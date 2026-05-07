@@ -46,32 +46,61 @@ PROD  ← /phase-gate phase-3 ← (manual PR dev → main)
 
 ## Install
 
+One command. No git clone, no setup script.
+
 ```bash
-git clone https://github.com/firatcand/forge ~/.forge
-cd ~/.forge
-./setup.sh
+npx @firatcand/forge
 ```
 
-This symlinks all skills and subagents into `~/.claude/`. Your existing Claude Code setup is left intact.
+This runs an interactive setup that:
+1. Detects which AI coding tools you have installed (Claude Code, Codex CLI, Cursor, Gemini CLI)
+2. Installs the 21 forge skills + 12 subagents into the right places
+3. Optionally installs companion skills from [firatcand/founder-skills](https://github.com/firatcand/founder-skills) for deeper domain expertise
+
+> Prefer the original bash flow? `git clone` + `./setup.sh` still works as a fallback.
 
 ## Quick start
 
 ```bash
-mkdir my-product && cd my-product
-git init
-forge init   # creates CLAUDE.md, spec/, plans/, docs/{learnings,retros}/
+# Install forge globally (one time)
+npx @firatcand/forge
 
-claude
-> /forge      # Socratic Q&A, ~15 minutes
-> /draft-prd  # PRD generated from BRIEF
-> /draft-spec # SPEC generated from PRD
-> /decompose  # phases.yaml generated from spec
-> /setup-repo # GitHub repo + branch protection + CI workflows
-> /push-to-linear # Linear project + cycles + issues
+# Initialize a new project
+mkdir my-product && cd my-product
+npx @firatcand/forge init
+
+# Open your AI coding tool and run /forge
+claude       # or: codex, cursor, gemini
+> /forge          # Socratic Q&A → spec/BRIEF.md
+> /draft-prd      # → spec/PRD.md
+> /draft-spec     # → spec/SPEC.md
+> /decompose      # → plans/phases.yaml
+> /setup-repo     # GitHub repo wired
+> /push-to-linear # Linear project + cycles
 > /pickup-task    # claim first task, worktree created
 ```
 
 [Full quick start →](docs/QUICKSTART.md)
+
+## Other commands
+
+```bash
+npx @firatcand/forge install      # Install/reinstall forge skills + agents only
+npx @firatcand/forge init [name]  # Initialize a project in current directory
+npx @firatcand/forge companions   # Install founder-skills companions only
+npx @firatcand/forge --help       # Show all commands
+npx @firatcand/forge --version    # Show version
+```
+
+## Cross-tool support
+
+Forge works with:
+- ✅ Claude Code (`~/.claude/`)
+- ✅ Codex CLI (`~/.codex/`)
+- ✅ Cursor (`~/.cursor/`)
+- ✅ Gemini CLI (`~/.gemini/`)
+
+The installer detects which tools you have and installs to all of them by default. You can choose specific tools during setup.
 
 ## Why "forge"?
 
