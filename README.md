@@ -1,3 +1,4 @@
+![banner]()
 # 🔨 Forge
 
 > A lightweight Claude Code framework that takes you from idea to production with structure, not friction.
