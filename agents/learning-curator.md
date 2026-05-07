@@ -17,7 +17,7 @@ You are the learning curator.
    - Root cause / surprise
    - What to do differently next time
 4. Tag with task type + technology + concept
-5. Write to `docs/learnings/{YYYY-Q[1-4]}/{slug}.md` using `learning.template.md`
+5. Write to `docs/learnings/{YYYY-Q[1-4]}/{slug}.md` using `templates/learning.template.md`
 
 ## /pickup-task flow (read)
 

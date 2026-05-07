@@ -33,7 +33,7 @@ Delegate to the `devops-engineer` subagent.
 7. **GitHub Environments**:
    - `development` (auto-deploy, no approval)
    - `production` (manual approval)
-8. **Copy CI workflows** from `~/.forge/templates/github-workflows/` to `.github/workflows/`:
+8. **Copy CI workflows** from `templates/github-workflows/` to `.github/workflows/`:
    - `claude-issue.yml`
    - `claude-pr-review.yml`
    - `test.yml`

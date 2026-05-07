@@ -20,7 +20,7 @@ tools: Read, Write, Bash(git*)
    - Scope changes from original phases.yaml
    - Learnings (count + key ones)
    - What to do differently next phase
-3. Write to `docs/retros/phase-{N}.md` using `retro.template.md`
+3. Write to `docs/retros/phase-{N}.md` using `templates/retro.template.md`
 
 ## Output
 

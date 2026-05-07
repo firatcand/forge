@@ -236,12 +236,49 @@ async function commandInit(projectNameArg) {
   );
   console.log(chalk.green('  ✓') + ' CLAUDE.md');
 
-  await fs.copy(
-    path.join(templatesDir, 'CRITICAL.template.md'),
-    path.join(cwd, 'CRITICAL.md'),
-    { overwrite: true }
-  );
-  console.log(chalk.green('  ✓') + ' CRITICAL.md');
+  const criticalPath = path.join(cwd, 'CRITICAL.md');
+  let writeCritical = true;
+  if (await fs.pathExists(criticalPath)) {
+    writeCritical = await confirm({
+      message: 'CRITICAL.md already exists. Overwrite?',
+      default: false,
+    });
+  }
+  if (writeCritical) {
+    await fs.copy(
+      path.join(templatesDir, 'CRITICAL.template.md'),
+      criticalPath,
+      { overwrite: true }
+    );
+    console.log(chalk.green('  ✓') + ' CRITICAL.md');
+  } else {
+    console.log(chalk.dim('  - CRITICAL.md (kept existing)'));
+  }
+
+  const projectTemplates = path.join(cwd, 'templates');
+  let copyTemplates = true;
+  if (await fs.pathExists(projectTemplates)) {
+    copyTemplates = await confirm({
+      message: 'templates/ already exists. Refresh from forge templates? (your edits will be overwritten)',
+      default: false,
+    });
+  }
+  if (copyTemplates) {
+    const skipList = new Set(['CLAUDE.project.template.md', 'CRITICAL.template.md']);
+    await fs.ensureDir(projectTemplates);
+    const entries = await fs.readdir(templatesDir);
+    for (const entry of entries) {
+      if (skipList.has(entry)) continue;
+      await fs.copy(
+        path.join(templatesDir, entry),
+        path.join(projectTemplates, entry),
+        { overwrite: true }
+      );
+    }
+    console.log(chalk.green('  ✓') + ' templates/ (BRIEF, PRD, SPEC, DESIGN, phases, retro, learning + github-workflows/)');
+  } else {
+    console.log(chalk.dim('  - templates/ (kept existing)'));
+  }
 
   if (!await fs.pathExists(path.join(cwd, '.env.example'))) {
     await fs.writeFile(

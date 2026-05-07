@@ -27,7 +27,7 @@ Delegate to `learning-curator`.
    - Why
    - What we'd do differently
 3. Tag with relevant types
-4. Write 5-10 line learning to `docs/learnings/{quarter}/{slug}.md` using `learning.template.md`
+4. Write 5-10 line learning to `docs/learnings/{quarter}/{slug}.md` using `templates/learning.template.md`
 
 ## Format
 
