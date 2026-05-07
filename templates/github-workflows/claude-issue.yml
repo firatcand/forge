@@ -1,0 +1,27 @@
+name: Claude — Issue Assistant
+on:
+  issue_comment:
+    types: [created]
+  issues:
+    types: [opened, assigned]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    if: |
+      contains(github.event.comment.body, '@claude') ||
+      (github.event.action == 'assigned' && github.event.assignee.login == 'claude-bot')
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_tools: "Edit,Read,Bash(git*),Bash(npm run*),Bash(npx tsc*)"

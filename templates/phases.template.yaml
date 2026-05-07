@@ -1,0 +1,45 @@
+project: "{{PROJECT_NAME}}"
+linear_project_id: ""    # populated by /push-to-linear
+linear_team_id: ""       # populated by /push-to-linear
+github_repo: ""          # populated by /setup-repo
+gate_check_command: "npm run e2e && npm run typecheck && npm run lint"
+
+phases:
+  - id: phase-1
+    name: "Foundations"
+    status: active
+    goal: "Working skeleton end-to-end with seed data"
+    gate_criteria:
+      - "All P0 + P1 tasks closed in Linear"
+      - "Dev deploy succeeds"
+      - "No P0 bugs open"
+    tasks:
+      - id: P1-T01
+        linear_id: ""    # populated by /push-to-linear
+        title: ""
+        description: ""
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - ""
+
+  - id: phase-2
+    name: "Core Features"
+    status: blocked
+    blocked_by: phase-1
+    goal: ""
+    gate_criteria:
+      - ""
+    tasks: []
+
+  - id: phase-3
+    name: "Polish & Launch"
+    status: blocked
+    blocked_by: phase-2
+    goal: ""
+    gate_criteria:
+      - ""
+    tasks: []

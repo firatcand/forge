@@ -1,0 +1,31 @@
+{
+  "name": "forge",
+  "version": "1.0.0",
+  "description": "Lightweight Claude Code framework for solo founders — 21 skills, 12 subagents, 13 templates for shipping real products with structure, not friction.",
+  "bin": {
+    "forge": "./forge"
+  },
+  "scripts": {
+    "install-skills": "./setup.sh",
+    "validate": "bash -n setup.sh forge lib/*.sh && for f in templates/github-workflows/*.yml templates/phases.template.yaml; do python3 -c \"import yaml; yaml.safe_load(open('$f'))\" || exit 1; done"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/firatcand/forge"
+  },
+  "keywords": [
+    "claude-code",
+    "ai-development",
+    "agent-framework",
+    "skills",
+    "subagents",
+    "linear",
+    "github",
+    "solo-founder"
+  ],
+  "author": "Firat Can Basarir",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}

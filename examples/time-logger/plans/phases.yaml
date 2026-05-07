@@ -1,0 +1,233 @@
+project: "time-logger"
+linear_project_id: ""    # populated by /push-to-linear
+linear_team_id: ""       # populated by /push-to-linear
+github_repo: ""          # populated by /setup-repo
+gate_check_command: "npm run typecheck && npm run lint && npm test"
+
+phases:
+  - id: phase-1
+    name: "Foundations"
+    status: active
+    goal: "Working `tl <project>` happy path with SQLite-backed entries; CI green"
+    gate_criteria:
+      - "All P0 + P1 tasks closed"
+      - "`tl applaiflow` works end-to-end on a fresh machine"
+      - "CI green on `dev` branch"
+    tasks:
+      - id: P1-T01
+        linear_id: ""
+        title: "Bootstrap Node + TypeScript project"
+        description: "package.json, tsconfig.json, vitest config, prettier, eslint. CLI entry point at src/cli.ts wired through commander with a `tl --help` printable."
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "`npm run typecheck` passes"
+          - "`npm test` runs the empty suite"
+          - "`./bin/tl --help` prints usage"
+
+      - id: P1-T02
+        linear_id: ""
+        title: "SQLite schema + migration runner"
+        description: "Create migrations/0001_init.sql with projects + entries tables. Implement a tiny migration runner that applies pending migrations on first DB open."
+        type: data
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: M
+        owner_type: db-architect
+        acceptance:
+          - "DB created at `${TL_HOME}/data.db` with mode 0600"
+          - "Migration table tracks applied migrations"
+          - "Idempotent — re-running CLI doesn't re-apply"
+
+      - id: P1-T03
+        linear_id: ""
+        title: "Implement `tl init <project>` command"
+        description: "Register a new project name. Validate the name (alphanumeric + dashes, 1–32 chars). Prevent duplicates."
+        type: backend
+        priority: P0
+        depends_on: [P1-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Inserts row in `projects`"
+          - "Rejects invalid names with clear error"
+          - "Rejects duplicate project names"
+
+      - id: P1-T04
+        linear_id: ""
+        title: "Implement `tl <project> [note]` happy path"
+        description: "Close any open entry, insert new entry, print confirmation. Transaction-safe."
+        type: backend
+        priority: P0
+        depends_on: [P1-T02, P1-T03]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Closes existing open entry's ended_at"
+          - "Inserts new entry"
+          - "Prints `← prev (closed 11:42, 2h28m)` and `→ project @ 11:42` lines"
+          - "Errors if project not registered"
+
+      - id: P1-T05
+        linear_id: ""
+        title: "GitHub Actions CI workflow"
+        description: "Run typecheck + lint + test on every PR to dev. Fail on any of them."
+        type: infra
+        priority: P1
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - ".github/workflows/test.yml exists"
+          - "Triggers on PRs to dev and main"
+          - "Three jobs: typecheck, lint, test"
+
+  - id: phase-2
+    name: "Core Features"
+    status: blocked
+    blocked_by: phase-1
+    goal: "All commands from PRD work; tab completion in zsh + bash"
+    gate_criteria:
+      - "All P0 + P1 tasks closed"
+      - "Manual smoke test: log a full day across 4 projects, run `tl report`, verify totals"
+      - "Tab completion installed and working in both shells"
+    tasks:
+      - id: P2-T01
+        linear_id: ""
+        title: "Implement `tl status`"
+        description: "Print the current open entry or exit 1 if none. Format: `Working on <project>: \"<note>\" (started HH:MM, elapsed Xh Ym)`."
+        type: backend
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Exit 0 with status line when entry open"
+          - "Exit 1 silently when no open entry (for shell prompt use)"
+
+      - id: P2-T02
+        linear_id: ""
+        title: "Implement `tl report` (last 7 days)"
+        description: "Aggregate entries by project, format as table with hours + percentages + last note."
+        type: backend
+        priority: P0
+        depends_on: [P1-T04]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Default range: last 7 days"
+          - "Open entries count as `now - started_at`"
+          - "Sorted by hours descending"
+          - "Percentages sum to 100% (rounding aware)"
+          - "Plain text output when stdout is not a TTY or NO_COLOR set"
+
+      - id: P2-T03
+        linear_id: ""
+        title: "Add `--week N` flag to `tl report`"
+        description: "Allow `tl report --week 2` for two weeks back. Validate N as positive integer."
+        type: backend
+        priority: P1
+        depends_on: [P2-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Accepts `--week 1` through `--week 52`"
+          - "Rejects non-integer or negative values"
+          - "Window: ((N-1)*7) to (N*7) days back from today"
+
+      - id: P2-T04
+        linear_id: ""
+        title: "Implement special `tl off` command"
+        description: "Close any open entry without opening a new one. Print day total."
+        type: backend
+        priority: P1
+        depends_on: [P1-T04]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Closes open entry"
+          - "Prints day total: `Day total: 7h14m across 4 projects`"
+          - "No-op + exit 0 if no open entry"
+
+      - id: P2-T05
+        linear_id: ""
+        title: "Tab completion for zsh and bash"
+        description: "Generate completion scripts. Provide `tl install-completion` to write them to the right place after confirmation."
+        type: integration
+        priority: P1
+        depends_on: [P1-T03]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Project names auto-complete after `tl `"
+          - "`tl install-completion` works for zsh and bash with explicit confirmation"
+          - "Never modifies rc files without `--yes` or interactive confirmation"
+
+      - id: P2-T06
+        linear_id: ""
+        title: "Open-entry recovery prompt"
+        description: "If an open entry exists from >12h ago, confirm before auto-closing on next `tl <project>`."
+        type: backend
+        priority: P2
+        depends_on: [P1-T04]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Prompts only when open entry > 12h"
+          - "Default action on Enter is `n` (don't auto-close)"
+          - "Prints suggestion: `tl edit <id>` to fix the timestamp manually"
+
+  - id: phase-3
+    name: "Polish & Launch"
+    status: blocked
+    blocked_by: phase-2
+    goal: "Public npm release, README, install instructions verified on fresh Mac and Linux"
+    gate_criteria:
+      - "All P0 tasks closed"
+      - "README has working install + 5-minute getting-started"
+      - "Binary works from a fresh `npm install -g time-logger` on macOS and Ubuntu"
+    tasks:
+      - id: P3-T01
+        linear_id: ""
+        title: "Write README with screencast"
+        description: "Hero example, install commands for npm/pnpm, 5-minute getting started, FAQ section, link to forge as the framework used to build it."
+        type: content
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Hero block: install + first command + first report"
+          - "Install instructions for npm and pnpm"
+          - "FAQ covers: Where is my data? How do I migrate from Toggl? Can I sync across machines?"
+          - "60-second screencast embedded (asciinema or terminalizer)"
+
+      - id: P3-T02
+        linear_id: ""
+        title: "Publish to npm"
+        description: "Set up `prepublishOnly` build, configure `bin` field, dry-run with `npm pack`, publish v0.1.0."
+        type: infra
+        priority: P0
+        depends_on: [P3-T01]
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - "`npm pack` produces a valid tarball"
+          - "Manual install of tarball works on a clean machine"
+          - "v0.1.0 published to npm"
+
+      - id: P3-T03
+        linear_id: ""
+        title: "Verify install on macOS and Ubuntu"
+        description: "On a fresh VM (macOS via DevContainer, Ubuntu via Docker), install via npm globally, walk through quickstart, log issues."
+        type: integration
+        priority: P1
+        depends_on: [P3-T02]
+        estimate: S
+        owner_type: qa-engineer
+        acceptance:
+          - "Quickstart works end-to-end on both"
+          - "Any platform-specific issues filed as P0 and triaged"

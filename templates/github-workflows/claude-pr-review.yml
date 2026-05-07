@@ -1,0 +1,22 @@
+name: Claude — PR Security Review
+on:
+  pull_request:
+    types: [opened, synchronize]
+    branches: [dev, main]
+
+jobs:
+  security-review:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: anthropics/claude-code-security-review@main
+        with:
+          comment-pr: true
+          claude-api-key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          fail-on-findings: false

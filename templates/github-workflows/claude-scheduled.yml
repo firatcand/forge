@@ -1,0 +1,23 @@
+name: Claude — Scheduled Tasks
+on:
+  schedule:
+    - cron: '0 9 * * 1'    # Mondays 9am UTC
+  workflow_dispatch:
+
+jobs:
+  tech-debt:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Review the codebase for tech debt: duplicated code, dead code,
+            outdated dependencies, missing tests on critical paths.
+            Create branch chore/tech-debt-{date}, propose fixes, open PR to dev.
+          allowed_tools: "Edit,Read,Bash(git*),Bash(npm run*)"
