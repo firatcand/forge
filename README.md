@@ -87,11 +87,14 @@ claude       # or: codex, cursor, gemini
 
 ```bash
 npx @firatcand/forge install      # Install/reinstall forge skills + agents only
+npx @firatcand/forge doctor       # Audit installed skills + agents per detected tool
 npx @firatcand/forge init [name]  # Initialize a project in current directory
 npx @firatcand/forge companions   # Install founder-skills companions only
 npx @firatcand/forge --help       # Show all commands
 npx @firatcand/forge --version    # Show version
 ```
+
+If a slash command stops triggering in one of your AI tools (e.g. you installed Codex CLI after running forge for the first time), run `npx @firatcand/forge doctor` to see exactly what's installed where, then `npx @firatcand/forge install` to sync.
 
 ## Cross-tool support
 
@@ -124,7 +127,7 @@ What forge adds:
 
 ## Status
 
-Forge is **v1.0** — used in production by the maintainer for solo founder workflows. Stable enough to depend on, raw enough that you'll find sharp edges. Issues and PRs welcome.
+Forge is **v0.2.0** — used in production by the maintainer for solo founder workflows. Stable enough to depend on, raw enough that you'll find sharp edges. Issues and PRs welcome.
 
 ## License
 
