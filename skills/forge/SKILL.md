@@ -1,6 +1,6 @@
 ---
 name: forge
-description: Apply Socratic pressure to a raw idea and produce a validated project BRIEF. Heavy ceremony — 6 forcing questions. The required first command for any new forge project.
+description: Run forge's discovery interview over a raw idea and produce a validated project BRIEF. Heavy ceremony — 6 forcing questions. The required first command for any new forge project.
 tools: Read, Write, Edit, Bash(git*)
 ---
 
@@ -71,7 +71,7 @@ BRIEF written to spec/BRIEF.md
 Gate 1 — review the brief. To proceed:
   • /draft-prd to generate the PRD
   • Edit spec/BRIEF.md directly for fixes
-  • /forge --refine [section] to re-Socratic a weak section
+  • /forge --refine [section] to re-interview a weak section
 ```
 
 ## --refine mode

@@ -67,7 +67,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 
 ### `/forge`
 
-- **When to invoke:** very first thing for any new project. Once. (Or with `--refine [section]` to re-Socratic a weak section.)
+- **When to invoke:** very first thing for any new project. Once. (Or with `--refine [section]` to re-interview a weak section.)
 - **Inputs:** none — you arrive with a sentence in your head.
 - **Outputs:** `spec/BRIEF.md` answering 6 forcing questions (pain, advantage, smallest scope, non-goals, north star, kill criteria).
 - **Unlocks:** `/draft-prd`. Until BRIEF exists, `/draft-prd` refuses.

@@ -28,7 +28,7 @@ Usage:
   forge version                 Show forge version
 
 Skills (use inside Claude Code):
-  /forge          Socratic ideation → BRIEF.md
+  /forge          Discovery interview → BRIEF.md
   /draft-prd      Generate PRD.md from BRIEF.md
   /draft-spec     Generate SPEC.md from PRD.md
   /draft-design   Generate DESIGN.md from PRD.md (optional)

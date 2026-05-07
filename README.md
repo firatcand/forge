@@ -72,7 +72,7 @@ npx @firatcand/forge init
 
 # Open your AI coding tool and run /forge
 claude       # or: codex, cursor, gemini
-> /forge          # Socratic Q&A → spec/BRIEF.md
+> /forge          # discovery interview → spec/BRIEF.md
 > /draft-prd      # → spec/PRD.md
 > /draft-spec     # → spec/SPEC.md
 > /decompose      # → plans/phases.yaml
@@ -105,7 +105,7 @@ The installer detects which tools you have and installs to all of them by defaul
 
 ## Why "forge"?
 
-Forge is what you do when you have raw material (an idea) and want a finished tool (a product). The process is heat, pressure, shape, repeat. The framework's namesake skill `/forge` applies Socratic pressure to your raw idea until structure emerges.
+Forge is what you do when you have raw material (an idea) and want a finished tool (a product). The process is heat, pressure, shape, repeat. The framework's namesake skill `/forge` is a discovery interview that applies pressure to your raw idea until structure emerges.
 
 ## Inspiration
 

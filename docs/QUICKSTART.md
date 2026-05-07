@@ -45,7 +45,7 @@ claude
 In Claude Code:
 
 ```
-> /forge          # 15 min Socratic Q&A
+> /forge          # 15 min discovery interview
 > /draft-prd      # PRD generated
 > /draft-spec     # SPEC generated  
 > /draft-design   # DESIGN generated (skip if no UI)

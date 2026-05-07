@@ -23,7 +23,7 @@ ${chalk.bold('Usage:')}
   npx @firatcand/forge --help           Show this help
 
 ${chalk.bold('Skills (use inside your AI coding tool):')}
-  /forge          Socratic ideation → BRIEF.md
+  /forge          Discovery interview → BRIEF.md
   /draft-prd      Generate PRD.md from BRIEF.md
   /draft-spec     Generate SPEC.md from PRD.md
   /draft-design   Generate DESIGN.md from PRD.md (optional)
@@ -319,7 +319,7 @@ async function commandInit(projectNameArg) {
   console.log(chalk.bold.green('\n✅ Project initialized\n'));
   console.log(chalk.bold('Next:'));
   console.log('  Open your AI coding tool: ' + chalk.cyan('claude') + ' or ' + chalk.cyan('codex'));
-  console.log('  Run: ' + chalk.cyan('/forge') + ' (Socratic ideation → BRIEF.md)\n');
+  console.log('  Run: ' + chalk.cyan('/forge') + ' (discovery interview → BRIEF.md)\n');
 }
 
 async function main() {
