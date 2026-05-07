@@ -1,4 +1,4 @@
-![banner]()
+![banner](forge-cover-v1--horizon-banner-3x1@2x.png)
 # 🔨 Forge
 
 > A lightweight Claude Code framework that takes you from idea to production with structure, not friction.
