@@ -9,7 +9,7 @@ Forge is for solo founders and small teams who want to ship real products with C
 
 Forge ships:
 
-- **21 slash commands** covering the full product lifecycle from raw idea to production
+- **21 skills** covering the full product lifecycle from raw idea to production (typed as slash commands in Claude Code; invoked by description in Codex CLI — see [Cross-tool support](#cross-tool-support))
 - **12 specialist subagents** — frontend, backend, db, qa, security, devops, design, plus orchestrators
 - **13 templates** for PRD, SPEC, DESIGN, phases.yaml, GitHub workflows, and more
 - **8 best practices baked in** — Boil the Lake, Iron Law of Investigation, Compound Learning, Test-or-die, Multi-model Second Opinion, and more
@@ -45,6 +45,8 @@ PROD  ← /phase-gate phase-3 ← (manual PR dev → main)
 
 ~90-120 minutes from raw idea to first task ready to implement.
 
+> The `/`-prefixed names above are the Claude Code experience — typed slash commands. In other hosts (Codex CLI, Cursor, Gemini CLI), the same skills are available but invoked differently. See [Cross-tool support](#cross-tool-support) below.
+
 ## Install
 
 One command. No git clone, no setup script.
@@ -70,8 +72,8 @@ npx @firatcand/forge
 mkdir my-product && cd my-product
 npx @firatcand/forge init
 
-# Open your AI coding tool and run /forge
-claude       # or: codex, cursor, gemini
+# Open your AI coding tool — see Cross-tool support below for per-host invocation
+claude
 > /forge          # discovery interview → spec/BRIEF.md
 > /draft-prd      # → spec/PRD.md
 > /draft-spec     # → spec/SPEC.md
@@ -80,6 +82,8 @@ claude       # or: codex, cursor, gemini
 > /push-to-linear # Linear project + cycles
 > /pickup-task    # claim first task, worktree created
 ```
+
+In Codex CLI, the same skills are installed but Codex doesn't expose user-defined slash commands — invoke them by description instead, e.g. `Run forge's discovery interview for my project idea: ...`. Codex's model picks the skill up from `~/.codex/skills/forge/SKILL.md`.
 
 [Full quick start →](docs/QUICKSTART.md)
 
@@ -98,13 +102,18 @@ If a slash command stops triggering in one of your AI tools (e.g. you installed 
 
 ## Cross-tool support
 
-Forge works with:
-- ✅ Claude Code (`~/.claude/`)
-- ✅ Codex CLI (`~/.codex/`)
-- ✅ Cursor (`~/.cursor/`)
-- ✅ Gemini CLI (`~/.gemini/`)
+The installer detects which tools you have and installs forge skills + subagents into each. **The skills land in every host, but how you invoke them differs by host.**
 
-The installer detects which tools you have and installs to all of them by default. You can choose specific tools during setup.
+| Host       | Install path                          | How to invoke a forge skill                                  | Status                |
+|------------|---------------------------------------|--------------------------------------------------------------|-----------------------|
+| Claude Code | `~/.claude/skills/`, `~/.claude/agents/` | Typed slash commands: `/forge`, `/draft-prd`, …            | ✅ Verified            |
+| Codex CLI  | `~/.codex/skills/`, `~/.codex/subagents/` | Natural language — Codex doesn't expose user slash commands. Ask the model: "Run forge's discovery interview for …" | ✅ Skills load; no `/forge` syntax |
+| Cursor     | `~/.cursor/skills/`, `~/.cursor/agents/`   | Unverified — invocation mechanism not yet tested by maintainer | ⚠️ Unverified          |
+| Gemini CLI | `~/.gemini/extensions/`                | Unverified — uses Gemini's `extensions` format, may need manual config | ⚠️ Unverified          |
+
+If you're on Codex/Cursor/Gemini and `/forge` doesn't trigger, that's expected — try the natural-language form. Run `npx @firatcand/forge doctor` to confirm the skills are physically present at the expected paths.
+
+If you discover the right invocation pattern for Cursor or Gemini and it differs from natural language, please open an issue or PR — the maintainer is actively looking for confirmation on those two.
 
 ## Why "forge"?
 

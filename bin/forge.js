@@ -40,6 +40,7 @@ ${chalk.bold('Usage:')}
   npx @firatcand/forge --help           Show this help
 
 ${chalk.bold('Skills (use inside your AI coding tool):')}
+${chalk.dim(`  Claude Code: type the / name. Codex CLI: ask in natural language ("run forge's discovery interview").`)}
   /forge          Discovery interview → BRIEF.md
   /draft-prd      Generate PRD.md from BRIEF.md
   /draft-spec     Generate SPEC.md from PRD.md
