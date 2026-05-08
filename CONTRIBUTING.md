@@ -8,7 +8,7 @@ Thanks for considering contributing to forge. The contribution model is **gstack
 - **New subagents** for stack specialties not yet covered (e.g., mobile-dev, ml-engineer)
 - **Template refinements** that solve real problems you hit while dogfooding
 - **Doc fixes**: typos, broken links, clearer examples
-- **Bug fixes** in `setup.sh`, `forge` CLI, or `lib/*.sh` helpers
+- **Bug fixes** in `bin/forge.js`, `lib/tools.js`, or `lib/*.sh` helpers
 - **New examples** in `examples/` showing forge applied to a different stack or domain
 
 ## What contributions are NOT welcome (yet)
@@ -66,8 +66,9 @@ Thanks for considering contributing to forge. The contribution model is **gstack
 Before opening a PR:
 
 ```bash
-cd ~/.forge   # or wherever you cloned it
-bash -n setup.sh forge lib/*.sh
+cd <your forge clone>
+node --check bin/forge.js lib/*.js
+bash -n lib/*.sh
 for f in templates/github-workflows/*.yml templates/phases.template.yaml; do
   python3 -c "import yaml; yaml.safe_load(open('$f'))"
 done
