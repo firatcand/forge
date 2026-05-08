@@ -60,8 +60,6 @@ This runs an interactive setup that:
 2. Installs the 21 forge skills + 12 subagents into the right places
 3. Optionally installs companion skills from [firatcand/founder-skills](https://github.com/firatcand/founder-skills) for deeper domain expertise
 
-> Prefer the original bash flow? `git clone` + `./setup.sh` still works as a fallback.
-
 ## Quick start
 
 ```bash
