@@ -180,17 +180,31 @@ async function commandDoctor() {
     process.exit(1);
   }
 
-  let anyMissing = false;
+  let anyDrift = false;
   for (const tool of detected) {
     const audit = await auditTool(tool, FORGE_ROOT);
-    const skillsLabel = `${audit.installedSkills.length}/${audit.expectedSkills.length} skills`;
     const agentLabelWord = tool.key === 'codex' ? 'subagents' : 'agents';
-    const agentsLabel = audit.agentsTarget
-      ? `${audit.installedAgents.length}/${audit.expectedAgents.length} ${agentLabelWord}`
-      : null;
-    const toolMissing = audit.missingSkills.length > 0 || audit.missingAgents.length > 0;
 
-    const statusIcon = toolMissing ? chalk.yellow('  ⚠') : chalk.green('  ✓');
+    const skillsStaleSuffix = audit.staleSkills.length > 0
+      ? chalk.yellow(` (${audit.staleSkills.length} stale)`)
+      : '';
+    const skillsLabel = `${audit.installedSkills.length}/${audit.expectedSkills.length} skills${skillsStaleSuffix}`;
+
+    let agentsLabel = null;
+    if (audit.agentsTarget) {
+      const agentsStaleSuffix = audit.staleAgents.length > 0
+        ? chalk.yellow(` (${audit.staleAgents.length} stale)`)
+        : '';
+      agentsLabel = `${audit.installedAgents.length}/${audit.expectedAgents.length} ${agentLabelWord}${agentsStaleSuffix}`;
+    }
+
+    const toolDrift =
+      audit.missingSkills.length > 0 ||
+      audit.missingAgents.length > 0 ||
+      audit.staleSkills.length > 0 ||
+      audit.staleAgents.length > 0;
+
+    const statusIcon = toolDrift ? chalk.yellow('  ⚠') : chalk.green('  ✓');
     const counts = agentsLabel ? `${skillsLabel}, ${agentsLabel}` : skillsLabel;
     console.log(`${statusIcon} ${tool.name} — ${counts}`);
     console.log(chalk.dim(`     skills:  ${tildify(audit.skillsTarget)}`));
@@ -201,16 +215,22 @@ async function commandDoctor() {
     if (audit.missingSkills.length > 0) {
       console.log(chalk.yellow(`     missing skills: ${audit.missingSkills.join(', ')}`));
     }
+    if (audit.staleSkills.length > 0) {
+      console.log(chalk.yellow(`     stale skills:   ${audit.staleSkills.join(', ')}`));
+    }
     if (audit.missingAgents.length > 0) {
       console.log(chalk.yellow(`     missing ${agentLabelWord}: ${audit.missingAgents.join(', ')}`));
     }
+    if (audit.staleAgents.length > 0) {
+      console.log(chalk.yellow(`     stale ${agentLabelWord}:   ${audit.staleAgents.join(', ')}`));
+    }
 
-    if (toolMissing) anyMissing = true;
+    if (toolDrift) anyDrift = true;
   }
 
   console.log();
-  if (anyMissing) {
-    console.log(chalk.yellow('Some tools are missing forge skills or agents.'));
+  if (anyDrift) {
+    console.log(chalk.yellow('Some tools have missing or stale forge skills/agents.'));
     console.log(chalk.dim('Run: ') + chalk.cyan('npx @firatcand/forge install') + chalk.dim(' to sync.\n'));
     process.exit(1);
   }
