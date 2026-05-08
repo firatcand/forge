@@ -33,3 +33,11 @@ coverage/
 # Local dev
 .cache/
 tmp/
+
+# AI tool local state (project-scoped Claude Code, etc.)
+.claude/
+.cursor/
+.codex/
+
+# Scratch / one-shot test scripts
+.tmp-*
