@@ -4,11 +4,27 @@ import { checkbox, input, confirm } from '@inquirer/prompts';
 import chalk from 'chalk';
 import fs from 'fs-extra';
 import path from 'path';
+import os from 'os';
 import { execSync } from 'child_process';
 
-import { detectTools, installToTool } from '../lib/tools.js';
+import { detectTools, installToTool, auditTool } from '../lib/tools.js';
 import { COMPANIONS, installCompanion } from '../lib/companions.js';
 import { FORGE_ROOT, getPackageVersion } from '../lib/paths.js';
+
+function tildify(p) {
+  if (!p) return p;
+  const home = os.homedir();
+  return p.startsWith(home) ? '~' + p.slice(home.length) : p;
+}
+
+function formatInstallSummary(tool, result) {
+  const parts = [`${result.skillsCount} skills → ${tildify(result.skillsTarget)}`];
+  if (result.agentsTarget) {
+    const agentLabel = tool.key === 'codex' ? 'subagents' : 'agents';
+    parts.push(`${result.agentsCount} ${agentLabel} → ${tildify(result.agentsTarget)}`);
+  }
+  return `${tool.name} — ${parts.join(', ')}`;
+}
 
 function showHelp() {
   console.log(`
@@ -17,12 +33,14 @@ ${chalk.bold('🔨 forge')} — A lightweight framework for shipping software pr
 ${chalk.bold('Usage:')}
   npx @firatcand/forge                  Run interactive setup (default)
   npx @firatcand/forge install          Install forge skills + agents only
+  npx @firatcand/forge doctor           Audit installed skills + agents per tool
   npx @firatcand/forge init [name]      Initialize a forge project in current directory
   npx @firatcand/forge companions       Install founder-skills companions
   npx @firatcand/forge --version        Show version
   npx @firatcand/forge --help           Show this help
 
 ${chalk.bold('Skills (use inside your AI coding tool):')}
+${chalk.dim(`  Claude Code: type the / name. Codex CLI: ask in natural language ("run forge's discovery interview").`)}
   /forge          Discovery interview → BRIEF.md
   /draft-prd      Generate PRD.md from BRIEF.md
   /draft-spec     Generate SPEC.md from PRD.md
@@ -84,8 +102,8 @@ async function runInteractiveSetup() {
   console.log(chalk.bold('\n📦 Installing forge skills (21) and agents (12)...\n'));
   for (const toolKey of selectedTools) {
     const tool = detected.find(t => t.key === toolKey);
-    await installToTool(tool, FORGE_ROOT);
-    console.log(chalk.green('  ✓') + ` Installed to ${tool.name}`);
+    const result = await installToTool(tool, FORGE_ROOT);
+    console.log(chalk.green('  ✓') + ' ' + formatInstallSummary(tool, result));
   }
 
   console.log();
@@ -145,11 +163,80 @@ async function commandInstall() {
 
   for (const toolKey of selectedTools) {
     const tool = detected.find(t => t.key === toolKey);
-    await installToTool(tool, FORGE_ROOT);
-    console.log(chalk.green('  ✓') + ` Installed to ${tool.name}`);
+    const result = await installToTool(tool, FORGE_ROOT);
+    console.log(chalk.green('  ✓') + ' ' + formatInstallSummary(tool, result));
   }
 
   console.log(chalk.bold.green('\n✅ Done\n'));
+}
+
+async function commandDoctor() {
+  console.log(chalk.bold('\n🔨 forge doctor\n'));
+
+  const detected = detectTools();
+  if (detected.length === 0) {
+    console.log(chalk.red('  ⚠️  No supported AI coding tools detected.'));
+    console.log(chalk.dim('  Install one of: Claude Code, Codex CLI, Cursor, Gemini CLI'));
+    console.log(chalk.dim('  Then re-run: npx @firatcand/forge\n'));
+    process.exit(1);
+  }
+
+  let anyDrift = false;
+  for (const tool of detected) {
+    const audit = await auditTool(tool, FORGE_ROOT);
+    const agentLabelWord = tool.key === 'codex' ? 'subagents' : 'agents';
+
+    const skillsStaleSuffix = audit.staleSkills.length > 0
+      ? chalk.yellow(` (${audit.staleSkills.length} stale)`)
+      : '';
+    const skillsLabel = `${audit.installedSkills.length}/${audit.expectedSkills.length} skills${skillsStaleSuffix}`;
+
+    let agentsLabel = null;
+    if (audit.agentsTarget) {
+      const agentsStaleSuffix = audit.staleAgents.length > 0
+        ? chalk.yellow(` (${audit.staleAgents.length} stale)`)
+        : '';
+      agentsLabel = `${audit.installedAgents.length}/${audit.expectedAgents.length} ${agentLabelWord}${agentsStaleSuffix}`;
+    }
+
+    const toolDrift =
+      audit.missingSkills.length > 0 ||
+      audit.missingAgents.length > 0 ||
+      audit.staleSkills.length > 0 ||
+      audit.staleAgents.length > 0;
+
+    const statusIcon = toolDrift ? chalk.yellow('  ⚠') : chalk.green('  ✓');
+    const counts = agentsLabel ? `${skillsLabel}, ${agentsLabel}` : skillsLabel;
+    console.log(`${statusIcon} ${tool.name} — ${counts}`);
+    console.log(chalk.dim(`     skills:  ${tildify(audit.skillsTarget)}`));
+    if (audit.agentsTarget) {
+      console.log(chalk.dim(`     ${agentLabelWord}:  ${tildify(audit.agentsTarget)}`));
+    }
+
+    if (audit.missingSkills.length > 0) {
+      console.log(chalk.yellow(`     missing skills: ${audit.missingSkills.join(', ')}`));
+    }
+    if (audit.staleSkills.length > 0) {
+      console.log(chalk.yellow(`     stale skills:   ${audit.staleSkills.join(', ')}`));
+    }
+    if (audit.missingAgents.length > 0) {
+      console.log(chalk.yellow(`     missing ${agentLabelWord}: ${audit.missingAgents.join(', ')}`));
+    }
+    if (audit.staleAgents.length > 0) {
+      console.log(chalk.yellow(`     stale ${agentLabelWord}:   ${audit.staleAgents.join(', ')}`));
+    }
+
+    if (toolDrift) anyDrift = true;
+  }
+
+  console.log();
+  if (anyDrift) {
+    console.log(chalk.yellow('Some tools have missing or stale forge skills/agents.'));
+    console.log(chalk.dim('Run: ') + chalk.cyan('npx @firatcand/forge install') + chalk.dim(' to sync.\n'));
+    process.exit(1);
+  }
+
+  console.log(chalk.bold.green('✅ All detected tools are in sync\n'));
 }
 
 async function commandCompanions() {
@@ -330,6 +417,9 @@ async function main() {
     switch (command) {
       case 'install':
         await commandInstall();
+        break;
+      case 'doctor':
+        await commandDoctor();
         break;
       case 'companions':
         await commandCompanions();

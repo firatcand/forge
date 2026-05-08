@@ -22,7 +22,7 @@
 - New API routes must have input validation
 - See `spec/` for full conventions
 
-## Forge principles (auto-applied — see ~/.forge/ETHOS.md)
+## Forge principles (auto-applied — see [Forge ETHOS.md](https://github.com/firatcand/forge/blob/main/ETHOS.md))
 1. Boil the Lake — refuse weak inputs
 2. Iron Law of Investigation — no fixes without RCA
 3. Confusion Protocol — clarify, don't guess
