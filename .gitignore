@@ -50,5 +50,5 @@ tmp/
 /spec/CONTEXT.md
 /plans/tasks/*.plan.md
 /plans/phases.yaml
-/docs/learnings/*.md
+/docs/learnings/**/*.md
 /.forge/
