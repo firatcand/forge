@@ -8,36 +8,43 @@ tools: Read, Write
 
 ## Validation checklist
 
-For BRIEF.md:
-- [ ] Pain section is concrete (not "people want")
-- [ ] Target user is specific
-- [ ] Non-goals listed
-- [ ] North-star metric has a number
+For `spec/BRIEF.md`:
+- [ ] **Product** section is concrete (one or two sentences describing what the product DOES)
+- [ ] **User & JTBD** section is specific (named persona + JTBD format)
+- [ ] **v1 scope** has at least 2 bullets
+- [ ] **Non-goals** has at least 2 bullets
+- [ ] **Definition of done** is a delivery checkpoint (not a metric, not a vision)
 
-For PRD.md:
-- [ ] Acceptance criteria are testable
-- [ ] Non-goals match BRIEF non-goals
-- [ ] Success metrics include BRIEF north-star
+For `spec/PRD.md`:
+- [ ] **Problem** is concrete (specific user, specific moment)
+- [ ] **Target user** is specific
+- [ ] **Per-feature breakdown** has one subsection per v1 feature; each has flow + acceptance + edge cases + non-goals
+- [ ] **Acceptance criteria (overall v1)** are testable
+- [ ] **Explicit non-goals** include all from BRIEF.non-goals
 
-For SPEC.md:
-- [ ] Stack is specified
-- [ ] Data model present
-- [ ] Env variables enumerated
-- [ ] Security model defined
+For `spec/SPEC.md`:
+- [ ] **Stack** is specified (runtime, language, key libs)
+- [ ] **Data model** present
+- [ ] **Key flows** documented
+- [ ] **Environment variables** enumerated
+- [ ] **Security model** defined
 
-For DESIGN.md (if exists):
-- [ ] Tokens reference brand-book via @inherit OR are explicitly defined
-- [ ] Voice section calibrated for this product
+For `spec/DESIGN.md` (if exists):
+- [ ] **Mode** declared (`project_owned` or `reference_external`)
+- [ ] **Tokens** are self-contained (no `@inherit` patterns — if found, flag as drift from prior forge version)
+- [ ] **Voice** section calibrated for this product
 
 ## Cross-document consistency
 
 - PRD acceptance criteria must be testable given SPEC's data model
 - DESIGN voice must be compatible with PRD's target user
-- All env vars in SPEC must have entries in `.env.example`
+- All env vars in SPEC must have entries in `.env.example` (or be documented per secret manager)
+- BRIEF non-goals must appear verbatim in PRD non-goals
+- PRD constraints (tracker, secret manager) must match `.forge/settings.yaml` if present
 
 ## On failure
 
-List what's missing or inconsistent. Block /decompose.
+List what's missing or inconsistent. Block `/decompose` with a clear message: "ingest-spec failed — fix the items above and re-run."
 
 ## On success
 

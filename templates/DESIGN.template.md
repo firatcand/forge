@@ -1,37 +1,60 @@
 # {{PROJECT_NAME}} — DESIGN
 
+> Mode: {{DESIGN_MODE}}  <!-- project_owned | reference_external -->
+> Reference: {{DESIGN_REFERENCE}}  <!-- URL or path; empty if project_owned -->
+
 ## Tokens
-<!-- Reference brand assets via @inherit pattern. -->
 
-@inherit ~/{{BRAND_PATH}}/DESIGN-SYSTEM.md#tokens
+### Color
+- Primary: 
+- Secondary: 
+- Background: 
+- Surface: 
+- Text (primary): 
+- Text (muted): 
+- Accent: 
+- Destructive: 
+- Success: 
 
-Project-specific overrides:
-- 
+### Typography
+- Display: 
+- Body: 
+- Mono: 
+- Type scale (px): 
+
+### Spacing
+- Base unit: 
+- Scale: 
+
+### Radius / elevation
+- Radius scale: 
+- Shadow scale: 
 
 ## Components
-<!-- Reference primitives from design-system. List project-specific composites. -->
+<!-- Project-level component primitives + composites. Self-contained — no @inherit. -->
 
-@inherit ~/{{BRAND_PATH}}/DESIGN-SYSTEM.md#components
-
-Project additions:
-- 
+- Buttons: primary, secondary, ghost, destructive
+- Inputs: text, select, toggle, checkbox, radio
+- Surfaces: card, modal, drawer, panel, tooltip
+- Navigation: header, sidebar, tabs, breadcrumb
+- Feedback: toast, banner, empty state, loading state
 
 ## Layouts
-<!-- Project-unique page templates. -->
+<!-- Page templates unique to this product. -->
 
 ## Voice & tone
-@inherit ~/{{BRAND_PATH}}/VOICE.md
+<!-- How the product speaks to users in this product context. -->
 
-Project-specific calibration:
-<!-- Any shifts from brand voice for this product context. -->
-- 
+- Register: 
+- Tense / person: 
+- Examples: 
 
 ## Accessibility
 - WCAG AA minimum
-- AAA for text contrast
-- All interactive elements have visible focus
-- Keyboard navigation tested
-- Screen reader patterns: 
+- AAA for body text contrast
+- Visible focus on every interactive element
+- Full keyboard navigation
+- Screen-reader patterns: 
 
 ## States
-<!-- For every interactive element: loading, error, empty, success. -->
+<!-- For every interactive element: loading, error, empty, success, disabled. -->

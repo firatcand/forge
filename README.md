@@ -129,7 +129,7 @@ Forge stands on the shoulders of:
 What forge adds:
 - **Phase decomposition with dependency graphs** — neither gstack nor Every's CE has this
 - **Linear ↔ GitHub native sync** — durable external task system instead of internal state
-- **Brand-book inheritance** — `@inherit` pattern lets your design system stay single-source-of-truth across projects
+- **Project-owned design systems** — each forge project owns its `spec/DESIGN.md`, with optional reference to an external brand asset as a generation guideline (no runtime inheritance)
 - **Stack-agnostic templates** — works with any tech stack, doesn't impose Next.js + Supabase
 
 ## Status

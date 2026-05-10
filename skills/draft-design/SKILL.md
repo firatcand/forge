@@ -1,6 +1,6 @@
 ---
 name: draft-design
-description: Generate spec/DESIGN.md from spec/PRD.md. References user's brand-book and design-system via @inherit pattern.
+description: Generate spec/DESIGN.md for the project. Asks at init whether to create a project-owned design system or reference an external one (URL/file/brand-book) as a guideline. Each project owns its DESIGN.md — no inheritance.
 tools: Read, Write, Edit
 ---
 
@@ -9,47 +9,62 @@ tools: Read, Write, Edit
 ## Preconditions
 
 - `spec/PRD.md` must exist
-- User's brand assets configured in `~/.claude/CLAUDE.md` under `brand_assets`
+- Project has a UI surface (marketing site, app UI, email, docs). Skip for pure-backend products.
 
-## Configuration expected
+## Init prompt
+
+When `/draft-design` runs the first time on a project, ask:
+
+> Do you have a design system to reference, or should I create one for this project?
+>
+> **A) Reference external** — point me at a URL, file path, or brand-book asset. The project's DESIGN.md will be generated *consistent with* that reference, but stored locally as a self-contained doc.
+>
+> **B) Create new** — I'll generate a self-contained palette, type scale, spacing, components, voice from your product requirements.
+
+Save the answer to `.forge/settings.yaml`:
 
 ```yaml
-# In ~/.claude/CLAUDE.md
-brand_assets:
-  brand_book: ~/work/brand/BRAND-BOOK.md
-  design_system: ~/work/brand/DESIGN-SYSTEM.md
-  voice_register: ~/work/brand/VOICE.md
+design:
+  mode: project_owned        # project_owned | reference_external
+  reference: <url-or-path>   # only if mode = reference_external
 ```
-
-If not configured, prompt user to set these once.
 
 ## Orchestration
 
-1. Read PRD, brand_book, design_system, voice_register
-2. Check if user has a `ux-design` skill — invoke with all four as context
-3. Determine project surface area (marketing site, app UI, email, docs)
-4. Generate DESIGN.md using `@inherit` pattern — reference brand assets, don't duplicate
+1. Read PRD
+2. Read `.forge/settings.yaml` for `design.mode` + `design.reference`
+3. Check if user has a `ux-design`, `graphic-design`, or `frontend-design-pro` skill — invoke with PRD + reference (if any) as context
+4. Determine project surface area (marketing site, app UI, email, docs)
+5. Generate `spec/DESIGN.md` according to mode:
+   - **project_owned** — write self-contained tokens, components, layouts, voice derived from product requirements
+   - **reference_external** — read the reference, extract its guidelines (palette, type scale, spacing, voice register), write DESIGN.md *consistent with* it as a self-contained local doc
 
-## The @inherit pattern
+## Important: no @inherit pattern
 
-DESIGN.md should reference, not duplicate:
-
-```markdown
-## Tokens
-@inherit ~/work/brand/DESIGN-SYSTEM.md#tokens
-
-Project-specific overrides:
-- accent: --color-coral (use only for primary CTA)
-
-## Voice
-@inherit ~/work/brand/VOICE.md
-
-Project-specific calibration:
-- This is a tool, not editorial — trim lyricism, keep precision
-```
-
-When brand assets update, project DESIGN.md inherits the change.
+DESIGN.md is a self-contained project artifact. It does NOT inherit at runtime from a maintainer-global brand book or external file. If a reference is configured, it constrains *generation* of DESIGN.md, but DESIGN.md itself is the project's source of truth from that point forward.
 
 ## Output
 
-`spec/DESIGN.md` + Gate 3 confirmation.
+Print:
+
+```
+DESIGN written to spec/DESIGN.md (mode: {{design_mode}})
+
+Summary:
+- Tokens: [palette + type scale]
+- Components: [primitives + composites]
+- Voice: [tone + register]
+- Reference: [if any]
+
+Gate 3 — review the DESIGN. To proceed:
+  • /ingest-spec to validate BRIEF + PRD + SPEC + DESIGN coherence
+  • Edit spec/DESIGN.md directly
+  • /draft-design --refine [section] to re-generate
+```
+
+## --refine mode
+
+When invoked with `--refine [section]`:
+1. Read existing spec/DESIGN.md
+2. Re-generate the section per current PRD + reference
+3. Show diff before writing

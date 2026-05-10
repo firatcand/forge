@@ -41,3 +41,14 @@ tmp/
 
 # Scratch / one-shot test scripts
 .tmp-*
+
+# Forge dogfooding (we use forge to build forge — keep our project specs local, out of npm + GitHub)
+/spec/BRIEF.md
+/spec/PRD.md
+/spec/SPEC.md
+/spec/DESIGN.md
+/spec/CONTEXT.md
+/plans/tasks/*.plan.md
+/plans/phases.yaml
+/docs/learnings/*.md
+/.forge/

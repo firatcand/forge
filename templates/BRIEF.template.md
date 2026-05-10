@@ -3,32 +3,29 @@
 > Forged: {{ISO_DATE}}
 > Status: draft (Gate 1 pending)
 
-## The pain
-<!-- REQUIRED: Synthesized from forge Q1. Concrete, not abstract. -->
+## Product
+<!-- REQUIRED: One or two sentences. What does this product DO? -->
 
-## The user
-<!-- REQUIRED: Specific persona. JTBD format: When ___, I want ___, so I ___. -->
+## User & JTBD
+<!-- REQUIRED: Specific persona + job-to-be-done. When ___, I want ___, so I ___. -->
 
-## The unfair advantage
-<!-- REQUIRED: From Q2. Honest list of what's defensible vs aspirational. -->
-
-## The smallest valuable thing
-<!-- REQUIRED: From Q3. 3-5 sentence v1 description. -->
+## v1 scope
+<!-- REQUIRED: The smallest valuable thing. Bullet list of what ships in v1. -->
+- 
+- 
 
 ## Non-goals
-<!-- REQUIRED: From Q4. The trap list. At least 3 bullets. -->
-- 
+<!-- REQUIRED: What this product does NOT do in v1. At least 2 bullets. -->
 - 
 - 
 
-## North-star metric
-<!-- REQUIRED: From Q5. Single number with target value and timeframe. -->
+## Definition of done
+<!-- REQUIRED: How the user knows v1 is built. NOT a metric, NOT a north-star — a delivery checkpoint. -->
 
-## Kill criteria
-<!-- REQUIRED: From Q6. Structured by horizon. -->
-- At week 4: 
-- At week 12: 
-- At month 6: 
+## Open unknowns
+<!-- Decisions deferred or assumptions to validate. Carries forward to /draft-prd. -->
+- 
 
-## Open questions
-<!-- Anything Q&A didn't fully resolve. Carry forward to /draft-prd. -->
+## Constraints (optional)
+<!-- Any hard constraints: stack, integrations, regulatory, deadlines, secret manager, task tracker. -->
+- 
