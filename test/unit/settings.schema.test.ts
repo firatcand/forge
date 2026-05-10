@@ -353,4 +353,23 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
   const settings: Settings = result.data;
   const mc: number = settings.agents.max_concurrent;
   assert.equal(typeof mc, 'number');
+
+  // Compile-time lock: if z.infer ever widens defaulted fields to
+  // `T | undefined`, this `satisfies` fails to compile and breaks the
+  // build before the regression can ship.
+  result.data satisfies {
+    agents: {
+      max_concurrent: number;
+      retry_attempts: number;
+      retry_backoff_ms_max: number;
+      poll_interval_ms: number;
+      worktree_root: string;
+      on_persistent_failure: 'notify' | 'block_task' | 'move_to_next';
+      primary_host_cli: 'claude' | 'codex' | 'cursor' | 'gemini';
+      review_host_cli: 'claude' | 'codex' | 'cursor' | 'gemini' | null;
+    };
+    design: {
+      mode: 'project_owned' | 'reference_external';
+    };
+  };
 });

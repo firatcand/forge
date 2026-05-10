@@ -75,6 +75,8 @@ const AgentsSchema = z
       .nullable()
       .default('codex'),
   })
+  // .refine() before .default({}) — the collision check must see the
+  // resolved object after inner defaults expand.
   .refine(
     (d) => d.review_host_cli === null || d.review_host_cli !== d.primary_host_cli,
     {
