@@ -1,0 +1,24 @@
+version: 1
+project:
+  name: forge-example
+  description: Complete settings fixture covering every field
+tracker:
+  type: linear
+  config:
+    team_id: TEAM-123
+secrets:
+  manager: doppler
+  project: forge
+  config: prod
+agents:
+  max_concurrent: 4
+  retry_attempts: 3
+  retry_backoff_ms_max: 60000
+  poll_interval_ms: 15000
+  worktree_root: ./.forge/worktrees
+  on_persistent_failure: notify
+  primary_host_cli: claude
+  review_host_cli: codex
+design:
+  mode: reference_external
+  reference: https://figma.com/file/abc

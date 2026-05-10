@@ -1,0 +1,9 @@
+version: 1
+project:
+  name: forge-minimal
+tracker:
+  type: github
+  config:
+    repo: firatcand/forge
+secrets:
+  manager: env_file
