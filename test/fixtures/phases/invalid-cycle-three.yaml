@@ -1,0 +1,39 @@
+project: "cycle-three"
+phases:
+  - id: phase-1
+    name: "Three-cycle"
+    status: active
+    goal: "Trigger A->B->C->A."
+    gate_criteria:
+      - "Schema rejects."
+    tasks:
+      - id: P1-T01
+        title: "A"
+        description: "A->B"
+        type: foundation
+        priority: P0
+        depends_on: [P1-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."
+      - id: P1-T02
+        title: "B"
+        description: "B->C"
+        type: foundation
+        priority: P0
+        depends_on: [P1-T03]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."
+      - id: P1-T03
+        title: "C"
+        description: "C->A"
+        type: foundation
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."

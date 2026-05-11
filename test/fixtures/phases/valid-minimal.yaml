@@ -1,0 +1,18 @@
+project: "minimal"
+phases:
+  - id: phase-1
+    name: "Solo phase"
+    status: active
+    goal: "Do one thing."
+    gate_criteria:
+      - "Task completes."
+    tasks:
+      - id: P1-T01
+        title: "Single task"
+        description: "Only task in the project."
+        type: foundation
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Task runs and exits 0."

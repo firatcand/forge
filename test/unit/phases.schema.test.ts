@@ -1,0 +1,376 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { parse as parseYaml } from 'yaml';
+import {
+  PhasesSchema,
+  PhaseSchema,
+  TaskSchema,
+  OWNER_TYPES,
+  PRIORITIES,
+  type Phases,
+  type Task,
+} from '../../src/schemas/phases.ts';
+import {
+  PhasesSchema as PhasesSchemaViaBarrel,
+  type Phases as PhasesViaBarrel,
+} from '../../src/index.ts';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const fixturesDir = resolve(here, '..', 'fixtures', 'phases');
+
+function loadFixture(name: string): unknown {
+  const raw = readFileSync(resolve(fixturesDir, name), 'utf8');
+  return parseYaml(raw);
+}
+
+function baseTask(overrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    id: 'P1-T01',
+    title: 'Task',
+    description: 'Does something.',
+    type: 'foundation',
+    priority: 'P0',
+    estimate: 'S',
+    owner_type: 'backend-dev',
+    acceptance: ['It works.'],
+    ...overrides,
+  };
+}
+
+function basePhases(taskOverrides: Partial<Record<string, unknown>> = {}): Record<string, unknown> {
+  return {
+    project: 'fixture',
+    phases: [
+      {
+        id: 'phase-1',
+        name: 'Phase',
+        status: 'active',
+        goal: 'Goal text.',
+        gate_criteria: ['Gate.'],
+        tasks: [baseTask(taskOverrides)],
+      },
+    ],
+  };
+}
+
+test('AC1 — schema validates the live plans/phases.yaml snapshot', () => {
+  const data = loadFixture('live-snapshot.yaml');
+  const result = PhasesSchema.safeParse(data);
+  if (!result.success) {
+    assert.fail(`live snapshot failed: ${JSON.stringify(result.error.issues, null, 2)}`);
+  }
+  assert.equal(result.data.project, 'forge');
+  assert.equal(result.data.phases.length, 3);
+  assert.equal(result.data.phases[0]!.id, 'phase-1');
+  assert.equal(result.data.phases[0]!.tasks[0]!.id, 'P1-T01');
+});
+
+test('AC1 — schema validates a minimal one-phase one-task fixture', () => {
+  const data = loadFixture('valid-minimal.yaml');
+  const result = PhasesSchema.safeParse(data);
+  if (!result.success) {
+    assert.fail(`minimal fixture failed: ${JSON.stringify(result.error.issues)}`);
+  }
+  assert.equal(result.data.phases[0]!.tasks[0]!.depends_on.length, 0);
+});
+
+test('AC2 — rejects a two-task A->B->A cycle', () => {
+  const data = loadFixture('invalid-cycle.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const cycleIssue = result.error.issues.find((i) => i.message.includes('cycle detected'));
+  assert.ok(cycleIssue, `Expected cycle issue, got: ${JSON.stringify(result.error.issues)}`);
+});
+
+test('AC2 — rejects a three-task A->B->C->A cycle', () => {
+  const data = loadFixture('invalid-cycle-three.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const cycleIssue = result.error.issues.find((i) => i.message.includes('cycle detected'));
+  assert.ok(cycleIssue);
+  assert.match(cycleIssue!.message, /P1-T0\d -> P1-T0\d -> P1-T0\d -> P1-T0\d/);
+});
+
+test('AC2 — rejects a self-loop A->A', () => {
+  const data = loadFixture('invalid-self-loop.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const cycleIssue = result.error.issues.find((i) => i.message.includes('cycle detected'));
+  assert.ok(cycleIssue);
+  assert.match(cycleIssue!.message, /P1-T01 -> P1-T01/);
+});
+
+test('AC2 — rejects depends_on pointing at an unknown task id', () => {
+  const data = loadFixture('invalid-unknown-dep.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const unknownIssue = result.error.issues.find((i) =>
+    i.message.includes('depends_on references unknown task id'),
+  );
+  assert.ok(unknownIssue);
+});
+
+test('AC2 — rejects blocked_by pointing at an unknown phase id', () => {
+  const result = PhasesSchema.safeParse({
+    project: 'p',
+    phases: [
+      {
+        id: 'phase-1',
+        name: 'Phase 1',
+        status: 'blocked',
+        blocked_by: 'phase-99',
+        goal: 'g',
+        gate_criteria: ['g1'],
+        tasks: [baseTask()],
+      },
+    ],
+  });
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const issue = result.error.issues.find((i) =>
+    i.message.includes('blocked_by references unknown phase id'),
+  );
+  assert.ok(issue);
+});
+
+test('AC2 — rejects duplicate task ids across phases', () => {
+  const result = PhasesSchema.safeParse({
+    project: 'p',
+    phases: [
+      {
+        id: 'phase-1',
+        name: 'Phase 1',
+        status: 'active',
+        goal: 'g',
+        gate_criteria: ['g1'],
+        tasks: [baseTask({ id: 'P1-T01' })],
+      },
+      {
+        id: 'phase-2',
+        name: 'Phase 2',
+        status: 'blocked',
+        blocked_by: 'phase-1',
+        goal: 'g',
+        gate_criteria: ['g1'],
+        tasks: [baseTask({ id: 'P1-T01' })],
+      },
+    ],
+  });
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const dupIssue = result.error.issues.find((i) => i.message.includes('duplicate task id'));
+  assert.ok(dupIssue);
+});
+
+for (const ownerType of OWNER_TYPES) {
+  test(`AC3 — accepts owner_type "${ownerType}"`, () => {
+    const result = PhasesSchema.safeParse(basePhases({ owner_type: ownerType }));
+    if (!result.success) {
+      assert.fail(`owner_type ${ownerType} rejected: ${JSON.stringify(result.error.issues)}`);
+    }
+    assert.equal(result.data.phases[0]!.tasks[0]!.owner_type, ownerType);
+  });
+}
+
+for (const priority of PRIORITIES) {
+  test(`AC3 — accepts priority "${priority}"`, () => {
+    const result = PhasesSchema.safeParse(basePhases({ priority }));
+    if (!result.success) {
+      assert.fail(`priority ${priority} rejected: ${JSON.stringify(result.error.issues)}`);
+    }
+    assert.equal(result.data.phases[0]!.tasks[0]!.priority, priority);
+  });
+}
+
+test('AC3 — rejects invalid owner_type "not-a-role"', () => {
+  const result = PhasesSchema.safeParse(basePhases({ owner_type: 'not-a-role' }));
+  assert.equal(result.success, false);
+});
+
+test('AC3 — rejects invalid priority "P4"', () => {
+  const result = PhasesSchema.safeParse(basePhases({ priority: 'P4' }));
+  assert.equal(result.success, false);
+});
+
+test('FD-6 retro — rejects task missing required owner_type', () => {
+  const data = loadFixture('invalid-missing-owner-type.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const issue = result.error.issues.find((i) => i.path.includes('owner_type'));
+  assert.ok(issue);
+});
+
+test('FD-6 retro — rejects partial Phase object (missing tasks, goal, etc.)', () => {
+  const result = PhasesSchema.safeParse({ phases: [{}] });
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const missingProject = result.error.issues.find(
+    (i) => i.path.length === 1 && i.path[0] === 'project',
+  );
+  assert.ok(missingProject, 'project key absence must surface as its own issue');
+  const insidePhase = result.error.issues.filter(
+    (i) => i.path[0] === 'phases' && i.path[1] === 0,
+  );
+  assert.ok(insidePhase.length >= 3, 'partial phase must produce multiple missing-field issues');
+});
+
+test('FD-6 retro — rejects empty phases array', () => {
+  const result = PhasesSchema.safeParse({ project: 'p', phases: [] });
+  assert.equal(result.success, false);
+});
+
+test('FD-6 retro — rejects empty tasks array on a phase', () => {
+  const result = PhasesSchema.safeParse({
+    project: 'p',
+    phases: [
+      {
+        id: 'phase-1',
+        name: 'P',
+        status: 'active',
+        goal: 'g',
+        gate_criteria: ['g1'],
+        tasks: [],
+      },
+    ],
+  });
+  assert.equal(result.success, false);
+});
+
+test('FD-6 retro — rejects empty acceptance array on a task', () => {
+  const result = PhasesSchema.safeParse(basePhases({ acceptance: [] }));
+  assert.equal(result.success, false);
+});
+
+test('FD-6 retro — rejects empty gate_criteria array on a phase', () => {
+  const result = PhasesSchema.safeParse({
+    project: 'p',
+    phases: [
+      {
+        id: 'phase-1',
+        name: 'P',
+        status: 'active',
+        goal: 'g',
+        gate_criteria: [],
+        tasks: [baseTask()],
+      },
+    ],
+  });
+  assert.equal(result.success, false);
+});
+
+test('default — depends_on defaults to [] when absent on a task', () => {
+  const result = PhasesSchema.safeParse(basePhases());
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.phases[0]!.tasks[0]!.depends_on, []);
+});
+
+test('default — does NOT default any top-level required key', () => {
+  const result = PhasesSchema.safeParse({});
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const paths = result.error.issues.map((i) => i.path.join('.'));
+  assert.ok(paths.includes('project'));
+  assert.ok(paths.includes('phases'));
+});
+
+test('default — split_into stays undefined when absent', () => {
+  const result = PhasesSchema.safeParse(basePhases());
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.phases[0]!.tasks[0]!.split_into, undefined);
+});
+
+test('id regex — rejects bad task id format', () => {
+  const result = PhasesSchema.safeParse(basePhases({ id: 'task-1' }));
+  assert.equal(result.success, false);
+});
+
+test('id regex — rejects bad phase id format', () => {
+  const result = PhasesSchema.safeParse({
+    project: 'p',
+    phases: [
+      {
+        id: 'Phase1',
+        name: 'P',
+        status: 'active',
+        goal: 'g',
+        gate_criteria: ['g1'],
+        tasks: [baseTask()],
+      },
+    ],
+  });
+  assert.equal(result.success, false);
+});
+
+test('id regex — accepts split-task suffix (e.g. P2-T07a)', () => {
+  const result = PhasesSchema.safeParse(basePhases({ id: 'P2-T07a' }));
+  assert.equal(result.success, true);
+});
+
+test('barrel — PhasesSchema reachable through src/index.ts', () => {
+  const result = PhasesSchemaViaBarrel.safeParse(loadFixture('valid-minimal.yaml'));
+  assert.equal(result.success, true);
+});
+
+test('types — z.infer surface compiles via satisfies', () => {
+  const result = PhasesSchema.safeParse(loadFixture('valid-minimal.yaml'));
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  const phases: Phases = result.data;
+  const viaBarrel: PhasesViaBarrel = result.data;
+  const firstTask: Task = phases.phases[0]!.tasks[0]!;
+  assert.equal(typeof firstTask.id, 'string');
+  assert.equal(typeof viaBarrel.project, 'string');
+  result.data satisfies {
+    project: string;
+    phases: Array<{
+      id: string;
+      name: string;
+      status: 'active' | 'blocked' | 'done';
+      goal: string;
+      gate_criteria: string[];
+      tasks: Array<{
+        id: string;
+        title: string;
+        description: string;
+        priority: 'P0' | 'P1' | 'P2';
+        depends_on: string[];
+        estimate: 'S' | 'M' | 'L' | 'XL';
+        owner_type:
+          | 'frontend-dev'
+          | 'backend-dev'
+          | 'db-architect'
+          | 'devops-engineer'
+          | 'qa-engineer'
+          | 'security-auditor'
+          | 'design-engineer'
+          | 'integration';
+        acceptance: string[];
+      }>;
+    }>;
+  };
+});
+
+test('component schemas — PhaseSchema and TaskSchema exported separately', () => {
+  const phaseOk = PhaseSchema.safeParse({
+    id: 'phase-1',
+    name: 'P',
+    status: 'active',
+    goal: 'g',
+    gate_criteria: ['g1'],
+    tasks: [baseTask()],
+  });
+  assert.equal(phaseOk.success, true);
+
+  const taskOk = TaskSchema.safeParse(baseTask());
+  assert.equal(taskOk.success, true);
+});
