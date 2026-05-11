@@ -25,3 +25,10 @@ export {
   wrap,
 } from './logger.ts';
 export type { StepStatus, Spinner, PromptOpts } from './logger.ts';
+export {
+  loadSettings,
+  loadSettingsIfChanged,
+  __resetSettingsCacheForTests,
+} from './settings.ts';
+export { SettingsError } from './errors.ts';
+export type { SettingsErrorCode } from './errors.ts';
