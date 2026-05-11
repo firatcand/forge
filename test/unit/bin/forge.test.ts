@@ -44,10 +44,13 @@ test('forge --help prints help to stdout and exits 0', async () => {
   assert.equal(result.stderr.trim(), '');
 });
 
-test('forge with no args prints help and exits 0', async () => {
+test('forge with no args fails loudly (Codex P1 — was the v0.2.1 install entry; silent exit 0 would regress consumer scripts)', async () => {
   const result = await runCli([]);
-  assert.equal(result.exitCode, 0);
-  assert.match(result.stdout, /foundations release/);
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.stdout, '');
+  assert.match(result.stderr, /forge: no command specified/);
+  assert.match(result.stderr, /install\/setup flow that was the v0\.2\.1/);
+  assert.match(result.stderr, /forge --help/);
 });
 
 test('forge init exits 1 with a clear stderr message (fail loudly, no silent no-op)', async () => {

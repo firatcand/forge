@@ -55,10 +55,26 @@ function failUnknown(command: string, version: string): never {
   process.exit(1);
 }
 
+function failNoCommand(version: string): never {
+  // Bare `npx @firatcand/forge` was the v0.2.1 default install entry. Codex caught
+  // that silently printing help and exiting 0 here regresses any script depending on
+  // that surface — treat no-args as an explicit failure, distinct from `--help`.
+  const message = [
+    'forge: no command specified.',
+    '',
+    `v${version} is a foundations release; the install/setup flow that was the v0.2.1`,
+    'default (`npx @firatcand/forge`) is not yet available. Use `forge --help` for',
+    'currently-supported commands. The full CLI lands in 0.3.x patches:',
+    '  https://github.com/firatcand/forge/blob/main/CHANGELOG.md',
+  ].join('\n');
+  console.error(message);
+  process.exit(1);
+}
+
 const args = process.argv.slice(2);
 const version = readVersion();
 
-if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
+if (args.includes('--help') || args.includes('-h')) {
   printHelp(version);
   process.exit(0);
 }
@@ -66,6 +82,10 @@ if (args.length === 0 || args.includes('--help') || args.includes('-h')) {
 if (args.includes('--version') || args.includes('-v')) {
   console.log(version);
   process.exit(0);
+}
+
+if (args.length === 0) {
+  failNoCommand(version);
 }
 
 failUnknown(args[0] ?? '', version);
