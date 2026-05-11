@@ -25,3 +25,7 @@ export {
   wrap,
 } from './logger.ts';
 export type { StepStatus, Spinner, PromptOpts } from './logger.ts';
+export { loadPhases } from './phases.ts';
+export { PhasesError } from './errors.ts';
+export type { PhasesErrorCode } from './errors.ts';
+export type { Phases, Phase, Task } from '../schemas/phases.ts';
