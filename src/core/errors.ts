@@ -1,0 +1,28 @@
+export type WorkspaceErrorCode =
+  | 'EMPTY'
+  | 'TOO_LONG'
+  | 'LEADING_DASH'
+  | 'PATH_TRAVERSAL'
+  | 'CONTROL_CHAR'
+  | 'INVALID_CHAR'
+  | 'PATH_ESCAPE'
+  | 'NOT_FOUND'
+  | 'GIT_FAILURE'
+  | 'GITIGNORED_LOSS';
+
+export class WorkspaceError extends Error {
+  readonly code: WorkspaceErrorCode;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    code: WorkspaceErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'WorkspaceError';
+    this.code = code;
+    this.details = details;
+  }
+}
