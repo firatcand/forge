@@ -40,7 +40,7 @@ TASK  → /pickup-task → /plan-task → /implement
 
 PHASE → /phase-gate → /retro → next phase
 
-PROD  ← /phase-gate phase-3 ← (manual PR dev → main)
+PROD  ← /phase-gate phase-3 ← (release from main)
 ```
 
 ~90-120 minutes from raw idea to first task ready to implement.
