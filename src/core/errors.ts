@@ -50,3 +50,26 @@ export class SettingsError extends Error {
     this.details = details;
   }
 }
+
+export type PhasesErrorCode =
+  | 'FILE_NOT_FOUND'
+  | 'READ_FAILED'
+  | 'PARSE_ERROR'
+  | 'SCHEMA_INVALID';
+
+export class PhasesError extends Error {
+  readonly code: PhasesErrorCode;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    code: PhasesErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'PhasesError';
+    this.code = code;
+    this.details = details;
+  }
+}

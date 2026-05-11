@@ -32,3 +32,7 @@ export {
 } from './settings.ts';
 export { SettingsError } from './errors.ts';
 export type { SettingsErrorCode } from './errors.ts';
+export { loadPhases } from './phases.ts';
+export { PhasesError } from './errors.ts';
+export type { PhasesErrorCode } from './errors.ts';
+export type { Phases, Phase, Task } from '../schemas/phases.ts';
