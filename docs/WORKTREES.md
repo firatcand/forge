@@ -48,12 +48,9 @@ git worktree remove ../my-project-worktrees/TLOG-103
 
 # Prune stale worktree refs (after manual deletes)
 git worktree prune
-
-# Forge convenience: clean up worktrees for branches gone upstream
-source ~/.forge/lib/worktree-helpers.sh
-worktree_cleanup            # dry-run
-worktree_cleanup --apply    # actually remove
 ```
+
+A `forge worktree clean` command for pruning worktrees whose upstream branches are gone will land in a later 0.3.x patch as Phase 2 ships. Until then, use the manual `git worktree` commands above.
 
 ## Gotchas
 
@@ -71,15 +68,19 @@ worktree_cleanup --apply    # actually remove
 
 ## Cleanup discipline
 
-Worktrees accumulate. After a PR merges and the branch is deleted on GitHub, the local branch and the worktree linger. The `worktree_cleanup` helper finds worktrees whose branches are gone upstream:
+Worktrees accumulate. After a PR merges and the branch is deleted on GitHub, the local branch and the worktree linger. The recommended manual cleanup is:
 
 ```bash
-source ~/.forge/lib/worktree-helpers.sh
-worktree_cleanup            # see what would be removed
-worktree_cleanup --apply    # remove them
+# List worktrees; spot the ones whose branch is gone upstream
+git worktree list
+git fetch --prune
+
+# Remove a stale worktree once its branch is merged + deleted on origin
+git worktree remove ../my-project-worktrees/TLOG-103
+git branch -D feat/TLOG-103-foo   # only if fully merged
 ```
 
-Or use the `commit-commands:clean_gone` skill (if you have the commit-commands plugin installed).
+A bundled `forge worktree clean` command will ship in a later 0.3.x patch as Phase 2 lands. Or use the `commit-commands:clean_gone` skill if you have the commit-commands plugin installed.
 
 ## When NOT to use a worktree
 
