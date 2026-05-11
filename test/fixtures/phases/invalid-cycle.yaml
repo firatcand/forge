@@ -1,0 +1,29 @@
+project: "cycle-two"
+phases:
+  - id: phase-1
+    name: "Cycle"
+    status: active
+    goal: "Trigger a two-task cycle."
+    gate_criteria:
+      - "Schema rejects this."
+    tasks:
+      - id: P1-T01
+        title: "A"
+        description: "Depends on B."
+        type: foundation
+        priority: P0
+        depends_on: [P1-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."
+      - id: P1-T02
+        title: "B"
+        description: "Depends on A."
+        type: foundation
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."

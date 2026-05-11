@@ -1,0 +1,417 @@
+# Snapshot of /Users/firatcandogan/repos/forge/plans/phases.yaml taken 2026-05-11 for FD-8 AC1 pin.
+project: "forge"
+linear_project_id: "768871a9-7f95-4bd8-a5da-2ab1b290753a"        # populated by /push-to-tracker (multi-tracker rename ships in v-next)
+linear_team_id: "bf9e034a-51fc-4147-99ea-692947dcc1bb"           # populated by /push-to-tracker
+github_repo: "firatcand/forge"
+gate_check_command: "npm run typecheck && npm run test && npm run build"
+
+phases:
+  - id: phase-1
+    linear_milestone_id: "d1aade3f-fdc2-4ea9-b948-64a6b2d9450d"
+    name: "Foundations — TS migration + schemas + core"
+    status: active
+    goal: "TS toolchain working end-to-end; settings.yaml + phases.yaml load and validate; logger + workspace ready for orchestrator to plug into."
+    gate_criteria:
+      - "All Phase 1 tasks complete (P0 + P1)"
+      - "npm run typecheck passes with strict TS"
+      - "npm run test passes (node:test runner)"
+      - "npm run build emits dual ESM+CJS to dist/ under 1 MB"
+      - "tsup config produces bin/forge.cjs that runs and prints --version"
+      - "Existing v0.2.1 lib/ deleted (or aliased to src/) — no JS source remains in the build path"
+    tasks:
+      - id: P1-T01
+        linear_id: "FD-6"
+        title: "Bootstrap TS toolchain"
+        description: "Add typescript, tsup, tsx, @types/node devDeps. Create tsconfig.json (strict, ESM, target ES2022, moduleResolution=bundler). Create tsup.config.ts producing dual ESM+CJS for src/bin/forge.ts and src/index.ts. Wire npm scripts: build, typecheck (tsc --noEmit), test (node --test --import tsx), dev (tsx watch)."
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: devops-engineer
+        acceptance:
+          - "package.json has all 4 new devDeps at locked versions"
+          - "tsconfig.json with strict mode passes tsc --noEmit on empty src/index.ts"
+          - "tsup build produces dist/bin/forge.cjs that runs node dist/bin/forge.cjs --version (placeholder OK)"
+          - "test script runs against an empty test/unit/sanity.test.ts and exits 0"
+      - id: P1-T02
+        linear_id: "FD-7"
+        title: "Define settings.yaml zod schema"
+        description: "Implement src/schemas/settings.ts with SettingsSchema per SPEC §Data model. Discriminated unions for tracker.type and secrets.manager. Refinement: review_host_cli !== primary_host_cli (or null). Defaults applied for missing keys outside version + project."
+        type: data
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - "Schema validates a complete settings.yaml fixture"
+          - "Schema rejects review_host_cli == primary_host_cli with refinement message"
+          - "Defaults applied to fixture missing optional keys"
+          - "Unit tests cover all 5 secret manager variants"
+      - id: P1-T03
+        linear_id: "FD-8"
+        title: "Define phases.yaml zod schema"
+        description: "Implement src/schemas/phases.ts with PhaseSchema, TaskSchema, PhasesSchema per SPEC. Validates owner_type, priority, depends_on as task ID list. Add validator detecting cycles in depends_on graph."
+        type: data
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - "Schema validates this very phases.yaml fixture"
+          - "Cycle validator rejects a fixture with circular depends_on"
+          - "Unit tests cover 5 owner_types and 3 priorities"
+      - id: P1-T04
+        linear_id: "FD-9"
+        title: "Build core/settings.ts loader + hot-reload"
+        description: "src/core/settings.ts: load(), validate via zod, mtime-cache, reload-on-change-detect. Returns parsed Settings. Throws on validation error with helpful message. Used by orchestrator polling loop (loadIfChanged: Settings | null)."
+        type: backend
+        priority: P0
+        depends_on: [P1-T02]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "load() returns parsed Settings for a valid file"
+          - "load() throws ValidationError with zod issues for invalid file"
+          - "loadIfChanged() returns null if mtime unchanged, Settings if changed"
+          - "Unit tests cover happy path, invalid YAML, schema violation, mtime caching"
+      - id: P1-T05
+        linear_id: "FD-10"
+        title: "Build core/phases.ts loader"
+        description: "src/core/phases.ts: load(), validate via zod, returns parsed Phases. Used by /decompose output and orchestrator to read task graph."
+        type: backend
+        priority: P0
+        depends_on: [P1-T03]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "load() returns parsed Phases for a valid file"
+          - "load() throws on schema violation or cycle in depends_on"
+          - "Unit tests cover happy path, cycle, missing required fields"
+      - id: P1-T06
+        linear_id: "FD-11"
+        title: "Build core/logger.ts with chalk + JSONL"
+        description: "src/core/logger.ts implementing all DESIGN.md helpers: banner, section, step, kv, list, table, spinner, prompt, errorBlock. Stdout via chalk; append-only JSONL to .forge/logs/orchestrator.jsonl. Respects FORGE_NO_COLOR. ASCII fallback when LANG is non-UTF-8. Width-aware via process.stdout.columns. Secret-key redaction in JSONL writer."
+        type: foundation
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "All 9 component helpers exported and typed"
+          - "FORGE_NO_COLOR=1 disables chalk, structure preserved"
+          - "ASCII fallback works when forced via test harness"
+          - "Redactor catches keys matching *_KEY, *_TOKEN, *_SECRET in fields"
+          - "Snapshot tests for each helper output (with and without color)"
+      - id: P1-T07
+        linear_id: "FD-13"
+        title: "Build core/workspace.ts worktree manager"
+        description: "src/core/workspace.ts: sanitizeIssueId(id), validateUnderRoot(path, root), create(taskId) → spawns git worktree at <root>/<sanitized-id>, cleanup(taskId) → removes worktree. All git ops via execa. Path traversal hardening per SPEC threat model."
+        type: backend
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "sanitizeIssueId('FORGE-42') returns 'FORGE-42'; sanitizeIssueId('../etc/passwd') sanitized to safe form"
+          - "validateUnderRoot rejects path that escapes root"
+          - "create() spawns worktree from current branch; cleanup() removes it"
+          - "Unit tests cover sanitization edge cases + path traversal attacks"
+      - id: P1-T08
+        linear_id: "FD-12"
+        title: "Delete legacy lib/ JS files"
+        description: "After P1-T01..P1-T07 land, remove lib/ JavaScript files that have been migrated to src/. Update any internal references. Update package.json files whitelist."
+        type: foundation
+        priority: P1
+        depends_on: [P1-T04, P1-T05, P1-T06, P1-T07]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "lib/ directory empty or deleted"
+          - "package.json files field excludes lib/"
+          - "No remaining imports from lib/ anywhere in src/"
+          - "Existing tests still pass"
+
+  - id: phase-2
+    linear_milestone_id: "99412577-59a7-4b84-80f5-0e9b078dc794"
+    name: "Core features — adapters + init + orchestrator"
+    status: blocked
+    blocked_by: phase-1
+    goal: "User can run `forge init` to scaffold a project, `forge orchestrate` to dispatch tasks across IMPLEMENT/REVIEW/SHIP phases, with at least GitHub Issues + Linear adapters working end-to-end."
+    gate_criteria:
+      - "All Phase 2 tasks complete (P0 + P1)"
+      - "End-to-end test: forge init → forge orchestrate runs against fixture phases.yaml + GitHub fixture repo, ships at least one PR with two-host review verdict file present"
+      - "Linear adapter passes adapter test suite (mock MCP)"
+      - "Motion adapter passes adapter test suite (recorded API fixtures)"
+      - "Init flow completes in <30s on cold-start fixture"
+      - "Orchestrator survives Ctrl-C with no orphan worktrees or unreleased claims"
+    tasks:
+      - id: P2-T01
+        linear_id: "FD-14"
+        title: "Define Tracker interface + base adapter"
+        description: "src/trackers/base.ts with Tracker interface, Issue, IssueState, ClaimResult, CreateIssuePayload types per SPEC. Plus BaseTracker abstract class with shared logic (retry timing, error normalization). Concrete adapters extend it."
+        type: backend
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Tracker interface exported; all 8 methods typed"
+          - "BaseTracker handles ClaimResult normalization across error types"
+          - "Type-only consumer (test file) compiles against interface"
+      - id: P2-T02
+        linear_id: "FD-15"
+        title: "Implement GitHubTracker adapter via gh CLI"
+        description: "src/trackers/github.ts: spawns gh CLI via execa for all 8 Tracker methods. Claim via label add (atomic). Custom field round-trip for forgeTaskId via issue body footer (parsed back). Health check via gh auth status. Rate-limit handling via gh's built-in."
+        type: integration
+        priority: P0
+        depends_on: [P2-T01]
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - "All 8 Tracker methods implemented; pass adapter conformance suite"
+          - "Claim via label is atomic (concurrent claim test simulating two orchestrators)"
+          - "forgeTaskId round-trips through createIssue → listActiveIssues"
+          - "Integration test against fixture repo runs full lifecycle: createProject → createIssue → claim → updateState → comment"
+          - "healthCheck() returns ok=false with detail when gh auth status fails"
+      - id: P2-T03
+        linear_id: "FD-16"
+        title: "Implement LinearTracker adapter via MCP"
+        description: "src/trackers/linear.ts: uses Linear MCP server (already in user's tooling for v0.2.1). Claim via custom field forge_claimed_by (atomic via Linear revisions/optimistic concurrency). All 8 Tracker methods."
+        type: integration
+        priority: P0
+        depends_on: [P2-T01]
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - "All 8 Tracker methods implemented; pass adapter conformance suite"
+          - "Claim is atomic when two orchestrators race (test via mock MCP)"
+          - "Issue createdAt + state + blockerIds round-trip correctly"
+          - "Integration test against mock Linear MCP runs full lifecycle"
+      - id: P2-T04
+        linear_id: "FD-17"
+        title: "Implement MotionTracker adapter via REST"
+        description: "src/trackers/motion.ts: HTTPS to Motion API. API key via secrets manager (motion.secrets.api_key). Claim via custom field claimed_by + ETag If-Match for atomicity. All 8 Tracker methods."
+        type: integration
+        priority: P0
+        depends_on: [P2-T01]
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - "All 8 Tracker methods implemented; pass adapter conformance suite"
+          - "Claim via ETag returns retry on 412 Precondition Failed"
+          - "Recorded API fixture replays cover full lifecycle"
+          - "Rate limit (429) handled with exponential backoff"
+      - id: P2-T05
+        linear_id: "FD-18"
+        title: "Implement secret-managers adapters (env_file + 1password + doppler)"
+        description: "src/secrets-managers/{env-file,onepassword,doppler}.ts. env_file is the default; 1password + doppler cover most user choices. (aws_secrets + infisical deferred to v-next+1.) Each exports get(key, opts) → string. Health check probe per manager."
+        type: integration
+        priority: P1
+        depends_on: []
+        estimate: M
+        owner_type: integration
+        acceptance:
+          - "env_file reads from configured path; supports JSON + dotenv format auto-detect"
+          - "1password adapter shells to op CLI; surfaces clear error if op not authenticated"
+          - "doppler adapter shells to doppler CLI; respects DOPPLER_PROJECT + DOPPLER_CONFIG"
+          - "Healthchecks for each return ok=false with actionable detail when misconfigured"
+      - id: P2-T06
+        linear_id: "FD-19"
+        title: "Build init flow CLI"
+        description: "src/cli/init.ts replacing the inquirer prompts in current bin/forge.js. Sequential prompts: project name, description, goal, tracker, secret manager, primary_host_cli, review_host_cli, max_concurrent, retry_attempts. Per-tracker tooling validation. Scaffolds project files from templates/. Writes .forge/settings.yaml. Refuses to run inside the forge framework checkout itself."
+        type: backend
+        priority: P0
+        depends_on: [P1-T04, P1-T06, P2-T01]
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - "All 9 prompts shown in correct sequence; defaults work via Enter"
+          - "Tooling validation runs per chosen tracker; surfaces install link on failure with skip option"
+          - "Scaffolds spec/, plans/tasks/, .forge/settings.yaml, .gitignore, CLAUDE.md, CRITICAL.md"
+          - "Existing files prompt for confirmation (no silent overwrite)"
+          - "Refuses to run when package.json.name === '@firatcand/forge'"
+          - "Init completes in <30s end-to-end on fixture"
+      - id: P2-T07
+        linear_id: "FD-20"
+        title: "Build orchestrator dispatcher"
+        description: "src/orchestrator/dispatcher.ts: poll loop, eligibility filter (state + blockers), atomic claim, slot accounting per agents.max_concurrent, dispatch IMPLEMENT phase. Reads settings hot-reload via core/settings.loadIfChanged. Drains gracefully on cap reduction."
+        type: backend
+        priority: P0
+        depends_on: [P1-T04, P1-T05, P1-T06, P1-T07, P2-T01]
+        estimate: XL
+        owner_type: backend-dev
+        acceptance:
+          - "Dispatcher respects max_concurrent at all times under load"
+          - "Issues with non-terminal blockers are never dispatched"
+          - "Cap reduction (10→3) drains 7 oldest workers gracefully"
+          - "Settings.invalid event keeps prior config and surfaces warning"
+          - "Integration test runs 10-task fixture to completion"
+        split_into:
+          - "P2-T07a Dispatcher poll loop + slot accounting"
+          - "P2-T07b Eligibility filter + atomic claim"
+          - "P2-T07c Hot-reload + drain semantics"
+      - id: P2-T08
+        linear_id: "FD-21"
+        title: "Build orchestrator worker (subprocess + phase machine)"
+        description: "src/orchestrator/worker.ts: spawns host CLI subprocess via execa per phase. Phase machine: IMPLEMENT → REVIEW → SHIP. Reads review verdict file. Handles exit codes, stall detection (5min idle → kill). Heartbeat tracking via stdout."
+        type: backend
+        priority: P0
+        depends_on: [P2-T07]
+        estimate: XL
+        owner_type: backend-dev
+        acceptance:
+          - "IMPLEMENT phase spawns primary_host_cli with worktree path"
+          - "REVIEW phase spawns review_host_cli with diff prompt; parses .forge/review/{taskId}.json"
+          - "verdict=changes_requested queues IMPLEMENT retry with findings injected"
+          - "verdict=pass advances to SHIP phase"
+          - "Stall detection kills worker after stall_timeout_ms idle; queues retry"
+          - "Single-host mode (review_host_cli=null) skips REVIEW with startup warning"
+        split_into:
+          - "P2-T08a Worker subprocess wrapper + heartbeat"
+          - "P2-T08b Phase machine state transitions"
+          - "P2-T08c Review verdict parsing + retry-with-findings"
+      - id: P2-T09
+        linear_id: "FD-22"
+        title: "Build orchestrator retry queue + signals"
+        description: "src/orchestrator/{retry,signals}.ts: exponential backoff queue per Symphony pattern (delay = min(1000 * 2^(attempt-1), retry_backoff_ms_max)). Signal handling: SIGINT graceful drain (SIGTERM workers, wait 10s, SIGKILL). Pause/resume via .forge/paused marker."
+        type: backend
+        priority: P0
+        depends_on: [P2-T07]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Retry timing matches Symphony formula across 5 attempts (snapshot test)"
+          - "max_retries reached → tracker.updateState(blocked) + notify"
+          - "SIGINT drains running workers within 10s ceiling, escalates to SIGKILL"
+          - "Pause marker honored: no new dispatches; existing finish; resume picks up"
+          - "Second SIGINT within 5s → immediate SIGKILL all"
+      - id: P2-T10
+        linear_id: "FD-23"
+        title: "Rename /push-to-linear skill → /push-to-tracker; generalize for multi-tracker"
+        description: "Move skills/push-to-linear/ → skills/push-to-tracker/. Update SKILL.md description and content to dispatch to the configured tracker.type (linear|github|motion) via the Tracker interface. Rename agents/linear-syncer → tracker-syncer (or generalize). Provide deprecation alias: /push-to-linear continues to work for one minor version emitting a chalk-warn 'deprecated; use /push-to-tracker'. Update README, /pickup-task, /sync-status, and any other internal references."
+        type: foundation
+        priority: P0
+        depends_on: [P2-T01]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "skills/push-to-tracker/SKILL.md exists; description and content reflect multi-tracker"
+          - "skills/push-to-linear/SKILL.md kept as deprecation alias; emits warning + delegates to push-to-tracker"
+          - "agents/tracker-syncer (or successor) handles all 3 trackers via Tracker interface dispatch"
+          - "README + CLAUDE.md reference /push-to-tracker as canonical name"
+          - "Internal cross-references in /pickup-task, /sync-status updated"
+          - "End-to-end test: running /push-to-tracker on a fixture phases.yaml creates issues in the configured tracker (Linear in dogfood, GitHub in fixture)"
+
+  - id: phase-3
+    linear_milestone_id: "9f147eda-4ec3-4ada-b77b-230e6a516d46"
+    name: "Polish & launch — migrate, doctor, perf, release"
+    status: blocked
+    blocked_by: phase-2
+    goal: "v0.3.0 ready for npm publish: existing v0.2.1 users have a clean migration path; doctor catches drift; performance under acceptance thresholds; CHANGELOG + README documented; cross-host parity matrix updated."
+    gate_criteria:
+      - "All Phase 3 tasks complete"
+      - "v0.3.0 RC tag passes full e2e test matrix on at least Claude Code + Codex CLI hosts"
+      - "Migration test: a v0.2.1 fixture project upgrades cleanly via forge migrate"
+      - "Performance: forge --version <500ms p95, init <30s p95, orchestrator <1% CPU at idle"
+      - "Package size <1MB unpacked"
+      - "CHANGELOG.md complete, breaking changes flagged"
+      - "Manual sign-off: maintainer runs forge dogfood loop end-to-end on a real third-party project"
+    tasks:
+      - id: P3-T01
+        linear_id: "FD-24"
+        title: "Build forge migrate command"
+        description: "src/cli/migrate.ts: detects v0.2.1 drift (@inherit lines in DESIGN.md, /push-to-linear refs in docs, missing .forge/settings.yaml). Generates proposed diff with chalk preview. Confirms via @inquirer/prompts. Backs up to .forge/backup-<timestamp>/. Applies on accept."
+        type: backend
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "Detects all 3 drift signatures on a v0.2.1 fixture project"
+          - "Generated DESIGN.md replacement is consistent with PRD if PRD present"
+          - "/push-to-linear → /push-to-tracker references updated in scaffolded CLAUDE.md / docs"
+          - "Backup directory contains pristine pre-migration originals"
+          - "Aborts cleanly on user reject; no partial state"
+      - id: P3-T02
+        linear_id: "FD-25"
+        title: "Extend forge doctor with v-next checks"
+        description: "src/cli/doctor.ts: extend existing skill-installation audit with checks per SPEC §Observability: settings validates, tracker reachable (healthCheck), host CLIs detected, worktree root writable, no orphan worktrees, log file size sane. New flag --gc removes orphan worktrees."
+        type: backend
+        priority: P1
+        depends_on: [P1-T04, P1-T07, P2-T01]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "All 6 new checks added; pass on healthy fixture, fail with actionable detail on broken one"
+          - "doctor --gc removes orphan worktrees safely (validates under root before rm)"
+          - "Output respects DESIGN voice + status-prefix conventions"
+      - id: P3-T03
+        linear_id: "FD-26"
+        title: "Performance test harness"
+        description: "test/e2e/perf.test.ts: measures forge --version cold start (p95 <500ms target), forge init end-to-end (<30s), orchestrator CPU% at idle (<1%), package size after npm pack (<1MB), 10-concurrent-worker steady-state RSS (<200MB). Runs in CI matrix."
+        type: integration
+        priority: P1
+        depends_on: [P2-T06, P2-T07]
+        estimate: M
+        owner_type: qa-engineer
+        acceptance:
+          - "5 perf assertions implemented and runnable via npm run test:perf"
+          - "CI fails build if any threshold violated"
+          - "Baseline numbers documented in docs/PERFORMANCE.md"
+      - id: P3-T04
+        linear_id: "FD-27"
+        title: "End-to-end fixtures + cross-host CI matrix"
+        description: "examples/ fixture projects for: greenfield-github, greenfield-linear, greenfield-motion. CI runs the full lifecycle (init → /forge → ... → orchestrate → first PR shipped) on Claude Code primary + Codex review combo, against each fixture. Cursor + Gemini parity flagged as deferred per SPEC."
+        type: integration
+        priority: P0
+        depends_on: [P2-T06, P2-T07, P2-T08, P2-T09]
+        estimate: L
+        owner_type: qa-engineer
+        acceptance:
+          - "3 fixture projects with deterministic phases.yaml"
+          - "Full lifecycle e2e test passes for each tracker"
+          - "Two-host review pattern verified: review verdict file produced, changes_requested loop executes once before pass"
+          - "CI matrix: Claude+Codex passes; Cursor+Gemini smoke test only (verified-deferred)"
+      - id: P3-T05
+        linear_id: "FD-28"
+        title: "Update README + CHANGELOG + cross-host parity table"
+        description: "Document v-next: two-host review, multi-tracker, init flow, orchestrator. Migration section for v0.2.1 users with forge migrate instructions. Update cross-host parity table (Claude+Codex verified, Cursor+Gemini deferred). CHANGELOG breaking changes flagged."
+        type: content
+        priority: P0
+        depends_on: [P3-T01, P3-T04]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "README updated; new sections for two-host review, multi-tracker, init flow"
+          - "CHANGELOG.md v0.3.0 entry with BREAKING CHANGES section calling out @inherit removal + /push-to-linear rename"
+          - "docs/MIGRATION.md walks v0.2.1 → v-next users through forge migrate"
+          - "Cross-host parity table accurate per CI matrix results"
+      - id: P3-T06
+        linear_id: "FD-29"
+        title: "Update CRITICAL.md with v-next critical paths"
+        description: "Expand CRITICAL.md to enumerate v-next critical paths that require /codex review per ETHOS principle 6: src/orchestrator/ (worker dispatch + phase machine), src/trackers/ (auth + atomic claim), src/core/secrets.ts (secret manager dispatch), src/core/workspace.ts (path-traversal hardening), src/cli/init.ts (file scaffolding + validation). Document the rationale per path. Verify /codex skill picks these paths up correctly."
+        type: content
+        priority: P1
+        depends_on: [P2-T07, P2-T08, P2-T02, P2-T05]
+        estimate: S
+        owner_type: security-auditor
+        acceptance:
+          - "CRITICAL.md lists 5 path globs with one-line rationale each"
+          - "/codex skill verified to trigger on diffs touching any listed path (smoke test)"
+          - "README links to CRITICAL.md from the security/contributing section"
+          - "v0.3.0 CHANGELOG references the expanded critical-path coverage"
+      - id: P3-T07
+        linear_id: "FD-30"
+        title: "Release v0.3.0 to npm + GitHub"
+        description: "Cut release: bump package.json to 0.3.0, tag v0.3.0, npm publish --access public, create GitHub release with CHANGELOG excerpt + migration note. Verify install via npx @firatcand/forge --version pulls v0.3.0."
+        type: infra
+        priority: P0
+        depends_on: [P3-T01, P3-T02, P3-T03, P3-T04, P3-T05, P3-T06]
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - "git tag v0.3.0 pushed"
+          - "npm publish succeeds; latest tag points to 0.3.0"
+          - "GitHub release with CHANGELOG body + migration callout"
+          - "npx @firatcand/forge --version on a fresh machine returns 0.3.0"
+          - "Maintainer dogfood sign-off: ran v0.3.0 against a non-forge personal project, shipped at least one task end-to-end without intervention"

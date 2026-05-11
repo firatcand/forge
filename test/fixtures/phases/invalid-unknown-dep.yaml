@@ -1,0 +1,19 @@
+project: "unknown-dep"
+phases:
+  - id: phase-1
+    name: "Unknown dep"
+    status: active
+    goal: "Task depends on ghost id."
+    gate_criteria:
+      - "Schema rejects."
+    tasks:
+      - id: P1-T01
+        title: "A"
+        description: "Depends on ghost."
+        type: foundation
+        priority: P0
+        depends_on: [P9-T99]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."

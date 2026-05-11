@@ -1,0 +1,19 @@
+project: "self-loop"
+phases:
+  - id: phase-1
+    name: "Self loop"
+    status: active
+    goal: "Trigger A->A cycle."
+    gate_criteria:
+      - "Schema rejects."
+    tasks:
+      - id: P1-T01
+        title: "A"
+        description: "Depends on itself."
+        type: foundation
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Schema rejects."
