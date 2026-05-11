@@ -43,7 +43,7 @@ function printHelp(version: string): void {
 }
 
 function failUnknown(command: string, version: string): never {
-  // Fail loudly per FD-6 retro: never silently no-op on commands we do not implement yet.
+  // Fail loudly per FORGE-6 retro: never silently no-op on commands we do not implement yet.
   const message = [
     `forge: '${command}' is not yet available in ${version}.`,
     '',
