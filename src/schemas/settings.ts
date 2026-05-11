@@ -10,15 +10,15 @@ const GithubTrackerSchema = z.object({
   config: z.object({ repo: z.string() }),
 });
 
-const MotionTrackerSchema = z.object({
-  type: z.literal('motion'),
-  config: z.object({ workspace_id: z.string() }),
+const NotionTrackerSchema = z.object({
+  type: z.literal('notion'),
+  config: z.object({ database_id: z.string() }),
 });
 
 export const TrackerSchema = z.discriminatedUnion('type', [
   LinearTrackerSchema,
   GithubTrackerSchema,
-  MotionTrackerSchema,
+  NotionTrackerSchema,
 ]);
 
 const EnvFileSecretsSchema = z.object({
@@ -109,7 +109,7 @@ export type Settings = z.infer<typeof SettingsSchema>;
 
 export type LinearTracker = z.infer<typeof LinearTrackerSchema>;
 export type GithubTracker = z.infer<typeof GithubTrackerSchema>;
-export type MotionTracker = z.infer<typeof MotionTrackerSchema>;
+export type NotionTracker = z.infer<typeof NotionTrackerSchema>;
 export type Tracker = z.infer<typeof TrackerSchema>;
 
 export type EnvFileSecrets = z.infer<typeof EnvFileSecretsSchema>;

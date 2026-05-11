@@ -4,7 +4,7 @@ export type {
   Tracker,
   LinearTracker,
   GithubTracker,
-  MotionTracker,
+  NotionTracker,
   Secrets,
   EnvFileSecrets,
   OnePasswordSecrets,
