@@ -3,6 +3,7 @@ name: sync-status
 description: Pull current Linear state and reconcile with local phases.yaml. Useful when issues were closed/reopened in Linear directly.
 tools: Read, Edit
 subagent: linear-syncer
+mcp: linear
 ---
 
 # /sync-status
@@ -12,3 +13,7 @@ Read `plans/phases.yaml`. For each task with a `linear_id`, query Linear for cur
 Report any divergence to user (e.g., "TLOG-103 closed in Linear but local says Todo").
 
 This isn't usually needed — Linear ↔ GitHub native sync handles most cases. Use when manual closes happen in Linear.
+
+## Preflight
+
+Requires Linear MCP. If unavailable, abort with the setup hint from `/push-to-linear` Step 0 — there is no offline fallback for status reconciliation.
