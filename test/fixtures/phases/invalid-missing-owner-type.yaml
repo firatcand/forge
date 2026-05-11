@@ -1,0 +1,17 @@
+project: "missing-owner"
+phases:
+  - id: phase-1
+    name: "Missing owner"
+    status: active
+    goal: "Task missing owner_type."
+    gate_criteria:
+      - "Schema rejects."
+    tasks:
+      - id: P1-T01
+        title: "Lonely"
+        description: "Has no owner."
+        type: foundation
+        priority: P0
+        estimate: S
+        acceptance:
+          - "Schema rejects."
