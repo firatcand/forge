@@ -8,7 +8,7 @@ Thanks for considering contributing to forge. The contribution model is **gstack
 - **New subagents** for stack specialties not yet covered (e.g., mobile-dev, ml-engineer)
 - **Template refinements** that solve real problems you hit while dogfooding
 - **Doc fixes**: typos, broken links, clearer examples
-- **Bug fixes** in `bin/forge.js`, `lib/tools.js`, or `lib/*.sh` helpers
+- **Bug fixes** in the TypeScript core under `src/` (CLI entrypoint `src/bin/forge.ts`, schemas, core utilities)
 - **New examples** in `examples/` showing forge applied to a different stack or domain
 
 ## What contributions are NOT welcome (yet)
@@ -16,8 +16,7 @@ Thanks for considering contributing to forge. The contribution model is **gstack
 - Large architectural refactors without prior discussion in an issue
 - New principles in `ETHOS.md` — these are deliberately stable
 - Telemetry, analytics, or anything that calls home
-- Build steps or compiled artifacts
-- Dependencies beyond bash, git, gh, jq, yq, and python3 (for YAML validation only)
+- Dependencies beyond what the TypeScript core needs (Node ^22.18 || >=24, the runtime deps listed in `package.json`, and standard host tools: git, gh)
 
 ## How to contribute
 
@@ -67,11 +66,9 @@ Before opening a PR:
 
 ```bash
 cd <your forge clone>
-node --check bin/forge.js lib/*.js
-bash -n lib/*.sh
-for f in templates/github-workflows/*.yml templates/phases.template.yaml; do
-  python3 -c "import yaml; yaml.safe_load(open('$f'))"
-done
+npm run typecheck
+npm run build
+npm test
 for f in skills/*/SKILL.md agents/*.md; do
   head -1 "$f" | grep -q '^---$' || echo "MISSING FRONTMATTER: $f"
 done
