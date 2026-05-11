@@ -2,7 +2,7 @@ name: Claude — PR Security Review
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [dev, main]
+    branches: [main]
 
 jobs:
   security-review:

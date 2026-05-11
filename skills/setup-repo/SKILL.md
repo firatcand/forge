@@ -21,38 +21,34 @@ Delegate to the `devops-engineer` subagent.
 2. **Create repo**: `gh repo create [name] --private --source=. --remote=origin`
    - Or skip if origin already exists
 3. **Initial commit**: if no commits, commit current state to `main`
-4. **Branch dev from main**: `git checkout -b dev && git push origin dev`
-5. **Branch protection on main**:
+4. **Branch protection on main**:
    - Require PR review (1)
    - Require `test` status check
    - No direct pushes
    - No force pushes
-6. **Branch protection on dev**:
-   - Require PR review (1)
-   - Require `test` status check
-7. **GitHub Environments**:
+5. **GitHub Environments**:
    - `development` (auto-deploy, no approval)
    - `production` (manual approval)
-8. **Copy CI workflows** from `templates/github-workflows/` to `.github/workflows/`:
+6. **Copy CI workflows** from `templates/github-workflows/` to `.github/workflows/`:
    - `claude-issue.yml`
    - `claude-pr-review.yml`
    - `test.yml`
    - `claude-scheduled.yml`
-9. **Generate `.env.example`** from SPEC.md env_vars list
-10. **Setup Claude Code OAuth token**:
-    - Prompt user: `claude setup-token`
-    - Read token from clipboard or stdin
-    - Set as repo secret: `gh secret set CLAUDE_CODE_OAUTH_TOKEN`
-11. **Commit and push**: `.github/`, updated `.env.example`
+7. **Generate `.env.example`** from SPEC.md env_vars list
+8. **Setup Claude Code OAuth token**:
+   - Prompt user: `claude setup-token`
+   - Read token from clipboard or stdin
+   - Set as repo secret: `gh secret set CLAUDE_CODE_OAUTH_TOKEN`
+9. **Commit and push**: `.github/`, updated `.env.example`
 
 ## Each step shown to user
 
-Don't run all 11 steps silently. Print each:
+Don't run all 9 steps silently. Print each:
 
 ```
-[1/11] Verifying gh CLI authentication... ✓
-[2/11] Creating repo firatcand/time-logger... ✓
-[3/11] Initial commit on main... ✓
+[1/9] Verifying gh CLI authentication... ✓
+[2/9] Creating repo firatcand/time-logger... ✓
+[3/9] Initial commit on main... ✓
 ...
 ```
 

@@ -16,7 +16,7 @@ The natural Claude Code workflow is one task per session. With branches alone, y
 
 ```
 ~/repos/
-├── my-project/                          ← main checkout (on dev branch)
+├── my-project/                          ← main checkout (on main branch)
 │   ├── .git/                            ← real .git directory
 │   ├── src/
 │   └── ...
@@ -41,7 +41,7 @@ The `~/repos/{project}-worktrees/` directory is the convention. `/pickup-task` c
 git worktree list
 
 # Create a new worktree manually (forge does this for you via /pickup-task)
-git worktree add ../my-project-worktrees/TLOG-105 -b feat/TLOG-105-foo dev
+git worktree add ../my-project-worktrees/TLOG-105 -b feat/TLOG-105-foo main
 
 # Remove a worktree (after PR merged + branch deleted)
 git worktree remove ../my-project-worktrees/TLOG-103
@@ -60,7 +60,7 @@ A `forge worktree clean` command for pruning worktrees whose upstream branches a
 
 **Untracked files don't migrate.** A new file in `worktree-A/foo.txt` is invisible from `worktree-B/`. They live in different filesystem locations. Once you `git add` and commit, the commit is shared (after a `git fetch` or `git checkout` that updates the local branch).
 
-**Two worktrees can't be on the same branch.** Git will refuse with "fatal: '<branch>' is already checked out at '<path>'". This is a feature — it prevents you from accidentally diverging the same branch in two places. If you need two worktrees on the same code, branch one of them: `git worktree add ../foo-2 -b experiment dev`.
+**Two worktrees can't be on the same branch.** Git will refuse with "fatal: '<branch>' is already checked out at '<path>'". This is a feature — it prevents you from accidentally diverging the same branch in two places. If you need two worktrees on the same code, branch one of them: `git worktree add ../foo-2 -b experiment main`.
 
 **Stash isn't shared.** `git stash` is per-worktree on most git versions. If you stash in worktree A and check out worktree B, you won't see the stash. Use `git stash list` in the same worktree where you stashed.
 
@@ -84,4 +84,4 @@ A bundled `forge worktree clean` command will ship in a later 0.3.x patch as Pha
 
 ## When NOT to use a worktree
 
-For tiny one-line fixes, the worktree overhead isn't worth it. Just commit on `dev` and ship. The principle is: worktrees are for tasks that will take more than 15 minutes and might be interrupted.
+For tiny one-line fixes, the worktree overhead isn't worth it. Use a quick branch off `main` and open a small PR. The principle is: worktrees are for tasks that will take more than 15 minutes and might be interrupted.

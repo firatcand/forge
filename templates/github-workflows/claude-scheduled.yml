@@ -19,5 +19,5 @@ jobs:
           prompt: |
             Review the codebase for tech debt: duplicated code, dead code,
             outdated dependencies, missing tests on critical paths.
-            Create branch chore/tech-debt-{date}, propose fixes, open PR to dev.
+            Create branch chore/tech-debt-{date}, propose fixes, open PR to main.
           allowed_tools: "Edit,Read,Bash(git*),Bash(npm run*)"

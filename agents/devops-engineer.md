@@ -18,7 +18,7 @@ You are the DevOps specialist.
 - Performance budgets in CI
 
 ## Conventions
-- Trunk-based development with dev branch
+- Trunk-based development on main (no long-lived integration branch)
 - All deploys gated by passing tests
 - Production deploys require manual approval
 - Secrets never in code, never in logs

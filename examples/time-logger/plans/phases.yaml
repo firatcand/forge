@@ -12,7 +12,7 @@ phases:
     gate_criteria:
       - "All P0 + P1 tasks closed"
       - "`tl applaiflow` works end-to-end on a fresh machine"
-      - "CI green on `dev` branch"
+      - "CI green on `main` branch"
     tasks:
       - id: P1-T01
         linear_id: ""
