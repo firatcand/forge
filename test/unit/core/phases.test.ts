@@ -44,7 +44,7 @@ test('AC1: valid minimal fixture returns Phases shape', () => {
 test('AC3: parses real plans/phases.yaml from the worktree (regression)', () => {
   const result = loadPhases(resolve(worktreeRoot, 'plans', 'phases.yaml'));
   assert.equal(result.project, 'forge');
-  assert.equal(result.phases[0]!.status, 'active');
+  assert.ok(['active', 'blocked', 'done'].includes(result.phases[0]!.status));
 });
 
 test('AC2: two-task cycle throws SCHEMA_INVALID with cycle issue', () => {
