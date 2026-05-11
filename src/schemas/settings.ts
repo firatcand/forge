@@ -1,24 +1,24 @@
 import { z } from 'zod';
 
-const LinearTrackerSchema = z.object({
+const LinearTrackerConfigSchema = z.object({
   type: z.literal('linear'),
   config: z.object({ team_id: z.string() }),
 });
 
-const GithubTrackerSchema = z.object({
+const GithubTrackerConfigSchema = z.object({
   type: z.literal('github'),
   config: z.object({ repo: z.string() }),
 });
 
-const NotionTrackerSchema = z.object({
+const NotionTrackerConfigSchema = z.object({
   type: z.literal('notion'),
   config: z.object({ database_id: z.string() }),
 });
 
-export const TrackerSchema = z.discriminatedUnion('type', [
-  LinearTrackerSchema,
-  GithubTrackerSchema,
-  NotionTrackerSchema,
+export const TrackerConfigSchema = z.discriminatedUnion('type', [
+  LinearTrackerConfigSchema,
+  GithubTrackerConfigSchema,
+  NotionTrackerConfigSchema,
 ]);
 
 const EnvFileSecretsSchema = z.object({
@@ -99,7 +99,7 @@ export const SettingsSchema = z.object({
     name: z.string().min(1),
     description: z.string().optional(),
   }),
-  tracker: TrackerSchema,
+  tracker: TrackerConfigSchema,
   secrets: SecretsSchema,
   agents: AgentsSchema,
   design: DesignSchema,
@@ -107,10 +107,10 @@ export const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 
-export type LinearTracker = z.infer<typeof LinearTrackerSchema>;
-export type GithubTracker = z.infer<typeof GithubTrackerSchema>;
-export type NotionTracker = z.infer<typeof NotionTrackerSchema>;
-export type Tracker = z.infer<typeof TrackerSchema>;
+export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
+export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;
+export type NotionTrackerConfig = z.infer<typeof NotionTrackerConfigSchema>;
+export type TrackerConfig = z.infer<typeof TrackerConfigSchema>;
 
 export type EnvFileSecrets = z.infer<typeof EnvFileSecretsSchema>;
 export type OnePasswordSecrets = z.infer<typeof OnePasswordSecretsSchema>;
