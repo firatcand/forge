@@ -1,8 +1,36 @@
 import { execa, ExecaError } from 'execa';
-import { existsSync, mkdirSync, realpathSync, statSync, readdirSync, copyFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  realpathSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  readlinkSync,
+  copyFileSync,
+  writeFileSync,
+} from 'node:fs';
 import * as path from 'node:path';
 
 import { WorkspaceError } from './errors.ts';
+
+function wrapExecaError(
+  op: string,
+  err: unknown,
+  details: Record<string, unknown>,
+): WorkspaceError {
+  const cause = err as ExecaError;
+  return new WorkspaceError(
+    'GIT_FAILURE',
+    `${op} failed: ${cause.shortMessage ?? cause.message}`,
+    {
+      ...details,
+      stderr: typeof cause.stderr === 'string' ? cause.stderr : undefined,
+      exitCode: cause.exitCode,
+    },
+    { cause: err },
+  );
+}
 
 const MAX_ID_LENGTH = 64;
 const ALLOWED_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -53,7 +81,8 @@ function resolveLongestExistingPrefix(target: string): { resolvedRoot: string; t
   while (true) {
     if (existsSync(current)) {
       const real = realpathSync(current);
-      return { resolvedRoot: real, tail: tailParts.length ? path.join(...tailParts.reverse()) : '' };
+      const reversedTail = [...tailParts].reverse();
+      return { resolvedRoot: real, tail: reversedTail.length ? path.join(...reversedTail) : '' };
     }
     const parent = path.dirname(current);
     if (parent === current) {
@@ -95,7 +124,7 @@ function findMainWorktree(start: string): string | null {
     const dotGit = path.join(current, '.git');
     if (existsSync(dotGit)) {
       try {
-        const st = statSync(dotGit);
+        const st = lstatSync(dotGit);
         if (st.isDirectory()) return current;
       } catch {
         // ignore
@@ -104,6 +133,23 @@ function findMainWorktree(start: string): string | null {
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
+  }
+}
+
+function rejectIfSymlink(source: string): void {
+  const st = lstatSync(source);
+  if (st.isSymbolicLink()) {
+    // reject symlinks defensively — main worktree could contain a hostile symlink (e.g. CLAUDE.md -> /etc/passwd)
+    let target: string | undefined;
+    try {
+      target = readlinkSync(source);
+    } catch {
+      target = undefined;
+    }
+    throw new WorkspaceError('SYMLINK_REJECTED', 'refusing to follow symlink in main worktree', {
+      path: source,
+      target,
+    });
   }
 }
 
@@ -116,12 +162,21 @@ interface CopyPlanItem {
 function planCopyRecursive(srcRoot: string, destRoot: string, relativeBase: string): CopyPlanItem[] {
   const items: CopyPlanItem[] = [];
   if (!existsSync(srcRoot)) return items;
+  // guard the directory root itself — a hostile symlinked dir (e.g. plans -> /etc) must not be traversed
+  const rootStat = lstatSync(srcRoot);
+  if (rootStat.isSymbolicLink()) {
+    rejectIfSymlink(srcRoot);
+  }
+  if (!rootStat.isDirectory()) return items;
   const entries = readdirSync(srcRoot, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name === '.gitkeep') continue;
     const srcPath = path.join(srcRoot, entry.name);
     const destPath = path.join(destRoot, entry.name);
     const rel = path.join(relativeBase, entry.name);
+    if (entry.isSymbolicLink()) {
+      rejectIfSymlink(srcPath);
+    }
     if (entry.isDirectory()) {
       items.push(...planCopyRecursive(srcPath, destPath, rel));
     } else if (entry.isFile()) {
@@ -135,13 +190,22 @@ function planSpecMarkdownCopy(srcRoot: string, destRoot: string): CopyPlanItem[]
   const items: CopyPlanItem[] = [];
   const specSrc = path.join(srcRoot, 'spec');
   if (!existsSync(specSrc)) return items;
+  const specStat = lstatSync(specSrc);
+  if (specStat.isSymbolicLink()) {
+    rejectIfSymlink(specSrc);
+  }
+  if (!specStat.isDirectory()) return items;
   const entries = readdirSync(specSrc, { withFileTypes: true });
   for (const entry of entries) {
-    if (!entry.isFile()) continue;
     if (entry.name === '.gitkeep') continue;
     if (!entry.name.endsWith('.md')) continue;
+    const srcPath = path.join(specSrc, entry.name);
+    if (entry.isSymbolicLink()) {
+      rejectIfSymlink(srcPath);
+    }
+    if (!entry.isFile()) continue;
     items.push({
-      source: path.join(specSrc, entry.name),
+      source: srcPath,
       destination: path.join(destRoot, 'spec', entry.name),
       relative: path.join('spec', entry.name),
     });
@@ -152,12 +216,16 @@ function planSpecMarkdownCopy(srcRoot: string, destRoot: string): CopyPlanItem[]
 function planSingleFile(srcRoot: string, destRoot: string, name: string): CopyPlanItem[] {
   const src = path.join(srcRoot, name);
   if (!existsSync(src)) return [];
+  let st;
   try {
-    const st = statSync(src);
-    if (!st.isFile()) return [];
+    st = lstatSync(src);
   } catch {
     return [];
   }
+  if (st.isSymbolicLink()) {
+    rejectIfSymlink(src);
+  }
+  if (!st.isFile()) return [];
   return [{ source: src, destination: path.join(destRoot, name), relative: name }];
 }
 
@@ -165,6 +233,16 @@ function planForgeSettings(srcRoot: string, destRoot: string): CopyPlanItem[] {
   const rel = path.join('.forge', 'settings.yaml');
   const src = path.join(srcRoot, rel);
   if (!existsSync(src)) return [];
+  let st;
+  try {
+    st = lstatSync(src);
+  } catch {
+    return [];
+  }
+  if (st.isSymbolicLink()) {
+    rejectIfSymlink(src);
+  }
+  if (!st.isFile()) return [];
   return [{ source: src, destination: path.join(destRoot, rel), relative: rel }];
 }
 
@@ -211,54 +289,47 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
       reject: true,
     });
   } catch (err) {
-    const cause = err as ExecaError;
-    throw new WorkspaceError(
-      'GIT_FAILURE',
-      `git worktree add failed: ${cause.shortMessage ?? cause.message}`,
-      {
-        branch,
-        target,
-        base,
-        stderr: typeof cause.stderr === 'string' ? cause.stderr : undefined,
-        exitCode: cause.exitCode,
-      },
-      { cause: err },
-    );
+    throw wrapExecaError('git worktree add', err, { branch, target, base });
   }
 
-  const copyMeta = opts.copyMeta !== false;
+  const copyMeta = opts.copyMeta ?? true;
   let copiedFiles: string[] = [];
   let manifestPath: string | null = null;
 
   if (copyMeta) {
     const mainWorktree =
       opts.mainWorktree !== undefined ? path.resolve(opts.mainWorktree) : findMainWorktree(absRoot);
-    if (mainWorktree && existsSync(mainWorktree)) {
-      const plan: CopyPlanItem[] = [
-        ...planSpecMarkdownCopy(mainWorktree, target),
-        ...planCopyRecursive(path.join(mainWorktree, 'plans'), path.join(target, 'plans'), 'plans'),
-        ...planCopyRecursive(
-          path.join(mainWorktree, 'docs', 'learnings'),
-          path.join(target, 'docs', 'learnings'),
-          path.join('docs', 'learnings'),
-        ),
-        ...planSingleFile(mainWorktree, target, 'CLAUDE.md'),
-        ...planSingleFile(mainWorktree, target, 'CRITICAL.md'),
-        ...planForgeSettings(mainWorktree, target),
-      ];
-      copiedFiles = executeCopyPlan(plan);
-
-      const manifestDir = path.join(target, '.forge');
-      mkdirSync(manifestDir, { recursive: true });
-      manifestPath = path.join(manifestDir, 'copied-from-main.json');
-      const manifest = {
-        version: 1,
-        sourceMainWorktree: mainWorktree,
-        copiedAt: new Date().toISOString(),
-        files: copiedFiles,
-      };
-      writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    if (!mainWorktree || !existsSync(mainWorktree)) {
+      throw new WorkspaceError('NOT_FOUND', 'main worktree not found for copyMeta', {
+        context: 'main worktree not found for copyMeta',
+        cwd: absRoot,
+      });
     }
+
+    const plan: CopyPlanItem[] = [
+      ...planSpecMarkdownCopy(mainWorktree, target),
+      ...planCopyRecursive(path.join(mainWorktree, 'plans'), path.join(target, 'plans'), 'plans'),
+      ...planCopyRecursive(
+        path.join(mainWorktree, 'docs', 'learnings'),
+        path.join(target, 'docs', 'learnings'),
+        path.join('docs', 'learnings'),
+      ),
+      ...planSingleFile(mainWorktree, target, 'CLAUDE.md'),
+      ...planSingleFile(mainWorktree, target, 'CRITICAL.md'),
+      ...planForgeSettings(mainWorktree, target),
+    ];
+    copiedFiles = executeCopyPlan(plan);
+
+    const manifestDir = path.join(target, '.forge');
+    mkdirSync(manifestDir, { recursive: true });
+    manifestPath = path.join(manifestDir, 'copied-from-main.json');
+    const manifest = {
+      version: 1,
+      sourceMainWorktree: mainWorktree,
+      copiedAt: new Date().toISOString(),
+      files: copiedFiles,
+    };
+    writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
   }
 
   return { path: target, branch, copiedFiles, manifestPath };
@@ -302,44 +373,49 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
   } catch (err) {
-    const cause = err as ExecaError;
-    throw new WorkspaceError(
-      'GIT_FAILURE',
-      `git ls-files failed: ${cause.shortMessage ?? cause.message}`,
-      {
-        target,
-        stderr: typeof cause.stderr === 'string' ? cause.stderr : undefined,
-        exitCode: cause.exitCode,
-      },
-      { cause: err },
-    );
+    throw wrapExecaError('git ls-files', err, { target });
   }
 
-  const count = ignoredFiles.length;
+  const manifestRel = path.join('.forge', 'copied-from-main.json');
+  const manifestAbs = path.join(target, manifestRel);
+  const baseline = new Set<string>();
+  if (existsSync(manifestAbs)) {
+    try {
+      const parsed = JSON.parse(readFileSync(manifestAbs, 'utf8')) as { files?: unknown };
+      if (Array.isArray(parsed.files)) {
+        for (const f of parsed.files) {
+          if (typeof f === 'string') baseline.add(f);
+        }
+      }
+      baseline.add(manifestRel);
+    } catch (err) {
+      throw new WorkspaceError(
+        'GIT_FAILURE',
+        'failed to parse copied-from-main.json manifest',
+        { manifest: manifestAbs },
+        { cause: err },
+      );
+    }
+  }
+
+  const remaining = baseline.size > 0
+    ? ignoredFiles.filter((f) => !baseline.has(f))
+    : ignoredFiles;
+
+  const count = remaining.length;
   if (count > 0 && opts.force !== true) {
     throw new WorkspaceError('GITIGNORED_LOSS', `${count} gitignored file(s) would be lost`, {
       count,
-      files: ignoredFiles.slice(0, 10),
+      files: remaining.slice(0, 10),
     });
   }
 
-  const removeArgs = ['worktree', 'remove', target];
-  if (opts.force === true) removeArgs.splice(2, 0, '--force');
+  const removeArgs = ['worktree', 'remove', ...(opts.force ? ['--force'] : []), target];
 
   try {
     await execa('git', removeArgs, { cwd: absRoot, reject: true });
   } catch (err) {
-    const cause = err as ExecaError;
-    throw new WorkspaceError(
-      'GIT_FAILURE',
-      `git worktree remove failed: ${cause.shortMessage ?? cause.message}`,
-      {
-        target,
-        stderr: typeof cause.stderr === 'string' ? cause.stderr : undefined,
-        exitCode: cause.exitCode,
-      },
-      { cause: err },
-    );
+    throw wrapExecaError('git worktree remove', err, { target });
   }
 
   let branchDeleted = false;
@@ -349,17 +425,7 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
       await execa('git', ['branch', '-D', branch], { cwd: absRoot, reject: true });
       branchDeleted = true;
     } catch (err) {
-      const cause = err as ExecaError;
-      throw new WorkspaceError(
-        'GIT_FAILURE',
-        `git branch -D failed: ${cause.shortMessage ?? cause.message}`,
-        {
-          branch,
-          stderr: typeof cause.stderr === 'string' ? cause.stderr : undefined,
-          exitCode: cause.exitCode,
-        },
-        { cause: err },
-      );
+      throw wrapExecaError('git branch -D', err, { branch });
     }
   }
 

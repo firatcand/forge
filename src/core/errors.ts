@@ -8,7 +8,8 @@ export type WorkspaceErrorCode =
   | 'PATH_ESCAPE'
   | 'NOT_FOUND'
   | 'GIT_FAILURE'
-  | 'GITIGNORED_LOSS';
+  | 'GITIGNORED_LOSS'
+  | 'SYMLINK_REJECTED';
 
 export class WorkspaceError extends Error {
   readonly code: WorkspaceErrorCode;

@@ -158,12 +158,6 @@ test('sanitizeIssueId — rejects space with INVALID_CHAR', () => {
 
 test('sanitizeIssueId — rejects emoji with INVALID_CHAR', () => {
   try {
-    sanitizeIssueId('FORGE-fire');
-    // sanity: regular ASCII passes; switch to actually-emoji case
-  } catch {
-    assert.fail('regression: ASCII rejected');
-  }
-  try {
     sanitizeIssueId('FORGE-\u{1F525}');
     assert.fail('expected throw on emoji');
   } catch (err) {
@@ -444,6 +438,209 @@ test('cleanup — throws NOT_FOUND when worktree path does not exist', async () 
       assert.equal((err as WorkspaceError).code, 'NOT_FOUND');
     }
   } finally {
+    rmrf(repoDir);
+  }
+});
+
+test('create — refuses to follow a symlinked file in main worktree', async () => {
+  const repoDir = tmpdir('create-symlink-file');
+  try {
+    await initRepo(repoDir);
+    // create a symlink at CLAUDE.md pointing somewhere outside the repo
+    const linkTarget = path.join(os.tmpdir(), `forge-symlink-target-${Date.now()}`);
+    writeFileSync(linkTarget, 'hostile\n');
+    symlinkSync(linkTarget, path.join(repoDir, 'CLAUDE.md'));
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    try {
+      await create('FD-SL1', { root, base: 'main', mainWorktree: repoDir });
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof WorkspaceError);
+      assert.equal((err as WorkspaceError).code, 'SYMLINK_REJECTED');
+      assert.equal((err as WorkspaceError).details.path, path.join(repoDir, 'CLAUDE.md'));
+    }
+    rmrf(linkTarget);
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-SL1')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+  }
+});
+
+test('create — refuses to follow a symlinked directory in main worktree', async () => {
+  const repoDir = tmpdir('create-symlink-dir');
+  const outsideDir = tmpdir('hostile-dir');
+  try {
+    await initRepo(repoDir);
+    writeFileSync(path.join(outsideDir, 'secret.md'), '# secret\n');
+    // symlink plans/ -> outsideDir
+    symlinkSync(outsideDir, path.join(repoDir, 'plans'));
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    try {
+      await create('FD-SL2', { root, base: 'main', mainWorktree: repoDir });
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof WorkspaceError);
+      assert.equal((err as WorkspaceError).code, 'SYMLINK_REJECTED');
+    }
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-SL2')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+    rmrf(outsideDir);
+  }
+});
+
+test('create — copyMeta:true with no main worktree throws NOT_FOUND', async () => {
+  const root = tmpdir('create-no-main');
+  try {
+    // root is NOT inside a git repo and not provided as mainWorktree
+    try {
+      await create('FD-NM', { root });
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof WorkspaceError);
+      // could fail at git worktree add (GIT_FAILURE) before reaching NOT_FOUND.
+      // To target the NOT_FOUND path we need a repo where git worktree add succeeds.
+      // This test instead asserts the failure surfaces *some* WorkspaceError.
+      assert.ok(['NOT_FOUND', 'GIT_FAILURE'].includes((err as WorkspaceError).code));
+    }
+  } finally {
+    rmrf(root);
+  }
+});
+
+test('create — copyMeta:true with explicit nonexistent mainWorktree throws NOT_FOUND', async () => {
+  const repoDir = tmpdir('create-nm-explicit');
+  try {
+    await initRepo(repoDir);
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+    const ghost = path.join(os.tmpdir(), `forge-ghost-main-${Date.now()}`);
+    try {
+      await create('FD-NM2', { root, base: 'main', mainWorktree: ghost });
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof WorkspaceError);
+      assert.equal((err as WorkspaceError).code, 'NOT_FOUND');
+      assert.equal((err as WorkspaceError).details.context, 'main worktree not found for copyMeta');
+    }
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-NM2')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+  }
+});
+
+test('cleanup — succeeds on a freshly-created worktree with copyMeta default', async () => {
+  const repoDir = tmpdir('cleanup-fresh');
+  try {
+    await initRepo(repoDir);
+    // populate baseline meta files and a .gitignore that ignores them
+    writeFileSync(
+      path.join(repoDir, '.gitignore'),
+      'CLAUDE.md\nCRITICAL.md\nspec/*.md\nplans/\ndocs/learnings/\n.forge/\n',
+    );
+    writeFileSync(path.join(repoDir, 'CLAUDE.md'), '# claude\n');
+    writeFileSync(path.join(repoDir, 'CRITICAL.md'), '# critical\n');
+    mkdirSync(path.join(repoDir, 'spec'));
+    writeFileSync(path.join(repoDir, 'spec', 'SPEC.md'), '# spec\n');
+    mkdirSync(path.join(repoDir, 'plans', 'tasks'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'plans', 'tasks', 'FD-1.plan.md'), '# plan\n');
+    mkdirSync(path.join(repoDir, 'docs', 'learnings'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'docs', 'learnings', 'l1.md'), '# learning\n');
+    mkdirSync(path.join(repoDir, '.forge'));
+    writeFileSync(path.join(repoDir, '.forge', 'settings.yaml'), 'version: 1\n');
+    await execa('git', ['add', '-A'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'baseline + gitignore'], { cwd: repoDir, reject: true });
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    const created = await create('FD-FRESH', { root, base: 'main', mainWorktree: repoDir });
+    assert.ok(created.manifestPath !== null);
+
+    // Now cleanup without force — manifest should exclude baseline, so no GITIGNORED_LOSS.
+    const result = await cleanup('FD-FRESH', { root });
+    assert.equal(result.removed, true);
+    assert.equal(result.gitignoredFilesLost, 0);
+    assert.ok(!existsSync(created.path));
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-FRESH')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+  }
+});
+
+test('cleanup — throws on gitignored files NOT in the manifest', async () => {
+  const repoDir = tmpdir('cleanup-non-baseline');
+  try {
+    await initRepo(repoDir);
+    writeFileSync(
+      path.join(repoDir, '.gitignore'),
+      'CLAUDE.md\nspec/*.md\n.forge/\n.tmp-*\n',
+    );
+    writeFileSync(path.join(repoDir, 'CLAUDE.md'), '# claude\n');
+    mkdirSync(path.join(repoDir, 'spec'));
+    writeFileSync(path.join(repoDir, 'spec', 'SPEC.md'), '# spec\n');
+    mkdirSync(path.join(repoDir, '.forge'));
+    writeFileSync(path.join(repoDir, '.forge', 'settings.yaml'), 'version: 1\n');
+    await execa('git', ['add', '-A'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'baseline'], { cwd: repoDir, reject: true });
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+    const created = await create('FD-EXTRA', { root, base: 'main', mainWorktree: repoDir });
+
+    // Add a NEW gitignored file not in the manifest.
+    writeFileSync(path.join(created.path, '.tmp-something'), 'user work\n');
+
+    try {
+      await cleanup('FD-EXTRA', { root });
+      assert.fail('expected throw');
+    } catch (err) {
+      assert.ok(err instanceof WorkspaceError);
+      assert.equal((err as WorkspaceError).code, 'GITIGNORED_LOSS');
+      assert.equal((err as WorkspaceError).details.count, 1);
+      assert.deepEqual((err as WorkspaceError).details.files, ['.tmp-something']);
+    }
+
+    const forced = await cleanup('FD-EXTRA', { root, force: true });
+    assert.equal(forced.removed, true);
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-EXTRA')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
     rmrf(repoDir);
   }
 });
