@@ -8,7 +8,7 @@ tools: Read, Bash(git*)
 
 ## Process
 
-1. Run `git diff dev...HEAD` to get current diff
+1. Run `git diff main...HEAD` to get current diff
 2. Always invoke `code-reviewer` subagent
 3. If diff touches paths in CRITICAL.md, invoke `security-auditor`
 4. If task type is "design" or "frontend", invoke `design-reviewer`

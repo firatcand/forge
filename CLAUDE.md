@@ -6,9 +6,8 @@
 <!-- Auto-populated by /draft-spec — keep in sync with spec/SPEC.md -->
 
 ## Branch strategy
-- `main` → production (protected, no direct push)
-- `dev` → integration (protected, PRs only)
-- `feat/{LINEAR-ID}-{slug}` → working branches in worktrees
+- `main` → integration (protected, PRs only)
+- `feat/{LINEAR-ID}-{slug}` → working branches in worktrees, PR'd into `main`
 
 ## Commands
 - Build: `npm run build`

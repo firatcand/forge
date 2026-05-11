@@ -111,7 +111,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 
 - **When to invoke:** once, before the first task.
 - **Inputs:** working directory (project), `spec/SPEC.md` (for env vars).
-- **Outputs:** GitHub repo created, branch protection set up (main + dev), GitHub Environments (development, production), CI workflows copied in, `CLAUDE_CODE_OAUTH_TOKEN` secret set, `.env.example` populated.
+- **Outputs:** GitHub repo created, branch protection set up on `main`, GitHub Environments (development, production), CI workflows copied in, `CLAUDE_CODE_OAUTH_TOKEN` secret set, `.env.example` populated.
 - **Unlocks:** standard git/PR workflows.
 
 ### `/push-to-linear`
@@ -162,7 +162,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 ### `/review`
 
 - **When to invoke:** after `/implement` (or `/fix`).
-- **Inputs:** `git diff dev...HEAD`.
+- **Inputs:** `git diff main...HEAD`.
 - **Outputs:** findings from `code-reviewer`, plus `security-auditor` (if diff touches `CRITICAL.md` paths) and `design-reviewer` (if task type is design or frontend). Categorized as Block / Improvement / Nit.
 - **Unlocks:** `/qa` once Blocks are resolved.
 

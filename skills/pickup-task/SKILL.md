@@ -24,7 +24,7 @@ subagent: learning-curator
    ```bash
    PROJECT_NAME=$(basename "$(pwd)")
    WORKTREE_PATH="../${PROJECT_NAME}-worktrees/${LINEAR-ID}"
-   git worktree add "${WORKTREE_PATH}" -b "${BRANCH_NAME}" dev
+   git worktree add "${WORKTREE_PATH}" -b "${BRANCH_NAME}" main
    ```
 6. Delegate to `learning-curator` to retrieve relevant learnings:
    - Tags matching task type
