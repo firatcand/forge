@@ -1,10 +1,10 @@
-export { SettingsSchema, TrackerSchema, SecretsSchema } from './settings.ts';
+export { SettingsSchema, TrackerConfigSchema, SecretsSchema } from './settings.ts';
 export type {
   Settings,
-  Tracker,
-  LinearTracker,
-  GithubTracker,
-  NotionTracker,
+  TrackerConfig,
+  LinearTrackerConfig,
+  GithubTrackerConfig,
+  NotionTrackerConfig,
   Secrets,
   EnvFileSecrets,
   OnePasswordSecrets,
