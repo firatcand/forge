@@ -10,6 +10,8 @@ import {
   TaskSchema,
   OWNER_TYPES,
   PRIORITIES,
+  ESTIMATES,
+  TASK_TYPES,
   type Phases,
   type Task,
 } from '../../src/schemas/phases.ts';
@@ -169,6 +171,17 @@ test('AC2 — rejects duplicate task ids across phases', () => {
   assert.ok(dupIssue);
 });
 
+test('AC2 — rejects duplicate phase ids', () => {
+  const data = loadFixture('invalid-duplicate-phase-id.yaml');
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const dupIssue = result.error.issues.find((i) => i.message.includes('duplicate phase id'));
+  assert.ok(dupIssue, `Expected duplicate phase id issue, got: ${JSON.stringify(result.error.issues)}`);
+  assert.deepEqual(dupIssue!.path, ['phases', 1, 'id']);
+  assert.match(dupIssue!.message, /duplicate phase id: phase-1/);
+});
+
 for (const ownerType of OWNER_TYPES) {
   test(`AC3 — accepts owner_type "${ownerType}"`, () => {
     const result = PhasesSchema.safeParse(basePhases({ owner_type: ownerType }));
@@ -196,6 +209,36 @@ test('AC3 — rejects invalid owner_type "not-a-role"', () => {
 
 test('AC3 — rejects invalid priority "P4"', () => {
   const result = PhasesSchema.safeParse(basePhases({ priority: 'P4' }));
+  assert.equal(result.success, false);
+});
+
+for (const estimate of ESTIMATES) {
+  test(`AC3 — accepts estimate "${estimate}"`, () => {
+    const result = PhasesSchema.safeParse(basePhases({ estimate }));
+    if (!result.success) {
+      assert.fail(`estimate ${estimate} rejected: ${JSON.stringify(result.error.issues)}`);
+    }
+    assert.equal(result.data.phases[0]!.tasks[0]!.estimate, estimate);
+  });
+}
+
+test('AC3 — rejects invalid estimate "XXL"', () => {
+  const result = PhasesSchema.safeParse(basePhases({ estimate: 'XXL' }));
+  assert.equal(result.success, false);
+});
+
+for (const taskType of TASK_TYPES) {
+  test(`AC3 — accepts task_type "${taskType}"`, () => {
+    const result = PhasesSchema.safeParse(basePhases({ type: taskType }));
+    if (!result.success) {
+      assert.fail(`task_type ${taskType} rejected: ${JSON.stringify(result.error.issues)}`);
+    }
+    assert.equal(result.data.phases[0]!.tasks[0]!.type, taskType);
+  });
+}
+
+test('AC3 — rejects invalid task_type "misc"', () => {
+  const result = PhasesSchema.safeParse(basePhases({ type: 'misc' }));
   assert.equal(result.success, false);
 });
 

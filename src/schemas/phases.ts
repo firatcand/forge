@@ -67,6 +67,19 @@ export const PhasesSchema = z
     phases: z.array(PhaseSchema).min(1),
   })
   .superRefine((data, ctx) => {
+    const seenPhaseIds = new Map<string, number>();
+    data.phases.forEach((phase, phaseIdx) => {
+      if (seenPhaseIds.has(phase.id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `duplicate phase id: ${phase.id}`,
+          path: ['phases', phaseIdx, 'id'],
+        });
+        return;
+      }
+      seenPhaseIds.set(phase.id, phaseIdx);
+    });
+
     const taskIndex = new Map<string, TaskLocator>();
 
     data.phases.forEach((phase, phaseIdx) => {

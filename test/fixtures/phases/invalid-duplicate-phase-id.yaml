@@ -1,0 +1,34 @@
+project: "dup-phase"
+phases:
+  - id: phase-1
+    name: "First"
+    status: active
+    goal: "Goal A."
+    gate_criteria:
+      - "Gate A."
+    tasks:
+      - id: P1-T01
+        title: "Task A"
+        description: "First task."
+        type: foundation
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "A done."
+  - id: phase-1
+    name: "Duplicate"
+    status: active
+    goal: "Goal B."
+    gate_criteria:
+      - "Gate B."
+    tasks:
+      - id: P2-T01
+        title: "Task B"
+        description: "Second task."
+        type: foundation
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "B done."
