@@ -67,14 +67,15 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
 
 const SECRET_KEY_RE = /^(.*_(KEY|TOKEN|SECRET)|PASSWORD|APIKEY|API_KEY)$/i;
 
-function currentLogLevel(): LogLevel {
-  const raw = (process.env.FORGE_LOG_LEVEL || 'info').toLowerCase();
+function currentJsonlLevel(): LogLevel {
+  const raw = (process.env.FORGE_JSONL_LEVEL || 'info').toLowerCase();
   if (raw === 'debug' || raw === 'info' || raw === 'warn' || raw === 'error') return raw;
   return 'info';
 }
 
+// stdout is for humans, JSONL is for machines; FORGE_JSONL_LEVEL gates the machine side only
 function shouldEmit(level: LogLevel): boolean {
-  return LEVEL_ORDER[level] >= LEVEL_ORDER[currentLogLevel()];
+  return LEVEL_ORDER[level] >= LEVEL_ORDER[currentJsonlLevel()];
 }
 
 function envTrue(name: string): boolean {
@@ -233,9 +234,21 @@ function redact(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown 
     return { name: value.name, message: value.message, stack: value.stack };
   }
   if (Buffer.isBuffer(value)) return '[Buffer]';
-  if (value instanceof Map || value instanceof Set) return Array.from(value as Iterable<unknown>);
   if (seen.has(value as object)) return '[CIRCULAR]';
   seen.add(value as object);
+  if (value instanceof Map) {
+    const obj: Record<string, unknown> = {};
+    for (const [k, v] of value.entries()) {
+      const key = String(k);
+      obj[key] = SECRET_KEY_RE.test(key) ? '[REDACTED]' : redact(v, seen);
+    }
+    return obj;
+  }
+  if (value instanceof Set) {
+    const arr: unknown[] = [];
+    for (const item of value) arr.push(redact(item, seen));
+    return arr;
+  }
   if (Array.isArray(value)) {
     return value.map((item) => redact(item, seen));
   }
@@ -406,6 +419,7 @@ export function spinner(message: string): Spinner {
   } else {
     render();
     interval = setInterval(render, 250);
+    interval.unref();
   }
   writeJsonl('info', 'logger.spinner.start', 'spinner', { message });
   const finalize = (status: CanonicalStatus, finalMessage?: string): void => {
@@ -470,7 +484,12 @@ export async function prompt(question: string, opts: PromptOpts = {}): Promise<s
       validate: opts.validate,
     });
   }
-  writeJsonl('info', 'logger.prompt', 'prompt', { question, answer });
+  // answer omitted from JSONL — prompts may capture credentials; caller logs explicitly via kv() if needed
+  writeJsonl('info', 'logger.prompt', 'prompt', {
+    question,
+    hasDefault: opts.default !== undefined,
+    mode: opts.choices ? 'select' : 'input',
+  });
   return answer;
 }
 

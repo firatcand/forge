@@ -197,6 +197,49 @@ test('AC3 — ASCII fallback errorBlock uses [FAIL]', async () => {
   assert.ok(r.stdout.includes('[FAIL]'));
 });
 
+// ───────── prompt redaction (security) ─────────
+
+test('prompt — answer is NOT written to JSONL (credentials may pass through)', async () => {
+  const secret = 'sk-very-secret-api-key-value-123';
+  __setPromptModuleForTests({
+    async input() {
+      return secret;
+    },
+    async select<T>(opts: { default?: T }): Promise<T> {
+      return opts.default as T;
+    },
+  });
+  const r = await captureRun(async () => {
+    await prompt('Paste your API key', {});
+  }, NO_COLOR_ENV);
+  assert.equal(r.jsonl.length, 1);
+  const line = r.jsonl[0] as string;
+  assert.ok(!line.includes(secret), `JSONL leaked the answer: ${line}`);
+  const entry = JSON.parse(line) as { fields: Record<string, unknown> };
+  assert.equal(Object.prototype.hasOwnProperty.call(entry.fields, 'answer'), false, 'JSONL must not contain an "answer" field');
+  assert.equal(entry.fields.question, 'Paste your API key');
+  assert.equal(entry.fields.hasDefault, false);
+  assert.equal(entry.fields.mode, 'input');
+});
+
+test('prompt — select mode marks mode=select and hasDefault correctly', async () => {
+  __setPromptModuleForTests({
+    async input(opts) {
+      return opts.default ?? '';
+    },
+    async select<T>(opts: { default?: T }): Promise<T> {
+      return opts.default as T;
+    },
+  });
+  const r = await captureRun(async () => {
+    await prompt('Pick one', { choices: ['a', 'b'], default: 'a' });
+  }, NO_COLOR_ENV);
+  const entry = JSON.parse(r.jsonl[0] as string) as { fields: Record<string, unknown> };
+  assert.equal(entry.fields.mode, 'select');
+  assert.equal(entry.fields.hasDefault, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(entry.fields, 'answer'), false);
+});
+
 // ───────── AC4: redactor ─────────
 
 test('AC4 — redacts top-level *_KEY', () => {
@@ -243,6 +286,28 @@ test('AC4 — circular references replaced with [CIRCULAR]', () => {
   const out = __redactForTests(a) as Record<string, unknown>;
   assert.equal(out.name, 'a');
   assert.equal(out.self, '[CIRCULAR]');
+});
+
+test('AC4 — Map keys matching SECRET_KEY_RE are redacted (recurses into Map)', () => {
+  const m = new Map<string, unknown>([
+    ['API_KEY', 'super-secret-value'],
+    ['safe', 'visible'],
+  ]);
+  const out = __redactForTests({ m }) as { m: Record<string, unknown> };
+  assert.equal(out.m.API_KEY, '[REDACTED]');
+  assert.equal(out.m.safe, 'visible');
+  const serialized = JSON.stringify(out);
+  assert.ok(!serialized.includes('super-secret-value'), `serialized leaked: ${serialized}`);
+});
+
+test('AC4 — Set containing objects with secret keys recurses and redacts', () => {
+  const s = new Set([{ API_KEY: 'leak-me', ok: 1 }, { plain: 'fine' }]);
+  const out = __redactForTests({ s }) as { s: Record<string, unknown>[] };
+  assert.equal(out.s[0]?.API_KEY, '[REDACTED]');
+  assert.equal(out.s[0]?.ok, 1);
+  assert.equal(out.s[1]?.plain, 'fine');
+  const serialized = JSON.stringify(out);
+  assert.ok(!serialized.includes('leak-me'), `serialized leaked: ${serialized}`);
 });
 
 test('AC4 — JSONL writer applies redaction in fields', async () => {
@@ -459,14 +524,23 @@ test('JSONL — entries are newline-delimited (no trailing comma, no array brack
   }
 });
 
-test('JSONL — FORGE_LOG_LEVEL=error suppresses info entries', async () => {
+test('JSONL — FORGE_JSONL_LEVEL=error suppresses info entries', async () => {
   const r = await captureRun(() => {
     section('a');
     step('boom', 'fail');
-  }, { ...NO_COLOR_ENV, FORGE_LOG_LEVEL: 'error' });
+  }, { ...NO_COLOR_ENV, FORGE_JSONL_LEVEL: 'error' });
   assert.equal(r.jsonl.length, 1);
   const entry = JSON.parse(r.jsonl[0] as string) as { event: string; level: string };
   assert.equal(entry.level, 'error');
+});
+
+test('JSONL — FORGE_JSONL_LEVEL gates JSONL only, stdout always shows step', async () => {
+  const r = await captureRun(() => {
+    step('foo', 'pass');
+  }, { ...NO_COLOR_ENV, FORGE_JSONL_LEVEL: 'error' });
+  assert.ok(r.stdout.includes('foo'), 'stdout must still render step regardless of JSONL level');
+  assert.ok(r.stdout.includes('✓'));
+  assert.equal(r.jsonl.length, 0, 'JSONL must be empty when info-level event is gated');
 });
 
 // ───────── wrap util ─────────
@@ -490,6 +564,44 @@ test('status alias — ok maps to pass', async () => {
 test('status alias — warn maps to skip', async () => {
   const r = await captureRun(() => step('skipped', 'warn'), NO_COLOR_ENV);
   assert.ok(r.stdout.includes('→'));
+});
+
+// ───────── spinner cleanup safety ─────────
+
+test('spinner — setInterval handle is .unref()ed so a forgotten spinner does not pin the event loop', async () => {
+  const realSetInterval = global.setInterval;
+  const intervals: NodeJS.Timeout[] = [];
+  const unrefCalls: NodeJS.Timeout[] = [];
+  (global as unknown as { setInterval: typeof setInterval }).setInterval = ((
+    cb: (...args: unknown[]) => void,
+    ms?: number,
+    ...args: unknown[]
+  ): NodeJS.Timeout => {
+    const t = realSetInterval(cb, ms, ...args);
+    const origUnref = t.unref.bind(t);
+    t.unref = (): NodeJS.Timeout => {
+      unrefCalls.push(t);
+      return origUnref();
+    };
+    intervals.push(t);
+    return t;
+  }) as typeof setInterval;
+  const prevIsTty = process.stdout.isTTY;
+  Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+  try {
+    await captureRun(() => {
+      const s = spinner('forgotten');
+      // intentionally never call succeed/fail/stop — ensure unref happened anyway
+      void s;
+    }, UTF8_ENV);
+    assert.ok(intervals.length >= 1, 'expected setInterval to have been called for spinner');
+    assert.ok(unrefCalls.length >= 1, 'expected interval.unref() to be called');
+    // cleanup: clear leaked intervals so the test runner can exit
+    for (const t of intervals) clearInterval(t);
+  } finally {
+    (global as unknown as { setInterval: typeof setInterval }).setInterval = realSetInterval;
+    Object.defineProperty(process.stdout, 'isTTY', { value: prevIsTty, configurable: true });
+  }
 });
 
 // ───────── spinner stop() shape from task description ─────────
