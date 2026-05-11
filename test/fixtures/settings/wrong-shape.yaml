@@ -1,0 +1,7 @@
+version: 1
+tracker:
+  type: linear
+  config:
+    team_id: TEAM-123
+secrets:
+  manager: env_file

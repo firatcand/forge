@@ -28,6 +28,29 @@ export class WorkspaceError extends Error {
   }
 }
 
+export type SettingsErrorCode =
+  | 'FILE_NOT_FOUND'
+  | 'YAML_PARSE_ERROR'
+  | 'VALIDATION_ERROR'
+  | 'IO_ERROR';
+
+export class SettingsError extends Error {
+  readonly code: SettingsErrorCode;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    code: SettingsErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'SettingsError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export type PhasesErrorCode =
   | 'FILE_NOT_FOUND'
   | 'READ_FAILED'
