@@ -1,0 +1,18 @@
+version: 1
+project:
+  name: sample-app
+  description: a sample app
+tracker:
+  type: linear
+  config:
+    team_id: TEAM-1
+secrets:
+  manager: env_file
+  env_file_path: ./.env.local
+agents:
+  max_concurrent: 10
+  retry_attempts: 10
+  primary_host_cli: claude
+  review_host_cli: codex
+design:
+  mode: project_owned

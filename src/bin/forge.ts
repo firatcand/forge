@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { runInit } from '../cli/init.ts';
 
 type PackageJson = { version: string };
 
@@ -88,4 +89,24 @@ if (args.length === 0) {
   failNoCommand(version);
 }
 
-failUnknown(args[0] ?? '', version);
+const command = args[0] ?? '';
+
+if (command === 'init') {
+  // No top-level await: the CJS build target (dist/bin/forge.cjs) doesn't support it.
+  const positional = args.slice(1).find((a) => !a.startsWith('-'));
+  void (async () => {
+    try {
+      const result = await runInit({
+        cwd: process.cwd(),
+        ...(positional ? { positionalName: positional } : {}),
+      });
+      process.exit(result.exitCode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`forge init failed: ${msg}`);
+      process.exit(1);
+    }
+  })();
+} else {
+  failUnknown(command, version);
+}

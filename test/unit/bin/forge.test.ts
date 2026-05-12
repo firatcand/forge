@@ -53,14 +53,27 @@ test('forge with no args fails loudly (Codex P1 — was the v0.2.1 install entry
   assert.match(result.stderr, /forge --help/);
 });
 
-test('forge init exits 1 with a clear stderr message (fail loudly, no silent no-op)', async () => {
-  const result = await runCli(['init']);
+test('forge init is dispatched to runInit (fails loudly without answers in non-interactive)', async () => {
+  // With FORGE_INIT_NONINTERACTIVE=1 and no FORGE_INIT_ANSWERS_JSON, runInit should
+  // refuse to prompt and exit 1 with a clear errorBlock about the missing env var.
+  // This proves the dispatcher fires (no "not yet available" fall-through).
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'forge-bin-init-'));
+  mkdirSync(join(tmp, '.git'), { recursive: true });
+  writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'consumer' }));
+  const tsxBin = resolve(repoRoot, 'node_modules/.bin/tsx');
+  const result = await execa(tsxBin, [entry, 'init'], {
+    cwd: tmp,
+    reject: false,
+    env: { ...process.env, NODE_OPTIONS: '', FORGE_INIT_NONINTERACTIVE: '1' },
+  });
   assert.equal(result.exitCode, 1);
-  assert.equal(result.stdout, '');
-  assert.match(result.stderr, /forge: 'init' is not yet available/);
-  assert.match(result.stderr, new RegExp(`in ${expectedVersion.replace(/\./g, '\\.')}`));
-  assert.match(result.stderr, /foundations release/);
-  assert.match(result.stderr, /CHANGELOG\.md/);
+  assert.match(
+    result.stdout + result.stderr,
+    /FORGE_INIT_NONINTERACTIVE=1 requires FORGE_INIT_ANSWERS_JSON/,
+  );
 });
 
 test('forge orchestrate (another unknown command) also exits 1 with stderr', async () => {
