@@ -494,12 +494,17 @@ test('updateState done → gh issue close --reason completed', async () => {
   assert.ok(args?.includes('completed'));
 });
 
-test('updateState cancelled → gh issue close --reason not_planned', async () => {
+test('updateState cancelled → gh issue close --reason "not planned" (CLI spelling)', async () => {
+  // gh CLI uses the human-readable "not planned" (space) — NOT the API
+  // enum "not_planned" (underscore). Asserting the exact arg catches
+  // future drift; the mock can't validate gh's flag-parser since it
+  // doesn't actually shell out.
   const { tracker, mock } = makeTracker([ok()]);
   await tracker.updateState('42', 'cancelled');
   const args = mock.calls[0];
   assert.ok(args?.includes('close'));
-  assert.ok(args?.includes('not_planned'));
+  const reasonIdx = args?.indexOf('--reason') ?? -1;
+  assert.equal(args?.[reasonIdx + 1], 'not planned');
 });
 
 test('updateState in_progress → reopen + add state:in-progress label', async () => {

@@ -539,6 +539,8 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
         return;
       }
       if (state === 'cancelled') {
+        // gh CLI accepts the human-readable form ("not planned", with a
+        // space) — NOT the GitHub API enum spelling ("not_planned").
         await this.gh([
           'issue',
           'close',
@@ -546,7 +548,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           '--repo',
           this.repo,
           '--reason',
-          'not_planned',
+          'not planned',
         ]);
         return;
       }
