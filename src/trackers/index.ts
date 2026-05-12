@@ -20,3 +20,16 @@ export type {
   WithRetryOpts,
   NormalizeErrorHint,
 } from './base.ts';
+
+export {
+  GitHubTracker,
+  classifyGitHubError,
+  parseForgeFooters,
+  serializeWithForgeFooters,
+} from './github.ts';
+export type {
+  GhExec,
+  GhExecResult,
+  GitHubTrackerOptions,
+  ForgeFooters,
+} from './github.ts';
