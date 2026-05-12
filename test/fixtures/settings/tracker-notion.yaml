@@ -1,0 +1,10 @@
+version: 1
+project:
+  name: forge-tracker-notion
+  description: Fixture for push-to-tracker parity with Notion tracker
+tracker:
+  type: notion
+  config:
+    database_id: notion-database-xxxxxxxx
+secrets:
+  manager: env_file

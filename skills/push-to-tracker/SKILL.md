@@ -60,7 +60,7 @@ Canonical (tracker-agnostic) keys:
 - top level: `linear_project_id` (= `tracker_project_id`), `linear_team_id` (from config)
 - per task: `linear_id` (= `tracker_issue_id`)
 
-Other adapters (GitHub / Notion) write only the canonical keys. The legacy aliases are removed in v0.4.0 alongside the `/push-to-linear` deprecation. `forge migrate` (FORGE-25) rewrites stored references for existing projects.
+Other adapters (GitHub / Notion) write only the canonical keys. The legacy aliases are removed in v0.4.0 alongside the deprecation alias for the old skill name. `forge migrate` (FORGE-25) rewrites stored references for existing projects.
 
 ## Step 4 — Per-tracker post-step
 
