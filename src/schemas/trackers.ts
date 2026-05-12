@@ -36,3 +36,35 @@ export const ClaimResultSchema = z.discriminatedUnion('ok', [
     detail: z.string().optional(),
   }),
 ]);
+
+// gh CLI `--json` output schemas (parsed defensively against version drift).
+
+export const GhLabelJsonSchema = z.object({
+  name: z.string(),
+});
+
+export const GhIssueJsonSchema = z.object({
+  id: z.string(),
+  number: z.number().int().positive(),
+  title: z.string(),
+  labels: z.array(GhLabelJsonSchema),
+  body: z.string().nullable(),
+  url: z.string(),
+});
+
+export const GhIssueLabelsOnlySchema = z.object({
+  labels: z.array(GhLabelJsonSchema),
+});
+
+export const GhIssueBodyOnlySchema = z.object({
+  body: z.string().nullable(),
+});
+
+export const GhMilestoneJsonSchema = z.object({
+  number: z.number().int().positive(),
+  title: z.string(),
+  html_url: z.string(),
+});
+
+export type GhIssueJson = z.infer<typeof GhIssueJsonSchema>;
+export type GhMilestoneJson = z.infer<typeof GhMilestoneJsonSchema>;
