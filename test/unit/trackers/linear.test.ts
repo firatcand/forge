@@ -766,6 +766,63 @@ await test('updateState — blocked falls back to unstarted when team has no bac
   assert.ok(fallbackWarn, 'expected fallback warn-log');
 });
 
+await test('updateState — removes stale overlay label in fresh orchestrator process (cache miss → lookup)', async () => {
+  // Bug: a fresh orchestrator process has empty labelCacheByName. When
+  // transitioning out of in_review (or blocked), the remove-label path
+  // would have no cached id and silently skip the removal — leaving the
+  // overlay label on the issue, which causes deriveStateFromLinearIssue
+  // to misreport the state on subsequent listActiveIssues calls.
+  // Fix: lookupExistingLabel does a listIssueLabels refresh on cache miss.
+  // Regression for the codex review finding (FORGE-16).
+  const inReviewLabel = { id: 'lbl-ir', name: 'state:in-review' };
+  const blockedLabel = { id: 'lbl-blk', name: 'state:blocked' };
+  let listIssueLabelsCalls = 0;
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => {
+      listIssueLabelsCalls++;
+      return [inReviewLabel, blockedLabel]; // labels exist on the team
+    },
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  // Transition to in_progress — wantedOverlay=null; both overlay labels
+  // should be added to removedLabelIds via the lookup path.
+  await tracker.updateState('issue-1', 'in_progress');
+  assert.ok(captured, 'updateIssue should be called');
+  assert.deepEqual(
+    [...(captured!.input.removedLabelIds ?? [])].sort(),
+    [blockedLabel.id, inReviewLabel.id].sort(),
+    'both stale overlay labels should be queued for removal',
+  );
+  assert.ok(
+    listIssueLabelsCalls >= 1,
+    'lookup should have refreshed the cache via listIssueLabels',
+  );
+});
+
+await test('updateState — overlay label lookup tolerates listIssueLabels failure (warn + skip)', async () => {
+  // If the cache-refresh on remove-label path fails (e.g. transient
+  // network), we log and skip the removal rather than failing
+  // updateState. The state transition still succeeds; the stale label
+  // gets cleaned up on the next attempt when network recovers.
+  const { tracker, logger } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => {
+      throw makeLinearTransportError();
+    },
+    updateIssue: async () => makeIssue(),
+  });
+  await tracker.updateState('issue-1', 'in_progress');
+  const warn = logger.warnings.find(
+    (w) => w.event === 'tracker.lookupExistingLabel.listFailed',
+  );
+  assert.ok(warn, 'expected warn-log when listIssueLabels fails during overlay lookup');
+});
+
 await test('updateState — PRECONDITION_FAILED when team has no state matching forge state', async () => {
   const onlyTriage = DEFAULT_WORKFLOW_STATES.filter((s) => s.type === 'triage');
   const { tracker } = makeTracker({
@@ -891,7 +948,13 @@ await test('createIssue — rejects empty payload.title', async () => {
 
 // ─── setBlockedBy ────────────────────────────────────────────────────────────
 
-await test('setBlockedBy — writes footer AND creates native blocks relation', async () => {
+await test('setBlockedBy — writes footer AND creates native blocks relation with source=blocker', async () => {
+  // Linear's IssueRelationType.Blocks means "source blocks related". For
+  // setBlockedBy(issueId, blockerId) — "issueId is blocked by blockerId" —
+  // the source must be the BLOCKER (issueId=blockerId) and the related
+  // issue must be the BLOCKED one (relatedIssueId=issueId). Getting this
+  // backwards reverses the dependency arrow in Linear's UI.
+  // Regression for the codex review finding (FORGE-16).
   const issue = makeIssue({
     id: 'i1',
     identifier: 'FORGE-1',
@@ -912,13 +975,19 @@ await test('setBlockedBy — writes footer AND creates native blocks relation', 
   await tracker.setBlockedBy('i1', 'blocker-uuid-1');
   assert.match(updateInput!.description ?? '', /<!-- forge:blockedBy=blocker-uuid-1 -->/);
   assert.deepEqual(relationInput, {
-    issueId: 'i1',
-    relatedIssueId: 'blocker-uuid-1',
+    issueId: 'blocker-uuid-1', // source = blocker
+    relatedIssueId: 'i1', // related = blocked issue
     type: 'blocks',
   });
 });
 
-await test('setBlockedBy — idempotent dedup: existing blockerId returns without SDK calls', async () => {
+await test('setBlockedBy — footer dedup skips updateIssue but STILL attempts native relation create', async () => {
+  // If a previous setBlockedBy call wrote the footer but the native
+  // relation create failed transiently, the next call would short-circuit
+  // on the footer dedup and never re-attempt the native call — leaving
+  // the Linear UI permanently missing the dependency arrow. Native must
+  // always run; CONFLICT is the idempotent case.
+  // Regression for the codex review finding (FORGE-16).
   const issue = makeIssue({
     id: 'i1',
     description:
@@ -937,8 +1006,8 @@ await test('setBlockedBy — idempotent dedup: existing blockerId returns withou
     },
   });
   await tracker.setBlockedBy('i1', 'existing-blocker');
-  assert.equal(updateCalled, false);
-  assert.equal(relationCalled, false);
+  assert.equal(updateCalled, false, 'footer write skipped via dedup');
+  assert.equal(relationCalled, true, 'native relation still attempted');
 });
 
 await test('setBlockedBy — CONFLICT on relation create is swallowed (idempotent)', async () => {

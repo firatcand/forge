@@ -817,10 +817,20 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   //   2. native Linear IssueRelation(type=blocks) so the dependency shows up
   //      in Linear's UI as a real relation (decided §11 Q2)
   //
-  // Footer is written first. If the relation create fails non-fatally, the
-  // footer is already authoritative for the orchestrator. If it fails
-  // fatally, the next setBlockedBy retry will dedupe via the early-return
-  // below and only re-attempt the relation.
+  // Footer write and relation create are INDEPENDENTLY idempotent:
+  //   - Footer dedups internally via parseForgeFooters → blockerIds.includes
+  //   - Native relation CONFLICT (already-exists) is swallowed
+  //
+  // Both ALWAYS run on every invocation so retries after partial failure
+  // (e.g. footer wrote, native call timed out) complete the dual write.
+  // Skipping native when the footer dedups would leave the Linear UI
+  // permanently missing the dependency arrow (codex review, FORGE-16).
+  //
+  // IssueRelation direction: Linear's `Blocks` enum means "source blocks
+  // related". For setBlockedBy(issueId, blockerId) — "issueId is blocked
+  // by blockerId" — the source must be the BLOCKER and the related issue
+  // must be the BLOCKED one. Getting this backwards reverses the arrow
+  // in Linear's UI (codex review, FORGE-16).
   async setBlockedBy(issueId: string, blockerId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(blockerId, 'blockerId');
@@ -846,40 +856,38 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       );
     }
 
-    if (blockerIds.includes(blockerId)) return; // dedup — already recorded
-
-    const newDescription = serializeWithForgeFooters(
-      issue.description ?? '',
-      forgeTaskId,
-      [...blockerIds, blockerId],
-    );
-
-    try {
-      await client.updateIssue(issueId, { description: newDescription });
-    } catch (err) {
-      throw this.normalizeError(
-        'setBlockedBy',
-        err,
-        classifyLinearError(err),
+    // Footer write — only when blockerId isn't already recorded.
+    if (!blockerIds.includes(blockerId)) {
+      const newDescription = serializeWithForgeFooters(
+        issue.description ?? '',
+        forgeTaskId,
+        [...blockerIds, blockerId],
       );
+      try {
+        await client.updateIssue(issueId, { description: newDescription });
+      } catch (err) {
+        throw this.normalizeError(
+          'setBlockedBy',
+          err,
+          classifyLinearError(err),
+        );
+      }
     }
 
-    // Mirror the relation natively for UI visibility. Swallow CONFLICT
-    // (already-exists is the idempotent case); propagate other errors.
+    // Native relation — ALWAYS attempted (idempotent via CONFLICT swallow).
+    // Source = blocker; related = blocked issue. Linear's `Blocks` enum
+    // means "source blocks related", so to express "issueId is blocked by
+    // blockerId" we set source=blockerId, related=issueId.
     try {
       await client.createIssueRelation({
-        issueId,
-        relatedIssueId: blockerId,
+        issueId: blockerId,
+        relatedIssueId: issueId,
         type: 'blocks',
       });
     } catch (err) {
       const hint = classifyLinearError(err);
       if (hint.code === 'CONFLICT') return; // idempotent
-      throw this.normalizeError(
-        'setBlockedBy',
-        err,
-        hint,
-      );
+      throw this.normalizeError('setBlockedBy', err, hint);
     }
   }
 
@@ -1035,10 +1043,18 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   }
 
   // Compute the addedLabelIds/removedLabelIds to make the issue's overlay
-  // labels exactly { wantedOverlay } (or empty). We can only construct IDs
-  // for labels we know about — overlay-add ensures the label exists.
-  // Overlay-remove is best-effort via cached IDs; if the overlay label was
-  // never created, there's nothing on the issue to remove anyway.
+  // labels exactly { wantedOverlay } (or empty).
+  //
+  // Add path: ensureLabel creates the label if missing (so addedLabelIds
+  // always has a valid id when wantedOverlay is set).
+  //
+  // Remove path: must NOT use ensureLabel — we don't want to create labels
+  // we're about to remove. Instead we look them up via lookupExistingLabel
+  // (lists team labels once on cache miss, populates cache, returns id if
+  // found; null if the team never had that overlay label). Without this
+  // lookup, a fresh orchestrator process with an empty labelCacheByName
+  // would silently leave stale overlay labels on issues being transitioned
+  // out of in_review or blocked (codex review, FORGE-16).
   protected async reconcileOverlayLabels(
     wantedOverlay: string | null,
   ): Promise<{ addedLabelIds: string[]; removedLabelIds: string[] }> {
@@ -1057,11 +1073,35 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
           });
         }
       } else {
-        const cached = this.labelCacheByName.get(name);
-        if (cached) removedLabelIds.push(cached.id);
+        const existing = await this.lookupExistingLabel(name);
+        if (existing) removedLabelIds.push(existing.id);
       }
     }
     return { addedLabelIds, removedLabelIds };
+  }
+
+  // Look up a label by name WITHOUT creating it. On cache miss, refresh
+  // the cache once via listIssueLabels. Returns null if the team has no
+  // label with that name. Used by overlay-label removal to construct ids
+  // for labels we want to take OFF an issue without inadvertently creating
+  // labels that never existed.
+  protected async lookupExistingLabel(
+    name: string,
+  ): Promise<LinearLabelLike | null> {
+    const cached = this.labelCacheByName.get(name);
+    if (cached) return cached;
+    try {
+      const client = await this.getClient();
+      const all = await client.listIssueLabels(this.teamId);
+      for (const l of all) this.labelCacheByName.set(l.name, l);
+    } catch (err) {
+      this.logger.warn('tracker.lookupExistingLabel.listFailed', {
+        name,
+        err: errMessage(err),
+      });
+      return null;
+    }
+    return this.labelCacheByName.get(name) ?? null;
   }
 
   // Best-effort label removal — used during claim cleanup. Logs and swallows;
