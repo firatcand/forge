@@ -37,3 +37,21 @@ export type {
   GhExecResult,
   GitHubTrackerOptions,
 } from './github.ts';
+
+export {
+  LINEAR_LIST_LIMIT,
+  LinearTracker,
+  classifyLinearError,
+  wrapLinearClient,
+} from './linear.ts';
+export type {
+  LinearIssueLike,
+  LinearWorkflowStateLike,
+  LinearLabelLike,
+  LinearCreateIssueInput,
+  LinearUpdateIssueInput,
+  LinearCreateProjectInput,
+  LinearSdkLike,
+  LinearStateType,
+  LinearTrackerOptions,
+} from './linear.ts';
