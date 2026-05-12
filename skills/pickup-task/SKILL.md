@@ -14,7 +14,7 @@ subagent: learning-curator
 
 ## Steps
 
-1. Query Linear (via MCP) for issues in current Cycle that are:
+1. Query the configured tracker (via the Tracker interface) for active issues in the current cycle that are:
    - Status: Todo
    - All `blocked_by` issues are Done
 2. If multiple match, list and ask user to pick. If one, auto-pick.

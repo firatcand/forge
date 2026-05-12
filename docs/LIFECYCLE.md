@@ -19,7 +19,7 @@ Forge's lifecycle has four bands: **IDEA → TASK → PHASE → PROD**. Each ban
                               /setup-repo
                                    │
                                    ▼
-                            /push-to-linear  (optional, recommended)
+                            /push-to-tracker  (optional, recommended)
                                    │
                                    ▼
 ┌─────────────────────────────── TASK band ───────────────────────────────┐
@@ -105,7 +105,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 - **When to invoke:** after `/ingest-spec` passes.
 - **Inputs:** `spec/CONTEXT.md`.
 - **Outputs:** `plans/phases.yaml` — a DAG of tasks across Phase 1 / 2 / 3, each with id, title, type, priority, depends_on, estimate, owner_type, acceptance criteria.
-- **Unlocks:** `/setup-repo` and `/push-to-linear`.
+- **Unlocks:** `/setup-repo` and `/push-to-tracker`.
 
 ### `/setup-repo`
 
@@ -114,12 +114,12 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 - **Outputs:** GitHub repo created, branch protection set up on `main`, GitHub Environments (development, production), CI workflows copied in, `CLAUDE_CODE_OAUTH_TOKEN` secret set, `.env.example` populated.
 - **Unlocks:** standard git/PR workflows.
 
-### `/push-to-linear`
+### `/push-to-tracker`
 
 - **When to invoke:** after `/decompose` and `/setup-repo`.
-- **Inputs:** `plans/phases.yaml`. Linear MCP server registered with Claude Code.
-- **Outputs:** Linear project, cycles per phase, issues per task with `blocks` relations, GitHub-Linear link configured. `phases.yaml` updated with `linear_*` IDs.
-- **Unlocks:** `/pickup-task` (which queries Linear for the next available task).
+- **Inputs:** `plans/phases.yaml`, `.forge/settings.yaml` `tracker.type` (linear | github | notion), and per-tracker tooling reachable (Linear MCP / `gh` CLI / Notion MCP).
+- **Outputs:** tracker project (Linear Project / GH Milestone / Notion DB), per-phase grouping, issues per task with `blocks` relations (or body-footer equivalent on GH), GitHub link configured for Linear. `phases.yaml` updated with `tracker_project_id` + per-task `tracker_issue_id` (plus legacy `linear_*` aliases when `tracker.type === 'linear'`, removed in v0.4.0).
+- **Unlocks:** `/pickup-task` (which queries the tracker for the next available task).
 
 ---
 
@@ -128,7 +128,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 ### `/pickup-task`
 
 - **When to invoke:** start of every new task.
-- **Inputs:** Linear (or `phases.yaml` if no Linear).
+- **Inputs:** configured tracker (or `phases.yaml` if no tracker is configured).
 - **Outputs:** picks next available task (status Todo, all dependencies Done), sets it to In Progress, creates a worktree at `../{project}-worktrees/{TICKET}`, retrieves recent learnings tagged with the task's type.
 - **Unlocks:** `/plan-task` in the new worktree.
 
@@ -213,9 +213,9 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 
 ### `/sync-status`
 
-- **When to invoke:** rarely. Linear ↔ GitHub native sync handles drift automatically. Use when manual closes happen in Linear.
-- **Inputs:** `plans/phases.yaml`.
-- **Outputs:** `phases.yaml` updated to match Linear; drift report.
+- **When to invoke:** rarely. Linear ↔ GitHub native sync handles drift automatically; the GitHub tracker reads issue state directly. Use when manual closes happen out-of-band.
+- **Inputs:** `plans/phases.yaml`, `.forge/settings.yaml`.
+- **Outputs:** `phases.yaml` updated to match the tracker; drift report.
 
 ---
 
@@ -227,7 +227,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 
 **Skipping `/codex` on critical paths.** Don't. The 30-second cost of running it has saved entire incidents in dogfooding. If Codex is unavailable (no membership, offline), document why in the PR description.
 
-**Manual Linear status moves.** If a teammate closes an issue manually outside `/ship`, run `/sync-status` to reconcile. Otherwise the next `/pickup-task` may show stale state.
+**Manual tracker status moves.** If a teammate closes an issue manually outside `/ship`, run `/sync-status` to reconcile. Otherwise the next `/pickup-task` may show stale state.
 
 **Pre-existing repos.** `/setup-repo` is idempotent — it skips repo creation if origin exists, but still applies branch protection and workflows. Useful for adopting forge on an in-flight project.
 

@@ -1,19 +1,19 @@
 ---
 name: sync-status
-description: Pull current Linear state and reconcile with local phases.yaml. Useful when issues were closed/reopened in Linear directly.
-tools: Read, Edit
-subagent: linear-syncer
-mcp: linear
+description: Pull current tracker state and reconcile with local phases.yaml. Useful when issues were closed/reopened in the tracker directly.
+tools: Read, Edit, Bash(gh*)
+subagent: tracker-syncer
 ---
 
 # /sync-status
 
-Read `plans/phases.yaml`. For each task with a `linear_id`, query Linear for current status. Update `phases.yaml` task status fields if drifted.
+Read `plans/phases.yaml` and `.forge/settings.yaml`. For each task with a `tracker_issue_id` (or legacy `linear_id`), query the configured tracker for current status. Update `phases.yaml` task status fields if drifted.
 
-Report any divergence to user (e.g., "TLOG-103 closed in Linear but local says Todo").
+Report any divergence to user (e.g., "TLOG-103 closed in tracker but local says Todo").
 
-This isn't usually needed — Linear ↔ GitHub native sync handles most cases. Use when manual closes happen in Linear.
+This isn't usually needed — Linear ↔ GitHub native sync handles most cases, and the GitHub tracker is read-from-source-of-truth. Use when manual closes happen out-of-band.
 
 ## Preflight
 
-Requires Linear MCP. If unavailable, abort with the setup hint from `/push-to-linear` Step 0 — there is no offline fallback for status reconciliation.
+1. Read `.forge/settings.yaml` and resolve `tracker.type`. Abort if unset with: "No tracker configured. Run `forge init` first."
+2. Per-tracker reachability probe — same matrix as `/push-to-tracker` Step 1 (Linear MCP / `gh auth status` / Notion MCP). If unavailable, abort with the setup hint from `/push-to-tracker` — there is no offline fallback for status reconciliation.
