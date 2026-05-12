@@ -29,6 +29,7 @@ export const PHASE_STATUSES = ['active', 'blocked', 'done'] as const;
 export const TaskSchema = z.object({
   id: z.string().regex(/^P\d+-T\d+[a-z]?$/),
   linear_id: z.string().optional(),
+  tracker_issue_id: z.string().optional(),
   title: z.string().min(1),
   description: z.string().min(1),
   type: z.enum(TASK_TYPES),
@@ -62,6 +63,8 @@ export const PhasesSchema = z
     project: z.string().min(1),
     linear_project_id: z.string().optional(),
     linear_team_id: z.string().optional(),
+    tracker_project_id: z.string().optional(),
+    tracker_url: z.string().optional(),
     github_repo: z.string().optional(),
     gate_check_command: z.string().optional(),
     phases: z.array(PhaseSchema).min(1),
