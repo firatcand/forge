@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  GH_LIST_LIMIT,
   GitHubTracker,
   TrackerError,
   classifyGitHubError,
@@ -17,7 +18,6 @@ import {
   ghIssueViewLabelsEmpty,
   ghIssueViewLabelsClaimedOther,
   ghIssueViewLabelsClaimedMe,
-  ghIssueViewLabelsClaimedMeAndOther,
   ghIssueViewSingle,
   ghIssueViewBodyOnly,
   ghIssueViewBodyMissingFooter,
@@ -246,8 +246,8 @@ test('listActiveIssues parses 3 issues with mixed footers and states', async () 
   assert.deepEqual(issues[2]?.blockerIds, []);
 });
 
-test('listActiveIssues warns when at 200-limit', async () => {
-  const at200 = Array.from({ length: 200 }, (_, i) => ({
+test('listActiveIssues warns when at GH_LIST_LIMIT', async () => {
+  const atLimit = Array.from({ length: GH_LIST_LIMIT }, (_, i) => ({
     id: `I_${i}`,
     number: i + 1,
     title: `t${i}`,
@@ -255,12 +255,29 @@ test('listActiveIssues warns when at 200-limit', async () => {
     body: null,
     url: `https://example.com/issues/${i + 1}`,
   }));
-  const { tracker, logger } = makeTracker([ok(at200)]);
+  const { tracker, logger } = makeTracker([ok(atLimit)]);
   await tracker.listActiveIssues();
   const warn = logger.warnings.find(
     (w) => w.event === 'tracker.listActiveIssues',
   );
   assert.ok(warn !== undefined, 'expected limit-hit warning');
+});
+
+test('classifyGitHubError → AUTH on HTTP 403 for private repo (not NOT_FOUND)', () => {
+  // GitHub's 403 for private/no-access often phrases the response with
+  // "Not Found" copy. The AUTH branch must catch this before NOT_FOUND.
+  const err = makeExecaError({
+    stderr: 'HTTP 403: Resource not accessible by integration',
+    exitCode: 1,
+  });
+  assert.equal(classifyGitHubError(err).code, 'AUTH');
+});
+
+test('classifyGitHubError → CONFLICT only after VALIDATION (regression)', () => {
+  const err = makeExecaError({
+    stderr: 'HTTP 422: Validation Failed: title already exists in milestone',
+  });
+  assert.equal(classifyGitHubError(err).code, 'VALIDATION');
 });
 
 test('listActiveIssues VALIDATION on bad JSON', async () => {
@@ -379,6 +396,40 @@ test('claim VALIDATION on empty issueId', async () => {
   );
 });
 
+test('claim step-1 NOT_FOUND → state_changed (issue vanished pre-read)', async () => {
+  const notFound = makeExecaError({
+    stderr: 'HTTP 404: Not Found',
+    exitCode: 1,
+  });
+  const { tracker } = makeTracker([notFound]);
+  const result = await tracker.claim('42', 'me');
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'state_changed');
+    assert.match(result.detail ?? '', /initial-read/);
+  }
+});
+
+test('claim step-3 NOT_FOUND → state_changed (issue vanished after add)', async () => {
+  const notFound = makeExecaError({
+    stderr: 'HTTP 404: Not Found',
+    exitCode: 1,
+  });
+  const { tracker } = makeTracker([
+    ok(ghIssueViewLabelsEmpty), // step-1 read
+    ok(),                       // ensureLabel
+    ok(),                       // add-label
+    notFound,                   // step-3 recheck fails
+    ok(),                       // tryRemoveLabel
+  ]);
+  const result = await tracker.claim('42', 'me');
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'state_changed');
+    assert.match(result.detail ?? '', /recheck/);
+  }
+});
+
 // ─── releaseClaim ────────────────────────────────────────────────────────────
 
 test('releaseClaim removes only claim labels', async () => {
@@ -411,6 +462,26 @@ test('releaseClaim tolerates "label not present" on remove', async () => {
   ]);
   // Should not throw.
   await tracker.releaseClaim('42');
+});
+
+test('releaseClaim removes ALL stale claim labels (documented behavior)', async () => {
+  const { tracker, mock } = makeTracker([
+    ok({
+      labels: [
+        { name: 'claimed:agent-stale1' },
+        { name: 'claimed:agent-stale2' },
+        { name: 'enhancement' },
+      ],
+    }),
+    ok(), // remove stale1
+    ok(), // remove stale2
+  ]);
+  await tracker.releaseClaim('42');
+  const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
+  assert.equal(removeCalls.length, 2);
+  const removed = removeCalls.map((c) => c[c.indexOf('--remove-label') + 1]);
+  assert.ok(removed.includes('claimed:agent-stale1'));
+  assert.ok(removed.includes('claimed:agent-stale2'));
 });
 
 // ─── updateState ─────────────────────────────────────────────────────────────
@@ -463,6 +534,17 @@ test('updateState tolerates "already open" on reopen', async () => {
   await tracker.updateState('42', 'in_progress');
 });
 
+test('updateState done → in_progress reopen happy path (closed → open)', async () => {
+  const { tracker, mock } = makeTracker([
+    ok(), // reopen succeeds
+    ok(), // ensureLabel
+    ok(), // edit --remove-label state:* --add-label state:in-progress
+  ]);
+  await tracker.updateState('42', 'in_progress');
+  const reopen = mock.calls.find((c) => c.includes('reopen'));
+  assert.ok(reopen, 'expected reopen call');
+});
+
 // ─── comment ─────────────────────────────────────────────────────────────────
 
 test('comment forwards to gh issue comment', async () => {
@@ -479,6 +561,22 @@ test('comment VALIDATION on empty body', async () => {
     () => tracker.comment('42', ''),
     (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
   );
+});
+
+test('comment does NOT retry on transient errors (one-shot write)', async () => {
+  // Returning a TRANSPORT-class error once would trigger withRetry; the
+  // mock only supplies ONE response. If comment retried, we'd get an
+  // "unexpected call" error from the mock — the test asserts a single attempt.
+  const transportErr = makeExecaError({
+    stderr: 'HTTP 503 Service Unavailable',
+    exitCode: 1,
+  });
+  const { tracker, mock } = makeTracker([transportErr]);
+  await assert.rejects(
+    () => tracker.comment('42', 'hi'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'TRANSPORT',
+  );
+  assert.equal(mock.calls.length, 1, 'comment should not retry');
 });
 
 // ─── createProject ──────────────────────────────────────────────────────────
@@ -583,6 +681,24 @@ test('setBlockedBy PRECONDITION_FAILED when no forge:task footer', async () => {
     (err: unknown) =>
       err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
   );
+});
+
+test('setBlockedBy preserves unknown forge:* footers (ownerType)', async () => {
+  const bodyWithOwnerType = {
+    body:
+      'Original body.\n\n' +
+      '<!-- forge:task=FORGE-7 -->\n' +
+      '<!-- forge:ownerType=backend-dev -->\n' +
+      '<!-- forge:blockedBy=10 -->\n',
+  };
+  const { tracker, mock } = makeTracker([ok(bodyWithOwnerType), ok()]);
+  await tracker.setBlockedBy('42', '11');
+  const edit = mock.calls[1];
+  const bodyArgIdx = edit?.indexOf('--body') ?? -1;
+  const body = bodyArgIdx >= 0 ? (edit?.[bodyArgIdx + 1] ?? '') : '';
+  assert.match(body, /forge:ownerType=backend-dev/);
+  assert.match(body, /forge:blockedBy=10,11/);
+  assert.match(body, /forge:task=FORGE-7/);
 });
 
 // ─── parseIssueNumber via claim entrypoints (indirect) ───────────────────────

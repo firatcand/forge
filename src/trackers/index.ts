@@ -22,6 +22,7 @@ export type {
 } from './base.ts';
 
 export {
+  GH_LIST_LIMIT,
   GitHubTracker,
   classifyGitHubError,
   parseForgeFooters,

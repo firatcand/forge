@@ -48,7 +48,9 @@ const defaultGhExec: GhExec = async (args, opts) => {
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const CLAIM_LABEL_PREFIX = 'claimed:agent-';
-const GH_LIST_LIMIT = 200;
+
+// Exported so callers and tests can read the in-flight ceiling.
+export const GH_LIST_LIMIT = 200;
 
 const STATE_TO_LABEL: Readonly<Record<'in_progress' | 'in_review' | 'blocked', string>> = {
   in_progress: 'state:in-progress',
@@ -66,6 +68,9 @@ const ALL_STATE_LABELS = Object.values(STATE_TO_LABEL);
 
 const FORGE_TASK_RE = /<!--\s*forge:task=([^\s>]+?)\s*-->/;
 const FORGE_BLOCKED_RE = /<!--\s*forge:blockedBy=([\d,\s]*)\s*-->/;
+// Strip variants are global — defensive against duplicate footers.
+const FORGE_TASK_STRIP_RE = /<!--\s*forge:task=[^>]*-->\n?/g;
+const FORGE_BLOCKED_STRIP_RE = /<!--\s*forge:blockedBy=[^>]*-->\n?/g;
 
 // ─── Error classification (per-adapter; BaseTracker stays generic) ───────────
 
@@ -81,10 +86,13 @@ function isErrorLike(err: unknown): err is ExecaErrorLike {
   return typeof err === 'object' && err !== null;
 }
 
+// Branch order is load-bearing: AUTH must come before NOT_FOUND (gh's 403
+// for private repos returns "Not Found" copy to avoid leaking existence);
+// VALIDATION must come before CONFLICT (Validation Failed messages can
+// include "already exists" verbatim).
 export function classifyGitHubError(err: unknown): NormalizeErrorHint {
   if (!isErrorLike(err)) return { code: 'UNKNOWN' };
   const stderr = String(err.stderr ?? '');
-  const stderrLower = stderr.toLowerCase();
   const exitCode = typeof err.exitCode === 'number' ? err.exitCode : -1;
 
   if (err.code === 'ENOENT') {
@@ -95,14 +103,14 @@ export function classifyGitHubError(err: unknown): NormalizeErrorHint {
   }
 
   if (
-    /bad credentials|http 401|gh auth login|authentication failed/i.test(
-      stderrLower,
+    /bad credentials|HTTP 401|gh auth login|authentication failed|HTTP 403(?! .*rate)/i.test(
+      stderr,
     )
   ) {
     return { code: 'AUTH', details: { stderr } };
   }
 
-  if (/api rate limit exceeded|secondary rate limit|http 403.*rate/i.test(stderr)) {
+  if (/API rate limit exceeded|secondary rate limit|HTTP 403.*rate/i.test(stderr)) {
     const retryAfterMs = parseRetryAfter(stderr);
     return {
       code: 'RATE_LIMITED',
@@ -113,25 +121,29 @@ export function classifyGitHubError(err: unknown): NormalizeErrorHint {
     };
   }
 
-  if (/could not resolve to|http 404|not found/i.test(stderr)) {
+  // Tightened to avoid swallowing 403-as-"Not Found" responses; AUTH branch
+  // above catches the 403 case first.
+  if (/HTTP 404|could not resolve to a (?:Repository|Issue|Milestone|User|Organization)/i.test(stderr)) {
     return { code: 'NOT_FOUND', details: { stderr } };
   }
 
-  if (/http 422|validation failed/i.test(stderr)) {
+  if (/HTTP 422|validation failed/i.test(stderr)) {
     return { code: 'VALIDATION', details: { stderr } };
   }
 
-  if (/http 409|already exists/i.test(stderr)) {
+  // Must stay ordered after VALIDATION — "already exists" can appear inside
+  // a 422 Validation Failed body and should classify as VALIDATION.
+  if (/HTTP 409|already exists/i.test(stderr)) {
     return { code: 'CONFLICT', details: { stderr } };
   }
 
-  if (err.code === 'ETIMEDOUT' || /timeout|etimedout/i.test(stderrLower)) {
+  if (err.code === 'ETIMEDOUT' || /timeout|ETIMEDOUT/i.test(stderr)) {
     return { code: 'TIMEOUT', details: { stderr } };
   }
 
   if (
     exitCode < 0 ||
-    /http 5\d\d|econnreset|eai_again|connection (?:refused|reset)/i.test(
+    /HTTP 5\d\d|ECONNRESET|EAI_AGAIN|connection (?:refused|reset)/i.test(
       stderr,
     )
   ) {
@@ -169,6 +181,9 @@ export function parseForgeFooters(body: string | null | undefined): ForgeFooters
   return result;
 }
 
+// Strips ONLY the task and blockedBy footers; unknown `<!-- forge:* -->`
+// comments (e.g., ownerType) are preserved in place so `setBlockedBy`
+// rewrites don't strand them.
 export function serializeWithForgeFooters(
   originalBody: string,
   forgeTaskId: string,
@@ -176,8 +191,8 @@ export function serializeWithForgeFooters(
   extraFooters: readonly string[] = [],
 ): string {
   const stripped = originalBody
-    .replace(FORGE_TASK_RE, '')
-    .replace(FORGE_BLOCKED_RE, '')
+    .replace(FORGE_TASK_STRIP_RE, '')
+    .replace(FORGE_BLOCKED_STRIP_RE, '')
     .replace(/\n{3,}$/g, '\n')
     .trimEnd();
   const lines = [`<!-- forge:task=${forgeTaskId} -->`];
@@ -330,12 +345,23 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
         this.retryOpts,
       );
     } catch (err) {
-      if (err instanceof TrackerError && isTransientCode(err.code)) {
-        return {
-          ok: false,
-          reason: 'transient_error',
-          detail: err.message,
-        };
+      if (err instanceof TrackerError) {
+        if (err.code === 'NOT_FOUND') {
+          // Issue vanished before we could read it — treat as state_changed,
+          // not a thrown error, so the poll-loop moves on cleanly.
+          return {
+            ok: false,
+            reason: 'state_changed',
+            detail: 'issue-not-found-on-initial-read',
+          };
+        }
+        if (isTransientCode(err.code)) {
+          return {
+            ok: false,
+            reason: 'transient_error',
+            detail: err.message,
+          };
+        }
       }
       throw err;
     }
@@ -353,7 +379,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       }
       if (existingClaims.includes(myLabel)) {
         // Multiple claims including ours — apply tiebreak.
-        const winner = [...existingClaims].sort()[0];
+        const winner = tiebreakWinner(existingClaims);
         if (winner === myLabel) return { ok: true };
         await this.tryRemoveLabel(number, myLabel);
         return {
@@ -411,12 +437,22 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     } catch (err) {
       // Can't verify — be conservative, release our label.
       await this.tryRemoveLabel(number, myLabel);
-      if (err instanceof TrackerError && isTransientCode(err.code)) {
-        return {
-          ok: false,
-          reason: 'transient_error',
-          detail: err.message,
-        };
+      if (err instanceof TrackerError) {
+        if (err.code === 'NOT_FOUND') {
+          // Issue vanished between our write and the re-read.
+          return {
+            ok: false,
+            reason: 'state_changed',
+            detail: 'issue-not-found-on-recheck',
+          };
+        }
+        if (isTransientCode(err.code)) {
+          return {
+            ok: false,
+            reason: 'transient_error',
+            detail: err.message,
+          };
+        }
       }
       throw err;
     }
@@ -424,7 +460,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     const allClaims = post.filter((l) => l.startsWith(CLAIM_LABEL_PREFIX));
     if (allClaims.length <= 1) return { ok: true };
 
-    const winner = [...allClaims].sort()[0];
+    const winner = tiebreakWinner(allClaims);
     if (winner === myLabel) return { ok: true };
 
     await this.tryRemoveLabel(number, myLabel);
@@ -436,6 +472,15 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   }
 
   // ─── releaseClaim — idempotent ─────────────────────────────────────────────
+  //
+  // INTENTIONALLY broad: removes every `claimed:agent-*` label, not just the
+  // caller's. The `Tracker.releaseClaim(issueId)` interface takes no agentId
+  // (see SPEC.md line 187 / FORGE-14 plan §3.3), so we can't tell whose claim
+  // is whose. The forge orchestrator is single-process and trusted: callers
+  // only invoke this on issues they own or are explicitly cleaning up. If we
+  // ever need per-agent release semantics, the fix is an interface change
+  // (adding agentId), not a partial impl here — that would silently leave
+  // stale labels behind.
 
   async releaseClaim(issueId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
@@ -875,6 +920,15 @@ function isTransientCode(
   code: NormalizeErrorHint['code'],
 ): code is 'TRANSPORT' | 'TIMEOUT' | 'RATE_LIMITED' {
   return code === 'TRANSPORT' || code === 'TIMEOUT' || code === 'RATE_LIMITED';
+}
+
+// Locale-aware lexicographic tiebreak — case-insensitive, locale-stable
+// across hosts. Default `Array.sort()` uses UTF-16 code units which puts
+// 'Z' < 'a'; we don't want case to swing claim outcomes.
+function tiebreakWinner(claims: readonly string[]): string {
+  return [...claims].sort((a, b) =>
+    a.localeCompare(b, 'en', { sensitivity: 'base' }),
+  )[0]!;
 }
 
 function stderrOf(hint: NormalizeErrorHint): string {
