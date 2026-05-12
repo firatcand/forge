@@ -95,9 +95,8 @@ test(
         'done page should be filtered out of listActiveIssues',
       );
     } finally {
-      // Archive the test page so reruns are clean. notion-update-page with
-      // archived: true is the closest thing to a delete.
-      await handle?.call('notion-update-page', {
+      // Archive the test page so reruns are clean.
+      await handle?.call('API-patch-page', {
         page_id: pageId,
         archived: true,
       });

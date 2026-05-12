@@ -3,6 +3,14 @@
 forge's third tracker adapter. Treats a Notion database as the issue store, the
 same way `GitHubTracker` treats a GitHub repo.
 
+> **MCP server**: targets the official [`@notionhq/notion-mcp-server`][nmcp]
+> (npm) — the one whose tools are named `API-*` and which speaks Notion's
+> 2025-09-03 API. **Not** compatible with Claude AI's hosted Notion connector
+> (which uses `notion-*` tool names). forge spawns its own stdio connection;
+> see [Settings](#settings) below.
+>
+> [nmcp]: https://www.npmjs.com/package/@notionhq/notion-mcp-server
+
 ## How it differs from the other adapters
 
 | | LinearTracker | GitHubTracker | NotionTracker |
@@ -42,8 +50,22 @@ The `state` status property must have options:
 These names are exact-match — change them in `src/trackers/notion.ts` if you
 need different ones, but keep the mapping in sync.
 
-`createProject(name)` will create a database with this schema under the page
-referenced by `FORGE_NOTION_PARENT_PAGE_ID`.
+`createProject(name)` will create a data source with this schema under the
+page referenced by `FORGE_NOTION_PARENT_PAGE_ID`.
+
+### Data sources vs databases (Notion 2025-09 schema)
+
+Notion's recent API splits databases into two concepts:
+
+- **Database** — the container you see in the UI (`database_id`, what you put
+  in `settings.yaml`).
+- **Data source** — the schema and pages inside the database. A simple
+  database has exactly one data source.
+
+forge stores `database_id` in settings (the familiar shareable id) but
+resolves the underlying `data_source_id` lazily on first list/create call.
+If your database has multiple data sources, forge picks the first and warns;
+configure narrower databases for predictable behavior.
 
 ## Settings
 

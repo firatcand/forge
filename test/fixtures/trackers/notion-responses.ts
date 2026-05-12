@@ -200,3 +200,12 @@ export const newDatabase = {
   id: 'dddd1111-2222-3333-4444-555566667777',
   url: 'https://www.notion.so/dddd11112222333344445555666677777',
 };
+
+// Response of API-retrieve-a-database for our fixture database. Used to
+// resolve the data_source_id needed by API-query-data-source / API-post-page.
+export const DATA_SOURCE_ID = '88888888-aaaa-bbbb-cccc-dddddddddddd';
+export const databaseInfo = {
+  object: 'database',
+  id: '99999999-aaaa-bbbb-cccc-dddddddddddd',
+  data_sources: [{ id: DATA_SOURCE_ID, name: 'forge fixture' }],
+};

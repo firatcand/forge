@@ -380,6 +380,11 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   private readonly databaseId: string;
   private readonly retryOpts: WithRetryOpts;
   private readonly sleep: (ms: number) => Promise<void>;
+  // Cache of the database's primary data_source_id. Notion's 2025-09 schema
+  // splits databases into containers + data sources; pages live under a data
+  // source, not the database. We discover this lazily so callers configure
+  // only database_id in settings.yaml (familiar UX) — first call resolves.
+  private dataSourceIdCache: string | undefined;
 
   constructor(
     config: NotionTrackerConfig,
@@ -393,6 +398,52 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     this.sleep =
       options.sleep ??
       ((ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  }
+
+  // Resolves the database's primary data_source_id. Cached after first call.
+  // Throws PRECONDITION_FAILED if the database has no data sources, or if it
+  // has multiple (ambiguous — settings should call out which one).
+  private async resolveDataSourceId(op: string): Promise<string> {
+    if (this.dataSourceIdCache !== undefined) return this.dataSourceIdCache;
+    const raw = await this.runTool(
+      'API-retrieve-a-database',
+      { database_id: this.databaseId },
+      op,
+    );
+    if (raw === null || typeof raw !== 'object') {
+      throw new TrackerError(
+        'VALIDATION',
+        `${op}: API-retrieve-a-database returned unexpected shape`,
+        { databaseId: this.databaseId },
+      );
+    }
+    const sources = (raw as { data_sources?: Array<{ id: string }> }).data_sources;
+    if (!Array.isArray(sources) || sources.length === 0) {
+      throw new TrackerError(
+        'PRECONDITION_FAILED',
+        `${op}: database ${this.databaseId} has no data sources`,
+        { databaseId: this.databaseId },
+      );
+    }
+    if (sources.length > 1) {
+      // Multiple data sources — pick the first but log warning. Future config
+      // could add an explicit data_source_id override.
+      this.logger.warn('tracker.resolveDataSourceId', {
+        reason: 'multiple-data-sources',
+        count: sources.length,
+        chose: sources[0]?.id,
+      });
+    }
+    const id = sources[0]?.id;
+    if (typeof id !== 'string' || id.length === 0) {
+      throw new TrackerError(
+        'VALIDATION',
+        `${op}: data_sources[0].id missing`,
+        { databaseId: this.databaseId },
+      );
+    }
+    this.dataSourceIdCache = id;
+    return id;
   }
 
   // ─── runTool — central seam invoker ────────────────────────────────────────
@@ -431,6 +482,18 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
         details: { reason: 'tool-result-not-json', preview: text.slice(0, 500) },
       });
     }
+    // The Notion MCP server returns Notion error bodies (status >= 400) as
+    // *successful* tool calls — isError is undefined, content[0].text is the
+    // error JSON. Detect by shape (`object: 'error'`) and route through the
+    // same error path as McpError-thrown failures.
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      (parsed as { object?: string }).object === 'error'
+    ) {
+      const hint = classifyNotionError(parsed);
+      throw this.normalizeError(op, parsed, hint);
+    }
     return parsed;
   }
 
@@ -438,7 +501,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     try {
-      await this.runTool('notion-get-users', { page_size: 1 }, 'healthCheck');
+      await this.runTool('API-get-self', {}, 'healthCheck');
       return { ok: true };
     } catch (err) {
       const detail =
@@ -460,6 +523,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     return this.withRetry(
       'listActiveIssues',
       async () => {
+        const dataSourceId = await this.resolveDataSourceId('listActiveIssues');
         const issues: Issue[] = [];
         let cursor: string | undefined;
         let rawPagesFetched = 0;
@@ -475,13 +539,13 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
           rawPagesFetched < NOTION_RAW_PAGE_CAP
         ) {
           const args: Record<string, unknown> = {
-            database_id: this.databaseId,
+            data_source_id: dataSourceId,
             page_size: pageSize,
           };
           if (cursor !== undefined) args.start_cursor = cursor;
 
           const raw = await this.runTool(
-            'notion-fetch',
+            'API-query-data-source',
             args,
             'listActiveIssues',
           );
@@ -598,7 +662,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     // Step 2: write.
     try {
       await this.runTool(
-        'notion-update-page',
+        'API-patch-page',
         {
           page_id: pageId,
           properties: { [PROP_CLAIMED_BY]: richTextProp(agentId) },
@@ -688,7 +752,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     const pageId = parseNotionPageId(issueId);
     try {
       await this.runTool(
-        'notion-update-page',
+        'API-patch-page',
         {
           page_id: pageId,
           properties: { [PROP_CLAIMED_BY]: richTextProp('') },
@@ -711,7 +775,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     const notionState = STATE_TO_NOTION[state];
     try {
       await this.runTool(
-        'notion-update-page',
+        'API-patch-page',
         {
           page_id: pageId,
           properties: { [PROP_STATE]: statusProp(notionState) },
@@ -732,7 +796,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     const pageId = parseNotionPageId(issueId);
     try {
       await this.runTool(
-        'notion-create-comment',
+        'API-create-a-comment',
         {
           parent: { page_id: pageId },
           rich_text: richTextPayload(body),
@@ -772,6 +836,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       );
     }
 
+    // Notion's 2025-09 schema requires creating a data source under a page;
+    // the data source itself owns the parent database. Construct properties
+    // matching the forge schema (status options + rich_text columns).
     const args: Record<string, unknown> = {
       parent: { type: 'page_id', page_id: parseNotionPageId(parentPageId) },
       title: richTextPayload(name),
@@ -783,7 +850,11 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
     let raw: unknown;
     try {
-      raw = await this.runTool('notion-create-database', args, 'createProject');
+      raw = await this.runTool(
+        'API-create-a-data-source',
+        args,
+        'createProject',
+      );
     } catch (err) {
       if (err instanceof TrackerError) throw err;
       throw this.normalizeError(
@@ -816,6 +887,8 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     this.assertNonEmpty(payload.forgeTaskId, 'payload.forgeTaskId');
     this.assertNonEmpty(payload.ownerType, 'payload.ownerType');
 
+    const dataSourceId = await this.resolveDataSourceId('createIssue');
+
     const properties: Record<string, unknown> = {
       [PROP_TITLE]: titleProp(payload.title),
       [PROP_TASK_ID]: richTextProp(payload.forgeTaskId),
@@ -826,30 +899,28 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       [PROP_ACCEPTANCE]: richTextProp(payload.acceptance.join('\n')),
     };
 
+    // API-post-page's schema *declares* `children: array of string` but the
+    // server actually rejects strings with validation_error and accepts plain
+    // block objects. Verified against @notionhq/notion-mcp-server@2.2.1.
     const children = buildIssueChildren(payload);
 
     const args: Record<string, unknown> = {
-      pages: [
-        {
-          parent: { type: 'database_id', database_id: this.databaseId },
-          properties,
-          ...(children.length > 0 ? { children } : {}),
-        },
-      ],
+      parent: { type: 'data_source_id', data_source_id: dataSourceId },
+      properties,
+      ...(children.length > 0 ? { children } : {}),
     };
 
     let raw: unknown;
     try {
-      raw = await this.runTool('notion-create-pages', args, 'createIssue');
+      raw = await this.runTool('API-post-page', args, 'createIssue');
     } catch (err) {
       if (err instanceof TrackerError) throw err;
       throw this.normalizeError('createIssue', err, classifyNotionError(err));
     }
 
-    const page = extractCreatedPage(raw);
     let parsed: NotionPage;
     try {
-      parsed = NotionPageSchema.parse(page);
+      parsed = NotionPageSchema.parse(raw);
     } catch (err) {
       throw this.normalizeError('createIssue', err, {
         code: 'VALIDATION',
@@ -893,7 +964,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
     try {
       await this.runTool(
-        'notion-update-page',
+        'API-patch-page',
         {
           page_id: pageId,
           properties: { [PROP_BLOCKED_BY]: richTextProp(next) },
@@ -911,7 +982,11 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   private async fetchPage(pageId: string): Promise<NotionPage> {
     let raw: unknown;
     try {
-      raw = await this.runTool('notion-fetch', { id: pageId }, 'fetchPage');
+      raw = await this.runTool(
+        'API-retrieve-a-page',
+        { page_id: pageId },
+        'fetchPage',
+      );
     } catch (err) {
       throw err instanceof TrackerError
         ? err
@@ -958,7 +1033,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     }
     try {
       await this.runTool(
-        'notion-update-page',
+        'API-patch-page',
         {
           page_id: pageId,
           properties: { [PROP_CLAIMED_BY]: richTextProp('') },

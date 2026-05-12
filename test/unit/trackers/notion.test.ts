@@ -18,7 +18,9 @@ import {
 } from '../../../src/trackers/index.ts';
 import type { NotionTrackerConfig } from '../../../src/schemas/settings.ts';
 import {
+  DATA_SOURCE_ID,
   buildPage,
+  databaseInfo,
   databaseQueryActive,
   databaseQueryPaged1,
   databaseQueryPaged2,
@@ -272,7 +274,7 @@ test('healthCheck: returns ok on successful get-users call', async () => {
   const { tracker, mock } = makeTracker([okResult({ results: [] })]);
   const r = await tracker.healthCheck();
   assert.equal(r.ok, true);
-  assert.equal(mock.calls[0]?.tool, 'notion-get-users');
+  assert.equal(mock.calls[0]?.tool, 'API-get-self');
 });
 
 test('healthCheck: returns ok:false on transport error; never throws', async () => {
@@ -294,7 +296,10 @@ test('healthCheck: returns ok:false on AUTH error', async () => {
 // ─── listActiveIssues ────────────────────────────────────────────────────────
 
 test('listActiveIssues: maps pages → Issue[]; filters done/cancelled/archived', async () => {
-  const { tracker } = makeTracker([okResult(databaseQueryActive)]);
+  const { tracker } = makeTracker([
+    okResult(databaseInfo),
+    okResult(databaseQueryActive),
+  ]);
   const issues = await tracker.listActiveIssues();
   assert.equal(issues.length, 2);
   assert.deepEqual(
@@ -307,18 +312,25 @@ test('listActiveIssues: maps pages → Issue[]; filters done/cancelled/archived'
 
 test('listActiveIssues: paginates via next_cursor', async () => {
   const { tracker, mock } = makeTracker([
+    okResult(databaseInfo),
     okResult(databaseQueryPaged1),
     okResult(databaseQueryPaged2),
   ]);
   const issues = await tracker.listActiveIssues();
   assert.equal(issues.length, 2);
-  assert.equal(mock.calls.length, 2);
-  assert.equal(mock.calls[1]?.args.start_cursor, 'cursor-page-2');
+  // 1 db-info + 2 query calls
+  assert.equal(mock.calls.length, 3);
+  assert.equal(mock.calls[0]?.tool, 'API-retrieve-a-database');
+  assert.equal(mock.calls[2]?.args.start_cursor, 'cursor-page-2');
+  assert.equal(mock.calls[1]?.args.data_source_id, DATA_SOURCE_ID);
 });
 
 test('listActiveIssues: retries on RATE_LIMITED then succeeds', async () => {
+  // The retry wraps the entire listActiveIssues body, including the lazy
+  // data-source resolve. So the second attempt re-fetches the database too.
   const { tracker } = makeTracker([
     errorResult({ code: 'rate_limited', message: 'slow' }),
+    okResult(databaseInfo),
     okResult(databaseQueryActive),
   ]);
   const issues = await tracker.listActiveIssues();
@@ -326,7 +338,10 @@ test('listActiveIssues: retries on RATE_LIMITED then succeeds', async () => {
 });
 
 test('listActiveIssues: malformed response → VALIDATION', async () => {
-  const { tracker } = makeTracker([okResult({ wrong: 'shape' })]);
+  const { tracker } = makeTracker([
+    okResult(databaseInfo),
+    okResult({ wrong: 'shape' }),
+  ]);
   await assert.rejects(
     () => tracker.listActiveIssues(),
     (e: unknown) =>
@@ -360,9 +375,9 @@ test('claim: empty forge_claimed_by → write → recheck shows ours → ok', as
   ]);
   const r = await tracker.claim(pageId, 'agent-me');
   assert.deepEqual(r, { ok: true });
-  assert.equal(mock.calls[0]?.tool, 'notion-fetch');
-  assert.equal(mock.calls[1]?.tool, 'notion-update-page');
-  assert.equal(mock.calls[2]?.tool, 'notion-fetch');
+  assert.equal(mock.calls[0]?.tool, 'API-retrieve-a-page');
+  assert.equal(mock.calls[1]?.tool, 'API-patch-page');
+  assert.equal(mock.calls[2]?.tool, 'API-retrieve-a-page');
 });
 
 test('claim: already-claimed by other → already_claimed; no write', async () => {
@@ -485,7 +500,7 @@ test('claim: rejects empty issueId / agentId via VALIDATION', async () => {
 test('releaseClaim: clears forge_claimed_by', async () => {
   const { tracker, mock } = makeTracker([okEmpty()]);
   await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777');
-  assert.equal(mock.calls[0]?.tool, 'notion-update-page');
+  assert.equal(mock.calls[0]?.tool, 'API-patch-page');
   const props = mock.calls[0]?.args.properties as Record<string, unknown>;
   assert.ok('forge_claimed_by' in props);
 });
@@ -537,13 +552,13 @@ test('updateState: rejects empty issueId', async () => {
 
 // ─── comment ─────────────────────────────────────────────────────────────────
 
-test('comment: posts notion-create-comment with rich_text body', async () => {
+test('comment: posts API-create-a-comment with rich_text body', async () => {
   const { tracker, mock } = makeTracker([okEmpty()]);
   await tracker.comment(
     'aaaa1111-2222-3333-4444-555566667777',
     'Claimed by agent-me',
   );
-  assert.equal(mock.calls[0]?.tool, 'notion-create-comment');
+  assert.equal(mock.calls[0]?.tool, 'API-create-a-comment');
   const args = mock.calls[0]?.args as {
     parent: { page_id: string };
     rich_text: Array<{ text: { content: string } }>;
@@ -596,7 +611,7 @@ test('createProject: returns { id, url } from new database', async () => {
     const r = await tracker.createProject('my project', 'desc');
     assert.equal(r.id, newDatabase.id);
     assert.equal(r.url, newDatabase.url);
-    assert.equal(mock.calls[0]?.tool, 'notion-create-database');
+    assert.equal(mock.calls[0]?.tool, 'API-create-a-data-source');
   } finally {
     delete process.env.FORGE_NOTION_PARENT_PAGE_ID;
   }
@@ -614,7 +629,8 @@ test('createIssue: maps payload → page properties + body blocks', async () => 
     acceptance: 'must work',
   });
   const { tracker, mock } = makeTracker([
-    okResult({ pages: [createdPage] }),
+    okResult(databaseInfo),
+    okResult(createdPage),
   ]);
   const issue = await tracker.createIssue({
     title: 'New issue',
@@ -627,11 +643,16 @@ test('createIssue: maps payload → page properties + body blocks', async () => 
   assert.equal(issue.title, 'New issue');
   assert.equal(issue.forgeTaskId, 'FORGE-99');
   assert.equal(issue.state, 'todo');
-  // Check body children built
-  const args = mock.calls[0]?.args as {
-    pages: Array<{ children?: Array<{ type: string }> }>;
+  // API-post-page takes a single page, parented to a data_source_id,
+  // with children as plain block objects (the schema declares strings
+  // but the server rejects strings; verified live).
+  const args = mock.calls[1]?.args as {
+    parent: { type: string; data_source_id: string };
+    children?: Array<{ type: string }>;
   };
-  const children = args.pages[0]?.children ?? [];
+  assert.equal(args.parent.type, 'data_source_id');
+  assert.equal(args.parent.data_source_id, DATA_SOURCE_ID);
+  const children = args.children ?? [];
   assert.ok(children.length >= 3); // paragraph + heading + to_do
   assert.ok(children.some((c) => c.type === 'paragraph'));
   assert.ok(children.some((c) => c.type === 'heading_2'));
@@ -759,14 +780,15 @@ test('full lifecycle: createIssue → claim → updateState → comment → rele
     lastEditedTime: '2026-05-12T00:00:01.000Z',
   });
   const { tracker, mock } = makeTracker([
-    okResult({ pages: [created] }), // createIssue
-    okResult(claimedFetch),         // claim.fetch
-    okEmpty(),                      // claim.write
-    okResult(claimedRecheck),       // claim.recheck
-    okEmpty(),                      // updateState in_progress
-    okEmpty(),                      // comment
-    okEmpty(),                      // releaseClaim
-    okEmpty(),                      // updateState done
+    okResult(databaseInfo),   // createIssue → resolveDataSourceId
+    okResult(created),        // createIssue → API-post-page
+    okResult(claimedFetch),   // claim.fetch
+    okEmpty(),                // claim.write
+    okResult(claimedRecheck), // claim.recheck (after settle delay)
+    okEmpty(),                // updateState in_progress
+    okEmpty(),                // comment
+    okEmpty(),                // releaseClaim
+    okEmpty(),                // updateState done
   ]);
 
   const issue = await tracker.createIssue({
@@ -789,14 +811,15 @@ test('full lifecycle: createIssue → claim → updateState → comment → rele
 
   const tools = mock.calls.map((c) => c.tool);
   assert.deepEqual(tools, [
-    'notion-create-pages',
-    'notion-fetch',
-    'notion-update-page',
-    'notion-fetch',
-    'notion-update-page',
-    'notion-create-comment',
-    'notion-update-page',
-    'notion-update-page',
+    'API-retrieve-a-database',
+    'API-post-page',
+    'API-retrieve-a-page',
+    'API-patch-page',
+    'API-retrieve-a-page',
+    'API-patch-page',
+    'API-create-a-comment',
+    'API-patch-page',
+    'API-patch-page',
   ]);
 });
 
@@ -828,13 +851,15 @@ test('listActiveIssues: paginates past Done-heavy front pages (codex P2-1)', asy
     next_cursor: null,
   };
   const { tracker, mock } = makeTracker([
+    okResult(databaseInfo),
     okResult(donePage('a')),
     okResult(donePage('b')),
     okResult(activePage),
   ]);
   const issues = await tracker.listActiveIssues();
   assert.equal(issues.length, 5);
-  assert.equal(mock.calls.length, 3);
+  // 1 db-info + 3 query pages
+  assert.equal(mock.calls.length, 4);
 });
 
 test('listActiveIssues: hits raw-page cap and warns', async () => {
@@ -850,13 +875,13 @@ test('listActiveIssues: hits raw-page cap and warns', async () => {
     has_more: true,
     next_cursor: 'cursor-loop',
   };
-  const steps = Array.from({ length: NOTION_RAW_PAGE_CAP }, () =>
-    okResult(donePage),
-  );
+  const steps: Array<ReturnType<typeof okResult>> = [okResult(databaseInfo)];
+  for (let i = 0; i < NOTION_RAW_PAGE_CAP; i++) steps.push(okResult(donePage));
   const { tracker, mock, logger } = makeTracker(steps);
   const issues = await tracker.listActiveIssues();
   assert.equal(issues.length, 0);
-  assert.equal(mock.calls.length, NOTION_RAW_PAGE_CAP);
+  // 1 db-info + NOTION_RAW_PAGE_CAP queries
+  assert.equal(mock.calls.length, NOTION_RAW_PAGE_CAP + 1);
   assert.ok(
     logger.warnings.some(
       (w) =>
@@ -893,7 +918,7 @@ test('claim cleanup: does NOT clear when field now holds another agent (codex P2
   const tools = mock.calls.map((c) => c.tool);
   // 1 fetch + 1 write + 3 recheck-fetch + 1 cleanup-fetch = 6 fetches
   // total, NO second update-page (that would be the clear).
-  const updateCount = tools.filter((t) => t === 'notion-update-page').length;
+  const updateCount = tools.filter((t) => t === 'API-patch-page').length;
   assert.equal(updateCount, 1, 'only the initial claim write should occur');
 });
 
@@ -973,7 +998,7 @@ test('claim cleanup: DOES clear when field still owned by us (codex P2-2)', asyn
   assert.equal(r.ok, false);
   if (r.ok === false) assert.equal(r.reason, 'transient_error');
   const updateCount = mock.calls.filter(
-    (c) => c.tool === 'notion-update-page',
+    (c) => c.tool === 'API-patch-page',
   ).length;
   assert.equal(updateCount, 2, 'initial claim write + conditional cleanup');
 });
