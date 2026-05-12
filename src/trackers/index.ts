@@ -34,3 +34,27 @@ export type {
   GitHubTrackerOptions,
   ForgeFooters,
 } from './github.ts';
+
+export {
+  CLAIM_SETTLE_MS,
+  NOTION_LIST_LIMIT,
+  NOTION_RAW_PAGE_CAP,
+  NotionTracker,
+  classifyNotionError,
+  parseNotionPageId,
+  readRichText,
+  readTitle,
+  readStatus,
+} from './notion.ts';
+export type {
+  McpCall,
+  McpToolResult,
+  NotionTrackerOptions,
+  NotionErrorBody,
+} from './notion.ts';
+
+export { createStdioMcpCall } from './notion-mcp-transport.ts';
+export type {
+  StdioMcpCallOptions,
+  StdioMcpHandle,
+} from './notion-mcp-transport.ts';
