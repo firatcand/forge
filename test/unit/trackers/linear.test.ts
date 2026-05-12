@@ -115,15 +115,21 @@ await test('healthCheck — ok when viewer resolves', async () => {
   assert.deepEqual(await tracker.healthCheck(), { ok: true });
 });
 
-await test('healthCheck — !ok with AUTH detail on 401', async () => {
+await test('healthCheck — !ok with synthesized AUTH detail (no raw provider message leak)', async () => {
+  // healthCheck must NOT echo the raw provider error message for AUTH
+  // failures — Linear's SDK could (rarely) include token fragments in its
+  // AUTH error body, and the logger's redactor scans object keys, not
+  // string values (security-auditor, FORGE-16).
   const { tracker } = makeTracker({
     viewer: async () => {
-      throw makeLinearAuthError('Invalid API key');
+      throw makeLinearAuthError('Invalid API key lin_api_xyz_should_not_leak');
     },
   });
   const result = await tracker.healthCheck();
   assert.equal(result.ok, false);
-  assert.match(result.detail ?? '', /Invalid API key/);
+  assert.match(result.detail ?? '', /LINEAR_API_KEY rejected/);
+  // The synthetic message must not contain any fragment of the raw err.
+  assert.doesNotMatch(result.detail ?? '', /lin_api_xyz/);
 });
 
 await test('healthCheck — !ok when LINEAR_API_KEY is missing (no injected client)', async () => {
@@ -430,38 +436,56 @@ await test('claim — tiebreak: I win when my label is lexicographic first', asy
 });
 
 await test('claim — tiebreak: I lose when other label is first → state_changed + my label removed', async () => {
+  // Pre-write tiebreak loss path: initial-read sees both my label and the
+  // other agent's label, and my label loses lex tiebreak. The implementation
+  // must call tryRemoveLabelByName → lookupExistingLabel → list, find, and
+  // remove my label. Code-reviewer flagged that the prior version of this
+  // test used `void removed` to suppress an assertion that didn't fire
+  // because tryRemoveLabelByName was reading the raw (cold) cache instead
+  // of doing a list-refresh. After the lookupExistingLabel fix, removal
+  // genuinely happens — assert it (FORGE-16).
   const myLabel = makeClaimLabel('zzz-me');
   const otherLabel = makeClaimLabel('aaa-other');
   const issue = makeIssue({ id: 'i1', labels: [myLabel, otherLabel] });
   let removed: readonly string[] | undefined;
   const { tracker } = makeTracker({
     issue: async () => issue,
-    // tryRemoveLabelByName only fires for cached labels; seed cache via listIssueLabels.
     listIssueLabels: async () => [myLabel, otherLabel],
-    createIssueLabel: async ({ name }) => ({ id: `label-${name}`, name }),
     updateIssue: async (_id, input) => {
       removed = input.removedLabelIds;
       return issue;
     },
   });
-  // Prime the cache by invoking ensureLabel indirectly via a no-op listIssueLabels.
-  // The implementation will look up myLabel in the cache after tiebreak loss.
-  // Force priming by hitting the cache through a happy-path claim attempt first
-  // would require a different setup; instead, the test asserts the documented
-  // best-effort behavior: removal is attempted if the label is known.
-  // Manually seed by reusing the makeTracker harness's logger/cache via a
-  // throw-away tracker is too invasive. Instead, verify the ClaimResult shape
-  // — which is the load-bearing contract — and observe that no exception is
-  // thrown when the label isn't cached.
   const result = await tracker.claim('i1', 'zzz-me');
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.equal(result.reason, 'state_changed');
     assert.match(result.detail ?? '', /lost-tiebreak-to:/);
   }
-  // removed is only set when the label was in the cache before tiebreak loss.
-  // Since we haven't primed the cache here, the assert is just non-throw.
-  void removed;
+  // After the lookupExistingLabel fix, tryRemoveLabelByName lists team
+  // labels on cache miss, finds myLabel, and queues its id for removal.
+  assert.deepEqual(
+    [...(removed ?? [])],
+    [myLabel.id],
+    'my claim label should be removed after tiebreak loss',
+  );
+});
+
+await test('claim — assertValidAgentId rejects characters outside [A-Za-z0-9._-]', async () => {
+  const { tracker } = makeTracker({});
+  await assert.rejects(
+    () => tracker.claim('i1', '!malicious-prefix-wins-tiebreak'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});
+
+await test('claim — assertValidAgentId rejects >80 chars', async () => {
+  const { tracker } = makeTracker({});
+  const longId = 'a'.repeat(81);
+  await assert.rejects(
+    () => tracker.claim('i1', longId),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
 });
 
 await test('claim — assertNonEmpty rejects empty issueId', async () => {
@@ -792,9 +816,10 @@ await test('updateState — removes stale overlay label in fresh orchestrator pr
   // Transition to in_progress — wantedOverlay=null; both overlay labels
   // should be added to removedLabelIds via the lookup path.
   await tracker.updateState('issue-1', 'in_progress');
-  assert.ok(captured, 'updateIssue should be called');
+  const got = captured as { id: string; input: LinearUpdateIssueInput } | null;
+  assert.ok(got, 'updateIssue should be called');
   assert.deepEqual(
-    [...(captured!.input.removedLabelIds ?? [])].sort(),
+    [...(got.input.removedLabelIds ?? [])].sort(),
     [blockedLabel.id, inReviewLabel.id].sort(),
     'both stale overlay labels should be queued for removal',
   );
@@ -928,6 +953,43 @@ await test('createIssue — writes forge:task + forge:ownerType footers and retu
   assert.equal(issue.identifier, 'FORGE-42');
   assert.match(captured!.description, /<!-- forge:task=P2-T03 -->/);
   assert.match(captured!.description, /<!-- forge:ownerType=backend-dev -->/);
+});
+
+await test('createIssue — rejects forgeTaskId containing HTML comment metacharacters', async () => {
+  // Defense-in-depth against footer-corruption attack
+  // (security-auditor, FORGE-16).
+  const { tracker } = makeTracker({
+    createIssue: async () => makeIssue(),
+  });
+  await assert.rejects(
+    () =>
+      tracker.createIssue({
+        title: 'x',
+        body: 'b',
+        forgeTaskId: 'P2-T03 --> <script>',
+        ownerType: 'backend-dev',
+        acceptance: [],
+        dependsOn: [],
+      }),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});
+
+await test('setBlockedBy — rejects blockerId containing HTML comment metacharacters', async () => {
+  // Defense-in-depth against footer-corruption attack
+  // (security-auditor, FORGE-16).
+  const issue = makeIssue({
+    id: 'i1',
+    description: 'body\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async () => issue,
+  });
+  await assert.rejects(
+    () => tracker.setBlockedBy('i1', 'evil --> injection'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
 });
 
 await test('createIssue — rejects empty payload.title', async () => {

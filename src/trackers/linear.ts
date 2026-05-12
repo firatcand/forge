@@ -74,7 +74,9 @@ export interface LinearCreateProjectInput {
 }
 
 export interface LinearSdkLike {
-  viewer(): Promise<{ id: string; email: string }>;
+  // Returns the viewer ID only. Email is intentionally NOT included to keep
+  // PII out of the adapter's data surface (security-auditor, FORGE-16).
+  viewer(): Promise<{ id: string }>;
   issue(id: string): Promise<LinearIssueLike>;
   listIssues(opts: {
     teamId: string;
@@ -102,6 +104,7 @@ const STATE_OVERLAY_IN_REVIEW = 'state:in-review';
 const STATE_OVERLAY_BLOCKED = 'state:blocked';
 
 export const LINEAR_LIST_LIMIT = 200;
+export const LINEAR_WORKFLOW_STATES_LIMIT = 250;
 
 // ─── Error classification (per-adapter; BaseTracker stays generic) ───────────
 //
@@ -141,7 +144,13 @@ export function classifyLinearError(err: unknown): NormalizeErrorHint {
     ) ||
     linearType === 'AuthenticationError'
   ) {
-    return { code: 'AUTH', details: { status, message } };
+    // Deliberately omit `message` here: provider AUTH error bodies can
+    // (rarely) echo fragments of the rejected Authorization header. The
+    // logger's redactor scans object KEYS for *_KEY/*_TOKEN/*_SECRET, not
+    // string values, so a leaked fragment would bypass redaction. Callers
+    // synthesize their own detail string for AUTH (security-auditor,
+    // FORGE-16).
+    return { code: 'AUTH', details: { status } };
   }
 
   if (
@@ -239,7 +248,7 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
   return {
     async viewer() {
       const v = await client.viewer;
-      return { id: v.id, email: v.email };
+      return { id: v.id };
     },
 
     async issue(id) {
@@ -303,9 +312,12 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
     },
 
     async listWorkflowStates(teamId) {
+      // Linear API max page size is 250. Teams with >250 workflow states
+      // are vanishingly rare; getWorkflowStates() warn-logs if hit so the
+      // operator sees the truncation rather than a silent PRECONDITION_FAILED.
       const conn = await client.workflowStates({
         filter: { team: { id: { eq: teamId } } },
-        first: 100,
+        first: 250,
       });
       return conn.nodes.map((s) => ({
         id: s.id,
@@ -349,10 +361,10 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
       return { id: project.id, url: project.url };
     },
 
-    async createIssueRelation({ issueId, relatedIssueId, type: _type }) {
-      // Seam constrains `type` to 'blocks'; map to SDK enum here so callers
-      // don't need to import @linear/sdk just to write a string. _type
-      // intentionally unused — kept on the seam for future relation types.
+    async createIssueRelation({ issueId, relatedIssueId }) {
+      // Seam already constrains `type` to literal 'blocks'; we don't need
+      // to bind it here. If a second relation type is ever added, the seam
+      // gets widened and this destructure picks it up then.
       const result = await client.createIssueRelation({
         issueId,
         relatedIssueId,
@@ -438,7 +450,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   private async getClient(): Promise<LinearSdkLike> {
     if (this.injectedClient) return this.injectedClient;
     if (this.clientPromise) return this.clientPromise;
-    this.clientPromise = (async () => {
+    const promise = (async () => {
       const apiKey = process.env.LINEAR_API_KEY;
       if (apiKey === undefined || apiKey.trim().length === 0) {
         throw new TrackerError(
@@ -448,7 +460,15 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       }
       return wrapLinearClient(new LinearClient({ apiKey }));
     })();
-    return this.clientPromise;
+    this.clientPromise = promise;
+    // Clear the cached rejection so a later call retries (e.g., user exports
+    // LINEAR_API_KEY after a healthCheck-driven init failure). The .catch
+    // does NOT swallow the rejection — the original promise return path
+    // still surfaces it to the current caller (code-reviewer, FORGE-16).
+    promise.catch(() => {
+      this.clientPromise = null;
+    });
+    return promise;
   }
 
   // ─── healthCheck — never throws ────────────────────────────────────────────
@@ -474,6 +494,16 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       return { ok: true };
     } catch (err) {
       const hint = classifyLinearError(err);
+      // For AUTH, use a synthesized detail — the raw provider message could
+      // contain a token fragment which would bypass the logger's key-based
+      // redactor (security-auditor, FORGE-16).
+      if (hint.code === 'AUTH') {
+        return {
+          ok: false,
+          detail:
+            'LINEAR_API_KEY rejected by Linear API — re-mint at linear.app/settings/account/security',
+        };
+      }
       const detailFromHint =
         typeof hint.details?.message === 'string' ? hint.details.message : '';
       const detail =
@@ -522,15 +552,18 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
 
   // Three-step claim with tiebreak — mirrors GitHubTracker.claim exactly.
   //
-  // SPEC.md L207 says "atomic via Linear revisions / custom field
-  // forge_claimed_by". Linear's GraphQL API exposes neither (verified against
-  // schema 2026-05). We use label-add + lexicographic tiebreak for the
-  // race-loser case; the tiebreak gives us the atomicity SPEC requires from
-  // the orchestrator's perspective even though the underlying writes are
-  // not strict CAS. See plan §3.3 / EUREKA in frontmatter.
+  // Linear's public GraphQL API does NOT expose `revision`/`expectedRevision`
+  // or `customFields` on IssueUpdateInput (verified against
+  // packages/sdk/src/schema.graphql at master 2026-05). Strict optimistic
+  // concurrency is not achievable. We use label-add + lexicographic tiebreak
+  // on race losers; the tiebreak gives orchestrator-perspective atomicity
+  // (exactly one agent ends up with the claim under contention) even though
+  // the underlying writes are not strict CAS. See docs/adapters/linear.md
+  // "Claim semantics" for the full rationale.
   async claim(issueId: string, agentId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(agentId, 'agentId');
+    this.assertValidAgentId(agentId);
     const client = await this.getClient();
     const myLabelName = this.makeClaimLabel(agentId);
 
@@ -664,10 +697,10 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   }
 
   // Idempotent broad release: removes every claimed:agent-* label, mirroring
-  // GitHubTracker.releaseClaim. The Tracker.releaseClaim(issueId) interface
-  // takes no agentId (SPEC line 187 / FORGE-14 plan §3.3) — the orchestrator
-  // is single-process and trusted; callers only invoke this on issues they
-  // own or are explicitly cleaning up.
+  // GitHubTracker.releaseClaim. The Tracker interface's releaseClaim takes
+  // no agentId by design — the orchestrator is single-process and trusted;
+  // callers only invoke this on issues they own or are explicitly cleaning
+  // up. See docs/adapters/linear.md "Claim semantics" for the full rationale.
   async releaseClaim(issueId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     const client = await this.getClient();
@@ -906,6 +939,32 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     return `${CLAIM_LABEL_PREFIX}${agentId}`;
   }
 
+  // Constrain agentId to a safe character class. The label-based claim's
+  // lexicographic tiebreak depends on label content; if agentId ever flows
+  // from external input (multi-tenant future), an attacker could craft an
+  // ID starting with `!` or similar to always win the race. Lock the seam
+  // now (security-auditor, FORGE-16).
+  //
+  // Format matches the documented precondition in docs/adapters/linear.md
+  // and the FORGE-20 enforcement comment: alphanumerics, dot, underscore,
+  // hyphen. 1–80 chars. UUID-prefixed agent IDs (e.g. `agent-<uuid>`) fit.
+  protected assertValidAgentId(agentId: string): void {
+    if (agentId.length > 80) {
+      throw new TrackerError(
+        'VALIDATION',
+        `agentId exceeds 80 chars (length=${agentId.length})`,
+        { agentIdLength: agentId.length },
+      );
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(agentId)) {
+      throw new TrackerError(
+        'VALIDATION',
+        `agentId must match [A-Za-z0-9._-]+ (got: ${agentId.slice(0, 50)})`,
+        { agentIdPreview: agentId.slice(0, 50) },
+      );
+    }
+  }
+
   protected isClaimLabel(name: string): boolean {
     return name.startsWith(CLAIM_LABEL_PREFIX);
   }
@@ -965,6 +1024,17 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     if (this.workflowStatesCache) return this.workflowStatesCache;
     const client = await this.getClient();
     this.workflowStatesCache = await client.listWorkflowStates(this.teamId);
+    if (this.workflowStatesCache.length >= LINEAR_WORKFLOW_STATES_LIMIT) {
+      // Truncation suspected. resolveForgeStateToLinear may PRECONDITION_FAILED
+      // on a needed state-type that's in the truncated tail; warn-log so the
+      // operator can see the cause rather than chasing a phantom missing-state
+      // configuration (code-reviewer, FORGE-16).
+      this.logger.warn('tracker.workflowStates', {
+        reason: 'limit-hit',
+        limit: LINEAR_WORKFLOW_STATES_LIMIT,
+        teamId: this.teamId,
+      });
+    }
     return this.workflowStatesCache;
   }
 
@@ -1106,15 +1176,32 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
 
   // Best-effort label removal — used during claim cleanup. Logs and swallows;
   // never throws (the caller is already returning a non-ok ClaimResult).
+  //
+  // Uses lookupExistingLabel (not the raw cache) because the post-write
+  // tiebreak-loss path can fire in a fresh process: the label was just
+  // added to the issue but never went through ensureLabel/createIssueLabel
+  // locally, so labelCacheByName may be cold. Cache-only check would
+  // silently no-op, leaving the stale claim label on the issue
+  // (code-reviewer, FORGE-16).
   protected async tryRemoveLabelByName(
     issueId: string,
     labelName: string,
   ): Promise<void> {
-    const cached = this.labelCacheByName.get(labelName);
-    if (!cached) return;
+    let found: LinearLabelLike | null;
+    try {
+      found = await this.lookupExistingLabel(labelName);
+    } catch (err) {
+      this.logger.warn('tracker.tryRemoveLabelByName.lookupFailed', {
+        issueId,
+        labelName,
+        err: errMessage(err),
+      });
+      return;
+    }
+    if (!found) return;
     try {
       const client = await this.getClient();
-      await client.updateIssue(issueId, { removedLabelIds: [cached.id] });
+      await client.updateIssue(issueId, { removedLabelIds: [found.id] });
     } catch (err) {
       this.logger.warn('tracker.tryRemoveLabelByName', {
         issueId,
@@ -1165,14 +1252,14 @@ function errMessage(err: unknown): string {
   return String(err);
 }
 
-// Re-export the underscore-prefixed helpers other adapters may want to share.
-// (Kept inside this file so it's clear they're Linear-scoped today.)
+// Re-export Linear-scoped constants + adapter-local helpers. Footer helpers
+// (parseForgeFooters, serializeWithForgeFooters) live in `./footers.ts` and
+// are surfaced via `./index.ts`; do NOT re-export them here or future adapters
+// will see two import paths for the same symbol.
 export {
   CLAIM_LABEL_PREFIX,
   STATE_OVERLAY_IN_REVIEW,
   STATE_OVERLAY_BLOCKED,
   isTransientCode,
   tiebreakWinner,
-  parseForgeFooters,
-  serializeWithForgeFooters,
 };

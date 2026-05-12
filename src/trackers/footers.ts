@@ -11,11 +11,53 @@
 // GitHub issue numbers AND Linear UUIDs/identifiers ('FORGE-42', '7f3a-...').
 // Adapter-side validation enforces format at write time.
 
+import { TrackerError } from './errors.ts';
+
 const FORGE_TASK_RE = /<!--\s*forge:task=([^\s>]+?)\s*-->/;
 const FORGE_BLOCKED_RE = /<!--\s*forge:blockedBy=([^>]*?)\s*-->/;
 // Strip variants are global — defensive against duplicate footers.
 const FORGE_TASK_STRIP_RE = /<!--\s*forge:task=[^>]*-->\n?/g;
 const FORGE_BLOCKED_STRIP_RE = /<!--\s*forge:blockedBy=[^>]*-->\n?/g;
+
+// Reject bare values (forgeTaskId, blockerId) that would break the HTML
+// comment structure if concatenated raw. A `-->` inside a value would
+// terminate the comment; a `<!--` inside would open a nested one. Either
+// corrupts the round-trip parse and is a defense-in-depth gap
+// (security-auditor, FORGE-16).
+function assertFooterValueSafe(value: string, field: string): void {
+  if (value.includes('-->') || value.includes('<!--')) {
+    throw new TrackerError(
+      'VALIDATION',
+      `${field} contains HTML comment metacharacters ('-->' or '<!--'); cannot encode in forge footer`,
+      { field, valuePreview: value.slice(0, 40) },
+    );
+  }
+}
+
+// Validate that an extra footer (pre-formed HTML comment) is well-shaped:
+//   - exactly one `<!-- ... -->`
+//   - inner content contains no further `<!--` or `-->`
+// This lets adapters emit forge:ownerType etc. as comment strings while
+// still preventing injection if the embedded value contains comment
+// metacharacters (security-auditor, FORGE-16).
+function assertExtraFooterSafe(footer: string): void {
+  const match = footer.match(/^<!--\s*([\s\S]*?)\s*-->$/);
+  if (!match) {
+    throw new TrackerError(
+      'VALIDATION',
+      `extraFooter must be a single well-formed HTML comment '<!-- ... -->'`,
+      { footerPreview: footer.slice(0, 60) },
+    );
+  }
+  const inner = match[1] ?? '';
+  if (inner.includes('-->') || inner.includes('<!--')) {
+    throw new TrackerError(
+      'VALIDATION',
+      `extraFooter inner content contains HTML comment metacharacters`,
+      { innerPreview: inner.slice(0, 60) },
+    );
+  }
+}
 
 export interface ForgeFooters {
   forgeTaskId?: string;
@@ -45,6 +87,10 @@ export function serializeWithForgeFooters(
   blockerIds: readonly string[],
   extraFooters: readonly string[] = [],
 ): string {
+  assertFooterValueSafe(forgeTaskId, 'forgeTaskId');
+  for (const id of blockerIds) assertFooterValueSafe(id, 'blockerId');
+  for (const extra of extraFooters) assertExtraFooterSafe(extra);
+
   const stripped = originalBody
     .replace(FORGE_TASK_STRIP_RE, '')
     .replace(FORGE_BLOCKED_STRIP_RE, '')
