@@ -49,3 +49,42 @@ When `forge init` scaffolds a new project, drop a `.claude/settings.json` templa
 `enabled: false` is the safe default — opt-in. `allowWrite` pre-filled with the project's `.git` path so flipping `enabled: true` later Just Works for the worktree workflow.
 
 **Scope:** ~5 lines added to scaffolding in P2-T06 (init flow). Parameterize `<PROJECT_NAME>` from the prompt answers.
+
+## Phase 3 / v-next+1 candidates (deferred from FORGE-18 on 2026-05-12)
+
+### `1password` secret-manager adapter
+
+Original FORGE-18 scope included 1password alongside env_file and doppler. Slimmed on 2026-05-12 — FORGE-18 ships env_file only, with the `SecretsManager` interface and `core/secrets.ts` factory in place so adding adapters later is purely additive.
+
+**Scope:** ~200 LOC + tests. Shells to `op` CLI via execa. Key shape `<item>/<field>`; adapter prepends `op://<vault>/` from config. Adapter classifies its own provider errors (AUTH / NOT_FOUND / TRANSPORT) via a `classifyProviderError(stderr, exitCode)` helper, following the FORGE-14 EUREKA pattern. Healthcheck via `op vault get <vault>` with actionable details ("not signed in", "vault missing", "op not installed").
+
+**Trigger to pull from backlog:** first adopter request, or once forge has any team-setup user.
+
+**Sketch (collapsed from the original FORGE-18 plan §2.4 OnePasswordSecretsManager):**
+- Constructor: `new OnePasswordSecretsManager(config: OnePasswordSecrets, logger: Logger)`
+- `get(key)`: `execa('op', ['read', \`op://\${vault}/\${key}\`])` → `stdout.trim()`
+- Error classification: stderr `not signed in` → AUTH; stderr `couldn't find|isn't an item` → NOT_FOUND; else TRANSPORT/UNKNOWN
+- Healthcheck: `op vault get <vault>`; surfaces install link if `ENOENT`
+
+### `doppler` secret-manager adapter
+
+Same story — deferred from FORGE-18.
+
+**Scope:** ~150 LOC + tests. Shells to `doppler` CLI. Respects `DOPPLER_PROJECT` and `DOPPLER_CONFIG` env overrides. Uses `--plain` flag to get raw value.
+
+**Sketch:**
+- Constructor: `new DopplerSecretsManager(config: DopplerSecrets, logger: Logger)`
+- Env override: `process.env.DOPPLER_PROJECT || config.project`; same for `DOPPLER_CONFIG`
+- `get(key)`: `execa('doppler', ['secrets', 'get', key, '--plain', '--project', project, '--config', config])` → `stdout.trim()`
+- Error classification: stderr `not found|does not exist` → NOT_FOUND; `unauthorized|token expired` → AUTH; project/config mismatch → MISCONFIGURED
+- Healthcheck: `doppler secrets --project <p> --config <c> --only-names` (single call verifies CLI + auth + project + config)
+
+### Extract `BaseSecretsManager` abstract class
+
+Triggered when the second secret-manager adapter (1password or doppler) lands. Shared concerns: logger injection, `wrapExecaError`, `normalizeError(op, err, hint)` — mirrors `BaseTracker`. Keeps the EUREKA invariant: BaseSecretsManager does NOT sniff provider errors; adapters classify their own.
+
+### Naming rename `EnvFileSecrets` → `EnvFileSecretsConfig`
+
+Currently the secrets config types use no suffix (`EnvFileSecrets`, `DopplerSecrets`, `Secrets`); the tracker config types use `Config` suffix (`LinearTrackerConfig`, `TrackerConfig`). Rename for symmetry.
+
+**Scope:** ~6 references in `src/schemas/settings.ts` exports + downstream consumers. Pure rename. ~10 LOC touched across maybe 5 files. Best done as a focused chore-PR alongside another schema-touching change to amortize the test-revalidation cost.
