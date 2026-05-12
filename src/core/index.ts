@@ -36,3 +36,4 @@ export { loadPhases } from './phases.ts';
 export { PhasesError } from './errors.ts';
 export type { PhasesErrorCode } from './errors.ts';
 export type { Phases, Phase, Task } from '../schemas/phases.ts';
+export { createSecretsManager } from './secrets.ts';
