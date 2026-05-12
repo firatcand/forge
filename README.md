@@ -33,7 +33,7 @@ IDEA  → /forge        → spec/BRIEF.md
       → /ingest-spec  → spec/CONTEXT.md      (validation pass)
       → /decompose    → plans/phases.yaml
       → /setup-repo   → GitHub repo wired
-      → /push-to-linear → Linear project + cycles + issues
+      → /push-to-tracker → tracker project + per-phase grouping + issues
       
 TASK  → /pickup-task → /plan-task → /implement
       → /review → /qa → /codex → /ship → /learn
@@ -77,7 +77,7 @@ claude
 > /draft-spec     # → spec/SPEC.md
 > /decompose      # → plans/phases.yaml
 > /setup-repo     # GitHub repo wired
-> /push-to-linear # Linear project + cycles
+> /push-to-tracker # tracker project + per-phase grouping + issues
 > /pickup-task    # claim first task, worktree created
 ```
 

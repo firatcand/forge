@@ -1,0 +1,10 @@
+version: 1
+project:
+  name: forge-tracker-github
+  description: Fixture for push-to-tracker E2E with GitHub tracker
+tracker:
+  type: github
+  config:
+    repo: firatcand/forge-test-fixtures
+secrets:
+  manager: env_file

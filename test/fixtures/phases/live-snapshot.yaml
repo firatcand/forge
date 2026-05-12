@@ -1,4 +1,6 @@
 # Snapshot of /Users/firatcandogan/repos/forge/plans/phases.yaml taken 2026-05-11 for FD-8 AC1 pin.
+# fixture: do not rewrite for downstream renames — this captures Linear export at decompose-time
+#          and its faithfulness is the test's value (FORGE-23 rename does not retroactively edit it).
 project: "forge"
 linear_project_id: "768871a9-7f95-4bd8-a5da-2ab1b290753a"        # populated by /push-to-tracker (multi-tracker rename ships in v-next)
 linear_team_id: "bf9e034a-51fc-4147-99ea-692947dcc1bb"           # populated by /push-to-tracker

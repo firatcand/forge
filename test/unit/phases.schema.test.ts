@@ -417,3 +417,41 @@ test('component schemas — PhaseSchema and TaskSchema exported separately', () 
   const taskOk = TaskSchema.safeParse(baseTask());
   assert.equal(taskOk.success, true);
 });
+
+test('FORGE-23 — TaskSchema accepts tracker_issue_id (canonical) alongside linear_id (legacy)', () => {
+  const task = baseTask({ linear_id: 'FORGE-23', tracker_issue_id: 'gh#42' });
+  const result = TaskSchema.safeParse(task);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.linear_id, 'FORGE-23');
+  assert.equal(result.data.tracker_issue_id, 'gh#42');
+});
+
+test('FORGE-23 — PhasesSchema accepts tracker_project_id and tracker_url (canonical)', () => {
+  const data = {
+    ...basePhases(),
+    tracker_project_id: 'proj_abc',
+    tracker_url: 'https://github.com/org/repo',
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.tracker_project_id, 'proj_abc');
+  assert.equal(result.data.tracker_url, 'https://github.com/org/repo');
+});
+
+test('FORGE-23 — dual-write roundtrip: legacy linear_* and canonical tracker_* both survive', () => {
+  const data = {
+    ...basePhases({ linear_id: 'FORGE-23', tracker_issue_id: 'FORGE-23' }),
+    linear_project_id: 'lin_proj_1',
+    tracker_project_id: 'lin_proj_1',
+    tracker_url: 'https://linear.app/team/project/proj_1',
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.linear_project_id, 'lin_proj_1');
+  assert.equal(result.data.tracker_project_id, 'lin_proj_1');
+  assert.equal(result.data.phases[0]!.tasks[0]!.linear_id, 'FORGE-23');
+  assert.equal(result.data.phases[0]!.tasks[0]!.tracker_issue_id, 'FORGE-23');
+});

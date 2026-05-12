@@ -1,6 +1,8 @@
 # Linear Integration
 
-Forge uses Linear as the durable task system. Local `phases.yaml` is the source of truth at decomposition time; once `/push-to-linear` runs, Linear becomes the operational system of record. The `/sync-status` skill exists to reconcile drift if it happens.
+> This file is the Linear-specific adapter doc. The canonical skill is [`/push-to-tracker`](../../skills/push-to-tracker/SKILL.md); this page covers Linear-specific setup and behavior. For other trackers see [`docs/trackers/README.md`](./README.md).
+
+Forge can use Linear as the durable task system. Local `phases.yaml` is the source of truth at decomposition time; once `/push-to-tracker` runs against a Linear-configured project, Linear becomes the operational system of record. The `/sync-status` skill exists to reconcile drift if it happens.
 
 This doc covers MCP setup, GitHub-Linear native sync, branch naming conventions, the issue lifecycle, and the most common errors.
 
@@ -23,7 +25,7 @@ claude mcp list
 # Should show: linear (running)
 ```
 
-The `linear-syncer` subagent calls Linear MCP tools directly. If MCP isn't registered, `/push-to-linear` falls back to printing an importable manifest and instructing manual import.
+The `tracker-syncer` subagent calls Linear MCP tools directly when `tracker.type === 'linear'`. If MCP isn't registered, `/push-to-tracker` falls back to printing an importable manifest and instructing manual import.
 
 ### Sample claude.json snippet
 
@@ -47,7 +49,7 @@ If you prefer manual config (`~/Library/Application Support/Claude/claude.json` 
 
 ## GitHub ↔ Linear native sync
 
-After `/push-to-linear`, the `linear-syncer` subagent runs the link step. It prints manual instructions because Linear's GraphQL API for setting up the GitHub integration is limited:
+After `/push-to-tracker` (with `tracker.type === 'linear'`), the `tracker-syncer` subagent runs the link step. It prints manual instructions because Linear's GraphQL API for setting up the GitHub integration is limited:
 
 1. Linear → Settings → Integrations → GitHub
 2. Connect the repo (`firatcand/your-project`)
@@ -98,12 +100,12 @@ Backlog ──→ Todo ──→ In Progress ──→ In Review ──→ Done
    │          │
    │          └─ /phase-gate moves Backlog → Todo when previous phase closes
    │
-   └─ /push-to-linear creates issues in Backlog (or current cycle's Todo if phase-1)
+   └─ /push-to-tracker creates issues in Backlog (or current cycle's Todo if phase-1)
 ```
 
 | State | What moves it | What forge skill cares |
 |-------|--------------|------------------------|
-| Backlog | `/push-to-linear` creates here for phase 2/3 tasks | `/pickup-task` ignores |
+| Backlog | `/push-to-tracker` creates here for phase 2/3 tasks | `/pickup-task` ignores |
 | Todo | `/phase-gate` moves to Todo when phase activates | `/pickup-task` claims from here |
 | In Progress | `/pickup-task` | active work |
 | In Review | PR opened with `[ID]` in title (native sync) | `/ship` triggers this |
@@ -124,10 +126,15 @@ Backlog ──→ Todo ──→ In Progress ──→ In Review ──→ Done
 | `task.estimate` (S/M/L) | Linear estimate (1/3/5 points) |
 | `task.type`, `task.owner_type` | Linear labels |
 
-After `/push-to-linear` succeeds, `phases.yaml` gains:
+After `/push-to-tracker` succeeds, `phases.yaml` gains:
 
-- `linear_project_id` (top-level)
-- `linear_team_id` (top-level)
+- `tracker_project_id` (top-level, canonical)
+- `tracker_url` (top-level, canonical)
+- per-task `tracker_issue_id` (canonical)
+
+When `tracker.type === 'linear'`, the skill also dual-writes the legacy keys for v0.3.x compatibility (removed in v0.4.0):
+
+- `linear_project_id`, `linear_team_id` (top-level)
 - per-task `linear_id`
 
 These IDs let `/sync-status` and `/pickup-task` query the right resources.
@@ -142,9 +149,9 @@ Run `/sync-status` when:
 
 - A teammate closed an issue manually in Linear (no PR involved)
 - An issue was reassigned to a different project or cycle
-- You manually edited `phases.yaml` after `/push-to-linear` and want Linear to reflect the changes (this is the wrong direction — `/push-to-linear` should be re-run instead)
+- You manually edited `phases.yaml` after `/push-to-tracker` and want Linear to reflect the changes (this is the wrong direction — `/push-to-tracker` should be re-run instead)
 
-`/sync-status` only updates **local** `phases.yaml`. It does not push back to Linear. If you want the local state to be authoritative, edit `phases.yaml` and re-run `/push-to-linear` with the `--update` flag (in v1.1).
+`/sync-status` only updates **local** `phases.yaml`. It does not push back to Linear. If you want the local state to be authoritative, edit `phases.yaml` and re-run `/push-to-tracker` with the `--update` flag (in v1.1).
 
 ---
 
@@ -160,14 +167,14 @@ claude mcp add linear --command "npx -y @linear/mcp-server"
 
 ### "Linear team has multiple workspaces — pick one"
 
-The `linear-syncer` Confusion Protocol fired because your Linear account has multiple teams. Pick explicitly:
+The `tracker-syncer` Confusion Protocol fired because your Linear account has multiple teams. Pick explicitly:
 
 ```yaml
 # In phases.yaml top-level:
 linear_team_id: "<paste-team-id-here>"
 ```
 
-Then re-run `/push-to-linear`.
+Then re-run `/push-to-tracker`.
 
 ### "issueRelationCreate failed: blocker not found"
 
