@@ -158,9 +158,9 @@ export function makeLinearTimeoutError(): Error & { code: string } {
 
 /**
  * Mutable issue state used by MockLinearSdk to simulate server-side state in
- * race tests. Shared across multiple LinearTracker instances so claim-race
- * coverage actually observes concurrent label additions in deterministic
- * order.
+ * race tests + conformance tests. Shared across multiple LinearTracker
+ * instances so claim-race coverage actually observes concurrent label
+ * additions in deterministic order.
  */
 export class MockServerState {
   private readonly issues = new Map<string, LinearIssueLike>();

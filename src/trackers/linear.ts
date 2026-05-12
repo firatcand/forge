@@ -422,6 +422,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   // Caches keyed by team id; team config is fixed for the adapter lifetime.
   private workflowStatesCache: LinearWorkflowStateLike[] | null = null;
   private labelCacheByName: Map<string, LinearLabelLike> = new Map();
+  private warnedAboutBlockedFallback = false;
 
   constructor(
     config: LinearTrackerConfig,
@@ -488,7 +489,35 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   // ─── Stubs (implemented in subsequent commits) ─────────────────────────────
 
   async listActiveIssues(): Promise<Issue[]> {
-    throw new TrackerError('UNKNOWN', 'listActiveIssues not implemented');
+    const client = await this.getClient();
+    return this.withRetry(
+      'listActiveIssues',
+      async () => {
+        let issues: LinearIssueLike[];
+        try {
+          issues = await client.listIssues({
+            teamId: this.teamId,
+            stateTypes: ['triage', 'backlog', 'unstarted', 'started'],
+            limit: LINEAR_LIST_LIMIT,
+          });
+        } catch (err) {
+          throw this.normalizeError(
+            'listActiveIssues',
+            err,
+            classifyLinearError(err),
+          );
+        }
+        if (issues.length === LINEAR_LIST_LIMIT) {
+          this.logger.warn('tracker.listActiveIssues', {
+            reason: 'limit-hit',
+            limit: LINEAR_LIST_LIMIT,
+            teamId: this.teamId,
+          });
+        }
+        return issues.map((i) => toIssue(i));
+      },
+      this.retryOpts,
+    );
   }
 
   // Three-step claim with tiebreak — mirrors GitHubTracker.claim exactly.
@@ -670,8 +699,37 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     }
   }
 
-  async updateState(_issueId: string, _state: IssueState): Promise<void> {
-    throw new TrackerError('UNKNOWN', 'updateState not implemented');
+  // updateState maps forge IssueState → Linear (stateId + overlay labels).
+  // Overlay labels carry `in_review` and `blocked` semantics since Linear has
+  // no native workflow-state type for them. The `state:in-review` and
+  // `state:blocked` labels are mutually exclusive with each other (and the
+  // unset case): updateState always reconciles both overlays so leftover
+  // labels from prior transitions don't poison `deriveStateFromLinearIssue`.
+  async updateState(issueId: string, state: IssueState): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    const client = await this.getClient();
+
+    let resolved: { stateId: string; overlayLabel: string | null };
+    try {
+      resolved = await this.resolveForgeStateToLinear(state);
+    } catch (err) {
+      if (err instanceof TrackerError) throw err;
+      throw this.normalizeError('updateState', err, classifyLinearError(err));
+    }
+
+    const { addedLabelIds, removedLabelIds } = await this.reconcileOverlayLabels(
+      resolved.overlayLabel,
+    );
+
+    try {
+      await client.updateIssue(issueId, {
+        stateId: resolved.stateId,
+        ...(addedLabelIds.length > 0 ? { addedLabelIds } : {}),
+        ...(removedLabelIds.length > 0 ? { removedLabelIds } : {}),
+      });
+    } catch (err) {
+      throw this.normalizeError('updateState', err, classifyLinearError(err));
+    }
   }
 
   async comment(issueId: string, body: string): Promise<void> {
@@ -686,18 +744,143 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   }
 
   async createProject(
-    _name: string,
-    _description?: string,
+    name: string,
+    description?: string,
   ): Promise<{ id: string; url: string }> {
-    throw new TrackerError('UNKNOWN', 'createProject not implemented');
+    this.assertNonEmpty(name, 'name');
+    const client = await this.getClient();
+    let project: { id: string; url: string };
+    try {
+      project = await client.createProject({
+        teamId: this.teamId,
+        name,
+        ...(description !== undefined && description.length > 0
+          ? { description }
+          : {}),
+      });
+    } catch (err) {
+      throw this.normalizeError(
+        'createProject',
+        err,
+        classifyLinearError(err),
+      );
+    }
+
+    // Pre-create overlay labels so updateState calls never need a label-
+    // create round-trip mid-orchestration. Best-effort: failures here are
+    // logged but don't fail createProject (mirrors GitHubTracker.precreate).
+    await this.precreateOverlayLabels().catch((err) => {
+      this.logger.warn('tracker.createProject.overlayPrecreateFailed', {
+        err: errMessage(err),
+      });
+    });
+
+    return project;
   }
 
-  async createIssue(_payload: CreateIssuePayload): Promise<Issue> {
-    throw new TrackerError('UNKNOWN', 'createIssue not implemented');
+  private async precreateOverlayLabels(): Promise<void> {
+    for (const name of [STATE_OVERLAY_IN_REVIEW, STATE_OVERLAY_BLOCKED]) {
+      await this.ensureLabel(name);
+    }
   }
 
-  async setBlockedBy(_issueId: string, _blockerId: string): Promise<void> {
-    throw new TrackerError('UNKNOWN', 'setBlockedBy not implemented');
+  async createIssue(payload: CreateIssuePayload): Promise<Issue> {
+    this.assertNonEmpty(payload.title, 'payload.title');
+    this.assertNonEmpty(payload.forgeTaskId, 'payload.forgeTaskId');
+    this.assertNonEmpty(payload.ownerType, 'payload.ownerType');
+    const client = await this.getClient();
+
+    const extraFooters = [`<!-- forge:ownerType=${payload.ownerType} -->`];
+    const bodyWithFooter = serializeWithForgeFooters(
+      payload.body,
+      payload.forgeTaskId,
+      [],
+      extraFooters,
+    );
+
+    let created: LinearIssueLike;
+    try {
+      created = await client.createIssue({
+        teamId: this.teamId,
+        title: payload.title,
+        description: bodyWithFooter,
+      });
+    } catch (err) {
+      throw this.normalizeError('createIssue', err, classifyLinearError(err));
+    }
+    return toIssue(created);
+  }
+
+  // setBlockedBy writes both:
+  //   1. forge:blockedBy footer in the issue description (orchestrator-read
+  //      single-source-of-truth)
+  //   2. native Linear IssueRelation(type=blocks) so the dependency shows up
+  //      in Linear's UI as a real relation (decided §11 Q2)
+  //
+  // Footer is written first. If the relation create fails non-fatally, the
+  // footer is already authoritative for the orchestrator. If it fails
+  // fatally, the next setBlockedBy retry will dedupe via the early-return
+  // below and only re-attempt the relation.
+  async setBlockedBy(issueId: string, blockerId: string): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    this.assertNonEmpty(blockerId, 'blockerId');
+    const client = await this.getClient();
+
+    let issue: LinearIssueLike;
+    try {
+      issue = await client.issue(issueId);
+    } catch (err) {
+      throw this.normalizeError(
+        'setBlockedBy',
+        err,
+        classifyLinearError(err),
+      );
+    }
+
+    const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
+    if (forgeTaskId === undefined) {
+      throw new TrackerError(
+        'PRECONDITION_FAILED',
+        `setBlockedBy: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
+        { issueId, identifier: issue.identifier },
+      );
+    }
+
+    if (blockerIds.includes(blockerId)) return; // dedup — already recorded
+
+    const newDescription = serializeWithForgeFooters(
+      issue.description ?? '',
+      forgeTaskId,
+      [...blockerIds, blockerId],
+    );
+
+    try {
+      await client.updateIssue(issueId, { description: newDescription });
+    } catch (err) {
+      throw this.normalizeError(
+        'setBlockedBy',
+        err,
+        classifyLinearError(err),
+      );
+    }
+
+    // Mirror the relation natively for UI visibility. Swallow CONFLICT
+    // (already-exists is the idempotent case); propagate other errors.
+    try {
+      await client.createIssueRelation({
+        issueId,
+        relatedIssueId: blockerId,
+        type: 'blocks',
+      });
+    } catch (err) {
+      const hint = classifyLinearError(err);
+      if (hint.code === 'CONFLICT') return; // idempotent
+      throw this.normalizeError(
+        'setBlockedBy',
+        err,
+        hint,
+      );
+    }
   }
 
   // ─── Internal helpers used by subsequent commits ───────────────────────────
@@ -770,6 +953,117 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     }
   }
 
+  protected async getWorkflowStates(): Promise<LinearWorkflowStateLike[]> {
+    if (this.workflowStatesCache) return this.workflowStatesCache;
+    const client = await this.getClient();
+    this.workflowStatesCache = await client.listWorkflowStates(this.teamId);
+    return this.workflowStatesCache;
+  }
+
+  // Map a forge IssueState to (Linear workflow state id, overlay label name).
+  // Throws PRECONDITION_FAILED if the team is missing a required state type
+  // (e.g. no `started` for in_progress). Implements the §11 Q4 fallback:
+  // when `blocked` lacks a `backlog` state, fall back to first `unstarted`
+  // and warn-log once per process.
+  protected async resolveForgeStateToLinear(
+    state: IssueState,
+  ): Promise<{ stateId: string; overlayLabel: string | null }> {
+    const states = await this.getWorkflowStates();
+    const byType = (t: LinearStateType) => states.find((s) => s.type === t);
+
+    switch (state) {
+      case 'todo': {
+        const s = byType('unstarted') ?? byType('backlog') ?? byType('triage');
+        if (!s) {
+          throw this.missingStateError('todo', 'unstarted/backlog/triage');
+        }
+        return { stateId: s.id, overlayLabel: null };
+      }
+      case 'in_progress': {
+        const s = byType('started');
+        if (!s) throw this.missingStateError('in_progress', 'started');
+        return { stateId: s.id, overlayLabel: null };
+      }
+      case 'in_review': {
+        const s = byType('started');
+        if (!s) throw this.missingStateError('in_review', 'started');
+        return { stateId: s.id, overlayLabel: STATE_OVERLAY_IN_REVIEW };
+      }
+      case 'done': {
+        const s = byType('completed');
+        if (!s) throw this.missingStateError('done', 'completed');
+        return { stateId: s.id, overlayLabel: null };
+      }
+      case 'cancelled': {
+        const s = byType('canceled');
+        if (!s) throw this.missingStateError('cancelled', 'canceled');
+        return { stateId: s.id, overlayLabel: null };
+      }
+      case 'blocked': {
+        const backlog = byType('backlog');
+        if (backlog) {
+          return { stateId: backlog.id, overlayLabel: STATE_OVERLAY_BLOCKED };
+        }
+        // §11 Q4 graceful degradation: fall back to first unstarted state.
+        const unstarted = byType('unstarted') ?? byType('triage');
+        if (!unstarted) {
+          throw this.missingStateError('blocked', 'backlog or unstarted');
+        }
+        if (!this.warnedAboutBlockedFallback) {
+          this.logger.warn('tracker.updateState.fallback', {
+            reason: 'team-missing-backlog-state',
+            forgeState: 'blocked',
+            fallbackStateType: unstarted.type,
+            overlayLabel: STATE_OVERLAY_BLOCKED,
+          });
+          this.warnedAboutBlockedFallback = true;
+        }
+        return { stateId: unstarted.id, overlayLabel: STATE_OVERLAY_BLOCKED };
+      }
+    }
+  }
+
+  private missingStateError(
+    forgeState: IssueState,
+    requiredType: string,
+  ): TrackerError {
+    return new TrackerError(
+      'PRECONDITION_FAILED',
+      `team has no workflow state matching '${requiredType}' (required for forge state '${forgeState}')`,
+      { forgeState, requiredType, teamId: this.teamId },
+    );
+  }
+
+  // Compute the addedLabelIds/removedLabelIds to make the issue's overlay
+  // labels exactly { wantedOverlay } (or empty). We can only construct IDs
+  // for labels we know about — overlay-add ensures the label exists.
+  // Overlay-remove is best-effort via cached IDs; if the overlay label was
+  // never created, there's nothing on the issue to remove anyway.
+  protected async reconcileOverlayLabels(
+    wantedOverlay: string | null,
+  ): Promise<{ addedLabelIds: string[]; removedLabelIds: string[] }> {
+    const overlayLabelNames = [STATE_OVERLAY_IN_REVIEW, STATE_OVERLAY_BLOCKED];
+    const addedLabelIds: string[] = [];
+    const removedLabelIds: string[] = [];
+    for (const name of overlayLabelNames) {
+      if (name === wantedOverlay) {
+        try {
+          const lbl = await this.ensureLabel(name);
+          addedLabelIds.push(lbl.id);
+        } catch (err) {
+          this.logger.warn('tracker.updateState.overlayAddSkipped', {
+            label: name,
+            err: errMessage(err),
+          });
+        }
+      } else {
+        const cached = this.labelCacheByName.get(name);
+        if (cached) removedLabelIds.push(cached.id);
+      }
+    }
+    return { addedLabelIds, removedLabelIds };
+  }
+
   // Best-effort label removal — used during claim cleanup. Logs and swallows;
   // never throws (the caller is already returning a non-ok ClaimResult).
   protected async tryRemoveLabelByName(
@@ -795,6 +1089,35 @@ function stringifyDetailMessage(hint: NormalizeErrorHint): string {
   const message = hint.details?.message;
   if (typeof message === 'string' && message.length > 0) return message;
   return hint.code.toLowerCase();
+}
+
+// Derive forge IssueState from a Linear issue. Terminal states win
+// unconditionally; for open states, overlay labels override the workflow
+// type so `state:in-review` and `state:blocked` round-trip correctly.
+export function deriveStateFromLinearIssue(raw: LinearIssueLike): IssueState {
+  if (raw.state.type === 'completed') return 'done';
+  if (raw.state.type === 'canceled') return 'cancelled';
+  const labelNames = raw.labels.map((l) => l.name);
+  if (labelNames.includes(STATE_OVERLAY_BLOCKED)) return 'blocked';
+  if (labelNames.includes(STATE_OVERLAY_IN_REVIEW)) return 'in_review';
+  if (raw.state.type === 'started') return 'in_progress';
+  // 'unstarted', 'backlog', 'triage' → all map to 'todo' (open, not started)
+  return 'todo';
+}
+
+// Convert a flattened Linear issue into forge's tracker-agnostic Issue.
+export function toIssue(raw: LinearIssueLike): Issue {
+  const { forgeTaskId, blockerIds } = parseForgeFooters(raw.description);
+  const issue: Issue = {
+    id: raw.id,
+    identifier: raw.identifier,
+    title: raw.title,
+    state: deriveStateFromLinearIssue(raw),
+    blockerIds,
+    url: raw.url,
+  };
+  if (forgeTaskId !== undefined) issue.forgeTaskId = forgeTaskId;
+  return issue;
 }
 
 function errMessage(err: unknown): string {

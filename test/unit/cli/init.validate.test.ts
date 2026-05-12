@@ -50,7 +50,12 @@ test('validateTooling: git pass + claude pass + linear MCP pass + codex pass + e
     'codex --version': { exitCode: 0, stdout: '0.1.0' },
     'claude mcp list': { exitCode: 0, stdout: 'linear  https://...\n' },
   });
-  const report = await validateTooling(baseAnswers(), { cwd, exec, autoSkipFailures: true });
+  const report = await validateTooling(baseAnswers(), {
+    cwd,
+    exec,
+    autoSkipFailures: true,
+    getEnv: (n) => (n === 'LINEAR_API_KEY' ? 'lin_api_test' : undefined),
+  });
   assert.equal(report.gitFatal, false);
   assert.equal(report.unverified.length, 0);
   const statuses = Object.fromEntries(report.results.map((r) => [r.key, r.status]));
@@ -58,7 +63,50 @@ test('validateTooling: git pass + claude pass + linear MCP pass + codex pass + e
   assert.equal(statuses['primary_host'], 'pass');
   assert.equal(statuses['review_host'], 'pass');
   assert.equal(statuses['linear_mcp'], 'pass');
+  assert.equal(statuses['linear_api_key'], 'pass');
   assert.equal(statuses['secret_mgr_env_file'], 'pass');
+});
+
+test('validateTooling: linear tracker without LINEAR_API_KEY env → linear_api_key probe fails', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), 'X=1\n');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1\n' },
+    'claude --version': { exitCode: 0, stdout: '1.0.0' },
+    'codex --version': { exitCode: 0, stdout: '0.1.0' },
+    'claude mcp list': { exitCode: 0, stdout: 'linear' },
+  });
+  const report = await validateTooling(baseAnswers(), {
+    cwd,
+    exec,
+    autoSkipFailures: true,
+    getEnv: () => undefined,
+  });
+  const apiKey = report.results.find((r) => r.key === 'linear_api_key');
+  assert.ok(apiKey, 'linear_api_key probe should exist');
+  assert.equal(apiKey!.status, 'fail');
+  assert.match(apiKey!.message ?? '', /LINEAR_API_KEY/);
+  assert.ok(report.unverified.includes('linear_api_key'));
+});
+
+test('validateTooling: github tracker does NOT run linear_api_key probe', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), 'X=1\n');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1\n' },
+    'claude --version': { exitCode: 0, stdout: '1.0.0' },
+    'codex --version': { exitCode: 0, stdout: '0.1.0' },
+    'gh auth status': { exitCode: 0 },
+  });
+  const report = await validateTooling(
+    baseAnswers({ tracker: { type: 'github', config: { repo: 'x/y' } } }),
+    { cwd, exec, autoSkipFailures: true, getEnv: () => undefined },
+  );
+  assert.equal(
+    report.results.find((r) => r.key === 'linear_api_key'),
+    undefined,
+    'linear_api_key probe should not run for github tracker',
+  );
 });
 
 test('validateTooling: git fail sets gitFatal=true', async () => {

@@ -29,6 +29,9 @@ export interface ValidateOptions {
   cwd: string;
   timeoutMs?: number;
   exec?: ExecaLike;
+  // Env-var reader seam. Defaults to process.env. Injected for tests so
+  // probes that depend on env vars (e.g. LINEAR_API_KEY) are deterministic.
+  getEnv?: (name: string) => string | undefined;
   // When true, treat as headless CI: all probes auto-skip after recording status
   autoSkipFailures?: boolean;
   // When confirmer returns true, the failed probe is appended to unverified[] and init continues.
@@ -231,6 +234,11 @@ async function probeTracker(answers: InitAnswers, exec: ExecaLike, timeoutMs: nu
   const hostIsClaude = answers.agents.primary_host_cli === 'claude';
   switch (t.type) {
     case 'linear':
+      // Linear MCP probe is for the user-facing /push-to-linear skill, NOT
+      // the orchestrator runtime. The orchestrator's LinearTracker uses
+      // @linear/sdk with LINEAR_API_KEY (see probeLinearApiKey, plumbed
+      // separately in validateTooling). Keep this as a soft `skip` when
+      // missing so init doesn't fail on adopters who don't use the skill.
       return probeMcp('linear_mcp', 'linear', exec, timeoutMs, hostIsClaude);
     case 'github':
       return runProbe(
@@ -249,12 +257,37 @@ async function probeTracker(answers: InitAnswers, exec: ExecaLike, timeoutMs: nu
   }
 }
 
+// LinearTracker (the orchestrator's runtime adapter, separate from the
+// /push-to-linear skill) talks to Linear's GraphQL API via @linear/sdk.
+// LINEAR_API_KEY env var is REQUIRED at orchestrator runtime; we check it
+// at init time so adopters discover the requirement before their first
+// `forge orchestrate` run fails. See docs/adapters/linear.md.
+function probeLinearApiKey(getEnv: (name: string) => string | undefined): ProbeResult {
+  const key = 'linear_api_key';
+  const label = 'LINEAR_API_KEY env var';
+  const installLink = 'https://linear.app/settings/account/security';
+  const value = getEnv('LINEAR_API_KEY');
+  if (value !== undefined && value.trim().length > 0) {
+    return { key, label, status: 'pass' };
+  }
+  return {
+    key,
+    label,
+    status: 'fail',
+    message:
+      'LINEAR_API_KEY not set. The orchestrator uses @linear/sdk directly (not the MCP server). ' +
+      'Mint a Personal API Key at linear.app/settings/account/security and export it before `forge orchestrate`.',
+    installLink,
+  };
+}
+
 export async function validateTooling(
   answers: InitAnswers,
   opts: ValidateOptions,
 ): Promise<ValidationReport> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const exec = opts.exec ?? (execa as unknown as ExecaLike);
+  const getEnv = opts.getEnv ?? ((n: string) => process.env[n]);
 
   // Parallel — probes are independent.
   const tasks: Promise<ProbeResult | null>[] = [
@@ -266,6 +299,9 @@ export async function validateTooling(
     tasks.push(probeHostCli('review_host', answers.agents.review_host_cli, 'Review', exec, timeoutMs));
   }
   tasks.push(probeTracker(answers, exec, timeoutMs));
+  if (answers.tracker.type === 'linear') {
+    tasks.push(Promise.resolve(probeLinearApiKey(getEnv)));
+  }
   tasks.push(probeSecretManager(answers, exec, timeoutMs, opts.cwd));
 
   const settled = await Promise.all(tasks);

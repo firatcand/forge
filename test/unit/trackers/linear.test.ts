@@ -32,6 +32,7 @@ import {
   makeLinearTransportError,
   makeLinearValidationError,
 } from '../../fixtures/trackers/linear-responses.ts';
+import { runTrackerConformance } from '../../fixtures/trackers/conformance.ts';
 
 // ─── Test infra ──────────────────────────────────────────────────────────────
 
@@ -556,6 +557,482 @@ await test('claim is atomic when two orchestrators race (20× repeat)', async ()
         .join(',')}`,
     );
   }
+});
+
+// ─── listActiveIssues ────────────────────────────────────────────────────────
+
+await test('listActiveIssues — filters by team + active state types, maps issues', async () => {
+  const issueA = makeIssue({
+    id: 'a',
+    identifier: 'FORGE-1',
+    title: 'one',
+    description: '<!-- forge:task=P0-T01 -->\n<!-- forge:blockedBy=b -->',
+    labels: [LABEL_STATE_IN_REVIEW],
+  });
+  const issueB = makeIssue({ id: 'b', identifier: 'FORGE-2', title: 'two' });
+  let capturedFilter: { teamId: string; stateTypes: readonly string[] } | null = null;
+  const { tracker } = makeTracker({
+    listIssues: async (opts) => {
+      capturedFilter = { teamId: opts.teamId, stateTypes: opts.stateTypes };
+      return [issueA, issueB];
+    },
+  });
+  const result = await tracker.listActiveIssues();
+  assert.equal(result.length, 2);
+  assert.equal(result[0]!.identifier, 'FORGE-1');
+  assert.equal(result[0]!.state, 'in_review'); // overlay label wins
+  assert.equal(result[0]!.forgeTaskId, 'P0-T01');
+  assert.deepEqual(result[0]!.blockerIds, ['b']);
+  assert.equal(capturedFilter!.teamId, 'team-uuid-test');
+  assert.deepEqual(
+    [...capturedFilter!.stateTypes].sort(),
+    ['backlog', 'started', 'triage', 'unstarted'],
+  );
+});
+
+await test('listActiveIssues — warns when limit is hit', async () => {
+  const many: LinearIssueLike[] = Array.from({ length: 200 }, (_, i) =>
+    makeIssue({ id: `i${i}`, identifier: `FORGE-${i}` }),
+  );
+  const { tracker, logger } = makeTracker({
+    listIssues: async () => many,
+  });
+  await tracker.listActiveIssues();
+  const warn = logger.warnings.find((w) => w.event === 'tracker.listActiveIssues');
+  assert.ok(warn, 'expected limit-hit warn-log');
+});
+
+await test('listActiveIssues — normalizes errors with classified code', async () => {
+  const { tracker } = makeTracker({
+    listIssues: async () => {
+      throw makeLinearAuthError();
+    },
+  });
+  await assert.rejects(
+    () => tracker.listActiveIssues(),
+    (err: unknown) => err instanceof TrackerError && err.code === 'AUTH',
+  );
+});
+
+await test('listActiveIssues — retries on transient errors then succeeds', async () => {
+  let attempt = 0;
+  const issue = makeIssue();
+  const { tracker } = makeTracker({
+    listIssues: async () => {
+      attempt++;
+      if (attempt === 1) throw makeLinearTransportError();
+      return [issue];
+    },
+  });
+  // tracker uses { sleep: async () => {} } via makeTracker so retries are instant.
+  const result = await tracker.listActiveIssues();
+  assert.equal(result.length, 1);
+  assert.equal(attempt, 2);
+});
+
+// ─── deriveStateFromLinearIssue / toIssue ────────────────────────────────────
+
+await test('toIssue — terminal completed state maps to done regardless of labels', async () => {
+  const { tracker } = makeTracker({
+    listIssues: async () => [
+      makeIssue({
+        state: { id: 's', name: 'Done', type: 'completed' },
+        labels: [LABEL_STATE_IN_REVIEW], // should be ignored
+      }),
+    ],
+  });
+  const [issue] = await tracker.listActiveIssues();
+  assert.equal(issue!.state, 'done');
+});
+
+await test('toIssue — overlay state:blocked label overrides started workflow type', async () => {
+  const { tracker } = makeTracker({
+    listIssues: async () => [
+      makeIssue({
+        state: { id: 's', name: 'In Progress', type: 'started' },
+        labels: [LABEL_STATE_BLOCKED],
+      }),
+    ],
+  });
+  const [issue] = await tracker.listActiveIssues();
+  assert.equal(issue!.state, 'blocked');
+});
+
+await test('toIssue — no labels, started state → in_progress', async () => {
+  const { tracker } = makeTracker({
+    listIssues: async () => [
+      makeIssue({
+        state: { id: 's', name: 'In Progress', type: 'started' },
+        labels: [],
+      }),
+    ],
+  });
+  const [issue] = await tracker.listActiveIssues();
+  assert.equal(issue!.state, 'in_progress');
+});
+
+// ─── updateState ─────────────────────────────────────────────────────────────
+
+await test('updateState — in_progress sets stateId to started workflow state', async () => {
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'in_progress');
+  assert.equal(captured!.input.stateId, 'state-in-progress');
+});
+
+await test('updateState — in_review keeps stateId=started AND adds state:in-review overlay', async () => {
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const inReviewLabel = { id: 'lbl-ir', name: 'state:in-review' };
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => [inReviewLabel],
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'in_review');
+  assert.equal(captured!.input.stateId, 'state-in-progress');
+  assert.deepEqual([...(captured!.input.addedLabelIds ?? [])], [inReviewLabel.id]);
+});
+
+await test('updateState — done sets stateId to completed workflow state', async () => {
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'done');
+  assert.equal(captured!.input.stateId, 'state-done');
+});
+
+await test('updateState — cancelled sets stateId to canceled workflow state', async () => {
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'cancelled');
+  assert.equal(captured!.input.stateId, 'state-canceled');
+});
+
+await test('updateState — blocked prefers backlog state when present', async () => {
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const blockedLabel = { id: 'lbl-blk', name: 'state:blocked' };
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => [blockedLabel],
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'blocked');
+  assert.equal(captured!.input.stateId, 'state-backlog');
+  assert.deepEqual([...(captured!.input.addedLabelIds ?? [])], [blockedLabel.id]);
+});
+
+await test('updateState — blocked falls back to unstarted when team has no backlog state + warn-log fires', async () => {
+  const statesWithoutBacklog = DEFAULT_WORKFLOW_STATES.filter(
+    (s) => s.type !== 'backlog',
+  );
+  let captured: { id: string; input: LinearUpdateIssueInput } | null = null;
+  const blockedLabel = { id: 'lbl-blk', name: 'state:blocked' };
+  const { tracker, logger } = makeTracker({
+    listWorkflowStates: async () => statesWithoutBacklog,
+    listIssueLabels: async () => [blockedLabel],
+    updateIssue: async (id, input) => {
+      captured = { id, input };
+      return makeIssue();
+    },
+  });
+  await tracker.updateState('issue-1', 'blocked');
+  assert.equal(captured!.input.stateId, 'state-todo'); // unstarted = "Todo" in fixtures
+  const fallbackWarn = logger.warnings.find(
+    (w) => w.event === 'tracker.updateState.fallback',
+  );
+  assert.ok(fallbackWarn, 'expected fallback warn-log');
+});
+
+await test('updateState — PRECONDITION_FAILED when team has no state matching forge state', async () => {
+  const onlyTriage = DEFAULT_WORKFLOW_STATES.filter((s) => s.type === 'triage');
+  const { tracker } = makeTracker({
+    listWorkflowStates: async () => onlyTriage,
+  });
+  await assert.rejects(
+    () => tracker.updateState('issue-1', 'in_progress'),
+    (err: unknown) =>
+      err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
+  );
+});
+
+// ─── Round-trip: forgeTaskId + state + blockerIds (AC bullet 3) ──────────────
+
+await test('round-trip: footer-encoded fields survive list → toIssue parse', async () => {
+  const raw = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-99',
+    description:
+      'real body content\n\n<!-- forge:task=P2-T03 -->\n<!-- forge:blockedBy=blocker-uuid-1,blocker-uuid-2 -->',
+    state: { id: 's', name: 'In Progress', type: 'started' },
+    labels: [],
+  });
+  const { tracker } = makeTracker({
+    listIssues: async () => [raw],
+  });
+  const [issue] = await tracker.listActiveIssues();
+  assert.equal(issue!.forgeTaskId, 'P2-T03');
+  assert.deepEqual(issue!.blockerIds, ['blocker-uuid-1', 'blocker-uuid-2']);
+  assert.equal(issue!.state, 'in_progress');
+  assert.equal(issue!.identifier, 'FORGE-99');
+});
+
+// ─── createProject ───────────────────────────────────────────────────────────
+
+await test('createProject — happy path returns {id, url} and precreates overlay labels', async () => {
+  let captured: LinearCreateProjectInput | null = null;
+  const createdLabels: string[] = [];
+  const { tracker } = makeTracker({
+    createProject: async (input) => {
+      captured = input;
+      return { id: 'proj-1', url: 'https://linear.app/p/1' };
+    },
+    listIssueLabels: async () => [],
+    createIssueLabel: async ({ name }) => {
+      createdLabels.push(name);
+      return { id: `lbl-${name}`, name };
+    },
+  });
+  const result = await tracker.createProject('Phase 2', 'Core features');
+  assert.deepEqual(result, { id: 'proj-1', url: 'https://linear.app/p/1' });
+  assert.equal(captured!.teamId, 'team-uuid-test');
+  assert.equal(captured!.name, 'Phase 2');
+  assert.equal(captured!.description, 'Core features');
+  // Both overlay labels were precreated.
+  assert.deepEqual([...createdLabels].sort(), ['state:blocked', 'state:in-review']);
+});
+
+await test('createProject — overlay precreate failure does not fail createProject', async () => {
+  const { tracker, logger } = makeTracker({
+    createProject: async () => ({ id: 'p', url: 'u' }),
+    listIssueLabels: async () => {
+      throw makeLinearTransportError();
+    },
+    createIssueLabel: async () => {
+      throw makeLinearTransportError();
+    },
+  });
+  const result = await tracker.createProject('x');
+  assert.deepEqual(result, { id: 'p', url: 'u' });
+  const warn = logger.warnings.find(
+    (w) =>
+      w.event === 'tracker.createProject.overlayPrecreateFailed' ||
+      w.event === 'tracker.updateState.overlayAddSkipped' ||
+      w.event === 'tracker.ensureLabel.listFailed',
+  );
+  assert.ok(warn, 'expected a warn-log for the precreate failure');
+});
+
+// ─── createIssue ─────────────────────────────────────────────────────────────
+
+await test('createIssue — writes forge:task + forge:ownerType footers and returns mapped Issue', async () => {
+  let captured: LinearCreateIssueInput | null = null;
+  const created = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-42',
+    title: 'New issue',
+  });
+  const { tracker } = makeTracker({
+    createIssue: async (input) => {
+      captured = input;
+      return { ...created, description: input.description };
+    },
+  });
+  const issue = await tracker.createIssue({
+    title: 'New issue',
+    body: 'hello world',
+    forgeTaskId: 'P2-T03',
+    ownerType: 'backend-dev',
+    acceptance: [],
+    dependsOn: [],
+  });
+  assert.equal(issue.identifier, 'FORGE-42');
+  assert.match(captured!.description, /<!-- forge:task=P2-T03 -->/);
+  assert.match(captured!.description, /<!-- forge:ownerType=backend-dev -->/);
+});
+
+await test('createIssue — rejects empty payload.title', async () => {
+  const { tracker } = makeTracker({});
+  await assert.rejects(
+    () =>
+      tracker.createIssue({
+        title: '',
+        body: 'x',
+        forgeTaskId: 'P0-T01',
+        ownerType: 'backend-dev',
+        acceptance: [],
+        dependsOn: [],
+      }),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});
+
+// ─── setBlockedBy ────────────────────────────────────────────────────────────
+
+await test('setBlockedBy — writes footer AND creates native blocks relation', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-1',
+    description: 'body\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  let updateInput: LinearUpdateIssueInput | null = null;
+  let relationInput: { issueId: string; relatedIssueId: string; type: 'blocks' } | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      updateInput = input;
+      return issue;
+    },
+    createIssueRelation: async (input) => {
+      relationInput = input;
+    },
+  });
+  await tracker.setBlockedBy('i1', 'blocker-uuid-1');
+  assert.match(updateInput!.description ?? '', /<!-- forge:blockedBy=blocker-uuid-1 -->/);
+  assert.deepEqual(relationInput, {
+    issueId: 'i1',
+    relatedIssueId: 'blocker-uuid-1',
+    type: 'blocks',
+  });
+});
+
+await test('setBlockedBy — idempotent dedup: existing blockerId returns without SDK calls', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    description:
+      'body\n\n<!-- forge:task=P2-T03 -->\n<!-- forge:blockedBy=existing-blocker -->\n',
+  });
+  let updateCalled = false;
+  let relationCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async () => {
+      updateCalled = true;
+      return issue;
+    },
+    createIssueRelation: async () => {
+      relationCalled = true;
+    },
+  });
+  await tracker.setBlockedBy('i1', 'existing-blocker');
+  assert.equal(updateCalled, false);
+  assert.equal(relationCalled, false);
+});
+
+await test('setBlockedBy — CONFLICT on relation create is swallowed (idempotent)', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    description: 'body\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async () => issue,
+    createIssueRelation: async () => {
+      throw makeLinearConflictError('relation already exists');
+    },
+  });
+  // Must not throw — already-exists is the idempotent case.
+  await tracker.setBlockedBy('i1', 'blocker-uuid-1');
+});
+
+await test('setBlockedBy — PRECONDITION_FAILED when issue has no forge:task footer', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-99',
+    description: 'non-forge issue body',
+  });
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+  });
+  await assert.rejects(
+    () => tracker.setBlockedBy('i1', 'blocker-uuid-1'),
+    (err: unknown) =>
+      err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
+  );
+});
+
+// ─── Tracker interface conformance (AC bullet 1) ─────────────────────────────
+
+await test('LinearTracker passes the shared Tracker conformance suite', async () => {
+  const seed = makeIssue({
+    id: 'conf-issue',
+    identifier: 'FORGE-CONF',
+    description: 'seed body\n\n<!-- forge:task=P0-T01 -->\n',
+  });
+  const server = new MockServerState([seed]);
+
+  // Happy-path SDK responding to all 9 methods used by the conformance suite.
+  const sdk: LinearSdkLike = {
+    viewer: async () => ({ id: 'u', email: 'u@x' }),
+    issue: async (id) => server.getIssue(id),
+    listIssues: async () => server.listIssues(),
+    createIssue: async (input) => {
+      const created = makeIssue({
+        id: 'created-1',
+        identifier: 'FORGE-CREATED',
+        title: input.title,
+        description: input.description,
+      });
+      server.setIssue(created);
+      return created;
+    },
+    updateIssue: async (id, input) => {
+      if (input.addedLabelIds) {
+        for (const lid of input.addedLabelIds) {
+          const l = server.labelById(lid);
+          if (l) server.addLabel(id, l.name);
+        }
+      }
+      if (input.removedLabelIds) {
+        for (const lid of input.removedLabelIds) server.removeLabel(id, lid);
+      }
+      return server.getIssue(id);
+    },
+    createComment: async () => {},
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => server.allLabels(),
+    createIssueLabel: async ({ name }) => server.ensureLabel(name),
+    createProject: async () => ({
+      id: 'project-conf',
+      url: 'https://linear.app/p/conf',
+    }),
+    createIssueRelation: async () => {},
+  };
+
+  const tracker = new LinearTracker(linearConfig, noopLogger(), {
+    client: sdk,
+    retry: { sleep: async () => {} },
+  });
+  // Seed a blocker issue so setBlockedBy doesn't conflict.
+  server.setIssue(makeIssue({ id: 'blocker-1', identifier: 'FORGE-BLK' }));
+
+  await runTrackerConformance(tracker, {
+    existingIssueId: 'conf-issue',
+    blockerId: 'blocker-1',
+    agentId: 'agent-conformance',
+  });
 });
 
 // Module-level marker: unused imports kept for future test additions.
