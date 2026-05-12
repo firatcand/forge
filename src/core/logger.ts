@@ -1,6 +1,11 @@
-import chalk from 'chalk';
+import chalkImport from 'chalk';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+
+// tsdown/rolldown's CJS interop double-wraps chalk v5 (pure ESM): `chalkImport.default`
+// ends up pointing at the namespace, not the function. Bypass the rewrite-on-import
+// by aliasing through a local const — rolldown only rewrites the original binding name.
+const chalk = ((chalkImport as unknown as { default?: typeof chalkImport }).default ?? chalkImport);
 
 export type StepStatus = 'pending' | 'running' | 'pass' | 'fail' | 'skip' | 'ok' | 'warn';
 
