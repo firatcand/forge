@@ -22,18 +22,39 @@ export type {
 } from './base.ts';
 
 export {
+  parseForgeFooters,
+  serializeWithForgeFooters,
+} from './footers.ts';
+export type { ForgeFooters } from './footers.ts';
+
+export {
   GH_LIST_LIMIT,
   GitHubTracker,
   classifyGitHubError,
-  parseForgeFooters,
-  serializeWithForgeFooters,
 } from './github.ts';
 export type {
   GhExec,
   GhExecResult,
   GitHubTrackerOptions,
-  ForgeFooters,
 } from './github.ts';
+
+export {
+  LINEAR_LIST_LIMIT,
+  LinearTracker,
+  classifyLinearError,
+  wrapLinearClient,
+} from './linear.ts';
+export type {
+  LinearIssueLike,
+  LinearWorkflowStateLike,
+  LinearLabelLike,
+  LinearCreateIssueInput,
+  LinearUpdateIssueInput,
+  LinearCreateProjectInput,
+  LinearSdkLike,
+  LinearStateType,
+  LinearTrackerOptions,
+} from './linear.ts';
 
 export {
   CLAIM_SETTLE_MS,

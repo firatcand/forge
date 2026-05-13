@@ -6,9 +6,9 @@ Forge supports three trackers as the durable task system, chosen per project in 
 
 | Tracker | `tracker.type` | Adapter | Status |
 |---|---|---|---|
-| [Linear](./linear.md) | `linear` | Linear MCP (TS adapter forthcoming in FORGE-16) | Used in dogfood; full deep-dive in `linear.md` |
+| [Linear](./linear.md) | `linear` | `LinearTracker` via `@linear/sdk` (`src/trackers/linear.ts`, shipped in FORGE-16) | Code adapter live; full deep-dive in [`docs/adapters/linear.md`](../adapters/linear.md) |
 | [GitHub](./github.md) | `github` | `GitHubTracker` via `gh` CLI (`src/trackers/github.ts`, shipped in FORGE-15) | Code adapter live; deep-dive doc coming |
-| [Notion](./notion.md) | `notion` | Notion MCP (TS adapter forthcoming in FORGE-17) | MCP-only until adapter lands |
+| [Notion](./notion.md) | `notion` | `NotionTracker` via Notion MCP server (`src/trackers/notion.ts`, shipped in FORGE-17) | Code adapter live; see [`docs/adapters/notion.md`](../adapters/notion.md) |
 
 All three speak the same `Tracker` interface (`src/trackers/base.ts`) — `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`.
 

@@ -51,6 +51,57 @@ Each test cleans up its fixture issues via `gh api repos/{repo}/issues/{n} --met
 - The negative `healthCheck` case (expired auth) is **not** tested automatically — it would require corrupting the user's `gh` auth state. Verified manually instead.
 - Tests assume the fixture repo allows label creation; first run will create `claimed:agent-*` and `state:*` labels permanently.
 
+---
+
+## Linear adapter (`trackers/linear.test.ts`)
+
+Tests the full LinearTracker lifecycle against a real Linear workspace via `@linear/sdk`.
+
+### Prerequisites
+
+1. A **throwaway Linear team** — tests create issues, projects, and labels. The issues are archived (not hard-deleted; Linear has no hard-delete API exposed) so don't point at a real team.
+2. A **Linear Personal API Key** with access to that team. Mint at [linear.app/settings/account/security](https://linear.app/settings/account/security).
+3. The team UUID. Query via Linear's API playground:
+   ```graphql
+   query { team(id: "YOUR-TEAM-KEY") { id name } }
+   ```
+   or via the SDK.
+
+### Run
+
+```bash
+FORGE_E2E_LINEAR=1 \
+FORGE_E2E_LINEAR_TEAM_ID=<team-uuid> \
+LINEAR_API_KEY=lin_api_xxxxx \
+npm test
+```
+
+Without `FORGE_E2E_LINEAR=1` the Linear integration tests are skipped.
+
+### What's tested
+
+| Test | What it verifies |
+|---|---|
+| `full lifecycle` | `healthCheck` → `createProject` → `createIssue` (with footer) → `listActiveIssues` (round-trips footer + state) → `claim` → `updateState('in_progress')` → `updateState('in_review')` (overlay label) → `comment` → `releaseClaim` → `updateState('done')` |
+| `concurrent claim` | Two parallel `claim` calls on the same fresh issue produce exactly one winner; the other gets `already_claimed` or `state_changed` |
+| `setBlockedBy` round-trip | `setBlockedBy(B, A)` writes the footer AND creates the native `IssueRelation(type:'blocks')`. `listActiveIssues` round-trips `blockerIds: [A.id]`. Second call is idempotent (no duplicate footer entries). |
+
+Issues are archived in `finally` blocks via `client.archiveIssue(id)`. Manual cleanup of archived issues is usually unnecessary — Linear's UI filters them out by default — but if you want to purge: open team settings → Archive → bulk delete.
+
+### Cost / runtime
+
+- ~12 Linear GraphQL calls per run across the three tests.
+- Typical wall time: **<20 seconds** on a healthy connection.
+- Labels (`claimed:agent-*`, `state:in-review`, `state:blocked`) created on first run persist in the team.
+
+### Limitations
+
+- The negative `healthCheck` case (invalid API key) is **not** tested automatically — would require corrupting the env mid-run. Verified manually with a known-bad key.
+- Tests assume the throwaway team has at least one `unstarted`, `started`, and `completed` workflow state. Linear's defaults satisfy this.
+- The race test (`concurrent claim`) is non-deterministic by nature — under high Linear API latency, Linear may serialize the two requests and the race never actually occurs. The unit-test race coverage (20× Promise.all with shared mock state) is the deterministic primary; this integration test verifies the contract holds against the real API at least once.
+
+---
+
 ## Notion adapter (`trackers/notion.test.ts`)
 
 Tests the full NotionTracker lifecycle against a real Notion database via the official Notion MCP server (`@notionhq/notion-mcp-server`).
