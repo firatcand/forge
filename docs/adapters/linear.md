@@ -2,7 +2,7 @@
 
 Implements the `Tracker` interface (`src/trackers/base.ts`) against Linear's GraphQL API via the official [`@linear/sdk`](https://www.npmjs.com/package/@linear/sdk). Used at orchestrator runtime when `tracker.type: linear` in `.forge/settings.yaml`.
 
-> **Not to be confused with**: the user-facing `/push-to-linear` skill inside Claude Code. That skill talks to Linear's [MCP server](https://linear.app/docs/mcp). The orchestrator (Node CLI) talks to Linear's GraphQL API directly via the SDK. See [Why SDK vs MCP](#why-sdk-not-mcp).
+> **Not to be confused with**: the user-facing `/push-to-tracker` skill inside Claude Code (Linear backend path). That skill talks to Linear's [MCP server](https://linear.app/docs/mcp). The orchestrator (Node CLI) talks to Linear's GraphQL API directly via the SDK. See [Why SDK vs MCP](#why-sdk-not-mcp).
 
 ---
 
@@ -105,7 +105,7 @@ If you delete a forge-managed issue's description and lose the footer, forge can
 
 ## Why SDK, not MCP
 
-A common question: forge ships with `/push-to-linear` (a Claude Code skill that calls Linear's MCP server). Why doesn't the orchestrator use the same MCP server?
+A common question: forge ships with `/push-to-tracker` (a Claude Code skill whose Linear backend path calls Linear's MCP server). Why doesn't the orchestrator use the same MCP server?
 
 Answer: **MCP is a protocol designed for LLMs to invoke tools**. The orchestrator is not an LLM — it's a Node CLI dispatcher. Specifically:
 
@@ -164,4 +164,4 @@ Linear enforces per-key API quotas. The adapter respects `Retry-After` headers a
 - Unit tests: `test/unit/trackers/linear.test.ts`
 - Conformance suite: `test/fixtures/trackers/conformance.ts`
 - Integration test (gated): `test/integration/trackers/linear.test.ts` — requires `FORGE_E2E_LINEAR=1`, `FORGE_E2E_LINEAR_TEAM_ID`, `LINEAR_API_KEY`
-- Sibling adapters: `src/trackers/github.ts`, `src/trackers/notion.ts` (FORGE-17, planned)
+- Sibling adapters: `src/trackers/github.ts` (FORGE-15), `src/trackers/notion.ts` (FORGE-17)

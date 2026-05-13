@@ -44,4 +44,4 @@ Delegate to the `product-decomposer` subagent.
 
 Show YAML to user, ask for one round of edits. Then write to `plans/phases.yaml`.
 
-Print: "phases.yaml written. /push-to-linear unlocked. Gate 4 — review the breakdown."
+Print: "phases.yaml written. /push-to-tracker unlocked. Gate 4 — review the breakdown."

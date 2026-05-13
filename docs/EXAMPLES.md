@@ -42,7 +42,7 @@ A solo-founder CLI for logging time across projects. Local SQLite, no network, n
 ✓ Repo wired: https://github.com/firatcand/time-logger
 ```
 
-### What `/push-to-linear` would output
+### What `/push-to-tracker` would output (Linear-configured project)
 
 ```
 ✓ Linear MCP server registered
@@ -67,7 +67,7 @@ Manual step required:
   3. Map to project: time-logger
   4. Enable: branch-name auto-link, PR-status sync
 
-✓ phases.yaml updated with linear_project_id and per-task linear_id
+✓ phases.yaml updated with tracker_project_id and per-task tracker_issue_id (plus legacy linear_* aliases through v0.3.x)
 ```
 
 ### Walking the lifecycle
@@ -83,7 +83,7 @@ cp ~/.forge/examples/time-logger/plans/phases.yaml plans/
 claude
 > /ingest-spec        # validates the spec we copied in
 > /setup-repo         # wires up GitHub
-> /push-to-linear     # creates Linear cycles + issues (or prints import manifest)
+> /push-to-tracker    # creates tracker project + issues (Linear cycles, GH milestone, or Notion db row per tracker.type)
 > /pickup-task        # claims TLOG-101, creates worktree
 ```
 

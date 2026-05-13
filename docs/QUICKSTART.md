@@ -52,7 +52,7 @@ In Claude Code:
 > /ingest-spec    # validation pass
 > /decompose      # phases.yaml generated
 > /setup-repo     # GitHub wired
-> /push-to-linear # Linear wired
+> /push-to-tracker # tracker wired (linear / github / notion per .forge/settings.yaml)
 > /pickup-task    # first task ready
 ```
 

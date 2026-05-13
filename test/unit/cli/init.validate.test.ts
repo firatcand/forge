@@ -167,15 +167,27 @@ test('validateTooling: github tracker probes gh auth status', async () => {
 test('validateTooling: notion tracker probes notion in mcp list', async () => {
   const cwd = tmp();
   writeFileSync(join(cwd, '.env.local'), '');
+  // Notion probe now verifies the configured mcp_command's executable is on
+  // PATH (forge spawns its own MCP server) — it does NOT probe
+  // `claude mcp list`.
   const exec = mockExec({
     'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
     'claude --version': { exitCode: 0 },
     'codex --version': { exitCode: 0 },
-    'claude mcp list': { exitCode: 0, stdout: 'NOTION mcp' },
+    'npx --version': { exitCode: 0, stdout: '10.8.2' },
   });
-  const answers = baseAnswers({ tracker: { type: 'notion', config: { database_id: 'db' } } });
+  const answers = baseAnswers({
+    tracker: {
+      type: 'notion',
+      config: {
+        database_id: 'db',
+        mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
+        mcp_env: {},
+      },
+    },
+  });
   const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
-  const probe = report.results.find((r) => r.key === 'notion_mcp');
+  const probe = report.results.find((r) => r.key === 'notion_mcp_command');
   assert.equal(probe?.status, 'pass');
 });
 

@@ -97,7 +97,7 @@ Phase 2 unblocks: FD-14 and FD-18 have no dependencies; FD-15/16/17/23 are eligi
 | P2-T02 GitHubTracker via gh CLI | FD-15 | After FD-14 | |
 | P2-T03 LinearTracker via MCP | FD-16 | After FD-14 | |
 | P2-T04 MotionTracker via REST | FD-17 | After FD-14 | |
-| P2-T10 Rename /push-to-linear → /push-to-tracker | FD-23 | After FD-14 | |
+| P2-T10 Rename /push-to-linear → /push-to-tracker | FORGE-23 | After FD-14 | Shipped — markdown rename + dual-write phases.yaml keys |
 | P2-T06 Init flow CLI | FD-19 | After FD-9 (DONE), FD-11 (DONE), FD-14 | Unblocks once FD-14 ships |
 | P2-T07 Orchestrator dispatcher | FD-20 | After FD-9/10/11/13 (all DONE), FD-14 | Unblocks once FD-14 ships; split into 7a/7b/7c |
 | P2-T08 Orchestrator worker (subprocess + phase machine) | FD-21 | After FD-20 | Split into 8a/8b/8c |
