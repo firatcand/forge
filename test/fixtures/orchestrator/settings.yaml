@@ -1,0 +1,20 @@
+version: 1
+project:
+  name: orchestrator-fixture
+  description: Settings used by FORGE-20/21/31/32/22 test suites
+tracker:
+  type: github
+  config:
+    repo: firatcand/forge-fixture
+secrets:
+  manager: env_file
+  env_file_path: ./.env.local
+agents:
+  max_concurrent: 2
+  retry_attempts: 3
+  retry_backoff_ms_max: 60000
+  poll_interval_ms: 1000
+  worktree_root: ./.forge/worktrees
+  on_persistent_failure: notify
+  primary_host_cli: claude
+  review_host_cli: codex

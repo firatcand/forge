@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "question_id": "0190000000000000bad",
+  "run_id": "0190000000000000r1",
+  "task_id": "FIX-2",
+  "agent_id": "agent-a",
+  "decision_key": "should-not-parse",
+  "attempt": 1,
+  "max_attempts": 3,
+  "created_at": "2026-05-13T14:00:00.000Z",
+  "expires_at": "2026-05-13T14:30:00.000Z",
+  "status": "open",
+  "question": "This question has no options — readers must reject.",
+  "context": "Exercises the untrusted-input rejection path.",
+  "options": [],
+  "classification": {
+    "decision_type": "architectural",
+    "category": "other",
+    "reversibility": "low",
+    "blast_radius": "local",
+    "default_action": "ask",
+    "reason": "test fixture"
+  }
+}

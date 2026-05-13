@@ -33,3 +33,27 @@ export type {
   Estimate,
   PhaseStatus,
 } from './phases.ts';
+
+export {
+  QuestionSchema,
+  QuestionSchemaWithRecommendationCheck,
+  AnswerSchema,
+  DecisionClassificationSchema,
+  QuestionOptionSchema,
+  QUESTION_STATUSES,
+  DECISION_CATEGORIES,
+  DECISION_TYPES,
+  REVERSIBILITIES,
+  BLAST_RADII,
+  DEFAULT_ACTIONS,
+  QUESTION_FILE_MAX_BYTES,
+} from './questions.ts';
+export type {
+  Question,
+  Answer,
+  DecisionClassification,
+  QuestionOption,
+  QuestionStatus,
+  DecisionType,
+  DecisionCategory,
+} from './questions.ts';
