@@ -1,9 +1,6 @@
 project: "{{PROJECT_NAME}}"
-tracker_project_id: ""   # populated by /push-to-tracker (canonical)
-tracker_url: ""          # populated by /push-to-tracker (canonical)
-linear_project_id: ""    # populated by /push-to-tracker when tracker.type=linear (legacy, removed in v0.4.0)
-linear_team_id: ""       # populated by /push-to-tracker when tracker.type=linear (legacy, removed in v0.4.0)
-github_repo: ""          # populated by /setup-repo
+tracker_project_id: ""   # populated by /push-to-tracker
+tracker_url: ""          # populated by /push-to-tracker
 gate_check_command: "npm run e2e && npm run typecheck && npm run lint"
 
 phases:
@@ -12,13 +9,12 @@ phases:
     status: active
     goal: "Working skeleton end-to-end with seed data"
     gate_criteria:
-      - "All P0 + P1 tasks closed in Linear"
+      - "All P0 + P1 tasks closed in the tracker"
       - "Dev deploy succeeds"
       - "No P0 bugs open"
     tasks:
       - id: P1-T01
-        tracker_issue_id: ""  # populated by /push-to-tracker (canonical)
-        linear_id: ""         # populated by /push-to-tracker when tracker.type=linear (legacy, removed in v0.4.0)
+        tracker_issue_id: ""  # populated by /push-to-tracker
         title: ""
         description: ""
         type: foundation

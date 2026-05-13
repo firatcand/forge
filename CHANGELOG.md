@@ -10,9 +10,13 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 - **`tracker-syncer` subagent** — replaces `linear-syncer`. Documents per-tracker dispatch (Linear MCP / `GitHubTracker` / Notion MCP) over the shared `Tracker` interface from FORGE-14.
 - **`docs/trackers/` directory** — split out the Linear deep-dive (now `docs/trackers/linear.md`) and added an index `README.md` plus short stubs for `github.md` and `notion.md`.
 
+### Removed
+
+- **Legacy `linear_*` keys in `plans/phases.yaml`** — `linear_project_id`, `linear_team_id`, per-phase `linear_milestone_id`, per-task `linear_id`, and top-level `github_repo` are gone from the schema. The canonical tracker-agnostic keys (`tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`) are now the only supported names. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives only in `.forge/settings.yaml::tracker.config`, no longer duplicated into `phases.yaml`. Originally scheduled for v0.4.0; accelerated because there are no external adopters with stored legacy keys.
+
 ### Deprecated
 
-- **`/push-to-linear`** is now an alias for `/push-to-tracker` and prints a deprecation warning before forwarding. The alias and the legacy `linear_project_id` / `linear_team_id` / per-task `linear_id` dual-write keys are scheduled for removal in **v0.4.0**. While `tracker.type === 'linear'`, `/push-to-tracker` writes both the canonical `tracker_*` keys and the legacy `linear_*` keys for compatibility.
+- **`/push-to-linear`** is now an alias for `/push-to-tracker` and prints a deprecation warning before forwarding.
 
 ### Changed
 
@@ -20,7 +24,7 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 - **`/pickup-task`** — step 1 reads "Query the configured tracker (via Tracker interface)" instead of "Query Linear (via MCP)". Behavior unchanged for v0.3.x (still uses Linear MCP today); full behavioral generalization is a follow-up once FORGE-16/17 adapters land.
 - **`/decompose`** — final-print message updated from `/push-to-linear unlocked` to `/push-to-tracker unlocked`.
 - **`docs/LINEAR-INTEGRATION.md`** → **`docs/trackers/linear.md`** (verbatim move; old path deleted). Internal links updated.
-- **`templates/phases.template.yaml`** and **`examples/time-logger/plans/phases.yaml`** — comments now mention `/push-to-tracker` and include canonical `tracker_project_id` / `tracker_issue_id` slots alongside the legacy `linear_*` slots (also populated when `tracker.type === 'linear'`).
+- **`templates/phases.template.yaml`** and **`examples/time-logger/plans/phases.yaml`** — now use only the canonical `tracker_*` keys.
 
 ### Notes
 

@@ -418,16 +418,15 @@ test('component schemas — PhaseSchema and TaskSchema exported separately', () 
   assert.equal(taskOk.success, true);
 });
 
-test('FORGE-23 — TaskSchema accepts tracker_issue_id (canonical) alongside linear_id (legacy)', () => {
-  const task = baseTask({ linear_id: 'FORGE-23', tracker_issue_id: 'gh#42' });
+test('TaskSchema accepts tracker_issue_id', () => {
+  const task = baseTask({ tracker_issue_id: 'gh#42' });
   const result = TaskSchema.safeParse(task);
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.linear_id, 'FORGE-23');
   assert.equal(result.data.tracker_issue_id, 'gh#42');
 });
 
-test('FORGE-23 — PhasesSchema accepts tracker_project_id and tracker_url (canonical)', () => {
+test('PhasesSchema accepts tracker_project_id and tracker_url', () => {
   const data = {
     ...basePhases(),
     tracker_project_id: 'proj_abc',
@@ -440,18 +439,18 @@ test('FORGE-23 — PhasesSchema accepts tracker_project_id and tracker_url (cano
   assert.equal(result.data.tracker_url, 'https://github.com/org/repo');
 });
 
-test('FORGE-23 — dual-write roundtrip: legacy linear_* and canonical tracker_* both survive', () => {
-  const data = {
-    ...basePhases({ linear_id: 'FORGE-23', tracker_issue_id: 'FORGE-23' }),
-    linear_project_id: 'lin_proj_1',
-    tracker_project_id: 'lin_proj_1',
-    tracker_url: 'https://linear.app/team/project/proj_1',
+test('PhaseSchema accepts tracker_milestone_id', () => {
+  const phase = {
+    id: 'phase-1',
+    tracker_milestone_id: 'milestone-uuid',
+    name: 'Phase',
+    status: 'active',
+    goal: 'g',
+    gate_criteria: ['g1'],
+    tasks: [baseTask()],
   };
-  const result = PhasesSchema.safeParse(data);
+  const result = PhaseSchema.safeParse(phase);
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.linear_project_id, 'lin_proj_1');
-  assert.equal(result.data.tracker_project_id, 'lin_proj_1');
-  assert.equal(result.data.phases[0]!.tasks[0]!.linear_id, 'FORGE-23');
-  assert.equal(result.data.phases[0]!.tasks[0]!.tracker_issue_id, 'FORGE-23');
+  assert.equal(result.data.tracker_milestone_id, 'milestone-uuid');
 });

@@ -1,9 +1,6 @@
 project: "time-logger"
 tracker_project_id: ""   # populated by /push-to-tracker (canonical)
 tracker_url: ""          # populated by /push-to-tracker (canonical)
-linear_project_id: ""    # populated by /push-to-tracker when tracker.type=linear (legacy, removed in v0.4.0)
-linear_team_id: ""       # populated by /push-to-tracker when tracker.type=linear (legacy, removed in v0.4.0)
-github_repo: ""          # populated by /setup-repo
 gate_check_command: "npm run typecheck && npm run lint && npm test"
 
 phases:
@@ -17,7 +14,7 @@ phases:
       - "CI green on `main` branch"
     tasks:
       - id: P1-T01
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Bootstrap Node + TypeScript project"
         description: "package.json, tsconfig.json, vitest config, prettier, eslint. CLI entry point at src/cli.ts wired through commander with a `tl --help` printable."
         type: foundation
@@ -31,7 +28,7 @@ phases:
           - "`./bin/tl --help` prints usage"
 
       - id: P1-T02
-        linear_id: ""
+        tracker_issue_id: ""
         title: "SQLite schema + migration runner"
         description: "Create migrations/0001_init.sql with projects + entries tables. Implement a tiny migration runner that applies pending migrations on first DB open."
         type: data
@@ -45,7 +42,7 @@ phases:
           - "Idempotent — re-running CLI doesn't re-apply"
 
       - id: P1-T03
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Implement `tl init <project>` command"
         description: "Register a new project name. Validate the name (alphanumeric + dashes, 1–32 chars). Prevent duplicates."
         type: backend
@@ -59,7 +56,7 @@ phases:
           - "Rejects duplicate project names"
 
       - id: P1-T04
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Implement `tl <project> [note]` happy path"
         description: "Close any open entry, insert new entry, print confirmation. Transaction-safe."
         type: backend
@@ -74,7 +71,7 @@ phases:
           - "Errors if project not registered"
 
       - id: P1-T05
-        linear_id: ""
+        tracker_issue_id: ""
         title: "GitHub Actions CI workflow"
         description: "Run typecheck + lint + test on every PR to dev. Fail on any of them."
         type: infra
@@ -98,7 +95,7 @@ phases:
       - "Tab completion installed and working in both shells"
     tasks:
       - id: P2-T01
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Implement `tl status`"
         description: "Print the current open entry or exit 1 if none. Format: `Working on <project>: \"<note>\" (started HH:MM, elapsed Xh Ym)`."
         type: backend
@@ -111,7 +108,7 @@ phases:
           - "Exit 1 silently when no open entry (for shell prompt use)"
 
       - id: P2-T02
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Implement `tl report` (last 7 days)"
         description: "Aggregate entries by project, format as table with hours + percentages + last note."
         type: backend
@@ -127,7 +124,7 @@ phases:
           - "Plain text output when stdout is not a TTY or NO_COLOR set"
 
       - id: P2-T03
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Add `--week N` flag to `tl report`"
         description: "Allow `tl report --week 2` for two weeks back. Validate N as positive integer."
         type: backend
@@ -141,7 +138,7 @@ phases:
           - "Window: ((N-1)*7) to (N*7) days back from today"
 
       - id: P2-T04
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Implement special `tl off` command"
         description: "Close any open entry without opening a new one. Print day total."
         type: backend
@@ -155,7 +152,7 @@ phases:
           - "No-op + exit 0 if no open entry"
 
       - id: P2-T05
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Tab completion for zsh and bash"
         description: "Generate completion scripts. Provide `tl install-completion` to write them to the right place after confirmation."
         type: integration
@@ -169,7 +166,7 @@ phases:
           - "Never modifies rc files without `--yes` or interactive confirmation"
 
       - id: P2-T06
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Open-entry recovery prompt"
         description: "If an open entry exists from >12h ago, confirm before auto-closing on next `tl <project>`."
         type: backend
@@ -193,7 +190,7 @@ phases:
       - "Binary works from a fresh `npm install -g time-logger` on macOS and Ubuntu"
     tasks:
       - id: P3-T01
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Write README with screencast"
         description: "Hero example, install commands for npm/pnpm, 5-minute getting started, FAQ section, link to forge as the framework used to build it."
         type: content
@@ -208,7 +205,7 @@ phases:
           - "60-second screencast embedded (asciinema or terminalizer)"
 
       - id: P3-T02
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Publish to npm"
         description: "Set up `prepublishOnly` build, configure `bin` field, dry-run with `npm pack`, publish v0.1.0."
         type: infra
@@ -222,7 +219,7 @@ phases:
           - "v0.1.0 published to npm"
 
       - id: P3-T03
-        linear_id: ""
+        tracker_issue_id: ""
         title: "Verify install on macOS and Ubuntu"
         description: "On a fresh VM (macOS via DevContainer, Ubuntu via Docker), install via npm globally, walk through quickstart, log issues."
         type: integration

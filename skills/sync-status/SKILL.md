@@ -7,7 +7,7 @@ subagent: tracker-syncer
 
 # /sync-status
 
-Read `plans/phases.yaml` and `.forge/settings.yaml`. For each task with a `tracker_issue_id` (or legacy `linear_id`), query the configured tracker for current status. Update `phases.yaml` task status fields if drifted.
+Read `plans/phases.yaml` and `.forge/settings.yaml`. For each task with a `tracker_issue_id`, query the configured tracker for current status. Update `phases.yaml` task status fields if drifted.
 
 Report any divergence to user (e.g., "TLOG-103 closed in tracker but local says Todo").
 

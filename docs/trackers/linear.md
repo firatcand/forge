@@ -128,16 +128,12 @@ Backlog ──→ Todo ──→ In Progress ──→ In Review ──→ Done
 
 After `/push-to-tracker` succeeds, `phases.yaml` gains:
 
-- `tracker_project_id` (top-level, canonical)
-- `tracker_url` (top-level, canonical)
-- per-task `tracker_issue_id` (canonical)
+- `tracker_project_id` (top-level)
+- `tracker_url` (top-level)
+- per-phase `tracker_milestone_id`
+- per-task `tracker_issue_id`
 
-When `tracker.type === 'linear'`, the skill also dual-writes the legacy keys for v0.3.x compatibility (removed in v0.4.0):
-
-- `linear_project_id`, `linear_team_id` (top-level)
-- per-task `linear_id`
-
-These IDs let `/sync-status` and `/pickup-task` query the right resources.
+The Linear `team_id` lives in `.forge/settings.yaml` under `tracker.config.team_id` — not duplicated into `phases.yaml`. These IDs let `/sync-status` and `/pickup-task` query the right resources.
 
 ---
 
@@ -167,11 +163,13 @@ claude mcp add linear --command "npx -y @linear/mcp-server"
 
 ### "Linear team has multiple workspaces — pick one"
 
-The `tracker-syncer` Confusion Protocol fired because your Linear account has multiple teams. Pick explicitly:
+The `tracker-syncer` Confusion Protocol fired because your Linear account has multiple teams. Pick explicitly in `.forge/settings.yaml`:
 
 ```yaml
-# In phases.yaml top-level:
-linear_team_id: "<paste-team-id-here>"
+tracker:
+  type: linear
+  config:
+    team_id: "<paste-team-uuid-here>"
 ```
 
 Then re-run `/push-to-tracker`.

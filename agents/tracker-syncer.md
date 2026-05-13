@@ -40,9 +40,7 @@ Adapters share the `Tracker` interface (`src/trackers/base.ts`): `createProject`
    - Build `CreateIssuePayload` with title, body (description + acceptance), `forgeTaskId` (the `P{phase}-T{nn}` id), `ownerType`, `acceptance` list, `dependsOn: []` (deferred to second pass).
    - `createIssue(payload)` → returns `Issue`. Stage `issue.id` in memory against the task.
 4. Second pass — for every task with `depends_on`, call `setBlockedBy(task._issueId, blocker._issueId)` once per blocker. Both issues must already exist.
-5. Write back into `phases.yaml`:
-   - Canonical: `tracker_project_id`, `tracker_url`, per-task `tracker_issue_id`.
-   - Linear legacy compat (only when `tracker.type === 'linear'`): also write `linear_project_id`, `linear_team_id`, per-task `linear_id`. Removed in v0.4.0.
+5. Write back into `phases.yaml`: `tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml::tracker.config` and is not duplicated into `phases.yaml`.
 6. Per-tracker post-step:
    - `linear` → print the manual Linear-GitHub integration setup (UI walk-through; the API doesn't expose this).
    - `github` → no-op.
@@ -50,7 +48,7 @@ Adapters share the `Tracker` interface (`src/trackers/base.ts`): `createProject`
 
 ## /sync-status flow
 
-For each task with a `tracker_issue_id` (fallback: `linear_id`), query the tracker for current state. Update local `phases.yaml.tasks[].status`. Report drift.
+For each task with a `tracker_issue_id`, query the tracker for current state. Update local `phases.yaml.tasks[].status`. Report drift.
 
 - `linear` → Linear MCP query.
 - `github` → `tracker.listActiveIssues()` + diff vs phases.yaml.

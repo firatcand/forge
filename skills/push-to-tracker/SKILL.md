@@ -50,17 +50,13 @@ The agent classifies adapter errors via `src/trackers/errors.ts` codes and retri
 
 ## Step 3 — Persist IDs back to phases.yaml
 
-Canonical (tracker-agnostic) keys:
+Tracker-agnostic keys:
 
 - top level: `tracker_project_id`, `tracker_url`
+- per phase: `tracker_milestone_id`
 - per task: `tracker_issue_id`
 
-**Backwards compatibility (v0.3.x):** when `tracker.type === 'linear'`, also dual-write the legacy keys with the same values:
-
-- top level: `linear_project_id` (= `tracker_project_id`), `linear_team_id` (from config)
-- per task: `linear_id` (= `tracker_issue_id`)
-
-Other adapters (GitHub / Notion) write only the canonical keys. The legacy aliases are removed in v0.4.0 alongside the deprecation alias for the old skill name. `forge migrate` (FORGE-25) rewrites stored references for existing projects.
+All adapters write the same keys; the tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml` under `tracker.config`, not in `phases.yaml`.
 
 ## Step 4 — Per-tracker post-step
 
@@ -79,6 +75,5 @@ Print:
 
 ## Edge cases
 
-- `phases.yaml` already has `linear_project_id` set and `tracker.type === 'linear'` → update mode; reconcile against the existing Linear project rather than creating a new one.
-- `phases.yaml` has `linear_project_id` set but `tracker.type !== 'linear'` → ignore the field, warn once: "phases.yaml has Linear-specific IDs but tracker is `${type}`; ignoring." Do not auto-strip — let `forge migrate` do that.
+- `phases.yaml` already has `tracker_project_id` set → update mode; reconcile against the existing tracker-side project rather than creating a new one.
 - A `depends_on` references a task that wasn't created (filtered out, typo) → adapter throws `VALIDATION`; surface the offending task IDs and abort the second pass.
