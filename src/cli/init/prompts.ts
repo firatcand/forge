@@ -45,7 +45,14 @@ const TrackerGithubSchema = z.object({
 });
 const TrackerNotionSchema = z.object({
   type: z.literal('notion'),
-  config: z.object({ database_id: z.string().min(1) }),
+  config: z.object({
+    database_id: z.string().min(1),
+    mcp_command: z
+      .array(z.string().min(1))
+      .min(1)
+      .default(['npx', '-y', '@notionhq/notion-mcp-server']),
+    mcp_env: z.record(z.string(), z.string()).default({}),
+  }),
 });
 const TrackerSchema = z.discriminatedUnion('type', [
   TrackerLinearSchema,
@@ -225,7 +232,14 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     const databaseId = (
       await loggerPrompt('Notion database_id?', { validate: validateNonEmpty('database_id') })
     ).trim();
-    tracker = { type: 'notion', config: { database_id: databaseId } };
+    tracker = {
+      type: 'notion',
+      config: {
+        database_id: databaseId,
+        mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
+        mcp_env: {},
+      },
+    };
   }
 
   // 5. secret manager

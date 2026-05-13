@@ -125,7 +125,7 @@ async function probeHostCli(
 
 async function probeMcp(
   key: string,
-  needle: 'linear' | 'notion',
+  needle: 'linear',
   exec: ExecaLike,
   timeoutMs: number,
   hostIsClaude: boolean,
@@ -136,14 +136,13 @@ async function probeMcp(
       label: `${needle} MCP`,
       status: 'skip',
       message: `Primary host is not claude — verify ${needle} MCP manually for your host CLI.`,
-      installLink:
-        needle === 'linear' ? 'https://linear.app/docs/mcp' : 'https://developers.notion.com/docs/mcp',
+      installLink: 'https://linear.app/docs/mcp',
     };
   }
   return runProbe(
     key,
     `${needle} MCP`,
-    needle === 'linear' ? 'https://linear.app/docs/mcp' : 'https://developers.notion.com/docs/mcp',
+    'https://linear.app/docs/mcp',
     exec,
     'claude',
     ['mcp', 'list'],
@@ -154,6 +153,40 @@ async function probeMcp(
       return haystack.includes(needle) ? true : `${needle} not in \`claude mcp list\` output`;
     },
     `${needle} MCP not detected.`,
+  );
+}
+
+// NotionTracker spawns its own MCP server (via mcp_command), so the host-CLI
+// MCP-list check used for Linear isn't right here. Probe that the configured
+// command's executable resolves on PATH. We don't try to start the server
+// itself — that risks long npx download times and would need NOTION_TOKEN.
+async function probeNotionMcpCommand(
+  mcpCommand: readonly string[],
+  exec: ExecaLike,
+  timeoutMs: number,
+): Promise<ProbeResult> {
+  const cmd = mcpCommand[0];
+  if (cmd === undefined || cmd.length === 0) {
+    return {
+      key: 'notion_mcp_command',
+      label: 'Notion MCP command',
+      status: 'fail',
+      message:
+        'tracker.config.mcp_command is empty — forge needs a command to spawn the Notion MCP server.',
+      installLink: 'https://developers.notion.com/docs/mcp',
+    };
+  }
+  return runProbe(
+    'notion_mcp_command',
+    'Notion MCP server command',
+    'https://developers.notion.com/docs/mcp',
+    exec,
+    cmd,
+    ['--version'],
+    timeoutMs,
+    (r) =>
+      r.exitCode === 0 ? true : `\`${cmd} --version\` exited ${r.exitCode}`,
+    `\`${cmd}\` not found on PATH — required to spawn the Notion MCP server.`,
   );
 }
 
@@ -245,7 +278,7 @@ async function probeTracker(answers: InitAnswers, exec: ExecaLike, timeoutMs: nu
         '`gh` CLI not authenticated.',
       );
     case 'notion':
-      return probeMcp('notion_mcp', 'notion', exec, timeoutMs, hostIsClaude);
+      return probeNotionMcpCommand(t.config.mcp_command, exec, timeoutMs);
   }
 }
 
