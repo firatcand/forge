@@ -77,20 +77,27 @@ jobs:
       matrix:
         node-version: ['22.x', '24.x']
     steps:
-      # No checkout: the bundled artifact must be self-contained. If the
-      # smoke binary needs any source file outside dist/, that is a bundler
-      # bug we want this job to catch.
+      # We DO need checkout + npm ci (prod-only) here: tsdown deliberately
+      # marks `dependencies` as external (the correct shape for an npm
+      # package), so the CJS bundle resolves chalk/zod/etc. from
+      # node_modules at runtime. End users get those deps installed by npm
+      # when they run `npm install @firatcand/forge`; the smoke job
+      # mirrors that — install prod deps only, then exercise the bundled
+      # entrypoint exactly as a user would.
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci --omit=dev
       - uses: actions/download-artifact@v4
         with:
           name: dist-node-${{ matrix.node-version }}
           path: dist
-      # --version exits before any chalk/help-text rendering; --help exercises
-      # the full command-registration path including coloured output. Both
-      # together cover the chalk-v5 / top-level-await / dual-format bug
-      # classes documented in
+      # --version exits before any chalk/help-text rendering; --help
+      # exercises the full command-registration path including coloured
+      # output. Both together cover the chalk-v5 / top-level-await /
+      # dual-format bug classes documented in
       # docs/learnings/2026-Q2/ship-gates-missed-build-step.md.
       - run: node dist/bin/forge.cjs --version
       - run: node dist/bin/forge.cjs --help
