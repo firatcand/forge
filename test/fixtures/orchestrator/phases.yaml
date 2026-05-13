@@ -1,0 +1,45 @@
+project: "orchestrator-fixture"
+tracker_project_id: "fixture-project"
+gate_check_command: "echo gate-ok"
+
+phases:
+  - id: phase-1
+    name: "Fixture phase"
+    status: active
+    goal: "Exercise dispatcher eligibility + slot accounting."
+    gate_criteria:
+      - "All three tasks complete."
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: "FIX-1"
+        title: "Root task"
+        description: "Unblocks T02 and T03."
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Exits 0."
+      - id: P1-T02
+        tracker_issue_id: "FIX-2"
+        title: "Downstream A"
+        description: "Becomes eligible after T01 done."
+        type: backend
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Exits 0."
+      - id: P1-T03
+        tracker_issue_id: "FIX-3"
+        title: "Downstream B"
+        description: "Becomes eligible alongside T02 — tests parallel claim."
+        type: backend
+        priority: P0
+        depends_on: [P1-T01]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Exits 0."
