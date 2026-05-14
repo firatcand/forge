@@ -24,6 +24,12 @@ import {
   ghMilestoneCreated,
   makeExecaError,
 } from '../../fixtures/trackers/github-responses.ts';
+import {
+  MockGhServerState,
+  makeMockGhIssue,
+  makeStateBackedGitHubTracker,
+} from '../../fixtures/trackers/github-state.ts';
+import { runTrackerConformance } from '../../fixtures/trackers/conformance.ts';
 
 // ─── Test infra ──────────────────────────────────────────────────────────────
 
@@ -729,4 +735,29 @@ test('issue id rejects garbage', async () => {
     () => tracker.claim('not-an-id', 'me'),
     (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
   );
+});
+
+// ─── shared tracker conformance suite ────────────────────────────────────────
+//
+// Structural coverage of all 9 Tracker interface methods via the
+// state-backed mock. Existing sequenced-MockGh tests above already exercise
+// every method in isolation — this is the canonical interface check used
+// uniformly across adapters (Linear has the same test in linear.test.ts).
+
+test('GitHubTracker passes the shared Tracker conformance suite', async () => {
+  const repo = 'firatcand/forge-test';
+  const seedBody =
+    'seed body for conformance.\n\n<!-- forge:task=P0-T01 -->\n';
+  const server = new MockGhServerState({
+    repo,
+    initialIssues: [
+      makeMockGhIssue({ number: 42, title: 'Existing issue', body: seedBody }, repo),
+      makeMockGhIssue({ number: 1, title: 'Blocker issue' }, repo),
+    ],
+  });
+  const tracker = makeStateBackedGitHubTracker(server);
+  await runTrackerConformance(tracker, {
+    existingIssueId: '42',
+    blockerId: '1',
+  });
 });
