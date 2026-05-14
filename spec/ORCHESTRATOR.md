@@ -1,312 +1,564 @@
-# forge — ORCHESTRATOR architecture
+# forge — ORCHESTRATOR architecture (v2)
 
-> Drafted: 2026-05-13
-> Scope: contract for the dispatcher + worker + question-channel subsystem (Phase 2 tasks FORGE-20, FORGE-21, FORGE-31, FORGE-32, FORGE-22).
+> Drafted: 2026-05-13 (v1 — daemon design)
+> Revised: 2026-05-14 (v2 — CLI-as-control-plane + skill-as-dispatch)
+> Scope: contract for the orchestrator subsystem (Phase 2 tasks FORGE-20, FORGE-21, FORGE-31, FORGE-32, FORGE-22, FORGE-65).
 > Status: frozen reference. Every Phase 2 implementation task is built against this spec. Changes here require re-review of any unfinished task.
+>
+> **v2 changes:** The daemon process and `execa`-based subprocess workers are deleted. Workers are now host-native subagents (Claude Code's Task tool / Codex's native subagent dispatch). State lives in a stateless CLI control plane plus durable on-disk state. See "Changes from v1" at the end for the rationale and a point-by-point mapping.
 
 ## Purpose
 
-forge's orchestrator runs as a local daemon. It claims tasks from a tracker, spawns host-CLI subprocess workers in isolated git worktrees, advances each worker through an IMPLEMENT → REVIEW → SHIP phase machine, and surfaces architectural questions from workers back to a human supervisor. It is deliberately headless: it consumes no host-CLI context window of its own. It is observable from a fresh main session at any time via the `forge orchestrate {status,questions,answer,attach}` CLI.
+forge's orchestrator turns the dependency graph in `phases.yaml` into shipped PRs, with a human in the loop on architectural decisions and autonomy on tactical ones. It is structured as three layers:
 
-The design is the synthesis of three constraints:
+1. **Control plane** — the `forge` CLI. Stateless on-demand commands that own durable state on disk: task/attempt/run state machines, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation. Source of truth.
+2. **Dispatch layer** — a host-specific skill (`/forge orchestrate` in Claude Code; equivalent in Codex). Thin. Reads the next ready task from the CLI, dispatches a worker via the host's native subagent primitive, relays open questions to the user, records answers, polls for completion. Has no persistent state of its own.
+3. **Worker layer** — a host-native subagent prompt template. Receives a task, works in an isolated worktree, calls CLI commands to register questions and report verdicts, returns to the parent skill on completion or block.
 
-1. **Two-host parity.** Both Claude Code and Codex CLI users must get equivalent UX. We do not depend on host-side primitives (e.g. Claude Code's agent view) that have no Codex equivalent.
-2. **Human-in-the-loop on architecture.** Workers ask the supervisor when a decision affects scope, public API shape, naming of exported symbols, deprecation strategy, error semantics that propagate across module boundaries, or anything explicitly flagged in spec/ as "decide with user." They decide autonomously on routine choices.
-3. **Minimum context pollution.** The main session reads a narrow notification stream (`question`, `question_resolved`, `fatal`). Operational noise (heartbeats, retries, ship events, worker stdout) goes to per-worker log files and the tracker, never to the main session.
+The design satisfies three constraints:
+
+1. **Two-host parity.** Claude Code and Codex CLI users get equivalent UX. The CLI is identical across hosts; the dispatch layer is one thin per-host skill; the worker prompt is portable text with host-specific dispatch glue.
+2. **Subscription billing only.** Workers are subagents in the user's interactive main session, billed against the user's Claude / ChatGPT Plus subscription. The orchestrator never spawns headless host CLI processes (`claude -p`, `codex exec`) and never uses provider API keys or Agent SDK quota.
+3. **Human-in-the-loop on architecture.** Workers escalate decisions that affect public API shape, file lifecycle, deprecation strategy, exported-symbol naming, scope, or error semantics across module boundaries. They decide autonomously on tactical matters (variable names, internal helpers, log format, test fixture shape).
 
 ## Architectural primitives
 
-The orchestrator is one daemon process. It owns three primitives:
+The orchestrator is **not** a long-running process. It is three layered surfaces:
 
-| Primitive | Responsibility | Owner module |
+| Layer | Responsibility | Owner module |
 |---|---|---|
-| Dispatcher | Poll loop, eligibility filter, atomic claim, slot accounting, phase transitions, hot-reload, drain, signals | `src/orchestrator/dispatcher.ts` |
-| Worker | Subprocess wrapper per phase invocation; heartbeat; stall detection; verdict parsing; retry-with-findings | `src/orchestrator/worker.ts` |
-| Question channel | Atomic filesystem mailbox; CLI surface for human supervisor; JSONL notification stream filter | `src/orchestrator/questions/`, `src/orchestrator/events.ts`, `src/cli/orchestrate-*.ts` |
+| **CLI control plane** | State machine, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation, status snapshots, event log | `src/cli/orchestrate/*.ts`, `src/orchestrator/state/*.ts`, `src/orchestrator/leases/*.ts` |
+| **Skill dispatch layer** | Read ready tasks, dispatch subagents, relay questions to the user, record answers, poll completion | `skills/forge-orchestrate/SKILL.md` (host-specific files compiled from a shared source in Phase 3) |
+| **Worker subagent** | Implement a task in a worktree, call CLI to register questions/verdicts, return to parent on completion or block | `templates/worker-prompt.md` (loaded into every subagent dispatch) |
 
-The three primitives are file-disjoint. They share contracts (schemas, filesystem layout, event types) defined in this document.
+The three are file-disjoint. They share contracts (schemas, filesystem layout, event types) defined in this document. The CLI is the only surface that mutates persistent state. Skills and workers call the CLI; they never read or write `.forge/orchestrator/` directly.
+
+## Write-surface contract (who may write what under .forge/)
+
+Workers, skills, and the CLI have different write authority. The contract:
+
+| Path | Worker may write | Skill may write | CLI writes |
+|---|---|---|---|
+| `.forge/orchestrator/tasks/<t>/state.json` | ❌ | ❌ | ✅ (only via state-machine transitions) |
+| `.forge/orchestrator/tasks/<t>/lease.json` | ❌ | ❌ | ✅ (only via lease verbs) |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/manifest.json` | ❌ | ❌ | ✅ (on `dispatch`) |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/events.jsonl` | ✅ via `forge orchestrate event` | ❌ | ✅ for events the CLI observes |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/save-point.md` | ✅ direct write | ❌ | — |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/verdict.json` | ✅ direct write (advisory; CLI verifies) | ❌ | — |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/verdict.verified.json` | ❌ | ❌ | ✅ (only on `complete` after verification) |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/questions/<q>.json` | ✅ via `forge orchestrate question` | ❌ | ✅ for CLI-validated writes |
+| `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/<q>.json` | ❌ | ❌ | ✅ on `answer` verb |
+| `.forge/orchestrator/runs/<r>/notifications.jsonl` | ❌ | ❌ | ✅ (notification stream is CLI-emitted) |
+| `.forge/orchestrator/index/questions.json` | ❌ | ❌ | ✅ (global question index — see "Answer lookup" below) |
+| `.forge/logs/orchestrate.jsonl` | — (no direct path) | — | ✅ (every CLI invocation appends) |
+| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ | ✅ create/remove on dispatch/gc |
+
+**Principles:**
+- All writes go through atomic helpers (tmp+link+unlink, never `rename`) regardless of writer.
+- Worker direct-writes to advisory paths (verdict.json, save-point.md) are explicitly OK because the CLI verifies them on `complete`. The CLI rejects writes whose verification fails.
+- Skill never writes anything under `.forge/orchestrator/` directly. Every skill state change goes through a CLI verb.
+- `state.json` and `lease.json` are CLI-only — even workers cannot touch them. This is what makes the state machine enforceable.
+
+### Answer lookup — global index
+
+`forge orchestrate answer <question-id>` accepts a global question ID (UUIDv7) but answers are stored task-keyed under `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/<q>.json`. To make the global lookup cheap, the CLI maintains a small global index at `.forge/orchestrator/index/questions.json`:
+
+```ts
+type QuestionIndex = {
+  version: 1;
+  questions: {
+    [question_id: string]: {
+      task_id: string;
+      attempt_id: string;
+      decision_key: string;
+      created_at: string;
+      resolved_at: string | null;
+    };
+  };
+};
+```
+
+The index is written atomically on every `forge orchestrate question` and `answer`. If the index is corrupted or out-of-sync (detectable via the global event log on next gc pass), it is fully rebuilt from the task tree — the canonical store is per-task; the index is derivable.
+
+## CLI surface
+
+The `forge orchestrate` command tree is the entire public surface of the control plane. Every state mutation flows through one of these verbs. Every command is idempotent and validates inputs with zod before touching disk or tracker.
+
+```
+forge orchestrate next [--limit N]                                  # claim & return ready tasks
+forge orchestrate dispatch <task-id> --run <run-id>                 # register a new worker attempt
+forge orchestrate heartbeat <task-id> --attempt <attempt-id>        # renew lease
+forge orchestrate question <task-id> --attempt <attempt-id> \
+    --decision-key <key> --question <text> [--options-file <path>]  # write a question
+forge orchestrate answer <question-id> --answer <text>              # supervisor answers a question
+forge orchestrate event <task-id> --attempt <attempt-id> \
+    --type <event-type> [--data <json>]                             # append to attempt event log
+forge orchestrate complete <task-id> --attempt <attempt-id> \
+    --verdict-file <path>                                           # finalize an attempt
+forge orchestrate cancel <task-id> [--reason <text>]                # cancel + flag cleanup
+forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]  # snapshot
+forge orchestrate questions [--open] [--run <run-id>] [--json]      # list questions
+forge orchestrate gc [--dry-run] [--run <run-id>]                   # reconciliation pass
+forge orchestrate phases [--ready] [--blocked-by <task-id>] [--json]  # graph state
+forge orchestrate run start [--name <text>]                         # start a new run
+forge orchestrate run list [--active]                               # list runs
+```
+
+Every command returns a stable JSON envelope on `--json` for skill consumption: `{ ok: boolean, data?: ..., error?: { code, message, retriable } }`. Plain output is human-formatted via chalk for direct terminal use.
 
 ## State machine
 
-### IssueState (tracker-side)
+### Task state (cross-run, repo-level, persisted)
 
 ```
-todo ──claim──▶ in_progress ──verdict=pass──▶ in_review ──ship-ok──▶ done
-                     │                              │
-                     ├──question──▶ needs_input ──answer──▶ in_progress
-                     │
-                     ├──stall/exit≠0──▶ in_progress (retry)
-                     │
-                     └──retries_exhausted──▶ blocked
-                                                  │
-                                            (manual unblock)
-                                                  │
-                                                  ▼
-                                                todo
+                  ┌───────────────────────────────────────────────────┐
+                  │                                                    │
+                  ▼                                                    │
+              unclaimed                                                │
+                  │                                                    │
+                  │ claim (atomic, lease-backed)                       │
+                  ▼                                                    │
+              claimed                                                  │
+                  │                                                    │
+                  │ dispatch                                           │
+                  ▼                                                    │
+              dispatched                                               │
+                  │                                                    │
+                  │ first heartbeat                                    │
+                  ▼                                                    │
+              running                                                  │
+                  │                                                    │
+                  ├─── question_written ──▶ blocked_on_question        │
+                  │                                  │                 │
+                  │                                  │ answer_recorded │
+                  │                                  ▼                 │
+                  │                              awaiting_respawn      │
+                  │                                  │                 │
+                  │                                  │ dispatch        │
+                  │                                  └─────────────────┘
+                  │
+                  ├─── verdict ready_for_review ──▶ ready_for_review
+                  │                                       │
+                  │                                       │ review_passed
+                  │                                       ▼
+                  │                                  reviewed
+                  │                                       │
+                  │                                       │ ship_completed
+                  │                                       ▼
+                  │                                   shipped (terminal)
+                  │
+                  ├─── lease_expired (no heartbeat) ──▶ abandoned ──┐
+                  │                                                  │
+                  ├─── cancel ──▶ cancelled (terminal)              │
+                  │                                                  │
+                  └─── retries_exhausted ──▶ failed (terminal)      │
+                                                                     │
+                  ┌──────────────────────────────────────────────────┘
+                  │
+                  ▼
+              unclaimed (steal-after-expiry; new attempt)
 ```
 
-We extend `IssueState` with a new value:
+A task's persistent state lives at `.forge/orchestrator/tasks/<task_id>/state.json`. State transitions go through `forge orchestrate <verb>`, which validates the proposed transition against this state machine and rejects illegal moves with a typed error.
 
-- **`needs_input`** — issued by the dispatcher when a worker has written a question file and is awaiting an answer. The worker has exited clean (with a lease) OR is blocked-polling on the answer file. In either case the slot is **not** consumed by an active worker (see "Slot accounting" below).
+### Attempt state (scoped to a single dispatch)
 
-Cancellation is reachable from any state via `tracker.updateState(id, 'cancelled')`.
+```
+                  ┌──────────┐
+                  │ dispatched│
+                  └─────┬─────┘
+                        │ first heartbeat
+                        ▼
+                  ┌──────────┐
+                  │ running  │
+                  └─────┬────┘
+                        │
+        ┌───────────────┼──────────────────────────┐
+        │               │                           │
+  blocked_on        completed                  abandoned
+  question        (verdict written)        (lease expired
+        │               │                    or worker died)
+        │ answer        │ CLI verifies
+        │ recorded      │ verdict, marks
+        │               │ attempt terminal
+        ▼               ▼
+   awaiting_         finalized                     │
+   respawn          (terminal)                     │
+        │                                          │
+        └──────────────────────────────────────────┘
+                        │
+                  next dispatch
+                  creates new attempt
+```
 
-### WorkerState (in-memory, orchestrator-owned)
+Each attempt is identified by `attempt_id` (UUIDv7). Attempts are immutable once terminal — a respawned worker is a *new* attempt with its own metadata, lease, event log, and verdict file. Prior attempts' artifacts are preserved as historical context.
+
+### Run state
+
+A "run" is a single supervisor session — a contiguous slice of work driven from one main Claude Code or Codex window. Each main session calls `forge orchestrate run start` at boot, recording its `run_id` for use in subsequent commands. Multiple runs coexist: each claims tasks independently against the tracker.
+
+Run lifecycle is light: `active` (heartbeating) → `quiesced` (no active workers) → `archived` (gc'd after retention window). The CLI tracks runs to scope ownership of leases and to bound gc behavior.
+
+## Lease semantics
+
+Every claim is backed by a **lease** with explicit expiry, heartbeat, and steal-after-expiry semantics. Leases solve the "abandoned claim" problem: laptop sleep, parent shell death, worker hang, OOM.
+
+### Lease record
 
 ```ts
-type WorkerState =
-  | { status: 'pending'; taskId: string; queuedAt: number }
-  | { status: 'claimed'; taskId: string; agentId: string; claimedAt: number }
-  | { status: 'running'; phase: 'implement' | 'review' | 'ship'; taskId: string; agentId: string; pid: number; startedAt: number; lastHeartbeat: number }
-  | { status: 'paused_for_question'; taskId: string; agentId: string; questionId: string; decisionKey: string; pausedAt: number; expiresAt: number }
-  | { status: 'succeeded'; taskId: string; finishedAt: number }
-  | { status: 'failed'; taskId: string; attempt: number; error: string; nextRetryAt: number | null };
+type Lease = {
+  claim_id: string;          // UUIDv7
+  task_id: string;
+  attempt_id: string | null; // null until first dispatch
+  owner_run_id: string;
+  acquired_at: string;       // ISO 8601
+  expires_at: string;        // ISO 8601 — acquired_at + lease_ttl_ms
+  last_heartbeat_at: string; // updated on `forge orchestrate heartbeat`
+  generation: number;        // incremented on steal — for fencing
+};
 ```
 
-The `paused_for_question` status is the orchestrator's view of a worker that has emitted a question and is waiting. Transitions:
+Stored at `.forge/orchestrator/tasks/<task_id>/lease.json`. Atomic write via tmp+link (see "File semantics" below). Only one lease per task at a time; any second write rejects with `LEASE_EXISTS`.
 
-- `running → paused_for_question` — worker wrote `.forge/questions/{question_id}.json` and exited 0 with the lease file.
-- `paused_for_question → running` — answer file appeared; dispatcher respawns the worker with the answer injected.
-- `paused_for_question → failed` — `expiresAt` reached without an answer; dispatcher applies the unanswered-question policy (see "Question lifecycle").
+### Defaults
+
+| Setting | Default | Configurable in |
+|---|---|---|
+| `lease_ttl_ms` | 30 min (1,800,000 ms) | `.forge/settings.yaml` → `agents.lease_ttl_ms` |
+| `heartbeat_interval_ms` | 5 min (300,000 ms) — workers heartbeat every 5 min; dispatch layer reminds via prompt | `.forge/settings.yaml` → `agents.heartbeat_interval_ms` |
+| `steal_grace_ms` | 5 min past expiry before steal is allowed | `.forge/settings.yaml` → `agents.steal_grace_ms` |
+
+### Steal-after-expiry
+
+`forge orchestrate next` is the only operation that can steal an expired lease:
+
+1. Read existing lease record (if any).
+2. If `now > expires_at + steal_grace_ms`: increment `generation`, write a new lease atomically (tmp+link with new `claim_id`). Old `generation` is now fenced.
+3. The original worker's next CLI call (heartbeat, question, complete) will see `generation` has advanced and fail with `LEASE_STOLEN`. That worker is expected to detect the failure, write a final event (`attempt_abandoned_by_steal`), and exit cleanly.
+4. The new claimer dispatches a fresh attempt that reads the prior attempt's event log + git state.
+
+This is the safe-by-construction equivalent of distributed locking with TTLs: explicit, observable, idempotent.
+
+### Heartbeat
+
+Workers heartbeat every `heartbeat_interval_ms` via `forge orchestrate heartbeat`. The CLI:
+- Validates the lease still belongs to the caller's `(run_id, claim_id, generation)`.
+- Updates `last_heartbeat_at` and extends `expires_at = now + lease_ttl_ms`.
+- Returns the current lease for caller verification.
+
+If a worker fails to heartbeat, `lease_ttl_ms` elapses and the lease becomes steal-eligible. The skill dispatch layer is responsible for reminding the worker subagent to heartbeat (via the worker prompt template). Workers that can't heartbeat (e.g., blocked on a long shell command) are at risk of having their lease stolen mid-flight; this is acceptable because (a) stolen leases produce a `LEASE_STOLEN` error rather than silent data corruption, and (b) the prior attempt's work is preserved in the worktree's git state.
 
 ## Filesystem layout
 
-All orchestrator state lives under `.forge/`. Every path documented below is rooted at the project directory.
+State is **task-keyed**, not run-keyed. Task is the coordination object; run is metadata.
 
 ```
 .forge/
-├── settings.yaml                          # config (hot-reloaded)
+├── settings.yaml                         # config (loaded on each CLI invocation)
 ├── logs/
-│   └── orchestrator.jsonl                 # append-only structured log (>100MB rotation)
+│   └── orchestrate.jsonl                 # global event log (append-only, rotated at 100MB)
 ├── orchestrator/
-│   └── {run_id}/                          # one directory per orchestrator run (UUIDv7 prefix)
-│       ├── pid                            # PID file for reattach detection
-│       ├── started_at                     # ISO 8601 wall time
-│       ├── settings_hash                  # SHA-256 of the settings.yaml at start
-│       ├── state.json                     # run-level state snapshot (workers, claims) — written atomically every 5s
-│       ├── notifications.jsonl            # the FILTERED stream that hits main-session stdout
-│       └── workers/
-│           └── {task_id}/                 # per-worker scratch
-│               ├── attempt.json           # current attempt count + retry timing
-│               ├── implement.log          # IMPLEMENT phase stdout/stderr
-│               ├── review.log             # REVIEW phase stdout/stderr
-│               ├── ship.log               # SHIP phase stdout/stderr
-│               └── lease                  # presence == worker holds the task; absence == respawn-eligible
-├── questions/
-│   └── {question_id}.json                 # worker → supervisor (atomic write, never overwritten)
-├── answers/
-│   └── {question_id}.json                 # supervisor → worker (atomic write, never overwritten)
-├── review/
-│   └── {task_id}.json                     # review verdict file from REVIEW phase
-└── worktrees/                              # configurable via agents.worktree_root
-    └── {sanitized-task-id}/
+│   ├── runs/
+│   │   └── <run_id>/                     # one directory per supervisor session
+│   │       ├── manifest.json             # run metadata: started_at, host, agent_id
+│   │       └── notifications.jsonl       # per-run notification stream (consumed by skill)
+│   └── tasks/
+│       └── <task_id>/                    # one directory per task across all runs
+│           ├── state.json                # current task state (see state machine)
+│           ├── lease.json                # current lease (atomic write, one at a time)
+│           ├── claim-history.jsonl       # append-only log of claims, steals, releases
+│           └── attempts/
+│               └── <attempt_id>/         # one directory per attempt
+│                   ├── manifest.json     # { run_id, claim_id, generation, dispatched_at }
+│                   ├── events.jsonl      # append-only event log (replaces save-point.md)
+│                   ├── save-point.md     # narrative context (optional, advisory)
+│                   ├── questions/
+│                   │   └── <question_id>.json        # atomic, never overwritten
+│                   ├── answers/
+│                   │   └── <question_id>.json        # atomic, never overwritten
+│                   ├── verdict.json      # worker's self-reported verdict
+│                   ├── verdict.verified.json  # CLI-computed verification of verdict
+│                   └── logs/
+│                       ├── stdout.log
+│                       └── stderr.log
+└── worktrees/                            # one worktree per task (not per attempt)
+    └── <sanitized-task-id>/
 ```
+
+### Why task-keyed, not run-keyed
+
+Codex v2 review identified that run-keyed state creates split brain between tracker truth (cross-run) and local artifacts (per-run). With task-keyed layout:
+- Tracker, state machine, lease, and on-disk attempts all key off `task_id` and stay consistent.
+- `run_id` is metadata stored *inside* per-attempt manifests, used for ownership checks and observability.
+- Cross-run aggregation (`forge orchestrate status` from any main) reads the same files.
+- gc operates on tasks, not runs.
+
+### Why worktree-per-task, not per-attempt
+
+A respawned worker after a blocked-question continues the prior worker's in-progress code. That's the **feature**: workers ask architectural questions mid-flight, and the answered worker picks up where the prior left off. Codex v2 framed this as "contaminated git state"; for forge's workflow it is intentional continuity. The new attempt reads the prior attempt's `save-point.md` and `events.jsonl` for narrative context, and `git log` + working-tree state for code-level orientation.
+
+Edge case: if the prior attempt was cancelled mid-edit and the worktree is in an unusable state (e.g., merge conflict markers from an aborted rebase), the new attempt's first event is `worktree_inspected` and it can choose to `git reset --hard` to recover. The worker prompt instructs this explicitly.
 
 ### File semantics
 
 | Property | Rule |
 |---|---|
-| Atomicity | All writes go to a uniquely-named `.tmp` sibling, `fsync`, then `link(tmp, target)` followed by `unlink(tmp)`. We use `link` rather than `rename` because POSIX rename silently overwrites an existing target; `link` fails with `EEXIST`, giving us OS-level enforcement of the "never overwritten" invariant below. Readers never observe a half-written file. Concurrent writers on the same id reject all but one with a typed `DUPLICATE_ID` error. Requires `.forge/` to live on a local POSIX filesystem — already true because git itself requires that. |
-| Idempotence | `{question_id}.json` and `{answer_id}.json` are never overwritten. A second write with the same id is a bug; readers reject duplicates by id. |
+| Atomicity | All writes go to a uniquely-named `.tmp` sibling, `fsync`, then `link(tmp, target)` followed by `unlink(tmp)`. We use `link` rather than `rename` because POSIX rename silently overwrites an existing target; `link` fails with `EEXIST`, giving us OS-level enforcement of the "never overwritten" invariant. Concurrent writers reject all but one with `DUPLICATE_ID`. Requires `.forge/` on a local POSIX filesystem. |
+| Idempotence | Question, answer, manifest, and verdict files are never overwritten. A second write with the same id is a bug; the CLI rejects it. |
 | Schema versioning | Every JSON document includes a `version` field. Readers warn-and-skip on unknown versions; they never crash. |
-| Untrusted input | Question/answer file contents may originate from compromised workers. Readers validate against the schema with strict size caps (default 64KB per file) and reject anything outside spec. |
-| Cleanup | `.forge/questions/` and `.forge/answers/` accumulate across runs; `forge doctor --gc` reclaims entries whose tasks are in `done` or `cancelled` state. |
+| Untrusted input | Question/answer file contents may originate from compromised workers. The CLI validates every read against the zod schema with strict size caps (default 64KB per file). |
+| Cleanup | All cleanup is gated through `forge orchestrate gc` (see "gc reconciliation rules"). No background reaper. |
 
-**Durability contract.** The `fsync(fd)` performed on the temp file before `link` is for *partial-write protection during normal operation* — it guarantees readers never observe a torn JSON document under crash-free I/O. It is **not** a power-loss-durability guarantee for the placement itself: after `link(tmp, target)` returns, a sudden host crash before the parent directory's dirent is persisted can lose the placement even though the file body is durable. We deliberately do not `fsync` the parent directory on every write — the cost is measurable per operation and the dispatcher already reconciles question/answer state from the tracker on restart, so a lost placement degrades at most to a re-asked question (idempotent under `decision_key` dedupe), not data corruption. Adopters with a stricter durability requirement should mount `.forge/` on a filesystem with stronger commit semantics (e.g., ext4 `data=journal`) — this is an environmental knob, not a writer concern. See `docs/learnings/2026-Q2/link-vs-rename-for-never-overwrite-invariant.md` for the broader rationale on `link` vs `rename`.
+**Durability contract.** `fsync(fd)` before `link` protects readers from torn writes under crash-free I/O. It is **not** a power-loss-durability guarantee for the placement: after `link(tmp, target)` returns, a sudden host crash before the parent directory's dirent is persisted can lose the placement. We deliberately do not `fsync` the parent directory on every write — the CLI reconciles state from the tracker + filesystem on every `gc` pass, so a lost placement degrades to "the gc reports a divergence and offers a resolution," not data corruption. Adopters with stricter durability requirements should mount `.forge/` on a journaled filesystem (ext4 `data=journal`, ZFS, APFS with `sync` mount). See `docs/learnings/2026-Q2/link-vs-rename-for-never-overwrite-invariant.md`.
 
-## Event types (JSONL notification stream)
+## Event types
 
-The dispatcher writes one JSONL document per line to `.forge/orchestrator/{run_id}/notifications.jsonl` and to its own stdout. The set of event types in this stream is **deliberately narrow**. Operational events live in `orchestrator.jsonl`, not here.
+Three distinct event streams:
+
+### 1. Attempt event log — `events.jsonl` per attempt
+
+Append-only, structured, machine-readable. Replaces the prose `save-point.md` as the authoritative record of attempt progress. Save-point.md remains for narrative context only.
+
+```ts
+type AttemptEvent =
+  | { type: 'attempt_started'; ts: string; attempt_id: string; run_id: string; claim_id: string; generation: number }
+  | { type: 'worktree_inspected'; ts: string; head_sha: string; dirty: boolean; conflicts: boolean }
+  | { type: 'heartbeat'; ts: string; lease_expires_at: string }
+  | { type: 'files_modified'; ts: string; files: string[] }
+  | { type: 'tests_run'; ts: string; passed: number; failed: number; skipped: number; duration_ms: number; output_excerpt: string }
+  | { type: 'lint_run'; ts: string; clean: boolean; violations: number; output_excerpt: string }
+  | { type: 'commit'; ts: string; sha: string; message_excerpt: string }
+  | { type: 'question_written'; ts: string; question_id: string; decision_key: string }
+  | { type: 'answer_observed'; ts: string; question_id: string }
+  | { type: 'attempt_completed'; ts: string; verdict: 'ready_for_review' | 'changes_needed' | 'blocked' }
+  | { type: 'attempt_cancelled'; ts: string; reason: string }
+  | { type: 'attempt_abandoned_by_steal'; ts: string; new_generation: number }
+  | { type: 'lease_stolen'; ts: string; from_generation: number; to_generation: number };
+```
+
+The CLI writes these as side effects of its verbs (`dispatch`, `heartbeat`, `question`, `complete`, etc.). Workers can append events directly via `forge orchestrate event` for steps the CLI can't observe (e.g., a long shell sequence the worker wants to checkpoint).
+
+### 2. Per-run notification stream — `notifications.jsonl`
+
+Filtered events surfaced to the supervisor's main session. The dispatch skill tails this file. **Deliberately narrow** — only events that demand human attention.
 
 ```ts
 type NotificationEvent =
-  | { type: 'question'; ts: string; runId: string; taskId: string; questionId: string; decisionKey: string; attempt: number; question: string; context: string; options: { id: string; label: string; description?: string }[]; recommended_option_id?: string; what_happens_if_unanswered?: string }
-  | { type: 'question_resolved'; ts: string; runId: string; taskId: string; questionId: string; resolution: 'answered' | 'expired' | 'budget_exhausted' | 'duplicate'; answerOptionId?: string }
-  | { type: 'fatal'; ts: string; runId: string; reason: string; details?: Record<string, unknown> };
+  | { type: 'question'; ts: string; run_id: string; task_id: string; question_id: string; decision_key: string; attempt: number; question: string; context: string; options: Option[]; recommended_option_id?: string; what_happens_if_unanswered?: string }
+  | { type: 'question_resolved'; ts: string; run_id: string; task_id: string; question_id: string; resolution: 'answered' | 'expired' | 'budget_exhausted' | 'duplicate'; answer_option_id?: string }
+  | { type: 'ready_for_review'; ts: string; run_id: string; task_id: string; attempt_id: string; summary: string }
+  | { type: 'shipped'; ts: string; run_id: string; task_id: string; pr_url: string }
+  | { type: 'fatal'; ts: string; reason: string; details?: Record<string, unknown> };
 ```
 
-**Stream invariants:**
+Operational events (heartbeats, commits, intermediate progress) never appear here. They go to `events.jsonl` per attempt and to the global `orchestrate.jsonl`.
 
-- Stdout receives only these three event types. Heartbeats, ship events, retry timing, worker stdout, settings reload notices all go to `orchestrator.jsonl` or per-worker log files and never appear on stdout.
-- `question` events are emitted exactly once per question file appearance.
-- `question_resolved` events fire on every terminal transition for a question (answered, expired, budget_exhausted, duplicate-dedup).
-- `fatal` is for orchestrator-level errors that should pause the human supervisor: corrupt state, tracker total outage past retry cap, signal abort completed. Worker-level failures are not fatal at this layer.
+### 3. Global event log — `orchestrate.jsonl`
 
-## Question lifecycle
+Append-only structured JSONL with every CLI verb invocation, every state transition, every error. Rotated at 100 MB. Read by `forge orchestrate status` for snapshot aggregation and by `forge orchestrate gc` for reconciliation.
 
-```
-worker decides to ask
-        │
-        ▼
-classify ──autonomous──▶ decide; log autonomous decision; continue
-        │
-        └──architectural──▶ check decision_key in .forge/answers/{*}.json
-                                 │
-                                 ├──prior answer exists──▶ reuse; do not ask
-                                 │
-                                 └──no prior answer──▶ check open question with same decision_key
-                                                          │
-                                                          ├──open exists──▶ block on existing
-                                                          │
-                                                          └──no open──▶ check per-task budget
-                                                                          │
-                                                                          ├──hard cap reached──▶ force autonomous decision; log
-                                                                          │
-                                                                          └──budget OK──▶ write .forge/questions/{question_id}.json atomically
-                                                                                            │
-                                                                                            ▼
-                                                                                       worker exits clean with lease
-                                                                                            │
-                                                                                            ▼
-                                                                                   dispatcher emits `question` event
-                                                                                            │
-                                                                                            ▼
-                                                                                   supervisor answers via forge orchestrate answer
-                                                                                            │
-                                                                                            ▼
-                                                                                   answer file appears → dispatcher respawns worker
-                                                                                            │
-                                                                                            ▼
-                                                                                   worker reads answer; resumes from prior checkpoint
-```
+## Tracker atomic claim — per-adapter capability matrix
 
-### Question identity
+Codex v2 review correctly flagged that GitHub and Notion don't have natural compare-and-set primitives. The honest design is layered:
 
-A question is identified by `question_id` (UUIDv7) but **deduplicated** by `decision_key`. A `decision_key` is a stable string the worker constructs from the decision context, e.g. `public-api:dispatcher-events:v1` or `naming:src/orchestrator/events.ts:NotificationEvent`. Respawned workers that re-encounter the same decision **reuse** an existing answer (even if the answer is from a previous run).
+- **Local lease is authoritative within the working window** (`lease_ttl_ms` default 30 min). All concurrency safety inside a run derives from the local lease, not the tracker.
+- **Tracker is the cross-run rendezvous point.** Multiple mains discover ready tasks by reading the tracker. The first to claim wins via best-available tracker semantics; the loser retries.
+- **Race losers are handled gracefully.** Two mains claiming the same task at the same instant both write a tentative tracker label; one detects the conflict on read-back and releases. Worst case: one wasted tracker round-trip per race.
 
-### Retry budget
+### Per-tracker mechanism
 
-- `attempt` — incremented on each respawn for the same `decision_key`. Initialized at 1.
-- `max_attempts` — default 3; configurable via `agents.question_max_attempts` in settings.
-- After `max_attempts`, worker marks the task `blocked_input_required` (a tracker-side comment + `IssueState.blocked` transition) and exits. The dispatcher emits `question_resolved` with `resolution: 'budget_exhausted'` and does not respawn.
+| Tracker | Authoritative atomicity | Mechanism | Race-loss detection |
+|---|---|---|---|
+| **Linear** | **Yes — strong CAS** | `IssueUpdate` with `expectedVersion` matching the current `Issue.updatedAt`/version. Linear's API supports optimistic concurrency. | API returns `VersionConflict`; race loser drops, picks next ready task. |
+| **GitHub Issues** | **Weak — best-effort label-CAS** | Two-step claim: (1) add label `forge:claimed-by:<run_id>` via `gh issue edit --add-label`; (2) immediately re-fetch via `gh issue view --json labels` and verify our label is present *and* no other `forge:claimed-by:*` label is present. Both checks must pass. | Race loser sees another `forge:claimed-by:*` label, removes its own label, drops the task. Race window: ~200ms between add and re-fetch. Acceptable because the local lease prevents same-host concurrent dispatch. |
+| **Notion** | **Weak — race-detect-only** | Set `forge_claimed_by` page property to `<run_id>`, then re-fetch the page and verify `last_edited_time` matches our write. | If `last_edited_time` advanced past our write, another writer raced us. Race loser clears its claim and drops the task. |
 
-### Per-task question budget
+For GitHub and Notion, the documented stance is: **the local lease is the ownership truth within a working window; the tracker is the eventually-consistent rendezvous point.** This is good enough because:
+1. The worker is already serialized within a run by the local lease.
+2. The only failure mode is "two mains briefly both think they own task T; both dispatch; second commit conflicts at PR time" — recoverable.
+3. The merge-to-main-between-phases policy (see "Branch/PR topology") ensures conflicts surface at PR time, not at merge time on main.
 
-- `soft_cap` — default 3; emits a warning to the worker prompt on the next ask.
-- `hard_cap` — default 6; forces autonomous decision with logged justification on subsequent forks.
-
-Both caps are configurable per task via a `question_budget: { soft, hard }` field in `plans/phases.yaml` for architecture-heavy tasks.
-
-### Unanswered-question fallback
-
-If a `paused_for_question` worker reaches `expiresAt` (default 30 min from question creation, configurable via `agents.question_timeout_ms`):
-
-1. Worker is marked `failed` with `error: 'question_expired'`.
-2. Question file remains in `.forge/questions/` (for audit).
-3. Dispatcher posts a tracker comment with the question text + a link to the question file.
-4. Tracker issue moves to `IssueState.needs_input`.
-5. Next time the supervisor runs `forge orchestrate questions --open`, the expired question reappears. They can answer it; the dispatcher detects the answer and respawns the worker fresh.
-
-This **decouples** the supervisor's presence from the worker's progress: workers don't ping-pong waiting for an absent human; the tracker becomes the durable inbox.
-
-## Slot accounting
-
-`agents.max_concurrent` (default 10) caps **active worker processes**, not claimed tasks. A `paused_for_question` worker has exited clean and consumes no process slot, so the dispatcher can fill its slot with another task while the question is open.
-
-This is a deliberate departure from "max_concurrent caps claimed tasks." We want supervisor latency on a single question to not starve the rest of the pipeline.
-
-| WorkerState | Counts toward `max_concurrent`? |
-|---|---|
-| `pending` | No |
-| `claimed` | No |
-| `running` | **Yes** |
-| `paused_for_question` | No |
-| `succeeded` | No |
-| `failed` (until retry fires) | No |
-
-## Reattach + state reconciliation
-
-The dispatcher daemon survives parent shell exit. A new main session can re-attach to an existing run:
-
-```bash
-forge orchestrate attach           # auto-detects the most recent run via .forge/orchestrator/*/pid
-forge orchestrate attach <run_id>  # explicit
-```
-
-Attach behavior:
-1. Read `pid` file; verify process is alive (`kill -0 <pid>`); refuse with actionable error if not.
-2. Tail `notifications.jsonl` from end-of-file; emit existing events to stdout in order, then stream new ones.
-3. Set up answer-write path through `.forge/answers/`; no other side effects.
-
-### State reconciliation on dispatcher restart
-
-If the dispatcher itself dies (kill -9, OOM, hardware) and a new dispatcher starts in the same project, it reconciles from:
-
-| Source | Used for |
-|---|---|
-| `tracker.listActiveIssues()` | Authoritative IssueState per task; existing claims to release/reclaim |
-| `.forge/orchestrator/*/state.json` | Most recent worker snapshots per task |
-| `.forge/orchestrator/*/workers/{task_id}/lease` | Whether a worker is mid-flight (lease present) vs. clean-exited (lease absent) |
-| `.forge/questions/{*}.json` + `.forge/answers/{*}.json` | Open vs. resolved questions; budget exhaustion |
-| `plans/phases.yaml` | Dependency graph (unchanged across restarts under normal ops) |
-
-Reconciliation rules:
-1. Tracker is the source of truth for IssueState.
-2. If the local `state.json` disagrees with tracker, tracker wins.
-3. Stale claims (>2 × poll_interval_ms old, owned by our agentId) are released.
-4. Workers whose lease file exists but PID is dead are marked `failed` with `error: 'worker_died_during_phase'` and a fresh attempt is queued.
-5. Questions open in `.forge/questions/` without a corresponding answer are surfaced via the new run's notifications stream so the supervisor can re-engage.
-
-## Worker prompt template
-
-Every worker spawn is given:
-
-1. The full `templates/worker-prompt.md` template (frozen text checked into the repo).
-2. A `WorkerContext` JSON document with `taskId`, `worktreePath`, `agentId`, `phase`, `runId`, `priorAttemptFindings` (if a retry), `answeredQuestions` (decision_key → answer map for any prior resolved questions on this task).
-
-The template encodes:
-
-### The 70/30 rule
-
-Workers **ask** the supervisor when a decision affects:
-
-| Category | Example |
-|---|---|
-| Scope | "Should this PR also handle X, or punt to a follow-up?" |
-| File lifecycle | "Delete the old module, or @deprecate it for one release?" |
-| Public API shape | "Should this function return Result<T,E> or throw?" |
-| Exported-symbol naming | "Is `dispatchWorker` the right name, or `spawnWorker`?" |
-| Deprecation strategy | "Drop legacy field, or keep with warning?" |
-| Error semantics propagating across module boundaries | "Surface the original tracker error, or wrap it?" |
-| Anything tagged in SPEC.md / CLAUDE.md as "decide with user" | (free text) |
-
-Workers **decide autonomously** when the decision is:
-
-- Local variable names
-- Internal helper structure (within a single module)
-- Log format and verbosity
-- Test fixture shape
-- Retry counts and timeouts within documented ranges
-- Whitespace, import ordering, comment style
-
-### Structured classification
-
-Before emitting any question, the worker MUST produce a classification JSON:
+Adapter implementation lives in `src/trackers/<adapter>.ts` and exposes a common interface:
 
 ```ts
-{
-  decision_type: 'routine' | 'architectural',
-  category: 'public_api' | 'scope' | 'naming' | 'deprecation' | 'error_semantics' | 'file_lifecycle' | 'other',
-  reversibility: 'low' | 'medium' | 'high',
-  blast_radius: 'local' | 'module' | 'project' | 'external',
-  default_action: 'decide' | 'ask',
-  reason: string,
+type ClaimResult =
+  | { ok: true; tracker_version?: string }
+  | { ok: false; reason: 'already_claimed' | 'version_conflict' | 'transient_error'; detail?: string };
+
+interface Tracker {
+  // ... existing methods from spec/SPEC.md ...
+  claim(issueId: string, runId: string): Promise<ClaimResult>;
+  releaseClaim(issueId: string, runId: string): Promise<void>;
 }
 ```
 
-If `decision_type === 'routine'`, the worker decides autonomously and logs the classification to `.forge/orchestrator/{run_id}/workers/{task_id}/decisions.jsonl`. If `decision_type === 'architectural'`, the worker proceeds to the question-write path with the classification attached to the question file.
+## gc reconciliation rules
 
-### Recommended answer + consequences
+`forge orchestrate gc` is the deterministic reconciler. Every CLI invocation may *trigger* a gc pass; an explicit `forge orchestrate gc` runs one synchronously with `--dry-run` support. The rules below are exhaustive — every state divergence has a defined resolution.
 
-Every question MUST include:
-- `recommended_option_id` — the worker's pick if forced to decide, with one-sentence rationale.
-- `what_happens_if_unanswered` — the worker's autonomous fallback if `expiresAt` is reached.
+### Divergence table
 
-These are guardrails: a clearly-recommended question can usually be auto-resolved by the supervisor with one tap. A question that can't articulate consequences is probably not worth asking.
+| Local state | Tracker state | Resolution |
+|---|---|---|
+| `running` | `done` / `cancelled` / closed | Mark local terminal; release lease; archive attempt; preserve worktree for inspection (gc with `--remove-worktrees` to delete) |
+| `running` | no claim or claim by different `run_id` | If lease is expired beyond `steal_grace_ms`: mark `abandoned`, release lease. If lease still valid: keep local truth, log warning (tracker is the diverged party). |
+| `claimed` (local) | not claimed (tracker) | Re-attempt tracker claim once; if fails, mark local `unclaimed`, release lease. |
+| no local state | tracker claimed by *us* | Recover: write `state.json` and `lease.json` from tracker metadata. (Happens after `.forge/orchestrator/` wipe.) |
+| `blocked_on_question` | any | Check `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/`. If answer exists, mark `awaiting_respawn`. If not and `attempt_started + question_timeout_ms` elapsed, mark `expired`. |
+| `ready_for_review` (local) | `done` (tracker) | Trust tracker; mark `shipped`. (Likely manual merge.) |
+| `shipped` | not closed | Re-check PR via tracker adapter; if PR merged, transition tracker; if not, log divergence. |
+| Verdict file exists but `verdict.verified.json` missing | n/a | Re-run CLI verification; write `verdict.verified.json`. |
+| Branch exists in repo | worktree missing | If task `shipped`: prune. If task `unclaimed` or terminal: prompt user with `--dry-run` output before pruning. |
+| Worktree exists | no task with matching ID in `phases.yaml` | Orphan; report. `gc --remove-orphan-worktrees` to delete. |
+| Question file exists | attempt is terminal | Archive the question under `attempts/<a>/archived/`. |
+| Answer file exists | question file is missing | Log warning; archive. (Shouldn't happen.) |
+| Multiple leases for same task | n/a | Only most recent `generation` is authoritative. Older leases are deleted. |
+| Lease present | task state is terminal | Release lease. |
 
-## Preflight wrapper (mechanical guardrail)
+### `--dry-run` output
 
-Independent of the prompt-level classification, a code-level wrapper inspects every file write attempted by the worker. If the path matches any of the **guardrail globs**, the wrapper forces a decision checkpoint (writes a question file before allowing the write):
+```
+$ forge orchestrate gc --dry-run
+gc plan (no changes will be made):
+
+  task            local       tracker     action
+  ─────────────   ─────────   ─────────   ────────────────────────
+  FORGE-31        shipped     done        archive attempt, prune worktree
+  FORGE-32        running     unclaimed   mark abandoned (lease expired 47m ago)
+  FORGE-99        n/a         n/a         orphan worktree at .forge/worktrees/forge-99 (orphan)
+  FORGE-103       running     done        mark shipped, archive attempt, keep worktree
+
+4 actions queued. Re-run without --dry-run to apply.
+```
+
+### Auto-gc
+
+A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate next` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
+
+## Worker prompt template
+
+Every worker subagent is dispatched with `templates/worker-prompt.md` as the system/user prompt, with placeholders filled by the dispatch skill.
+
+### Template structure
+
+```
+You are a forge worker subagent on task <TASK_ID>, attempt <ATTEMPT_ID>.
+
+Run: <RUN_ID>
+Worktree: <ABSOLUTE_WORKTREE_PATH>
+Phase: <IMPLEMENT | REVIEW | SHIP>
+
+Task description:
+<rendered from tracker issue body>
+
+Acceptance criteria:
+<rendered from phases.yaml acceptance bullets>
+
+Conventions:
+<contents of project's CLAUDE.md / AGENTS.md>
+
+Working directory rules (CLAUDE-SPECIFIC — Codex workers skip this section):
+- All Bash commands must be prefixed with `cd <WORKTREE> && `
+- All Read / Write / Edit operations use absolute paths under <WORKTREE>
+- Never `cd` to a path outside <WORKTREE>
+- The parent main session retains its own cwd — do not modify it
+
+Heartbeat protocol:
+- Every 5 minutes of active work, run: `forge orchestrate heartbeat <TASK_ID> --attempt <ATTEMPT_ID>`
+- If the call returns `LEASE_STOLEN`, your lease has been stolen by a newer attempt. Stop work, write a final event with `forge orchestrate event ... --type attempt_abandoned_by_steal`, and return to the parent.
+
+Decision guidelines (the 70/30 rule):
+- ESCALATE via `forge orchestrate question` when the decision sets a public contract:
+  · Exported symbol names (functions, types, classes consumed outside the file)
+  · File paths intended for import by other modules
+  · Schema shapes consumed downstream
+  · Deprecation strategies (delete vs warn vs alias)
+  · Migration approaches for irreversible changes
+  · Scope: "does this PR also cover X, or punt to a follow-up?"
+  · Error semantics propagating across module boundaries
+- DECIDE yourself: internal variable names, helper function extraction, comment placement, regex specifics, test naming, log verbosity within documented ranges.
+- When unsure, classify with the structured rubric below and err toward escalation.
+
+Structured classification (before any question):
+{
+  "decision_type": "routine" | "architectural",
+  "category": "public_api" | "scope" | "naming" | "deprecation" | "error_semantics" | "file_lifecycle" | "other",
+  "reversibility": "low" | "medium" | "high",
+  "blast_radius": "local" | "module" | "project" | "external",
+  "default_action": "decide" | "ask",
+  "reason": "<1-2 sentences>"
+}
+
+If `decision_type === "routine"`: decide and log via `forge orchestrate event ... --type files_modified`.
+If `decision_type === "architectural"`: write a question.
+
+To write a question:
+1. Run: `forge orchestrate question <TASK_ID> --attempt <ATTEMPT_ID> --decision-key <KEY> --question "<TEXT>"`
+   Optional: `--options-file <PATH>` to attach options.
+   `<KEY>` is a stable dedupe key like `public-api:event-payload-shape:v1` or `naming:src/orchestrator/events.ts:NotificationEvent`.
+2. Update save-point.md with a 5-line note on where you are.
+3. Return to parent with: "Blocked on question <ID>: <one-line summary>".
+
+To complete the attempt:
+1. Run tests: capture passed/failed/skipped/duration.
+2. Run lint: capture clean/violations.
+3. Write verdict.json with the rich schema (see below).
+4. Run: `forge orchestrate complete <TASK_ID> --attempt <ATTEMPT_ID> --verdict-file verdict.json`
+   The CLI will verify tests, lint, and diff stats independently. If your self-report disagrees with CLI verification, the attempt is rejected as `verdict_unverified` and you stay in `running` state to fix it.
+5. Update save-point.md.
+6. Return to parent with: "Task <TASK_ID> attempt <ATTEMPT_ID>: <verdict>".
+
+Prior attempts on this task (if any):
+<rendered: list of prior attempt_ids with their terminal status, plus links to prior save-points and answered questions>
+
+Answered questions from prior attempts:
+<rendered: decision_key → answer map>
+```
+
+### Verdict schema
+
+```ts
+type Verdict = {
+  version: 1;
+  verdict: 'ready_for_review' | 'changes_needed' | 'blocked';
+  summary: string;
+  tests: {
+    ran: boolean;
+    passed: number;
+    failed: number;
+    skipped: number;
+    duration_ms: number;
+    output_excerpt: string;  // last 2KB
+  };
+  lint: {
+    ran: boolean;
+    clean: boolean;
+    violations: number;
+    output_excerpt: string;
+  };
+  branch: string;            // git branch the worker is on
+  save_point: string;        // narrative note
+};
+```
+
+### CLI verification of verdicts
+
+`forge orchestrate complete` does not trust the worker's self-report. It independently computes:
+
+| Verdict field | CLI verification |
+|---|---|
+| `branch` | `git -C <worktree> rev-parse --abbrev-ref HEAD` |
+| `tests.ran/passed/failed` | Re-run the project's test command (`npm test` or detected equivalent) with a short timeout; record actual results. If worker's self-report disagrees, the attempt is marked `verdict_unverified` and the worker stays in `running` state to retry. |
+| `lint.clean` | Re-run lint; record actual results. |
+| `diff_stats` (computed, not worker-reported) | `git diff --stat <base>...HEAD` |
+| `conflicts_with_base` (computed) | `git merge-tree --write-tree $(git merge-base HEAD <base>) HEAD <base>` — non-zero exit indicates conflicts. |
+| `files_changed` (computed) | `git diff --name-only <base>...HEAD` |
+
+The verified record is written to `verdict.verified.json`. Only after verification does the task state transition to `ready_for_review`. Worker self-reports are kept as historical context in `verdict.json` but are never authoritative.
+
+### Preflight wrapper (mechanical guardrail — preserved from v1)
+
+Independent of prompt-level classification, a code-level wrapper in the worker prompt inspects every file write attempted by the worker. If the path matches any of the **guardrail globs**, the wrapper forces a decision checkpoint (writes a question before allowing the write):
 
 | Glob | Rationale |
 |---|---|
@@ -317,48 +569,351 @@ Independent of the prompt-level classification, a code-level wrapper inspects ev
 | `src/trackers/base.ts` | Tracker interface |
 | `src/cli/migrate.ts` | Migration logic — adopter-facing, irreversible side effects |
 | `spec/**` | Specifications |
-| `CRITICAL.md`, `CLAUDE.md` | Project-wide rules |
+| `CRITICAL.md`, `CLAUDE.md`, `AGENTS.md` | Project-wide rules |
 | `package.json` (deps + bin fields) | Distribution surface |
+| `phases.yaml` | Dependency graph |
 
-This list is loaded from `.forge/settings.yaml` (`agents.preflight_globs`) so projects can tune it. The default ships with the list above.
+This list lives in `.forge/settings.yaml` (`agents.preflight_globs`) so projects can tune it. The default ships with the list above. Guardrails compose with classification: even if the worker classifies a change as `decision_type: routine`, a write to a guardrail path forces an `architectural` question.
 
-Guardrails compose with classification: even if the worker classifies a change as `decision_type: routine`, a write to a guardrail path forces an `architectural` question. Prompt-side classification is advisory; preflight is enforcement.
+## Phase machine — IMPLEMENT → REVIEW → SHIP
+
+Each task flows through three phases sequentially. Each phase is its own subagent dispatch in the appropriate host.
+
+### Phase 1 — IMPLEMENT (primary host)
+
+- Dispatch skill calls `forge orchestrate next` to get a ready task.
+- Dispatch skill creates worktree at `.forge/worktrees/<sanitized-task-id>` via `git worktree add` (idempotent: skip if exists).
+- Dispatch skill calls `forge orchestrate dispatch` to register the attempt.
+- Subagent runs with worker prompt + task context.
+- On completion: subagent writes verdict.json, calls `forge orchestrate complete`, returns to parent.
+- CLI verifies verdict. If verified `ready_for_review`, task state advances to `ready_for_review`.
+
+### Phase 2 — REVIEW (secondary host — adversarial review)
+
+> **Cross-host direction restricted in v0.3.0.** Only `primary=Claude, review=Codex` is supported. The reverse (`primary=Codex, review=Claude`) requires spawning `claude -p` from a Codex session, which lands in Anthropic's Agent SDK quota and violates the v2 subscription-only invariant. The Codex direction is safe because OpenAI does NOT have an equivalent Agent-SDK-vs-interactive billing split — `codex exec` invoked from a Claude session bills against the user's ChatGPT Plus subscription identically to interactive Codex usage. The reverse direction unlocks in v0.3.1 alongside skill portability and proper MCP-based host bridging.
+
+- Dispatch skill detects `ready_for_review` tasks via `forge orchestrate next --phase review`.
+- Dispatch skill spawns a Codex subagent when primary is Claude (only supported direction in v0.3.0), with a review prompt that includes the worktree diff. Implementation: skill calls `codex exec --cd <worktree> --sandbox read-only` via Bash with the review prompt. This is subprocess dispatch in shape but subscription-billed in substance.
+- Review subagent reads `git diff <base>...HEAD`, runs the host's `/review` skill, writes `review_verdict.json` to the same attempt directory.
+- Review verdict schema:
+  ```ts
+  type ReviewVerdict = {
+    version: 1;
+    verdict: 'pass' | 'changes_requested';
+    findings: { severity: 'block' | 'improvement'; path: string; line?: number; message: string }[];
+    host: 'claude' | 'codex' | 'cursor' | 'gemini';
+  };
+  ```
+- `forge orchestrate complete --phase review` records the verdict.
+- On `pass`: task state advances to `reviewed`.
+- On `changes_requested`: task state regresses to `running`, a new IMPLEMENT attempt is dispatched with `priorReviewFindings` injected into the prompt. Attempt counter increments.
+
+### Phase 3 — SHIP (primary host)
+
+- Dispatch skill detects `reviewed` tasks.
+- **Dependency check before dispatch:** all `depends_on` tasks in `phases.yaml` must be in state `shipped` *and* their PRs merged to base. If a dependency PR is still open, SHIP is deferred until the dep merges.
+- Dispatch skill spawns a primary-host subagent with a ship prompt: rebase onto latest base, run final secrets scan, `gh pr create` (or tracker-equivalent), mark tracker `in_review`.
+- On success: task state advances to `shipped`. PR URL recorded. Notification `shipped` event emitted.
+- On failure (rare — usually a transient tracker/git issue): retry with backoff. After `retry_attempts` failures: task moves to `failed`, surfaces fatal notification.
+
+### Single-host mode
+
+If `agents.review_host_cli` is `null`, REVIEW phase is skipped. Task flows IMPLEMENT → SHIP directly. A one-time warning at orchestrator first-run: *"Second-opinion review disabled — running single-host. Forge recommends configuring review_host_cli for adversarial review."*
+
+## Branch / PR integration topology — merge-to-main-between-phases
+
+The branch strategy: **every task branches from `main`. SHIP merges to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
+
+Rationale (chosen over stacked PRs):
+- Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
+- Eliminates rebase churn that stacked PRs require when an upstream PR is amended during review.
+- Each PR is reviewable in isolation against `main`.
+- Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate next` tick).
+
+Concretely:
+- `forge orchestrate next` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
+- A task whose dependency is `reviewed` but PR not yet merged is **not ready** — it waits.
+- If a dependency PR is closed without merge: task moves to `blocked`.
+
+Trade-off accepted: tasks with declared dependencies cannot run in parallel with their dependencies even if their dependency's IMPLEMENT phase is done. This is correct — dependencies exist *because* the consumer needs the producer's output committed.
+
+For projects that want stacked PRs (rare; adds rebase loops), an opt-in `agents.branch_strategy: 'stacked'` mode is reserved in the settings schema but not implemented in v-next. Documented as a future extension if real demand emerges.
+
+## File-glob declarations + overlap detection (file-level safety)
+
+`phases.yaml` is extended to allow each task to declare its **expected write globs**:
+
+```yaml
+phases:
+  - number: 2
+    tasks:
+      - id: FORGE-31
+        title: Event payload schema
+        write_globs:
+          - src/schemas/events.ts
+          - test/schemas/events.test.ts
+        # ... existing fields
+```
+
+`write_globs` is optional. When present, `forge orchestrate next` performs an **overlap check** before dispatching parallel tasks:
+
+| Overlap class | Behavior |
+|---|---|
+| No overlap | Dispatch both freely |
+| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write src/utils/foo.ts — merge conflicts possible"` |
+| Hard overlap (any guardrail glob from preflight list) | **Block dispatch.** The task that came second in `phases.yaml` waits until the first completes. |
+| Either task declares a known-global file (`package.json`, lockfiles, migration directories) | Block: serialize them. |
+
+The hard-locked file list lives at `.forge/settings.yaml` → `agents.hard_lock_globs` and defaults to:
+```
+package.json
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+tsconfig.json
+phases.yaml
+src/index.ts
+migrations/**
+prisma/schema.prisma
+```
+
+Adopters can extend this. The principle: any file where two unrelated changes can't be merged-cleanly via git's 3-way merge belongs on this list.
+
+When `write_globs` is **absent**, the CLI assumes worst-case overlap and serializes more conservatively. This is a deliberate nudge for `/decompose` to fill in write_globs as part of task creation. v-next ships with `/decompose` updated to fill write_globs by inspection of task scope; pre-existing phases.yaml files without write_globs remain valid but get conservative scheduling.
+
+## Question lifecycle (preserved from v1 with CLI-as-consumer adjustments)
+
+```
+worker decides to ask
+        │
+        ▼
+classify ──autonomous──▶ decide; log autonomous decision; continue
+        │
+        └──architectural──▶ check .forge/orchestrator/tasks/<t>/attempts/<*>/answers/
+                                 │
+                                 ├──prior answer (decision_key match)──▶ reuse; do not ask
+                                 │
+                                 └──no prior──▶ check open question with same decision_key
+                                                  │
+                                                  ├──open exists──▶ block on existing
+                                                  │
+                                                  └──no open──▶ check per-task budget
+                                                                  │
+                                                                  ├──hard cap reached──▶ force autonomous decision
+                                                                  │
+                                                                  └──budget OK──▶ forge orchestrate question
+                                                                                       │
+                                                                                       ▼
+                                                                       Worker exits subagent run, returns to parent
+                                                                                       │
+                                                                                       ▼
+                                                                       Dispatch skill polls notifications.jsonl
+                                                                                       │
+                                                                                       ▼
+                                                                       Skill renders question to user
+                                                                                       │
+                                                                                       ▼
+                                                                       User answers in main session
+                                                                                       │
+                                                                                       ▼
+                                                                       Skill calls forge orchestrate answer
+                                                                                       │
+                                                                                       ▼
+                                                                       Skill dispatches new attempt (Task tool / Codex subagent)
+```
+
+### Question identity
+
+A question is identified by `question_id` (UUIDv7) but **deduplicated** by `decision_key`. A `decision_key` is a stable string the worker constructs from the decision context (e.g. `public-api:dispatcher-events:v1`). Respawned workers that re-encounter the same decision reuse an existing answer (even from a prior attempt, even from a prior run).
+
+### Retry + per-task budgets
+
+- `attempt` increments on each respawn for the same `decision_key` within an attempt-respawn chain. Initialized at 1.
+- `max_attempts` default 3 (`agents.question_max_attempts`).
+- After `max_attempts`, worker forces an autonomous decision with logged justification, OR marks the task `blocked` if it cannot proceed without resolution.
+- Per-task `soft_cap` (default 3) and `hard_cap` (default 6) for total questions. Beyond `hard_cap`: forced autonomous decisions. Configurable per-task via `question_budget: { soft, hard }` in `phases.yaml`.
+
+### Unanswered-question fallback
+
+If a question is unanswered for `question_timeout_ms` (default 30 min — same as lease TTL, deliberately):
+1. Attempt marked `expired`.
+2. Tracker comment posted with question text + answer file path.
+3. Tracker issue moves to `IssueState.blocked`.
+4. Question stays in `.forge/orchestrator/tasks/<t>/attempts/<a>/questions/` for audit.
+5. Supervisor can answer via `forge orchestrate answer <Q>` later; next `/forge orchestrate` dispatch picks up the answer and creates a new attempt.
+
+## Tool-permission isolation — workflow isolation, not security isolation
+
+The orchestrator runs worker subagents with the user's host CLI permissions. Worktree boundaries are **workflow isolation, not security isolation.** Workers can read and write any file the user can; can run any shell command; can read environment variables.
+
+Mitigations applied:
+- Worker prompts explicitly forbid writes outside the worktree.
+- Codex workers spawn with `--sandbox workspace-write` (Codex's built-in sandbox).
+- Claude Code workers run with restricted tool list (Read, Write, Edit, Bash with allowlist of safe commands).
+- A `forge orchestrate dispatch --strict-env` flag adds prompt instructions to avoid reading globally-readable secrets. This is a defense-in-depth nudge, not enforcement.
+
+Workers can still:
+- Read environment variables (including `ANTHROPIC_API_KEY` if set — see ingestion safety in `/SPEC.md`).
+- Read user dotfiles (`~/.aws/credentials`, `~/.ssh/`, etc.) if granted bash access.
+- Modify shared global files (lockfiles, system configs) — though preflight guardrails and hard-locked file globs reduce the surface.
+
+This is documented honestly: **forge is workflow tooling, not a security sandbox.** Adopters running untrusted workloads should add OS-level sandboxing (Docker, firejail, etc.) outside forge's scope.
+
+## Multi-main coordination
+
+Multiple supervisor sessions ("mains") can run concurrently against the same forge project. Each has its own `run_id`. Coordination is fully mediated by the local lease + tracker:
+
+1. **Discovery.** Each main runs `forge orchestrate next`. The CLI:
+   - Reads `phases.yaml` (graph hasn't changed).
+   - Computes ready set (tasks with all `depends_on` shipped, no overlap conflict with active tasks).
+   - For each candidate, attempts atomic claim against the tracker.
+   - Returns the first successfully-claimed task.
+
+2. **Working window.** Once claimed, the lease is the ownership truth. Other mains see the lease and skip the task.
+
+3. **Race resolution.** Two mains hitting `forge orchestrate next` within the same tracker-claim window may both write a tentative claim. The slower writer detects the conflict on re-fetch and releases. Worst case: both successfully write a claim to different tracker fields simultaneously (e.g., GitHub doesn't reject the second label-add); race-loss detection on re-fetch resolves: only one keeps its claim, the other releases.
+
+4. **Cross-main visibility.** Any main can run `forge orchestrate status` and see all active runs, leases, and attempts across the project. The CLI reads task-keyed state under `.forge/orchestrator/tasks/`.
+
+5. **Cleanup on main exit.** When a main's session ends, its run is marked `quiesced`. Active leases owned by that run continue to heartbeat from any active subagent worker. When the lease TTL elapses without a heartbeat, the lease becomes steal-eligible. Another main can pick up the task; the worktree's git state is the continuity.
+
+The dependency graph plus the tracker plus the lease combine to give: **at most one worker per task at any moment**, with eventual recovery from any main / worker / tracker failure.
+
+## Settings (extended schema)
+
+```yaml
+# .forge/settings.yaml — orchestrator section
+agents:
+  # Host CLI selection
+  primary_host_cli: claude              # claude | codex | cursor | gemini
+  review_host_cli: codex                # must differ from primary; null disables REVIEW
+  
+  # Subagent dispatch
+  subagent_cap_per_main: 3              # cap on parallel subagents per main session
+  
+  # Lease management
+  lease_ttl_ms: 1800000                 # 30 min
+  heartbeat_interval_ms: 300000         # 5 min
+  steal_grace_ms: 300000                # 5 min after expiry before steal allowed
+  
+  # Retry / backoff
+  retry_attempts: 10
+  retry_backoff_ms_max: 300000          # 5 min cap
+  
+  # Question management
+  question_timeout_ms: 1800000          # 30 min (same as lease TTL)
+  question_max_attempts: 3              # respawns per decision_key
+  question_budget_soft: 3               # warning threshold per task
+  question_budget_hard: 6               # forced-autonomous threshold per task
+  
+  # Worktree
+  worktree_root: ./.forge/worktrees
+  
+  # Branch strategy
+  branch_strategy: merge-to-main        # merge-to-main | stacked (stacked not implemented in v-next)
+  
+  # Preflight guardrails
+  preflight_globs:
+    - src/index.ts
+    - src/schemas/**
+    - src/bin/**
+    - src/cli/**
+    - src/trackers/base.ts
+    - src/cli/migrate.ts
+    - spec/**
+    - CRITICAL.md
+    - CLAUDE.md
+    - AGENTS.md
+    - package.json
+    - phases.yaml
+  
+  # File-glob overlap detection
+  hard_lock_globs:
+    - package.json
+    - package-lock.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - tsconfig.json
+    - phases.yaml
+    - src/index.ts
+    - migrations/**
+    - prisma/schema.prisma
+  
+  # Failure policy
+  on_persistent_failure: notify         # notify | block_task | move_to_next
+```
 
 ## Security posture
 
 The orchestrator treats worker output (including question files) as **untrusted input** for two reasons:
 
 1. **Compromise**: a malicious dependency could induce a worker to write crafted question files.
-2. **Prompt injection**: if questions/answers are reflected back into another worker's prompt context, a worker reading a tainted answer could leak credentials or escape its sandbox.
+2. **Prompt injection**: if questions/answers are reflected back into another worker's prompt context, a worker reading a tainted answer could be induced to leak credentials or escape its intended scope.
 
 Mitigations:
 
-- Schema validation with strict size caps on every read.
-- Question/answer content is rendered as **plain text** in the supervisor's notification stream, never interpreted as markup or code.
-- Answer file content is injected into respawned workers via a `WorkerContext.answeredQuestions` map, isolated from the rest of the prompt; the prompt template treats it as a structured input, not free-form context.
-- Filesystem permissions on `.forge/orchestrator/{run_id}/` are 0700; questions/answers are 0600.
-- The dispatcher process drops privileges (where supported) before invoking host CLIs.
+- Schema validation with strict size caps on every CLI read (default 64 KB per file).
+- Question/answer content rendered as **plain text** in the supervisor's notification stream, never interpreted as markup or code.
+- Answer content injected into respawned worker prompts via a `WorkerContext.answered_questions` structured map, not as free-form context.
+- Filesystem permissions on `.forge/orchestrator/<run_id>/` are 0700; question/answer files are 0600.
+- The CLI rejects any state-mutation operation from a process whose effective UID does not own `.forge/`.
+
+As noted in "Tool-permission isolation," forge does not claim to be a security sandbox. The above mitigations protect the orchestrator's integrity (state machine, schemas) but not the host system from a worker that goes off-script. Adopters who need true sandboxing must layer OS-level isolation.
 
 ## Integration points (cross-task contracts)
 
 | Producer | Consumer | Contract |
 |---|---|---|
-| FORGE-31 question infra | FORGE-20 dispatcher | `QuestionSchema`, `AnswerSchema`, `NotificationEvent` types; atomic-write helpers |
-| FORGE-31 question infra | FORGE-32 worker question writer | Same schemas; `writeQuestionAtomic`, `readAnswerAtomic` helpers |
-| FORGE-20 dispatcher | FORGE-21 worker subprocess | `WorkerContext` shape; spawn signature; verdict file path |
-| FORGE-21 worker subprocess | FORGE-22 retry queue | `WorkerState` transitions; `attempt.json` shape; failure error codes |
-| FORGE-32 worker question writer | FORGE-21 worker subprocess | Preflight wrapper hook integration point in the spawn path |
+| FORGE-31 question infra | FORGE-20 CLI | `QuestionSchema`, `AnswerSchema`, `NotificationEvent` types; atomic-write helpers |
+| FORGE-31 question infra | FORGE-32 worker prompt template | Same schemas; CLI calls `forge orchestrate question` |
+| FORGE-20 CLI | FORGE-21 dispatch skill | CLI command surface + JSON envelope schema |
+| FORGE-21 dispatch skill | FORGE-22 worker prompt template | `WorkerContext` shape; dispatch parameters; verdict file path |
+| FORGE-65 lease + state machine | FORGE-20 CLI | Lease record schema; state transition table; gc reconciliation rules |
+| FORGE-20 CLI | tracker adapters | `ClaimResult`, `Tracker.claim`/`releaseClaim` interface |
 
-Every implementation task is closed (no contract churn) once the matching producer task lands. This is the property that makes the work safe to serialize.
+Every implementation task is closed (no contract churn) once the matching producer task lands.
 
-## Non-goals (deferred to v0.4.0+)
+## Non-goals (v-next)
 
-- Web UI / TUI for the dispatcher.
-- Distributed orchestration (multiple machines coordinating).
-- Integration with Claude Code's `claude --bg` agent view (gated on agent view exiting research preview + a Codex CLI equivalent existing).
-- MCP-server interface (the filesystem mailbox + CLI surface is the v0.3.0 contract; MCP is a future enhancement layered on top).
-- Per-question ad-hoc UI (e.g. picker for multi-choice options) — v0.3.0 surfaces options as plain text; supervisor types option id.
+- Headless daemon mode surviving parent shell exit (deleted in v2).
+- `execa`-based subprocess workers (deleted in v2).
+- tmux / node-pty / pty-based worker spawning.
+- Provider API key support (Anthropic, OpenAI) — subscription-only.
+- Background or overnight unattended runs.
+- Distributed orchestration across multiple machines.
+- Skill portability across host CLIs (host-neutral source format, per-host emitters, migration UX) — deferred to Phase 3.
+- Stacked-PR branch strategy — schema reserved, not implemented.
+- Web UI / TUI for monitoring (`forge orchestrate status --json` is the machine surface; let people build TUIs on top).
+- Per-question ad-hoc UI (picker for multi-choice) — supervisor types option id.
+- MCP-server interface for `forge orchestrate` commands — possible future enhancement.
 
-## Open questions
+## Open questions for Phase 3
 
-None remaining at the start of FORGE-20/21/31/32 implementation. Items that arise during implementation that affect this document must be brought back to the supervisor before the change lands. Each task's PR includes a checklist line: *"No ORCHESTRATOR.md contract changes" — confirmed.*
+None remaining at the start of FORGE-20/21/31/32/65 implementation. The following are flagged for *Phase 3* design once the orchestrator is shipping in real projects:
+
+1. **Skill portability across hosts.** Host-neutral source schema, per-host emitters, migration prompts on host change. Separate design doc.
+2. **Stacked-PR branch strategy.** Real demand from users running on long-running feature branches. Adds rebase loops; design only if there's evidence of need.
+3. **Background daemon-mode revival (for overnight runs).** Layered on top of the v2 architecture as an opt-in mode. CLI semantics unchanged; a `forge orchestrate daemon` long-runs in the background and invokes the same CLI verbs.
+
+## Changes from v1 (point-by-point)
+
+| v1 element | v2 disposition | Reason |
+|---|---|---|
+| Daemon process | **Deleted** | User does not need overnight runs; supervisor-driven dispatch is sufficient. Deleting the daemon eliminates pty/tmux requirement (billing fix) and ~half the spec's complexity. |
+| Signals, drain, hot-reload | **Deleted** | No long-running process. |
+| Lease files (filesystem-only) | **Replaced** with structured lease records with `expires_at`, `generation`, steal-after-expiry | Codex v2 review #4 — abandoned claims need principled expiry. |
+| Slot accounting per max_concurrent | **Replaced** with `subagent_cap_per_main` enforced by the dispatch skill | No central process; cap is per-main. |
+| `execa(host_cli, [...])` subprocess workers | **Replaced** with host-native subagent dispatch (Claude Task tool / Codex subagent) | Billing fix: workers bill as interactive subscription, not Agent SDK quota. |
+| `forge orchestrate {status, attach, questions, answer}` CLI | **Retained and expanded** | Codex v2 review explicitly called out: these are user controls, not daemon features. |
+| Atomic file ops (tmp+link), schema versioning, security posture | **Retained** | The hard-won durability work survives. |
+| `decision_key` dedupe | **Retained** | Idempotency under respawn is unchanged. |
+| 70/30 rule, structured classification, preflight guardrails | **Retained** | Worker prompt behavior is host-agnostic. |
+| Question channel filesystem layout | **Restructured**: task-keyed instead of run-keyed; per-attempt scoping | Codex v2 review #5 — task is the coordination object. |
+| Worker self-reported verdict | **Wrapped** with CLI-verified verdict facts | Codex v2 review #7 — verdict facts must be CLI-computed, not worker-claimed. |
+| `save-point.md` prose as authoritative | **Demoted to advisory**; replaced by structured `events.jsonl` per attempt | Codex v2 review #3 (open questions) — prose can lie; structured events are checkable. |
+| Tracker atomic claim hand-waved | **Per-adapter capability matrix** with honest framing: Linear strong CAS, GitHub/Notion weak best-effort | Codex v2 review #1 — name the strength honestly. |
+| `gc` mentioned without rules | **Deterministic divergence table with `--dry-run`** | Codex v2 review #10. |
+| File-level conflict not addressed | **`write_globs` per task + overlap detection + hard-locked globals list** | Codex v2 review #2 + open question #1 — graph helps scheduling, not file-level safety. |
+| Branch/PR topology unspecified | **Merge-to-main-between-phases**, explicit | Codex v2 review #8. |
+| Tool isolation overstated | **Workflow isolation, not security isolation** — stated plainly | Codex v2 review #9. |
+| Cross-host parity via shared daemon | **Cross-host parity via shared CLI**: one state machine, two skills, two adapters | Codex v2 review #3 — overstated symmetry replaced with honest layering. |
