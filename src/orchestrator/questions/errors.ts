@@ -10,7 +10,8 @@
 
 export type QuestionChannelErrorCode =
   | 'DUPLICATE_ID' // question or answer file already exists for this id
-  | 'OVERSIZED' // file exceeds QUESTION_FILE_MAX_BYTES
+  | 'OVERSIZED' // file read exceeds QUESTION_FILE_MAX_BYTES
+  | 'PAYLOAD_TOO_LARGE' // write payload exceeds QUESTION_FILE_MAX_BYTES (producer-side; distinct from OVERSIZED so dispatcher logs disambiguate read vs. write boundary)
   | 'SCHEMA_INVALID' // zod parse failed or JSON is malformed
   | 'NOT_FOUND' // question or answer file does not exist
   | 'IO_ERROR' // EACCES or any unexpected fs error

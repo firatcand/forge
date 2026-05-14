@@ -1,14 +1,16 @@
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  QUESTION_FILE_MAX_BYTES,
   QuestionSchemaWithRecommendationCheck,
   type Answer,
   type Question,
 } from '../../../../src/schemas/questions.ts';
 import {
+  __fsForTesting,
   writeAnswerAtomic,
   writeQuestionAtomic,
 } from '../../../../src/orchestrator/questions/writer.ts';
@@ -250,6 +252,308 @@ test('writeQuestionAtomic cleans up the temp file on failure', () => {
     const tmp = entries.filter((e) => e.includes('.tmp'));
     assert.equal(tmp.length, 0, `expected no .tmp leftovers, found: ${tmp.join(',')}`);
   } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// --- FORGE-69 follow-up regression tests ---
+
+// T1: writeAnswerAtomic answer-side counterpart to the question-side test above.
+test('writeAnswerAtomic cleans up the temp file on failure', () => {
+  const forgeDir = freshForgeDir();
+  try {
+    const a = baseAnswer();
+    const dir = join(forgeDir, 'answers');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${a.question_id}.json`), '{"placeholder":true}');
+    try {
+      writeAnswerAtomic(a, { forgeDir });
+    } catch {
+      // expected
+    }
+    const entries = readdirSync(dir);
+    const tmp = entries.filter((e) => e.includes('.tmp'));
+    assert.equal(tmp.length, 0, `expected no .tmp leftovers, found: ${tmp.join(',')}`);
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T2: writeSync may return a short count under NFS / quota / signal-interrupted
+// conditions. The writer must loop until the full payload is written; the file
+// on disk must contain the full payload byte-for-byte.
+test('writeQuestionAtomic loops writeSync until the full payload is written (Bug #2 — partial writes)', (t) => {
+  const forgeDir = freshForgeDir();
+  try {
+    const realWriteSync = __fsForTesting.writeSync;
+    let firstCallShortened = false;
+    // First call returns half the requested bytes; second call (and beyond)
+    // delegate to the real writeSync. This exercises the loop.
+    t.mock.method(
+      __fsForTesting,
+      'writeSync',
+      (
+        fd: number,
+        buffer: NodeJS.ArrayBufferView | string,
+        offset?: number | null,
+        length?: number,
+        position?: number | null,
+      ): number => {
+        if (!firstCallShortened && typeof length === 'number' && length > 1) {
+          firstCallShortened = true;
+          const half = Math.floor(length / 2);
+          return realWriteSync(fd, buffer as NodeJS.ArrayBufferView, offset ?? 0, half, position ?? null);
+        }
+        return realWriteSync(
+          fd,
+          buffer as NodeJS.ArrayBufferView,
+          offset ?? 0,
+          length ?? (buffer as NodeJS.ArrayBufferView).byteLength,
+          position ?? null,
+        );
+      },
+    );
+    const q = baseQuestion();
+    writeQuestionAtomic(q, { forgeDir });
+    const path = join(forgeDir, 'questions', `${q.question_id}.json`);
+    const onDisk = readFileSync(path, 'utf8');
+    // The payload reconstructed from the parsed object must equal what we wrote.
+    const parsed = JSON.parse(onDisk) as Question;
+    assert.equal(parsed.question_id, q.question_id);
+    // Byte-for-byte: the loop must produce exactly the same JSON output as the
+    // single-call path would. Re-serialize the input and compare.
+    assert.equal(
+      onDisk,
+      JSON.stringify(QuestionSchemaWithRecommendationCheck.parse(q)),
+    );
+    assert.ok(firstCallShortened, 'mock did not observe the short-write path');
+  } finally {
+    mock.reset();
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T3: writeSync returning 0 with bytes still to write is a hard I/O error.
+// Looping forever would hang the process; the writer must throw IO_ERROR.
+test('writeQuestionAtomic throws IO_ERROR when writeSync returns 0 (Bug #2 — zero-progress guard)', (t) => {
+  const forgeDir = freshForgeDir();
+  try {
+    t.mock.method(__fsForTesting, 'writeSync', () => 0);
+    let caught: unknown;
+    try {
+      writeQuestionAtomic(baseQuestion(), { forgeDir });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(isQuestionChannelError(caught));
+    assert.equal((caught as QuestionChannelError).code, 'IO_ERROR');
+    assert.match(
+      (caught as QuestionChannelError).message,
+      /returned 0 at offset 0/,
+      'message should disclose the zero-progress offset',
+    );
+    // No file on disk, no .tmp leftovers.
+    const dir = join(forgeDir, 'questions');
+    const entries = readdirSync(dir);
+    assert.equal(entries.length, 0, `expected empty questions dir, found: ${entries.join(',')}`);
+  } finally {
+    mock.reset();
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T4: closeSync failure on a successful write must surface as IO_ERROR — close(2)
+// on POSIX is the documented surface for delayed write errors (NFS/quota paths).
+test('writeQuestionAtomic surfaces closeSync failures as IO_ERROR when write/fsync succeeded (Bug #3)', (t) => {
+  const forgeDir = freshForgeDir();
+  try {
+    const realCloseSync = __fsForTesting.closeSync;
+    t.mock.method(__fsForTesting, 'closeSync', (fd: number) => {
+      // Actually close so we don't leak the fd, then synthesize the error.
+      try {
+        realCloseSync(fd);
+      } catch {
+        // ignore — we're going to throw a synthetic error anyway
+      }
+      const err = new Error('synthetic delayed write error') as NodeJS.ErrnoException;
+      err.code = 'EIO';
+      throw err;
+    });
+    let caught: unknown;
+    try {
+      writeQuestionAtomic(baseQuestion(), { forgeDir });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(isQuestionChannelError(caught));
+    assert.equal((caught as QuestionChannelError).code, 'IO_ERROR');
+    assert.match(
+      (caught as QuestionChannelError).message,
+      /close/i,
+      'message should identify the close-side failure',
+    );
+    assert.equal(
+      ((caught as QuestionChannelError).details.cause as NodeJS.ErrnoException).code,
+      'EIO',
+      'details.cause should preserve the underlying errno',
+    );
+  } finally {
+    mock.reset();
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T5: when both writeSync and closeSync fail, the writeSync error wins —
+// prior errors are actionable, the close error is informational.
+test('writeQuestionAtomic preserves the prior write error when closeSync also fails (Bug #3)', (t) => {
+  const forgeDir = freshForgeDir();
+  try {
+    const realCloseSync = __fsForTesting.closeSync;
+    t.mock.method(__fsForTesting, 'writeSync', () => {
+      const err = new Error('synthetic disk full') as NodeJS.ErrnoException;
+      err.code = 'ENOSPC';
+      throw err;
+    });
+    t.mock.method(__fsForTesting, 'closeSync', (fd: number) => {
+      try {
+        realCloseSync(fd);
+      } catch {
+        // ignore
+      }
+      const err = new Error('synthetic close error') as NodeJS.ErrnoException;
+      err.code = 'EIO';
+      throw err;
+    });
+    let caught: unknown;
+    try {
+      writeQuestionAtomic(baseQuestion(), { forgeDir });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(isQuestionChannelError(caught));
+    assert.equal((caught as QuestionChannelError).code, 'IO_ERROR');
+    // Critical: details.cause must be the ENOSPC write error, NOT the EIO close error.
+    assert.equal(
+      ((caught as QuestionChannelError).details.cause as NodeJS.ErrnoException).code,
+      'ENOSPC',
+      'prior write error must win over close-time error',
+    );
+  } finally {
+    mock.reset();
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T6: payload size cap enforced at the write boundary, before any disk I/O.
+// The schema caps each string field by UTF-16 code units (`String#length`)
+// but the cap is enforced in UTF-8 BYTES. A schema-valid payload built from
+// 4-byte-per-codepoint characters (e.g. 😀, 2 UTF-16 units → 4 UTF-8 bytes)
+// can exceed QUESTION_FILE_MAX_BYTES even while passing zod validation.
+// This is exactly the gap the cap check is meant to close.
+test('writeQuestionAtomic rejects oversized payloads with PAYLOAD_TOO_LARGE before any I/O (Bug #4)', () => {
+  const forgeDir = freshForgeDir();
+  try {
+    // 2000 emoji = 4000 UTF-16 units (within question's 4000 cap) but 8000 UTF-8 bytes.
+    // 4000 emoji in context = 8000 UTF-16 (within context's 8000 cap) but 16000 UTF-8 bytes.
+    // 1000 emoji per option description × 10 options = 40000 UTF-8 bytes.
+    // 1000 emoji in what_happens_if_unanswered (cap 2000 UTF-16) = 4000 UTF-8 bytes.
+    // Total content ≈ 68000 UTF-8 bytes + JSON structural overhead → > 64KB cap.
+    const emoji = '😀';
+    const padded = baseQuestion({
+      question: emoji.repeat(2000), // 4000 UTF-16 units == cap
+      context: emoji.repeat(4000), // 8000 UTF-16 units == cap
+      options: Array.from({ length: 10 }, (_, i) => ({
+        id: `o${i}`,
+        label: 'opt',
+        description: emoji.repeat(1000), // 2000 UTF-16 units == cap
+      })),
+      recommended_option_id: 'o0',
+      what_happens_if_unanswered: emoji.repeat(1000), // 2000 UTF-16 units == cap
+    });
+    let caught: unknown;
+    try {
+      writeQuestionAtomic(padded, { forgeDir });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(isQuestionChannelError(caught), `expected QuestionChannelError, got ${caught}`);
+    assert.equal((caught as QuestionChannelError).code, 'PAYLOAD_TOO_LARGE');
+    // Critically: the questions directory must not even exist — the cap check
+    // is required to run before ensureDirectory.
+    let dirEntries: string[];
+    try {
+      dirEntries = readdirSync(join(forgeDir, 'questions'));
+    } catch {
+      dirEntries = [];
+    }
+    assert.equal(
+      dirEntries.length,
+      0,
+      `expected no on-disk side effects, found: ${dirEntries.join(',')}`,
+    );
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T7: boundary — a schema-valid payload just under the cap must be allowed.
+// The cap is exclusive of equal (`bytes > cap` rejects, `bytes <= cap` allows).
+// We can't construct an exactly-at-cap payload deterministically across all
+// schema fields, but we CAN assert that a near-cap payload (within a few bytes)
+// writes successfully — proving the cap is not over-eager.
+test('writeQuestionAtomic accepts a near-cap payload (Bug #4 — boundary)', () => {
+  const forgeDir = freshForgeDir();
+  try {
+    // Build a payload with ~50KB of UTF-8 from emoji — comfortably under the
+    // 64KB cap and well within schema caps.
+    const emoji = '😀';
+    const q = baseQuestion({
+      context: emoji.repeat(4000), // 8000 UTF-16 (== schema cap), 16000 UTF-8 bytes
+    });
+    const payloadBytes = Buffer.byteLength(
+      JSON.stringify(QuestionSchemaWithRecommendationCheck.parse(q)),
+      'utf8',
+    );
+    assert.ok(
+      payloadBytes < QUESTION_FILE_MAX_BYTES,
+      `precondition: payload (${payloadBytes}b) must be under cap (${QUESTION_FILE_MAX_BYTES}b)`,
+    );
+    // Must NOT throw.
+    writeQuestionAtomic(q, { forgeDir });
+    const onDisk = readFileSync(
+      join(forgeDir, 'questions', `${q.question_id}.json`),
+      'utf8',
+    );
+    assert.equal(Buffer.byteLength(onDisk, 'utf8'), payloadBytes);
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T8: enhancement #6 — temp filename randomness must come from crypto.randomBytes,
+// surfacing as 16 lowercase hex characters in the {pid}.{counter}.{hex}.tmp suffix.
+test('writeQuestionAtomic temp filename uses 16-char hex randomness (Enhancement #6)', (t) => {
+  const forgeDir = freshForgeDir();
+  const observedTempPaths: string[] = [];
+  try {
+    const realOpenSync = __fsForTesting.openSync;
+    t.mock.method(__fsForTesting, 'openSync', (path: string, flags: string | number, mode?: number) => {
+      if (typeof path === 'string' && path.endsWith('.tmp')) {
+        observedTempPaths.push(path);
+      }
+      return realOpenSync(path, flags as string, mode);
+    });
+    writeQuestionAtomic(baseQuestion(), { forgeDir });
+    assert.equal(observedTempPaths.length, 1, 'expected exactly one temp path open');
+    const tmp = observedTempPaths[0]!;
+    // Suffix shape: .<pid>.<counter>.<16-hex>.tmp
+    assert.match(
+      tmp,
+      /\.\d+\.\d+\.[0-9a-f]{16}\.tmp$/,
+      `temp path "${tmp}" must end with .{pid}.{counter}.{16-hex}.tmp`,
+    );
+  } finally {
+    mock.reset();
     rmSync(forgeDir, { recursive: true, force: true });
   }
 });
