@@ -66,6 +66,8 @@ A `forge worktree clean` command for pruning worktrees whose upstream branches a
 
 **Hooks running in two worktrees simultaneously.** If you have two Claude sessions running tests in two worktrees at once, they share `node_modules` if you're using the main checkout's, but they each have their own working tree. With Vitest in watch mode in both, the watchers can fight. Either use separate node_modules per worktree, or run tests one at a time across worktrees.
 
+**Gitignored content doesn't migrate.** `git worktree add` only checks out tracked files. Forge gitignores `spec/`, `plans/`, and `docs/learnings/` (so internal product docs don't ship in the published npm package), which means a fresh worktree starts blind — `/plan-task` can't read the spec, `/implement` can't find prior plans, and `learning-curator` finds zero learnings. `/pickup-task` hydrates these trees automatically after creating the worktree; if you create one manually with `git worktree add`, you must copy them in yourself. See `docs/learnings/2026-Q2/worktrees-blind-to-gitignored-context.md` for the root cause.
+
 ## Cleanup discipline
 
 Worktrees accumulate. After a PR merges and the branch is deleted on GitHub, the local branch and the worktree linger. The recommended manual cleanup is:
