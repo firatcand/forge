@@ -4,6 +4,16 @@ Items deferred from current phases. Triaged before next phase planning. Not comm
 
 ## Phase 3 enhancement candidates
 
+### Filesystem capability probe (`forge doctor`)
+
+Today the question channel writer lets `linkSync` fail with `EPERM`/`ENOTSUP` if `.forge/` happens to live on a non-POSIX filesystem (FAT, some NFS/SMB/FUSE mounts, Windows ReFS edge cases). Surface this as a real signal before first user-visible failure.
+
+**Probe:** on first orchestrator use in a project (and as part of `forge doctor`), write `probe.tmp` → `fsync` → `linkSync(probe.tmp, probe.target)` → assert second `linkSync` throws `EEXIST` → cleanup. Cache success in `.forge/.cap-probe-ok` so the cost is paid once per project.
+
+**Why deferred from FORGE-69:** The Codex review of FORGE-64 flagged this as Enhancement #5 alongside the four atomic-write bugs. The bugs were urgent (block FORGE-20 dispatcher); the probe is correctness gold-plating for a different threat model (wrong filesystem at setup time, not concurrent writers at runtime). Belongs with `forge doctor`.
+
+**Scope:** ~40 lines split between `src/orchestrator/questions/` (probe helper + marker file check) and `bin/forge-doctor.ts`. No schema changes.
+
 ### `touches:` field for tasks → file-overlap detection in `/pickup-task`
 
 Add an optional `touches: [paths]` field to each task in `plans/phases.yaml`. `/pickup-task` filters out tasks whose `touches` overlap with currently-claimed-and-in-flight tasks.
