@@ -359,7 +359,7 @@ Append-only structured JSONL with every CLI verb invocation, every state transit
 
 ## Tracker atomic claim — per-adapter capability matrix
 
-Codex v2 review correctly flagged that GitHub and Notion don't have natural compare-and-set primitives. The honest design is layered:
+Codex v2 review correctly flagged that GitHub and Notion don't have natural compare-and-set primitives. Codex v3 introspection (2026-05-15, confirmed against `@linear/sdk@84.0.0`) further established that Linear also has no CAS primitive — `IssueUpdate` exposes no `expectedVersion`/`expectedRevision`/`ifMatch` field, and `Issue` has no `version`/`revision`/`etag`/`sequence` read field. **All three trackers are therefore in the weak-CAS posture.** The honest design is layered:
 
 - **Local lease is authoritative within the working window** (`lease_ttl_ms` default 30 min). All concurrency safety inside a run derives from the local lease, not the tracker.
 - **Tracker is the cross-run rendezvous point.** Multiple mains discover ready tasks by reading the tracker. The first to claim wins via best-available tracker semantics; the loser retries.
@@ -369,11 +369,11 @@ Codex v2 review correctly flagged that GitHub and Notion don't have natural comp
 
 | Tracker | Authoritative atomicity | Mechanism | Race-loss detection |
 |---|---|---|---|
-| **Linear** | **Yes — strong CAS** | `IssueUpdate` with `expectedVersion` matching the current `Issue.updatedAt`/version. Linear's API supports optimistic concurrency. | API returns `VersionConflict`; race loser drops, picks next ready task. |
+| **Linear** | **Weak — best-effort label-CAS + verify-on-readback** | Two-step claim: (1) add `forge:claimed-by:<run_id>` via `IssueUpdate` with `addedLabelIds` (the append-only field) — or equivalently the dedicated `issueAddLabel(id, labelId)` mutation. **MUST NOT** use `IssueUpdateInput.labelIds` — that field is a full-list replacement and would clobber user-applied labels on every claim. (2) Re-fetch via `IssueQuery` and verify our label is present AND no other `forge:claimed-by:*` label is present. | Race loser sees another `forge:claimed-by:*` label, removes its own via `removedLabelIds` or `issueRemoveLabel`, drops the task. Race window: bounded by the local lease (same posture as GitHubTracker). |
 | **GitHub Issues** | **Weak — best-effort label-CAS** | Two-step claim: (1) add label `forge:claimed-by:<run_id>` via `gh issue edit --add-label`; (2) immediately re-fetch via `gh issue view --json labels` and verify our label is present *and* no other `forge:claimed-by:*` label is present. Both checks must pass. | Race loser sees another `forge:claimed-by:*` label, removes its own label, drops the task. Race window: ~200ms between add and re-fetch. Acceptable because the local lease prevents same-host concurrent dispatch. |
 | **Notion** | **Weak — race-detect-only** | Set `forge_claimed_by` page property to `<run_id>`, then re-fetch the page and verify `last_edited_time` matches our write. | If `last_edited_time` advanced past our write, another writer raced us. Race loser clears its claim and drops the task. |
 
-For GitHub and Notion, the documented stance is: **the local lease is the ownership truth within a working window; the tracker is the eventually-consistent rendezvous point.** This is good enough because:
+**For all three trackers**, the documented stance is: **the local lease is the ownership truth within a working window; the tracker is the eventually-consistent rendezvous point.** This is good enough because:
 1. The worker is already serialized within a run by the local lease.
 2. The only failure mode is "two mains briefly both think they own task T; both dispatch; second commit conflicts at PR time" — recoverable.
 3. The merge-to-main-between-phases policy (see "Branch/PR topology") ensures conflicts surface at PR time, not at merge time on main.
@@ -911,7 +911,7 @@ None remaining at the start of FORGE-20/21/31/32/65 implementation. The followin
 | Question channel filesystem layout | **Restructured**: task-keyed instead of run-keyed; per-attempt scoping | Codex v2 review #5 — task is the coordination object. |
 | Worker self-reported verdict | **Wrapped** with CLI-verified verdict facts | Codex v2 review #7 — verdict facts must be CLI-computed, not worker-claimed. |
 | `save-point.md` prose as authoritative | **Demoted to advisory**; replaced by structured `events.jsonl` per attempt | Codex v2 review #3 (open questions) — prose can lie; structured events are checkable. |
-| Tracker atomic claim hand-waved | **Per-adapter capability matrix** with honest framing: Linear strong CAS, GitHub/Notion weak best-effort | Codex v2 review #1 — name the strength honestly. |
+| Tracker atomic claim hand-waved | **Per-adapter capability matrix** with honest framing: all three trackers use weak label-CAS + verify-on-readback. Linear's "strong CAS via `expectedVersion`" assumption was wrong (disproven 2026-05-15 against `@linear/sdk@84.0.0`); the spec was corrected before adapter implementation started. | Codex v2 review #1 + Codex v3 introspection 2026-05-15 — name the strength honestly. |
 | `gc` mentioned without rules | **Deterministic divergence table with `--dry-run`** | Codex v2 review #10. |
 | File-level conflict not addressed | **`write_globs` per task + overlap detection + hard-locked globals list** | Codex v2 review #2 + open question #1 — graph helps scheduling, not file-level safety. |
 | Branch/PR topology unspecified | **Merge-to-main-between-phases**, explicit | Codex v2 review #8. |
