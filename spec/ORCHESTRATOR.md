@@ -106,7 +106,7 @@ All orchestrator state lives under `.forge/`. Every path documented below is roo
 
 | Property | Rule |
 |---|---|
-| Atomicity | All writes go to a `.tmp` sibling, `fsync`, then `rename` to the target. Readers never observe a half-written file. |
+| Atomicity | All writes go to a uniquely-named `.tmp` sibling, `fsync`, then `link(tmp, target)` followed by `unlink(tmp)`. We use `link` rather than `rename` because POSIX rename silently overwrites an existing target; `link` fails with `EEXIST`, giving us OS-level enforcement of the "never overwritten" invariant below. Readers never observe a half-written file. Concurrent writers on the same id reject all but one with a typed `DUPLICATE_ID` error. Requires `.forge/` to live on a local POSIX filesystem — already true because git itself requires that. |
 | Idempotence | `{question_id}.json` and `{answer_id}.json` are never overwritten. A second write with the same id is a bug; readers reject duplicates by id. |
 | Schema versioning | Every JSON document includes a `version` field. Readers warn-and-skip on unknown versions; they never crash. |
 | Untrusted input | Question/answer file contents may originate from compromised workers. Readers validate against the schema with strict size caps (default 64KB per file) and reject anything outside spec. |

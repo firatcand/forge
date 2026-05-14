@@ -3,6 +3,10 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInit } from '../cli/init.ts';
+import { runOrchestrateAnswer } from '../cli/orchestrate-answer.ts';
+import { runOrchestrateAttach } from '../cli/orchestrate-attach.ts';
+import { runOrchestrateQuestions } from '../cli/orchestrate-questions.ts';
+import { runOrchestrateStatus } from '../cli/orchestrate-status.ts';
 
 type PackageJson = { version: string };
 
@@ -107,6 +111,98 @@ if (command === 'init') {
       process.exit(1);
     }
   })();
+} else if (command === 'orchestrate') {
+  dispatchOrchestrate(args.slice(1));
 } else {
   failUnknown(command, version);
+}
+
+function parseFlag(rest: readonly string[], long: string): string | undefined {
+  // Supports `--flag value` and `--flag=value`. Order independent.
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i] ?? '';
+    if (a === `--${long}`) {
+      return rest[i + 1];
+    }
+    if (a.startsWith(`--${long}=`)) {
+      return a.slice(long.length + 3);
+    }
+  }
+  return undefined;
+}
+
+function hasFlag(rest: readonly string[], long: string): boolean {
+  for (const a of rest) {
+    if (a === `--${long}` || a.startsWith(`--${long}=`)) return true;
+  }
+  return false;
+}
+
+function firstPositional(rest: readonly string[]): string | undefined {
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i] ?? '';
+    if (a.startsWith('--')) {
+      // Skip the value of a `--flag value` pair (not `--flag=value`).
+      if (!a.includes('=') && i + 1 < rest.length && !rest[i + 1]?.startsWith('--')) {
+        i += 1;
+      }
+      continue;
+    }
+    return a;
+  }
+  return undefined;
+}
+
+function dispatchOrchestrate(rest: readonly string[]): void {
+  const sub = rest[0];
+  if (!sub) {
+    console.error(
+      'Usage: forge orchestrate <questions|answer|status|attach> [...]',
+    );
+    process.exit(1);
+  }
+  const subArgs = rest.slice(1);
+  const forgeDir = parseFlag(subArgs, 'forge-dir') ?? `${process.cwd()}/.forge`;
+
+  if (sub === 'questions') {
+    const open = hasFlag(subArgs, 'open');
+    const result = runOrchestrateQuestions({ open, forgeDir });
+    process.exit(result.exitCode);
+  }
+  if (sub === 'answer') {
+    const questionId = firstPositional(subArgs) ?? '';
+    const optionId = parseFlag(subArgs, 'option') ?? '';
+    const note = parseFlag(subArgs, 'note');
+    const result = runOrchestrateAnswer({
+      questionId,
+      optionId,
+      forgeDir,
+      ...(note ? { note } : {}),
+    });
+    process.exit(result.exitCode);
+  }
+  if (sub === 'status') {
+    const runId = firstPositional(subArgs) ?? parseFlag(subArgs, 'run-id');
+    const result = runOrchestrateStatus({
+      forgeDir,
+      ...(runId ? { runId } : {}),
+    });
+    process.exit(result.exitCode);
+  }
+  if (sub === 'attach') {
+    const runId = firstPositional(subArgs) ?? parseFlag(subArgs, 'run-id');
+    void (async () => {
+      const result = await runOrchestrateAttach({
+        forgeDir,
+        follow: true,
+        ...(runId ? { runId } : {}),
+      });
+      process.exit(result.exitCode);
+    })();
+    return;
+  }
+  console.error(
+    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach.`,
+  );
+  process.exit(1);
 }

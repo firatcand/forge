@@ -76,8 +76,25 @@ test('forge init is dispatched to runInit (fails loudly without answers in non-i
   );
 });
 
-test('forge orchestrate (another unknown command) also exits 1 with stderr', async () => {
+test('forge orchestrate with no subcommand prints usage and exits 1', async () => {
   const result = await runCli(['orchestrate']);
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /forge: 'orchestrate' is not yet available/);
+  assert.match(result.stderr, /Usage: forge orchestrate/);
+  assert.match(result.stderr, /questions\|answer\|status\|attach/);
+});
+
+test('forge orchestrate <unknown> rejects the subcommand and exits 1', async () => {
+  const result = await runCli(['orchestrate', 'mystery']);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /unknown subcommand 'mystery'/);
+});
+
+test('forge orchestrate questions --open returns 0 against an empty forge dir', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'forge-bin-orch-'));
+  const result = await runCli(['orchestrate', 'questions', '--open', '--forge-dir', join(tmp, '.forge')]);
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stdout, /No open questions\./);
 });

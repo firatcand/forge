@@ -19,3 +19,23 @@ export type {
   QuestionResolution,
   ParseLineResult,
 } from './events.ts';
+export {
+  QuestionChannelError,
+  createQuestionWatcher,
+  isQuestionChannelError,
+  listOpenQuestions,
+  readAnswer,
+  readQuestion,
+  writeAnswerAtomic,
+  writeQuestionAtomic,
+} from './questions/index.ts';
+export type {
+  ListOpenQuestionsOptions,
+  QuestionChannelErrorCode,
+  QuestionChannelErrorDetails,
+  QuestionWatcher,
+  QuestionWatcherEvent,
+  QuestionWatcherOptions,
+  ReadOptions,
+  WriteOptions,
+} from './questions/index.ts';
