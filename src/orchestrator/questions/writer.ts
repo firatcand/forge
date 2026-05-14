@@ -1,12 +1,40 @@
-import { closeSync, fsyncSync, linkSync, mkdirSync, openSync, unlinkSync, writeSync } from 'node:fs';
+import {
+  closeSync as _closeSync,
+  fsyncSync as _fsyncSync,
+  linkSync as _linkSync,
+  mkdirSync as _mkdirSync,
+  openSync as _openSync,
+  unlinkSync as _unlinkSync,
+  writeSync as _writeSync,
+} from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import {
   AnswerSchema,
+  QUESTION_FILE_MAX_BYTES,
   QuestionSchemaWithRecommendationCheck,
   type Answer,
   type Question,
 } from '../../schemas/questions.ts';
 import { QuestionChannelError, isNodeFsError } from './errors.ts';
+
+// Test seam: tests use node:test's `mock.method` to override individual entries
+// here when simulating fs failures (partial writeSync, closeSync errors, etc.).
+// The node:fs module namespace is a frozen Module Namespace Object so it cannot
+// be patched directly; this plain object holds mutable references the writer
+// uses. Production code must NOT touch this — call writeQuestionAtomic /
+// writeAnswerAtomic and let them route through `fs`. Marked __ to signal the
+// intent at the call site.
+export const __fsForTesting = {
+  closeSync: _closeSync,
+  fsyncSync: _fsyncSync,
+  linkSync: _linkSync,
+  mkdirSync: _mkdirSync,
+  openSync: _openSync,
+  unlinkSync: _unlinkSync,
+  writeSync: _writeSync,
+};
+const fs = __fsForTesting;
 
 // Atomic file placement is implemented as: write to a uniquely-named temp
 // file in the same directory, fsync, then `link` the temp file at the final
@@ -28,14 +56,15 @@ let tempCounter = 0;
 
 function tempName(targetPath: string): string {
   // Per-call counter prevents collisions between concurrent same-pid writers
-  // (e.g. inside a Promise.all). Math.random() is belt-and-suspenders.
+  // (e.g. inside a Promise.all); randomBytes hardens against a hostile same-UID
+  // process attempting to plant predictable temp names.
   tempCounter = (tempCounter + 1) >>> 0;
-  return `${targetPath}.${process.pid}.${tempCounter}.${Math.random().toString(36).slice(2, 10)}.tmp`;
+  return `${targetPath}.${process.pid}.${tempCounter}.${randomBytes(8).toString('hex')}.tmp`;
 }
 
 function ensureDirectory(dir: string): void {
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   } catch (err) {
     throw new QuestionChannelError(
       'IO_ERROR',
@@ -51,7 +80,7 @@ function writeTempFile(tmpPath: string, payload: string): void {
   // before the counter (extremely unlikely to fire, but cheap insurance).
   let fd: number;
   try {
-    fd = openSync(tmpPath, 'wx', 0o600);
+    fd = fs.openSync(tmpPath, 'wx', 0o600);
   } catch (err) {
     throw new QuestionChannelError(
       'IO_ERROR',
@@ -59,18 +88,27 @@ function writeTempFile(tmpPath: string, payload: string): void {
       { path: tmpPath, cause: err },
     );
   }
+  // writeSync may return a byte count smaller than the requested length on
+  // NFS / quota-exhausted / signal-interrupted writes. Loop until the full
+  // payload is written; treat `written === 0` as a hard I/O error rather than
+  // an infinite-loop trigger.
+  const buf = Buffer.from(payload, 'utf8');
+  let primaryError: unknown;
   try {
-    try {
-      writeSync(fd, payload, null, 'utf8');
-    } catch (err) {
-      throw new QuestionChannelError(
-        'IO_ERROR',
-        `Failed to write temp file ${tmpPath}`,
-        { path: tmpPath, cause: err },
-      );
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = fs.writeSync(fd, buf, offset, buf.length - offset, null);
+      if (written === 0) {
+        throw new QuestionChannelError(
+          'IO_ERROR',
+          `writeSync returned 0 at offset ${offset} for ${tmpPath}`,
+          { path: tmpPath, offset },
+        );
+      }
+      offset += written;
     }
     try {
-      fsyncSync(fd);
+      fs.fsyncSync(fd);
     } catch (err) {
       throw new QuestionChannelError(
         'IO_ERROR',
@@ -78,31 +116,53 @@ function writeTempFile(tmpPath: string, payload: string): void {
         { path: tmpPath, cause: err },
       );
     }
+  } catch (err) {
+    if (err instanceof QuestionChannelError) {
+      primaryError = err;
+    } else {
+      primaryError = new QuestionChannelError(
+        'IO_ERROR',
+        `Failed to write temp file ${tmpPath}`,
+        { path: tmpPath, cause: err },
+      );
+    }
   } finally {
-    // closeSync wrapped separately — a failure here does NOT necessarily
-    // mean the data wasn't written, but we surface it as IO_ERROR if the
-    // write/fsync path succeeded. If an earlier error already threw, we
-    // still want to release the fd; the close error in that path is
-    // swallowed deliberately (the outer error is the actionable one).
+    // Per close(2), a closeSync failure on a normally-completed write is a
+    // real I/O error (delayed write-back on NFS/quota paths). Surface it as
+    // IO_ERROR when it is the ONLY failure. If a prior write/fsync error
+    // already exists, that error wins — the close error is swallowed
+    // deliberately because (a) the fd is gone either way (never retry close)
+    // and (b) the prior error is the actionable one for the caller.
     try {
-      closeSync(fd);
-    } catch {
-      // best-effort
+      fs.closeSync(fd);
+    } catch (closeErr) {
+      if (primaryError === undefined) {
+        primaryError = new QuestionChannelError(
+          'IO_ERROR',
+          `Failed to close temp file ${tmpPath}`,
+          { path: tmpPath, cause: closeErr },
+        );
+      }
     }
   }
+  if (primaryError !== undefined) throw primaryError;
 }
 
 function bestEffortUnlink(path: string): void {
   try {
-    unlinkSync(path);
+    fs.unlinkSync(path);
   } catch {
     // best-effort cleanup; do not throw from a cleanup path
   }
 }
 
 function placeAtomic(tmpPath: string, targetPath: string): void {
+  // Temp-file cleanup is owned by the caller's `finally` block — `placeAtomic`
+  // never unlinks. This keeps a single, unconditional cleanup point regardless
+  // of whether `linkSync` succeeds, throws DUPLICATE_ID, or throws any other
+  // fs error, closing the leak surfaced by Codex review.
   try {
-    linkSync(tmpPath, targetPath);
+    fs.linkSync(tmpPath, targetPath);
   } catch (err) {
     if (isNodeFsError(err) && err.code === 'EEXIST') {
       throw new QuestionChannelError(
@@ -124,14 +184,21 @@ function placeAtomic(tmpPath: string, targetPath: string): void {
       { path: targetPath, cause: err },
     );
   }
-  // Temp file is unlinked AFTER link succeeds — link creates a second name
-  // for the same inode, then we remove the temp name. Order matters: if we
-  // unlinked before linking, a crash between unlink and link would lose data.
-  bestEffortUnlink(tmpPath);
 }
 
 export interface WriteOptions {
   forgeDir: string;
+}
+
+function assertPayloadSize(payload: string, targetPath: string): void {
+  const bytes = Buffer.byteLength(payload, 'utf8');
+  if (bytes > QUESTION_FILE_MAX_BYTES) {
+    throw new QuestionChannelError(
+      'PAYLOAD_TOO_LARGE',
+      `Payload exceeds QUESTION_FILE_MAX_BYTES (${QUESTION_FILE_MAX_BYTES}): ${bytes} bytes`,
+      { path: targetPath, bytes },
+    );
+  }
 }
 
 export function writeQuestionAtomic(
@@ -149,15 +216,22 @@ export function writeQuestionAtomic(
   const validated = parsed.data;
   const dir = join(opts.forgeDir, 'questions');
   const targetPath = join(dir, `${validated.question_id}.json`);
+  const payload = JSON.stringify(validated);
+  // Enforce the size cap BEFORE any disk I/O so producers fail fast and we
+  // never even attempt to land an oversized file in the mailbox. Reader-side
+  // OVERSIZED protection remains as a second line of defense.
+  assertPayloadSize(payload, targetPath);
   ensureDirectory(dir);
   const tmpPath = tempName(targetPath);
-  const payload = JSON.stringify(validated);
   try {
     writeTempFile(tmpPath, payload);
     placeAtomic(tmpPath, targetPath);
-  } catch (err) {
+  } finally {
+    // Unconditional cleanup: on the happy path the temp file is the second
+    // name of the now-linked inode (safe to unlink); on any failure path the
+    // temp may exist and must be removed to prevent .tmp accumulation.
+    // bestEffortUnlink swallows ENOENT, so this is idempotent.
     bestEffortUnlink(tmpPath);
-    throw err;
   }
 }
 
@@ -176,14 +250,14 @@ export function writeAnswerAtomic(
   const validated = parsed.data;
   const dir = join(opts.forgeDir, 'answers');
   const targetPath = join(dir, `${validated.question_id}.json`);
+  const payload = JSON.stringify(validated);
+  assertPayloadSize(payload, targetPath);
   ensureDirectory(dir);
   const tmpPath = tempName(targetPath);
-  const payload = JSON.stringify(validated);
   try {
     writeTempFile(tmpPath, payload);
     placeAtomic(tmpPath, targetPath);
-  } catch (err) {
+  } finally {
     bestEffortUnlink(tmpPath);
-    throw err;
   }
 }
