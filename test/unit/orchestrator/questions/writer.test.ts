@@ -72,12 +72,51 @@ function freshForgeDir(): string {
   return mkdtempSync(join(tmpdir(), 'forge-writer-'));
 }
 
+// All test paths use a single (taskId, attemptId) pair. The atomic-write
+// invariants under test are independent of which task/attempt the write goes
+// to — the v2 layout merely changes path computation.
+const TASK_ID = 'FORGE-20';
+const ATTEMPT_ID = '0190000000000000a1';
+function writeOpts(forgeDir: string): { forgeDir: string; taskId: string; attemptId: string } {
+  return { forgeDir, taskId: TASK_ID, attemptId: ATTEMPT_ID };
+}
+function qPath(forgeDir: string, questionId: string): string {
+  return join(
+    forgeDir,
+    'orchestrator',
+    'tasks',
+    TASK_ID,
+    'attempts',
+    ATTEMPT_ID,
+    'questions',
+    `${questionId}.json`,
+  );
+}
+function aPath(forgeDir: string, questionId: string): string {
+  return join(
+    forgeDir,
+    'orchestrator',
+    'tasks',
+    TASK_ID,
+    'attempts',
+    ATTEMPT_ID,
+    'answers',
+    `${questionId}.json`,
+  );
+}
+function qDir(forgeDir: string): string {
+  return join(forgeDir, 'orchestrator', 'tasks', TASK_ID, 'attempts', ATTEMPT_ID, 'questions');
+}
+function aDir(forgeDir: string): string {
+  return join(forgeDir, 'orchestrator', 'tasks', TASK_ID, 'attempts', ATTEMPT_ID, 'answers');
+}
+
 test('writeQuestionAtomic places a valid question file at .forge/questions/{id}.json', () => {
   const forgeDir = freshForgeDir();
   try {
     const q = baseQuestion();
-    writeQuestionAtomic(q, { forgeDir });
-    const path = join(forgeDir, 'questions', `${q.question_id}.json`);
+    writeQuestionAtomic(q, writeOpts(forgeDir));
+    const path = qPath(forgeDir, q.question_id);
     const raw = readFileSync(path, 'utf8');
     const parsed = JSON.parse(raw) as Question;
     assert.equal(parsed.question_id, q.question_id);
@@ -91,8 +130,8 @@ test('writeAnswerAtomic places a valid answer at .forge/answers/{id}.json', () =
   const forgeDir = freshForgeDir();
   try {
     const a = baseAnswer();
-    writeAnswerAtomic(a, { forgeDir });
-    const path = join(forgeDir, 'answers', `${a.question_id}.json`);
+    writeAnswerAtomic(a, writeOpts(forgeDir));
+    const path = aPath(forgeDir, a.question_id);
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Answer;
     assert.equal(parsed.question_id, a.question_id);
     assert.equal(parsed.option_id, 'no');
@@ -105,10 +144,10 @@ test('writeQuestionAtomic rejects duplicate ids with DUPLICATE_ID', () => {
   const forgeDir = freshForgeDir();
   try {
     const q = baseQuestion();
-    writeQuestionAtomic(q, { forgeDir });
+    writeQuestionAtomic(q, writeOpts(forgeDir));
     let caught: unknown;
     try {
-      writeQuestionAtomic(q, { forgeDir });
+      writeQuestionAtomic(q, writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -123,10 +162,10 @@ test('writeAnswerAtomic rejects duplicate ids with DUPLICATE_ID', () => {
   const forgeDir = freshForgeDir();
   try {
     const a = baseAnswer();
-    writeAnswerAtomic(a, { forgeDir });
+    writeAnswerAtomic(a, writeOpts(forgeDir));
     let caught: unknown;
     try {
-      writeAnswerAtomic(a, { forgeDir });
+      writeAnswerAtomic(a, writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -145,7 +184,7 @@ test('writeQuestionAtomic rejects an invalid payload with SCHEMA_INVALID before 
     const broken = { ...baseQuestion(), options: [] } as unknown as Question;
     let caught: unknown;
     try {
-      writeQuestionAtomic(broken, { forgeDir });
+      writeQuestionAtomic(broken, writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -154,7 +193,7 @@ test('writeQuestionAtomic rejects an invalid payload with SCHEMA_INVALID before 
     // No file should exist on disk.
     let dirEntries: string[];
     try {
-      dirEntries = readdirSync(join(forgeDir, 'questions'));
+      dirEntries = readdirSync(qDir(forgeDir));
     } catch {
       dirEntries = [];
     }
@@ -172,11 +211,11 @@ test('writeQuestionAtomic surfaces IS_DIRECTORY when the target path is a direct
   const forgeDir = freshForgeDir();
   try {
     const q = baseQuestion();
-    const targetPath = join(forgeDir, 'questions', `${q.question_id}.json`);
+    const targetPath = qPath(forgeDir, q.question_id);
     mkdirSync(targetPath, { recursive: true });
     let caught: unknown;
     try {
-      writeQuestionAtomic(q, { forgeDir });
+      writeQuestionAtomic(q, writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -200,7 +239,7 @@ test('writeQuestionAtomic: concurrent writers on the same id — exactly one win
     const N = 8;
     const results = await Promise.allSettled(
       Array.from({ length: N }, () =>
-        Promise.resolve().then(() => writeQuestionAtomic(q, { forgeDir })),
+        Promise.resolve().then(() => writeQuestionAtomic(q, writeOpts(forgeDir))),
       ),
     );
     const fulfilled = results.filter((r) => r.status === 'fulfilled');
@@ -221,11 +260,11 @@ test('writeQuestionAtomic: concurrent writers on the same id — exactly one win
       );
     }
     // Target file exists and is valid JSON matching the input.
-    const path = join(forgeDir, 'questions', `${q.question_id}.json`);
+    const path = qPath(forgeDir, q.question_id);
     const onDisk = JSON.parse(readFileSync(path, 'utf8')) as Question;
     assert.equal(onDisk.question_id, q.question_id);
     // No stray .tmp siblings remain in the directory.
-    const entries = readdirSync(join(forgeDir, 'questions'));
+    const entries = readdirSync(qDir(forgeDir));
     const tmp = entries.filter((e) => e.includes('.tmp'));
     assert.equal(tmp.length, 0, `expected no .tmp leftovers, found: ${tmp.join(',')}`);
   } finally {
@@ -240,11 +279,11 @@ test('writeQuestionAtomic cleans up the temp file on failure', () => {
     // link() will fail with EEXIST → DUPLICATE_ID. The temp file written
     // mid-call must be cleaned up despite the failure.
     const q = baseQuestion();
-    const dir = join(forgeDir, 'questions');
+    const dir = qDir(forgeDir);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${q.question_id}.json`), '{"placeholder":true}');
     try {
-      writeQuestionAtomic(q, { forgeDir });
+      writeQuestionAtomic(q, writeOpts(forgeDir));
     } catch {
       // expected
     }
@@ -263,11 +302,11 @@ test('writeAnswerAtomic cleans up the temp file on failure', () => {
   const forgeDir = freshForgeDir();
   try {
     const a = baseAnswer();
-    const dir = join(forgeDir, 'answers');
+    const dir = aDir(forgeDir);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${a.question_id}.json`), '{"placeholder":true}');
     try {
-      writeAnswerAtomic(a, { forgeDir });
+      writeAnswerAtomic(a, writeOpts(forgeDir));
     } catch {
       // expected
     }
@@ -314,8 +353,8 @@ test('writeQuestionAtomic loops writeSync until the full payload is written (Bug
       },
     );
     const q = baseQuestion();
-    writeQuestionAtomic(q, { forgeDir });
-    const path = join(forgeDir, 'questions', `${q.question_id}.json`);
+    writeQuestionAtomic(q, writeOpts(forgeDir));
+    const path = qPath(forgeDir, q.question_id);
     const onDisk = readFileSync(path, 'utf8');
     // The payload reconstructed from the parsed object must equal what we wrote.
     const parsed = JSON.parse(onDisk) as Question;
@@ -341,7 +380,7 @@ test('writeQuestionAtomic throws IO_ERROR when writeSync returns 0 (Bug #2 — z
     t.mock.method(__fsForTesting, 'writeSync', () => 0);
     let caught: unknown;
     try {
-      writeQuestionAtomic(baseQuestion(), { forgeDir });
+      writeQuestionAtomic(baseQuestion(), writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -353,8 +392,12 @@ test('writeQuestionAtomic throws IO_ERROR when writeSync returns 0 (Bug #2 — z
       'message should disclose the zero-progress offset',
     );
     // No file on disk, no .tmp leftovers.
-    const dir = join(forgeDir, 'questions');
-    const entries = readdirSync(dir);
+    let entries: string[];
+    try {
+      entries = readdirSync(qDir(forgeDir));
+    } catch {
+      entries = [];
+    }
     assert.equal(entries.length, 0, `expected empty questions dir, found: ${entries.join(',')}`);
   } finally {
     mock.reset();
@@ -381,7 +424,7 @@ test('writeQuestionAtomic surfaces closeSync failures as IO_ERROR when write/fsy
     });
     let caught: unknown;
     try {
-      writeQuestionAtomic(baseQuestion(), { forgeDir });
+      writeQuestionAtomic(baseQuestion(), writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -426,7 +469,7 @@ test('writeQuestionAtomic preserves the prior write error when closeSync also fa
     });
     let caught: unknown;
     try {
-      writeQuestionAtomic(baseQuestion(), { forgeDir });
+      writeQuestionAtomic(baseQuestion(), writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -472,7 +515,7 @@ test('writeQuestionAtomic rejects oversized payloads with PAYLOAD_TOO_LARGE befo
     });
     let caught: unknown;
     try {
-      writeQuestionAtomic(padded, { forgeDir });
+      writeQuestionAtomic(padded, writeOpts(forgeDir));
     } catch (err) {
       caught = err;
     }
@@ -480,16 +523,16 @@ test('writeQuestionAtomic rejects oversized payloads with PAYLOAD_TOO_LARGE befo
     assert.equal((caught as QuestionChannelError).code, 'PAYLOAD_TOO_LARGE');
     // Critically: the questions directory must not even exist — the cap check
     // is required to run before ensureDirectory.
-    let dirEntries: string[];
+    let dirEntries2: string[];
     try {
-      dirEntries = readdirSync(join(forgeDir, 'questions'));
+      dirEntries2 = readdirSync(qDir(forgeDir));
     } catch {
-      dirEntries = [];
+      dirEntries2 = [];
     }
     assert.equal(
-      dirEntries.length,
+      dirEntries2.length,
       0,
-      `expected no on-disk side effects, found: ${dirEntries.join(',')}`,
+      `expected no on-disk side effects, found: ${dirEntries2.join(',')}`,
     );
   } finally {
     rmSync(forgeDir, { recursive: true, force: true });
@@ -519,12 +562,43 @@ test('writeQuestionAtomic accepts a near-cap payload (Bug #4 — boundary)', () 
       `precondition: payload (${payloadBytes}b) must be under cap (${QUESTION_FILE_MAX_BYTES}b)`,
     );
     // Must NOT throw.
-    writeQuestionAtomic(q, { forgeDir });
-    const onDisk = readFileSync(
-      join(forgeDir, 'questions', `${q.question_id}.json`),
-      'utf8',
-    );
+    writeQuestionAtomic(q, writeOpts(forgeDir));
+    const onDisk = readFileSync(qPath(forgeDir, q.question_id), 'utf8');
     assert.equal(Buffer.byteLength(onDisk, 'utf8'), payloadBytes);
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// T-codex-1: writer must reject mismatch between path taskId and payload task_id.
+// Codex review: silent acceptance lets a caller land a question file at one
+// task's path while the JSON payload claims another, which corrupts
+// cross-attempt decision_key dedupe (it scans by path, reads payload).
+test('writeQuestionAtomic rejects mismatched path taskId vs payload task_id with INVALID_ID', () => {
+  const forgeDir = freshForgeDir();
+  try {
+    const q = baseQuestion(); // payload task_id is FORGE-20
+    let caught: unknown;
+    try {
+      writeQuestionAtomic(q, {
+        forgeDir,
+        taskId: 'FORGE-99', // path says FORGE-99, payload says FORGE-20 — mismatch
+        attemptId: ATTEMPT_ID,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(isQuestionChannelError(caught), 'expected QuestionChannelError');
+    assert.equal((caught as QuestionChannelError).code, 'INVALID_ID');
+    // No on-disk side effect: even the directory tree under FORGE-99 must
+    // not be created, since we reject before ensureDirectory.
+    let entries: string[];
+    try {
+      entries = readdirSync(join(forgeDir, 'orchestrator', 'tasks', 'FORGE-99'));
+    } catch {
+      entries = [];
+    }
+    assert.equal(entries.length, 0);
   } finally {
     rmSync(forgeDir, { recursive: true, force: true });
   }
@@ -543,7 +617,7 @@ test('writeQuestionAtomic temp filename uses 16-char hex randomness (Enhancement
       }
       return realOpenSync(path, flags as string, mode);
     });
-    writeQuestionAtomic(baseQuestion(), { forgeDir });
+    writeQuestionAtomic(baseQuestion(), writeOpts(forgeDir));
     assert.equal(observedTempPaths.length, 1, 'expected exactly one temp path open');
     const tmp = observedTempPaths[0]!;
     // Suffix shape: .<pid>.<counter>.<16-hex>.tmp

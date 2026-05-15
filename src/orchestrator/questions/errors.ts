@@ -15,7 +15,8 @@ export type QuestionChannelErrorCode =
   | 'SCHEMA_INVALID' // zod parse failed or JSON is malformed
   | 'NOT_FOUND' // question or answer file does not exist
   | 'IO_ERROR' // EACCES or any unexpected fs error
-  | 'IS_DIRECTORY'; // path resolved to a directory (TOCTOU class — explicit)
+  | 'IS_DIRECTORY' // path resolved to a directory (TOCTOU class — explicit)
+  | 'INVALID_ID'; // task_id / attempt_id / question_id failed segment validation (rejects '../', '/', NUL, empty)
 
 export interface QuestionChannelErrorDetails {
   readonly path?: string;

@@ -1,5 +1,6 @@
 import {
   QuestionChannelError,
+  findQuestionFile,
   readAnswer,
   readQuestion,
   writeAnswerAtomic,
@@ -35,9 +36,42 @@ export function runOrchestrateAnswer(
     return { exitCode: 1 };
   }
 
+  // v2 layout: questions live task-keyed under .forge/orchestrator/tasks/.../
+  // attempts/.../questions/<id>.json, but the supervisor only knows the global
+  // question id. Walk the task tree once to locate (taskId, attemptId), then
+  // read/write strictly within that attempt directory. The walk is the
+  // FORGE-73 fallback for spec/ORCHESTRATOR.md §"Answer lookup — global index"
+  // until FORGE-20 ships .forge/orchestrator/index/questions.json as a fast
+  // path. Both will coexist: index is best-effort, walk is canonical.
+  let location;
+  try {
+    location = findQuestionFile(opts.questionId, { forgeDir: opts.forgeDir });
+  } catch (e) {
+    if (e instanceof QuestionChannelError) {
+      err.write(`forge orchestrate answer: ${e.code}: ${e.message}\n`);
+      return { exitCode: 1 };
+    }
+    err.write(
+      `forge orchestrate answer: unexpected error: ${e instanceof Error ? e.message : String(e)}\n`,
+    );
+    return { exitCode: 1 };
+  }
+  if (location === null) {
+    err.write(
+      `forge orchestrate answer: NOT_FOUND: question '${opts.questionId}' does not exist under ${opts.forgeDir}\n`,
+    );
+    return { exitCode: 1 };
+  }
+
+  const readOpts = {
+    forgeDir: opts.forgeDir,
+    taskId: location.taskId,
+    attemptId: location.attemptId,
+  };
+
   let q;
   try {
-    q = readQuestion(opts.questionId, { forgeDir: opts.forgeDir });
+    q = readQuestion(opts.questionId, readOpts);
   } catch (e) {
     if (e instanceof QuestionChannelError) {
       err.write(`forge orchestrate answer: ${e.code}: ${e.message}\n`);
@@ -60,7 +94,7 @@ export function runOrchestrateAnswer(
   // Check whether an answer already exists. readAnswer throwing NOT_FOUND
   // is the expected happy path; any other code surfaces as an error.
   try {
-    readAnswer(opts.questionId, { forgeDir: opts.forgeDir });
+    readAnswer(opts.questionId, readOpts);
     err.write(
       `forge orchestrate answer: question '${opts.questionId}' has already been answered.\n`,
     );
@@ -86,7 +120,7 @@ export function runOrchestrateAnswer(
   });
 
   try {
-    writeAnswerAtomic(answer, { forgeDir: opts.forgeDir });
+    writeAnswerAtomic(answer, readOpts);
   } catch (e) {
     if (e instanceof QuestionChannelError) {
       if (e.code === 'DUPLICATE_ID') {

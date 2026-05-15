@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { runInit } from '../cli/init.ts';
 import { runOrchestrateAnswer } from '../cli/orchestrate-answer.ts';
 import { runOrchestrateAttach } from '../cli/orchestrate-attach.ts';
+import { runOrchestrateGc } from '../cli/orchestrate-gc.ts';
 import { runOrchestrateQuestions } from '../cli/orchestrate-questions.ts';
 import { runOrchestrateStatus } from '../cli/orchestrate-status.ts';
 
@@ -157,7 +158,7 @@ function dispatchOrchestrate(rest: readonly string[]): void {
   const sub = rest[0];
   if (!sub) {
     console.error(
-      'Usage: forge orchestrate <questions|answer|status|attach> [...]',
+      'Usage: forge orchestrate <questions|answer|status|attach|gc> [...]',
     );
     process.exit(1);
   }
@@ -201,8 +202,13 @@ function dispatchOrchestrate(rest: readonly string[]): void {
     })();
     return;
   }
+  if (sub === 'gc') {
+    const dryRun = hasFlag(subArgs, 'dry-run');
+    const result = runOrchestrateGc({ forgeDir, dryRun });
+    process.exit(result.exitCode);
+  }
   console.error(
-    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach.`,
+    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach|gc.`,
   );
   process.exit(1);
 }
