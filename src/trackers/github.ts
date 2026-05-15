@@ -292,10 +292,14 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
 
   // ─── claim — load-bearing atomic-with-tiebreak primitive ───────────────────
 
-  async claim(issueId: string, agentId: string): Promise<ClaimResult> {
+  async claim(issueId: string, runId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
-    this.assertNonEmpty(agentId, 'agentId');
-    const myLabel = `${CLAIM_LABEL_PREFIX}${agentId}`;
+    this.assertNonEmpty(runId, 'runId');
+    // v2 stub (FORGE-72): runId carries the per-orchestrator identity in the
+    // claim-label payload. The wire format prefix `claimed:agent-` is
+    // unchanged this task — the full migration to `forge:claimed-by:<run_id>`
+    // ships with FORGE-77 (verify-on-readback CAS work).
+    const myLabel = `${CLAIM_LABEL_PREFIX}${runId}`;
     const number = this.parseIssueNumber(issueId);
 
     // Step 1: read current labels (retriable on transport errors).
@@ -309,11 +313,11 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     } catch (err) {
       if (err instanceof TrackerError) {
         if (err.code === 'NOT_FOUND') {
-          // Issue vanished before we could read it — treat as state_changed,
+          // Issue vanished before we could read it — treat as version_conflict,
           // not a thrown error, so the poll-loop moves on cleanly.
           return {
             ok: false,
-            reason: 'state_changed',
+            reason: 'version_conflict',
             detail: 'issue-not-found-on-initial-read',
           };
         }
@@ -346,7 +350,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
         await this.tryRemoveLabel(number, myLabel);
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: `lost-tiebreak-to:${winner}`,
         };
       }
@@ -374,7 +378,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       if (hint.code === 'NOT_FOUND') {
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: 'issue-not-found-or-closed',
         };
       }
@@ -404,7 +408,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           // Issue vanished between our write and the re-read.
           return {
             ok: false,
-            reason: 'state_changed',
+            reason: 'version_conflict',
             detail: 'issue-not-found-on-recheck',
           };
         }
@@ -428,24 +432,28 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     await this.tryRemoveLabel(number, myLabel);
     return {
       ok: false,
-      reason: 'state_changed',
+      reason: 'version_conflict',
       detail: `lost-tiebreak-to:${winner}`,
     };
   }
 
   // ─── releaseClaim — idempotent ─────────────────────────────────────────────
   //
-  // INTENTIONALLY broad: removes every `claimed:agent-*` label, not just the
-  // caller's. The `Tracker.releaseClaim(issueId)` interface takes no agentId
-  // (see SPEC.md line 187 / FORGE-14 plan §3.3), so we can't tell whose claim
-  // is whose. The forge orchestrator is single-process and trusted: callers
-  // only invoke this on issues they own or are explicitly cleaning up. If we
-  // ever need per-agent release semantics, the fix is an interface change
-  // (adding agentId), not a partial impl here — that would silently leave
-  // stale labels behind.
+  // v2 contract (FORGE-72): accepts (issueId, runId). runId is validated but
+  // NOT YET USED to scope removal — this is the explicit AC-permitted stub.
+  // Targeted-removal (release only the label matching the caller's runId)
+  // lands in FORGE-77 alongside verify-on-readback CAS.
+  //
+  // Stub behavior: removes every `claimed:agent-*` label, broad-clear. Same
+  // as v1. Forge orchestrator is single-process and trusted: callers only
+  // invoke this on issues they own or are explicitly cleaning up.
 
-  async releaseClaim(issueId: string): Promise<void> {
+  async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
+    this.assertNonEmpty(runId, 'runId');
+    // TODO(FORGE-77): use runId to scope removal to the caller's claim label
+    // only, instead of broad-clearing every claimed:agent-* label.
+    void runId;
     const number = this.parseIssueNumber(issueId);
 
     let labels: string[];

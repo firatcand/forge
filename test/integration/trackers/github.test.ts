@@ -97,7 +97,7 @@ test('integration: full lifecycle createProject → createIssue → claim → up
     await tracker.comment(issue.id, 'integration comment');
 
     // Release + close
-    await tracker.releaseClaim(issue.id);
+    await tracker.releaseClaim(issue.id, 'e2e-orchestrator');
     await tracker.updateState(issue.id, 'done');
   } finally {
     await ghDeleteIssue(issueNumber);

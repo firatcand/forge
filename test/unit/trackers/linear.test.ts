@@ -198,7 +198,7 @@ await test('releaseClaim — removes all claimed:agent-* labels in one updateIss
       return issue;
     },
   });
-  await tracker.releaseClaim('issue-1');
+  await tracker.releaseClaim('issue-1', 'me');
   assert.deepEqual(
     [...(removed ?? [])].sort(),
     [myLabel.id, otherLabel.id].sort(),
@@ -215,7 +215,7 @@ await test('releaseClaim — no-op when no claim labels are present', async () =
       return issue;
     },
   });
-  await tracker.releaseClaim('issue-1');
+  await tracker.releaseClaim('issue-1', 'me');
   assert.equal(updateCalled, false);
 });
 
@@ -225,7 +225,7 @@ await test('releaseClaim — swallows NOT_FOUND on initial read (idempotent)', a
       throw makeLinearNotFoundError();
     },
   });
-  await tracker.releaseClaim('issue-1'); // must not throw
+  await tracker.releaseClaim('issue-1', 'me'); // must not throw
 });
 
 // ─── classifyLinearError — branch coverage in classification order ───────────
@@ -323,7 +323,7 @@ await test('claim — already_claimed when another agent holds the claim', async
   if (!result.ok) assert.equal(result.reason, 'already_claimed');
 });
 
-await test('claim — initial read NOT_FOUND → state_changed', async () => {
+await test('claim — initial read NOT_FOUND → version_conflict', async () => {
   const { tracker } = makeTracker({
     issue: async () => {
       throw makeLinearNotFoundError();
@@ -332,7 +332,7 @@ await test('claim — initial read NOT_FOUND → state_changed', async () => {
   const result = await tracker.claim('i1', 'me');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /initial-read/);
   }
 });
@@ -348,7 +348,7 @@ await test('claim — initial read transient → transient_error', async () => {
   if (!result.ok) assert.equal(result.reason, 'transient_error');
 });
 
-await test('claim — addLabel NOT_FOUND → state_changed', async () => {
+await test('claim — addLabel NOT_FOUND → version_conflict', async () => {
   const issue = makeIssue({ id: 'i1', labels: [] });
   const { tracker } = makeTracker({
     issue: async () => issue,
@@ -360,7 +360,7 @@ await test('claim — addLabel NOT_FOUND → state_changed', async () => {
   });
   const result = await tracker.claim('i1', 'me');
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.reason, 'state_changed');
+  if (!result.ok) assert.equal(result.reason, 'version_conflict');
 });
 
 await test('claim — addLabel transient → transient_error', async () => {
@@ -378,7 +378,7 @@ await test('claim — addLabel transient → transient_error', async () => {
   if (!result.ok) assert.equal(result.reason, 'transient_error');
 });
 
-await test('claim — recheck NOT_FOUND → state_changed (label released)', async () => {
+await test('claim — recheck NOT_FOUND → version_conflict (label released)', async () => {
   const issue = makeIssue({ id: 'i1', labels: [] });
   let stage = 'pre';
   let removedDuringCleanup: readonly string[] | undefined;
@@ -401,7 +401,7 @@ await test('claim — recheck NOT_FOUND → state_changed (label released)', asy
   const result = await tracker.claim('i1', 'me');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /recheck/);
   }
   assert.deepEqual([...(removedDuringCleanup ?? [])], ['label-claimed:agent-me']);
@@ -435,7 +435,7 @@ await test('claim — tiebreak: I win when my label is lexicographic first', asy
   assert.deepEqual(await tracker.claim('i1', 'aaa-me'), { ok: true });
 });
 
-await test('claim — tiebreak: I lose when other label is first → state_changed + my label removed', async () => {
+await test('claim — tiebreak: I lose when other label is first → version_conflict + my label removed', async () => {
   // Pre-write tiebreak loss path: initial-read sees both my label and the
   // other agent's label, and my label loses lex tiebreak. The implementation
   // must call tryRemoveLabelByName → lookupExistingLabel → list, find, and
@@ -459,7 +459,7 @@ await test('claim — tiebreak: I lose when other label is first → state_chang
   const result = await tracker.claim('i1', 'zzz-me');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /lost-tiebreak-to:/);
   }
   // After the lookupExistingLabel fix, tryRemoveLabelByName lists team
@@ -471,7 +471,7 @@ await test('claim — tiebreak: I lose when other label is first → state_chang
   );
 });
 
-await test('claim — assertValidAgentId rejects characters outside [A-Za-z0-9._-]', async () => {
+await test('claim — assertValidRunId rejects characters outside [A-Za-z0-9._-]', async () => {
   const { tracker } = makeTracker({});
   await assert.rejects(
     () => tracker.claim('i1', '!malicious-prefix-wins-tiebreak'),
@@ -479,7 +479,7 @@ await test('claim — assertValidAgentId rejects characters outside [A-Za-z0-9._
   );
 });
 
-await test('claim — assertValidAgentId rejects >80 chars', async () => {
+await test('claim — assertValidRunId rejects >80 chars', async () => {
   const { tracker } = makeTracker({});
   const longId = 'a'.repeat(81);
   await assert.rejects(
@@ -496,7 +496,7 @@ await test('claim — assertNonEmpty rejects empty issueId', async () => {
   );
 });
 
-await test('claim — assertNonEmpty rejects empty agentId', async () => {
+await test('claim — assertNonEmpty rejects empty runId', async () => {
   const { tracker } = makeTracker({});
   await assert.rejects(
     () => tracker.claim('i1', ''),
@@ -558,12 +558,12 @@ await test('claim is atomic when two orchestrators race (20× repeat)', async ()
     assert.equal(okCount, 1, `iter ${iter}: expected exactly one winner, got ${okCount}`);
 
     // The loser is either already_claimed (saw the winner's label on initial
-    // read) or state_changed via tiebreak (both wrote, then re-read).
+    // read) or version_conflict via tiebreak (both wrote, then re-read).
     const loser = a.ok ? b : a;
     if (!loser.ok) {
       assert.match(
         loser.reason,
-        /already_claimed|state_changed/,
+        /already_claimed|version_conflict/,
         `iter ${iter}: loser had unexpected reason ${loser.reason}`,
       );
     }
@@ -1162,7 +1162,7 @@ await test('LinearTracker passes the shared Tracker conformance suite', async ()
   await runTrackerConformance(tracker, {
     existingIssueId: 'conf-issue',
     blockerId: 'blocker-1',
-    agentId: 'agent-conformance',
+    runId: 'run-conformance',
   });
 });
 

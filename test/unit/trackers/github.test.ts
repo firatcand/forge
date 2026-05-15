@@ -340,7 +340,7 @@ test('claim race: re-read shows multiple claims; loser releases own label', asyn
   const result = await tracker.claim('42', 'zzz');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /lost-tiebreak/);
   }
   // verify we removed our own label
@@ -367,7 +367,7 @@ test('claim race: "me" wins lexicographic tiebreak', async () => {
   assert.deepEqual(result, { ok: true });
 });
 
-test('claim NOT_FOUND on add → state_changed (issue closed mid-flight)', async () => {
+test('claim NOT_FOUND on add → version_conflict (issue closed mid-flight)', async () => {
   const { tracker } = makeTracker([
     ok(ghIssueViewLabelsEmpty),
     ok(), // ensureLabel
@@ -375,7 +375,7 @@ test('claim NOT_FOUND on add → state_changed (issue closed mid-flight)', async
   ]);
   const result = await tracker.claim('42', 'me');
   assert.equal(result.ok, false);
-  if (!result.ok) assert.equal(result.reason, 'state_changed');
+  if (!result.ok) assert.equal(result.reason, 'version_conflict');
 });
 
 test('claim transient transport error on initial read → transient_error', async () => {
@@ -402,7 +402,7 @@ test('claim VALIDATION on empty issueId', async () => {
   );
 });
 
-test('claim step-1 NOT_FOUND → state_changed (issue vanished pre-read)', async () => {
+test('claim step-1 NOT_FOUND → version_conflict (issue vanished pre-read)', async () => {
   const notFound = makeExecaError({
     stderr: 'HTTP 404: Not Found',
     exitCode: 1,
@@ -411,12 +411,12 @@ test('claim step-1 NOT_FOUND → state_changed (issue vanished pre-read)', async
   const result = await tracker.claim('42', 'me');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /initial-read/);
   }
 });
 
-test('claim step-3 NOT_FOUND → state_changed (issue vanished after add)', async () => {
+test('claim step-3 NOT_FOUND → version_conflict (issue vanished after add)', async () => {
   const notFound = makeExecaError({
     stderr: 'HTTP 404: Not Found',
     exitCode: 1,
@@ -431,7 +431,7 @@ test('claim step-3 NOT_FOUND → state_changed (issue vanished after add)', asyn
   const result = await tracker.claim('42', 'me');
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.equal(result.reason, 'state_changed');
+    assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /recheck/);
   }
 });
@@ -445,7 +445,7 @@ test('releaseClaim removes only claim labels', async () => {
     }),
     ok(), // remove-label
   ]);
-  await tracker.releaseClaim('42');
+  await tracker.releaseClaim('42', 'me');
   const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
   assert.equal(removeCalls.length, 1);
   assert.ok(removeCalls[0]?.includes('claimed:agent-me'));
@@ -453,7 +453,7 @@ test('releaseClaim removes only claim labels', async () => {
 
 test('releaseClaim is idempotent (no claim labels → no-op)', async () => {
   const { tracker, mock } = makeTracker([ok(ghIssueViewLabelsEmpty)]);
-  await tracker.releaseClaim('42');
+  await tracker.releaseClaim('42', 'me');
   const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
   assert.equal(removeCalls.length, 0);
 });
@@ -467,7 +467,7 @@ test('releaseClaim tolerates "label not present" on remove', async () => {
     }),
   ]);
   // Should not throw.
-  await tracker.releaseClaim('42');
+  await tracker.releaseClaim('42', 'me');
 });
 
 test('releaseClaim removes ALL stale claim labels (documented behavior)', async () => {
@@ -482,7 +482,7 @@ test('releaseClaim removes ALL stale claim labels (documented behavior)', async 
     ok(), // remove stale1
     ok(), // remove stale2
   ]);
-  await tracker.releaseClaim('42');
+  await tracker.releaseClaim('42', 'me');
   const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
   assert.equal(removeCalls.length, 2);
   const removed = removeCalls.map((c) => c[c.indexOf('--remove-label') + 1]);

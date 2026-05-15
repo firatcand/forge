@@ -85,7 +85,7 @@ test(
 
       await tracker.updateState(pageId, 'in_progress');
       await tracker.comment(pageId, 'forge e2e: started');
-      await tracker.releaseClaim(pageId);
+      await tracker.releaseClaim(pageId, 'e2e-agent');
       await tracker.updateState(pageId, 'done');
 
       const reFetch = await tracker.listActiveIssues();

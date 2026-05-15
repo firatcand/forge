@@ -102,7 +102,7 @@ test(
       await tracker.comment(issue.id, 'forge integration comment');
 
       // Release + close
-      await tracker.releaseClaim(issue.id);
+      await tracker.releaseClaim(issue.id, 'e2e-orchestrator');
       await tracker.updateState(issue.id, 'done');
     } finally {
       await archiveIssueBestEffort(issue.id);
@@ -138,10 +138,10 @@ test(
         `expected exactly one winner, got a=${JSON.stringify(a)} b=${JSON.stringify(b)}`,
       );
 
-      // Loser is either already_claimed or state_changed (via tiebreak)
+      // Loser is either already_claimed or version_conflict (via tiebreak)
       const loser = a.ok ? b : a;
       if (!loser.ok) {
-        assert.match(loser.reason, /already_claimed|state_changed/);
+        assert.match(loser.reason, /already_claimed|version_conflict/);
       }
     } finally {
       await archiveIssueBestEffort(issue.id);

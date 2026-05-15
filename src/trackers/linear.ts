@@ -560,12 +560,15 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   // (exactly one agent ends up with the claim under contention) even though
   // the underlying writes are not strict CAS. See docs/adapters/linear.md
   // "Claim semantics" for the full rationale.
-  async claim(issueId: string, agentId: string): Promise<ClaimResult> {
+  async claim(issueId: string, runId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
-    this.assertNonEmpty(agentId, 'agentId');
-    this.assertValidAgentId(agentId);
+    this.assertNonEmpty(runId, 'runId');
+    this.assertValidRunId(runId);
     const client = await this.getClient();
-    const myLabelName = this.makeClaimLabel(agentId);
+    // v2 stub (FORGE-72): runId carries the per-orchestrator identity.
+    // Wire format `claimed:agent-<runId>` is unchanged for this task;
+    // full migration to `forge:claimed-by:<run_id>` ships with FORGE-76.
+    const myLabelName = this.makeClaimLabel(runId);
 
     // Step 1: read current labels.
     let initial: LinearIssueLike;
@@ -580,7 +583,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       if (hint.code === 'NOT_FOUND') {
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: 'issue-not-found-on-initial-read',
         };
       }
@@ -605,7 +608,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
         await this.tryRemoveLabelByName(issueId, myLabelName);
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: `lost-tiebreak-to:${winner}`,
         };
       }
@@ -639,7 +642,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       if (hint.code === 'NOT_FOUND') {
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: 'issue-not-found-or-closed',
         };
       }
@@ -668,7 +671,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       if (hint.code === 'NOT_FOUND') {
         return {
           ok: false,
-          reason: 'state_changed',
+          reason: 'version_conflict',
           detail: 'issue-not-found-on-recheck',
         };
       }
@@ -691,18 +694,25 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     await this.tryRemoveLabelByName(issueId, myLabelName);
     return {
       ok: false,
-      reason: 'state_changed',
+      reason: 'version_conflict',
       detail: `lost-tiebreak-to:${winner}`,
     };
   }
 
-  // Idempotent broad release: removes every claimed:agent-* label, mirroring
-  // GitHubTracker.releaseClaim. The Tracker interface's releaseClaim takes
-  // no agentId by design — the orchestrator is single-process and trusted;
-  // callers only invoke this on issues they own or are explicitly cleaning
-  // up. See docs/adapters/linear.md "Claim semantics" for the full rationale.
-  async releaseClaim(issueId: string): Promise<void> {
+  // v2 contract (FORGE-72): accepts (issueId, runId). runId is validated but
+  // NOT YET USED to scope removal — explicit AC-permitted stub. Targeted
+  // removal (release only the label matching the caller's runId) lands in
+  // FORGE-76 alongside Linear's verify-on-readback CAS.
+  //
+  // Stub behavior: removes every claimed:agent-* label, broad-clear (same
+  // as v1 + GitHubTracker.releaseClaim). The orchestrator is single-process
+  // and trusted; callers only invoke this on issues they own or are
+  // explicitly cleaning up. See docs/adapters/linear.md "Claim semantics".
+  async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
+    this.assertNonEmpty(runId, 'runId');
+    // TODO(FORGE-76): use runId to scope removal to the caller's claim label.
+    void runId;
     const client = await this.getClient();
 
     let issue: LinearIssueLike;
@@ -935,32 +945,32 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     return this.retryOpts;
   }
 
-  protected makeClaimLabel(agentId: string): string {
-    return `${CLAIM_LABEL_PREFIX}${agentId}`;
+  protected makeClaimLabel(runId: string): string {
+    return `${CLAIM_LABEL_PREFIX}${runId}`;
   }
 
-  // Constrain agentId to a safe character class. The label-based claim's
-  // lexicographic tiebreak depends on label content; if agentId ever flows
+  // Constrain runId to a safe character class. The label-based claim's
+  // lexicographic tiebreak depends on label content; if runId ever flows
   // from external input (multi-tenant future), an attacker could craft an
   // ID starting with `!` or similar to always win the race. Lock the seam
   // now (security-auditor, FORGE-16).
   //
-  // Format matches the documented precondition in docs/adapters/linear.md
-  // and the FORGE-20 enforcement comment: alphanumerics, dot, underscore,
-  // hyphen. 1–80 chars. UUID-prefixed agent IDs (e.g. `agent-<uuid>`) fit.
-  protected assertValidAgentId(agentId: string): void {
-    if (agentId.length > 80) {
+  // Format matches the documented precondition in docs/adapters/linear.md:
+  // alphanumerics, dot, underscore, hyphen. 1–80 chars. UUIDv7 run IDs
+  // (FORGE-72 v2 contract) fit comfortably.
+  protected assertValidRunId(runId: string): void {
+    if (runId.length > 80) {
       throw new TrackerError(
         'VALIDATION',
-        `agentId exceeds 80 chars (length=${agentId.length})`,
-        { agentIdLength: agentId.length },
+        `runId exceeds 80 chars (length=${runId.length})`,
+        { runIdLength: runId.length },
       );
     }
-    if (!/^[A-Za-z0-9._-]+$/.test(agentId)) {
+    if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
       throw new TrackerError(
         'VALIDATION',
-        `agentId must match [A-Za-z0-9._-]+ (got: ${agentId.slice(0, 50)})`,
-        { agentIdPreview: agentId.slice(0, 50) },
+        `runId must match [A-Za-z0-9._-]+ (got: ${runId.slice(0, 50)})`,
+        { runIdPreview: runId.slice(0, 50) },
       );
     }
   }

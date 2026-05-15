@@ -179,7 +179,7 @@ test('classifyNotionError: unknown shape → UNKNOWN', () => {
 test('classifyNotionError: McpError with embedded Notion error data → Notion wins (codex P2-4)', () => {
   // SDK can wrap a Notion provider error in a generic numeric JSON-RPC code.
   // Notion body takes precedence so adapter still maps object_not_found
-  // → NOT_FOUND (drives state_changed) instead of UNKNOWN (drives throw).
+  // → NOT_FOUND (drives version_conflict) instead of UNKNOWN (drives throw).
   const err = makeMcpError(-32603, 'tool failed', {
     object: 'error',
     code: 'object_not_found',
@@ -404,7 +404,7 @@ test('claim: already-claimed by us (idempotent) → ok', async () => {
   assert.equal(mock.calls.length, 1);
 });
 
-test('claim: race — recheck shows different agent → state_changed', async () => {
+test('claim: race — recheck shows different agent → version_conflict', async () => {
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const initial = buildPage({ id: pageId, claimedBy: '' });
   const post = buildPage({
@@ -421,7 +421,7 @@ test('claim: race — recheck shows different agent → state_changed', async ()
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) {
-    assert.equal(r.reason, 'state_changed');
+    assert.equal(r.reason, 'version_conflict');
     assert.match(r.detail ?? '', /lost-tiebreak-to:agent-other/);
   }
   // We do NOT call tryClearClaim in the lost-tiebreak path here (the other
@@ -429,7 +429,7 @@ test('claim: race — recheck shows different agent → state_changed', async ()
   assert.equal(mock.calls.length, 3);
 });
 
-test('claim: NOT_FOUND on initial fetch → state_changed (clean)', async () => {
+test('claim: NOT_FOUND on initial fetch → version_conflict (clean)', async () => {
   const { tracker } = makeTracker([
     errorResult({ code: 'object_not_found', message: 'gone' }),
   ]);
@@ -439,12 +439,12 @@ test('claim: NOT_FOUND on initial fetch → state_changed (clean)', async () => 
   );
   assert.deepEqual(r, {
     ok: false,
-    reason: 'state_changed',
+    reason: 'version_conflict',
     detail: 'page-not-found-on-initial-fetch',
   });
 });
 
-test('claim: NOT_FOUND on write → state_changed', async () => {
+test('claim: NOT_FOUND on write → version_conflict', async () => {
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const { tracker } = makeTracker([
     okResult(buildPage({ id: pageId, claimedBy: '' })),
@@ -453,7 +453,7 @@ test('claim: NOT_FOUND on write → state_changed', async () => {
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) {
-    assert.equal(r.reason, 'state_changed');
+    assert.equal(r.reason, 'version_conflict');
     assert.equal(r.detail, 'page-not-found-on-write');
   }
 });
@@ -470,7 +470,7 @@ test('claim: TRANSPORT mid-flow → transient_error', async () => {
   if (r.ok === false) assert.equal(r.reason, 'transient_error');
 });
 
-test('claim: page archived between fetches → state_changed', async () => {
+test('claim: page archived between fetches → version_conflict', async () => {
   const { tracker } = makeTracker([okResult(pageArchived)]);
   const r = await tracker.claim(
     'bbbb1111-2222-3333-4444-555566667777',
@@ -478,12 +478,12 @@ test('claim: page archived between fetches → state_changed', async () => {
   );
   assert.equal(r.ok, false);
   if (r.ok === false) {
-    assert.equal(r.reason, 'state_changed');
+    assert.equal(r.reason, 'version_conflict');
     assert.equal(r.detail, 'page-archived');
   }
 });
 
-test('claim: rejects empty issueId / agentId via VALIDATION', async () => {
+test('claim: rejects empty issueId / runId via VALIDATION', async () => {
   const { tracker } = makeTracker([]);
   await assert.rejects(
     () => tracker.claim('', 'agent-me'),
@@ -499,7 +499,7 @@ test('claim: rejects empty issueId / agentId via VALIDATION', async () => {
 
 test('releaseClaim: clears forge_claimed_by', async () => {
   const { tracker, mock } = makeTracker([okEmpty()]);
-  await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777');
+  await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777', 'run-me');
   assert.equal(mock.calls[0]?.tool, 'API-patch-page');
   const props = mock.calls[0]?.args.properties as Record<string, unknown>;
   assert.ok('forge_claimed_by' in props);
@@ -509,7 +509,7 @@ test('releaseClaim: idempotent on NOT_FOUND', async () => {
   const { tracker } = makeTracker([
     errorResult({ code: 'object_not_found', message: 'gone' }),
   ]);
-  await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777');
+  await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777', 'run-me');
 });
 
 test('releaseClaim: AUTH error bubbles up', async () => {
@@ -517,7 +517,7 @@ test('releaseClaim: AUTH error bubbles up', async () => {
     errorResult({ code: 'unauthorized', message: 'bad' }),
   ]);
   await assert.rejects(
-    () => tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777'),
+    () => tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777', 'run-me'),
     (e: unknown) => e instanceof TrackerError && e.code === 'AUTH',
   );
 });
@@ -806,7 +806,7 @@ test('full lifecycle: createIssue → claim → updateState → comment → rele
 
   await tracker.updateState(pageId, 'in_progress');
   await tracker.comment(pageId, 'starting work');
-  await tracker.releaseClaim(pageId);
+  await tracker.releaseClaim(pageId, 'agent-me');
   await tracker.updateState(pageId, 'done');
 
   const tools = mock.calls.map((c) => c.tool);
@@ -943,7 +943,7 @@ test('claim: applies CLAIM_SETTLE_MS sleep between write and recheck (codex P1)'
 test('claim: settle delay catches concurrent overwriter — second agent loses (codex P1)', async () => {
   // Simulate the race: A's write lands first; the settle window lets B's
   // overwrite arrive before A's recheck; A's recheck sees B's value and
-  // correctly returns state_changed instead of double-winning.
+  // correctly returns version_conflict instead of double-winning.
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const { tracker } = makeTracker([
     okResult(buildPage({ id: pageId, claimedBy: '' })),    // A.fetch
@@ -957,12 +957,12 @@ test('claim: settle delay catches concurrent overwriter — second agent loses (
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) {
-    assert.equal(r.reason, 'state_changed');
+    assert.equal(r.reason, 'version_conflict');
     assert.match(r.detail ?? '', /lost-tiebreak-to:agent-other/);
   }
 });
 
-test('claim recheck: NOT_FOUND returns state_changed, not thrown (codex P2-3)', async () => {
+test('claim recheck: NOT_FOUND returns version_conflict, not thrown (codex P2-3)', async () => {
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const initial = buildPage({ id: pageId, claimedBy: '' });
   const { tracker } = makeTracker([
@@ -975,7 +975,7 @@ test('claim recheck: NOT_FOUND returns state_changed, not thrown (codex P2-3)', 
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) {
-    assert.equal(r.reason, 'state_changed');
+    assert.equal(r.reason, 'version_conflict');
     assert.equal(r.detail, 'page-not-found-on-recheck');
   }
 });

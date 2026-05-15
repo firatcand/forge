@@ -37,10 +37,10 @@ class TestTracker extends BaseTracker {
   async listActiveIssues(): Promise<Issue[]> {
     return [];
   }
-  async claim(_issueId: string, _agentId: string): Promise<ClaimResult> {
+  async claim(_issueId: string, _runId: string): Promise<ClaimResult> {
     return { ok: true };
   }
-  async releaseClaim(_issueId: string): Promise<void> {}
+  async releaseClaim(_issueId: string, _runId: string): Promise<void> {}
   async updateState(_issueId: string, _state: IssueState): Promise<void> {}
   async comment(_issueId: string, _body: string): Promise<void> {}
   async createProject(

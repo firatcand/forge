@@ -25,13 +25,17 @@ export interface CreateIssuePayload {
   dependsOn: string[];
 }
 
+// v2 contract (FORGE-72): 'state_changed' deleted; 'version_conflict' added.
+// Semantics are identical ("the version we expected isn't current") — every
+// adapter call site that returned state_changed now returns version_conflict.
+// Per-adapter CAS hardening (real version readback) lands in FORGE-76/77.
 export type ClaimFailureReason =
   | 'already_claimed'
-  | 'state_changed'
+  | 'version_conflict'
   | 'transient_error';
 
 export type ClaimResult =
-  | { ok: true }
+  | { ok: true; tracker_version?: string }
   | { ok: false; reason: ClaimFailureReason; detail?: string };
 
 export type TrackerType = 'linear' | 'github' | 'notion';

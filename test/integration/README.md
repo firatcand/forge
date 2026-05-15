@@ -83,7 +83,7 @@ Without `FORGE_E2E_LINEAR=1` the Linear integration tests are skipped.
 | Test | What it verifies |
 |---|---|
 | `full lifecycle` | `healthCheck` → `createProject` → `createIssue` (with footer) → `listActiveIssues` (round-trips footer + state) → `claim` → `updateState('in_progress')` → `updateState('in_review')` (overlay label) → `comment` → `releaseClaim` → `updateState('done')` |
-| `concurrent claim` | Two parallel `claim` calls on the same fresh issue produce exactly one winner; the other gets `already_claimed` or `state_changed` |
+| `concurrent claim` | Two parallel `claim` calls on the same fresh issue produce exactly one winner; the other gets `already_claimed` or `version_conflict` |
 | `setBlockedBy` round-trip | `setBlockedBy(B, A)` writes the footer AND creates the native `IssueRelation(type:'blocks')`. `listActiveIssues` round-trips `blockerIds: [A.id]`. Second call is idempotent (no duplicate footer entries). |
 
 Issues are archived in `finally` blocks via `client.archiveIssue(id)`. Manual cleanup of archived issues is usually unnecessary — Linear's UI filters them out by default — but if you want to purge: open team settings → Archive → bulk delete.
@@ -142,4 +142,4 @@ Each test archives its fixture page via `notion-update-page { archived: true }` 
 ### Limitations
 
 - `createProject` (notion-create-database) is **not** exercised in the integration test because it leaves a permanent database behind on each run and requires `FORGE_NOTION_PARENT_PAGE_ID`. Unit-tested instead.
-- The race-tiebreak claim path is not reproducible against live Notion (needs two concurrent processes); unit-tested with the `state_changed` recheck path only.
+- The race-tiebreak claim path is not reproducible against live Notion (needs two concurrent processes); unit-tested with the `version_conflict` recheck path only.
