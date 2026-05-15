@@ -602,16 +602,16 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   // Notion has no true CAS. Pattern (mirrors GitHubTracker.claim):
   //   1. Fetch page; read forge_claimed_by and last_edited_time T1
   //   2. If claimed by someone else → already_claimed (no write)
-  //   3. Write forge_claimed_by = agentId
+  //   3. Write forge_claimed_by = runId
   //   4. Re-fetch; if our value sticks → ok; else lost-tiebreak
   //
   // T1/T2 are recorded in the result detail for debuggability but the
   // arbitration is purely value-based: last-write-wins per field is what
   // Notion guarantees, so the re-read is what arbitrates.
 
-  async claim(issueId: string, agentId: string): Promise<ClaimResult> {
+  async claim(issueId: string, runId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
-    this.assertNonEmpty(agentId, 'agentId');
+    this.assertNonEmpty(runId, 'runId');
     const pageId = parseNotionPageId(issueId);
 
     // Step 1: fetch.
@@ -627,7 +627,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
         if (err.code === 'NOT_FOUND') {
           return {
             ok: false,
-            reason: 'state_changed',
+            reason: 'version_conflict',
             detail: 'page-not-found-on-initial-fetch',
           };
         }
@@ -641,20 +641,20 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     if (initial.archived === true) {
       return {
         ok: false,
-        reason: 'state_changed',
+        reason: 'version_conflict',
         detail: 'page-archived',
       };
     }
 
     const existing = readRichText(initial, PROP_CLAIMED_BY);
-    if (existing.length > 0 && existing !== agentId) {
+    if (existing.length > 0 && existing !== runId) {
       return {
         ok: false,
         reason: 'already_claimed',
         detail: existing,
       };
     }
-    if (existing === agentId) {
+    if (existing === runId) {
       // Idempotent: already ours.
       return { ok: true };
     }
@@ -665,7 +665,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
         'API-patch-page',
         {
           page_id: pageId,
-          properties: { [PROP_CLAIMED_BY]: richTextProp(agentId) },
+          properties: { [PROP_CLAIMED_BY]: richTextProp(runId) },
         },
         'claim.write',
       );
@@ -674,7 +674,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
         if (err.code === 'NOT_FOUND') {
           return {
             ok: false,
-            reason: 'state_changed',
+            reason: 'version_conflict',
             detail: 'page-not-found-on-write',
           };
         }
@@ -701,17 +701,17 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
         this.retryOpts,
       );
     } catch (err) {
-      // Conditional cleanup: only clear if the field is still our agentId.
+      // Conditional cleanup: only clear if the field is still our runId.
       // Unconditional clearing here could erase a winning competitor's claim
-      // — there is only one forge_claimed_by field, not a per-agent label.
-      await this.tryClearClaimIfOwned(pageId, agentId);
+      // — there is only one forge_claimed_by field, not a per-run label.
+      await this.tryClearClaimIfOwned(pageId, runId);
       if (err instanceof TrackerError) {
         if (err.code === 'NOT_FOUND') {
           // Page archived/deleted between our write and the recheck. Same
-          // recoverable state-change shape the initial-fetch/write paths use.
+          // recoverable shape the initial-fetch/write paths use.
           return {
             ok: false,
-            reason: 'state_changed',
+            reason: 'version_conflict',
             detail: 'page-not-found-on-recheck',
           };
         }
@@ -723,32 +723,40 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     }
 
     const winner = readRichText(post, PROP_CLAIMED_BY);
-    if (winner === agentId) return { ok: true };
+    if (winner === runId) return { ok: true };
     if (winner.length === 0) {
-      // Our write didn't stick. Treat as state_changed; let the poll loop
+      // Our write didn't stick. Treat as version_conflict; let the poll loop
       // retry on the next tick.
       return {
         ok: false,
-        reason: 'state_changed',
+        reason: 'version_conflict',
         detail: 'write-not-visible',
       };
     }
     // Someone else won (or wrote a different value over ours).
     return {
       ok: false,
-      reason: 'state_changed',
+      reason: 'version_conflict',
       detail: `lost-tiebreak-to:${winner}`,
     };
   }
 
   // ─── releaseClaim — idempotent ─────────────────────────────────────────────
   //
-  // Same broad-clear policy as GitHubTracker: Tracker.releaseClaim takes no
-  // agentId, so we can't distinguish whose claim is whose. The orchestrator
+  // v2 contract (FORGE-72): accepts (issueId, runId). runId is validated but
+  // NOT YET USED to scope removal — explicit AC-permitted stub. Targeted
+  // removal (clear only if the page's forge_claimed_by matches the caller's
+  // runId) lands in a follow-up alongside Notion's verify-on-readback CAS.
+  //
+  // Stub behavior: clears the forge_claimed_by property unconditionally.
+  // Same broad-clear policy as GitHubTracker/LinearTracker. The orchestrator
   // only invokes this on issues it owns or is explicitly cleaning up.
 
-  async releaseClaim(issueId: string): Promise<void> {
+  async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
+    this.assertNonEmpty(runId, 'runId');
+    // TODO: use runId to scope removal to claims this run actually owns.
+    void runId;
     const pageId = parseNotionPageId(issueId);
     try {
       await this.runTool(
@@ -1003,13 +1011,13 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   }
 
   // Conditional cleanup: re-fetch first, only clear forge_claimed_by if it
-  // still equals our agentId. Prevents stealing a competitor's claim in the
+  // still equals our runId. Prevents stealing a competitor's claim in the
   // recheck-failure path where we can't tell if our write or theirs landed.
   // Failures are best-effort — logged, not thrown (caller is already in an
   // error path).
   private async tryClearClaimIfOwned(
     pageId: string,
-    agentId: string,
+    runId: string,
   ): Promise<void> {
     let page: NotionPage;
     try {
@@ -1023,7 +1031,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       return;
     }
     const current = readRichText(page, PROP_CLAIMED_BY);
-    if (current !== agentId) {
+    if (current !== runId) {
       this.logger.warn('tracker.tryClearClaimIfOwned', {
         pageId,
         reason: 'not-owned-by-us',

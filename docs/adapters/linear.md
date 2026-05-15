@@ -45,8 +45,8 @@ To find your team UUID: open any issue → URL contains `linear.app/<workspace>/
 |---|---|
 | `healthCheck()` | `client.viewer` — returns ok if API key authenticates |
 | `listActiveIssues()` | `client.issues({ filter: team + state.type IN [triage,backlog,unstarted,started] })` capped at `LINEAR_LIST_LIMIT = 200` |
-| `claim(issueId, agentId)` | label-based claim `claimed:agent-<agentId>` with lexicographic tiebreak on race losers (see [Claim semantics](#claim-semantics)) |
-| `releaseClaim(issueId)` | removes ALL `claimed:agent-*` labels from the issue (broad release; mirrors GitHubTracker) |
+| `claim(issueId, runId)` | label-based claim `claimed:agent-<runId>` with lexicographic tiebreak on race losers (see [Claim semantics](#claim-semantics)) |
+| `releaseClaim(issueId, runId)` | removes ALL `claimed:agent-*` labels from the issue (broad release; mirrors GitHubTracker). v2 stub: `runId` is validated but not yet used to scope removal — targeted-removal lands in FORGE-76. |
 | `updateState(issueId, state)` | sets `Issue.state` via workflow state mapping + overlay labels (see [State mapping](#state-mapping)) |
 | `comment(issueId, body)` | `client.createComment({ issueId, body })` |
 | `createProject(name, description?)` | `client.createProject({ teamIds, name, description })` + precreates overlay labels |
@@ -57,13 +57,13 @@ To find your team UUID: open any issue → URL contains `linear.app/<workspace>/
 
 ## Claim semantics
 
-LinearTracker claims issues by adding a `claimed:agent-<agentId>` label, then re-reads to detect concurrent claims. If multiple agent labels are present after the write, the lexicographically-first wins; losers remove their own label and return `{ ok: false, reason: 'state_changed', detail: 'lost-tiebreak-to:<winner>' }`.
+LinearTracker claims issues by adding a `claimed:agent-<runId>` label, then re-reads to detect concurrent claims. If multiple run labels are present after the write, the lexicographically-first wins; losers remove their own label and return `{ ok: false, reason: 'version_conflict', detail: 'lost-tiebreak-to:<winner>' }`.
 
-This matches GitHubTracker exactly. **It is not strict optimistic concurrency** — Linear's GraphQL API does not expose `revision` / `expectedRevision` fields publicly (verified against `linear/linear@master/packages/sdk/src/schema.graphql`). The tiebreak gives orchestrator-perspective atomicity: under contention, exactly one agent ends up with the claim.
+This matches GitHubTracker exactly. **It is not strict optimistic concurrency** — Linear's GraphQL API does not expose `revision` / `expectedRevision` fields publicly (verified against `linear/linear@master/packages/sdk/src/schema.graphql`). The tiebreak gives orchestrator-perspective atomicity: under contention, exactly one run ends up with the claim.
 
-### Precondition: globally unique `agentId`
+### Precondition: globally unique `runId`
 
-Callers MUST pass a globally-unique `agentId` (typically a UUIDv4 prefixed `agent-`, e.g. `agent-7f3a8b1c-...`). Two orchestrators that happen to pick the same `agentId` will both think they own the issue — the tiebreak resolves on label name, not on orchestrator identity. This is enforced by the orchestrator's startup code (FORGE-20, in progress), not by this adapter.
+Callers MUST pass a globally-unique `runId` (the v2 orchestrator's run identifier, UUIDv7). Two orchestrators that happen to pick the same `runId` will both think they own the issue — the tiebreak resolves on label name, not on orchestrator identity. This is enforced by the orchestrator's startup code (FORGE-20, in progress), not by this adapter.
 
 ---
 

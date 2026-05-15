@@ -1,4 +1,11 @@
-// Conformance suite for the Tracker interface.
+// Conformance suite for the Tracker interface (v2 contract).
+//
+// v2 changes (FORGE-72, 2026-05-15):
+//   - claim(issueId, runId)        — second arg renamed from agentId
+//   - releaseClaim(issueId, runId) — second arg added (stub-ignored by
+//     adapters in this task; targeted removal lands in FORGE-76/77)
+//   - ClaimFailureReason drops 'state_changed', adds 'version_conflict'
+//   - ClaimResult.ok=true gains optional tracker_version: string
 //
 // Each adapter has its own provider-specific mocking story (GhExec for
 // GitHubTracker, LinearSdkLike for LinearTracker), so this helper is
@@ -12,27 +19,27 @@
 
 import assert from 'node:assert/strict';
 
-import type { Tracker } from '../../../src/trackers/index.ts';
+import type { ClaimResult, Tracker } from '../../../src/trackers/index.ts';
 
 export interface ConformanceInputs {
   /** An issue ID the tracker can lookup successfully (must exist in mocks). */
   existingIssueId: string;
   /** A blocker ID the tracker accepts for setBlockedBy. */
   blockerId: string;
-  /** Agent ID used for claim. Must not yet hold a claim on existingIssueId. */
-  agentId?: string;
+  /** Run ID used for claim/releaseClaim. Must not yet hold a claim on existingIssueId. */
+  runId?: string;
 }
 
 /**
  * Exercise every method on the Tracker interface and assert each response
- * matches the interface contract. Caller is responsible for constructing
+ * matches the v2 interface contract. Caller is responsible for constructing
  * a tracker whose mock layer responds successfully to all 9 calls.
  */
 export async function runTrackerConformance(
   tracker: Tracker,
   inputs: ConformanceInputs,
 ): Promise<void> {
-  const agentId = inputs.agentId ?? 'conformance-agent';
+  const runId = inputs.runId ?? 'conformance-run';
 
   // 1. healthCheck — never throws
   const health = await tracker.healthCheck();
@@ -57,18 +64,12 @@ export async function runTrackerConformance(
     assert.ok(Array.isArray(i.blockerIds), 'Issue.blockerIds must be array');
   }
 
-  // 3. claim — returns ClaimResult discriminated union
-  const claim = await tracker.claim(inputs.existingIssueId, agentId);
-  assert.equal(typeof claim.ok, 'boolean', 'ClaimResult.ok must be boolean');
-  if (!claim.ok) {
-    assert.ok(
-      ['already_claimed', 'state_changed', 'transient_error'].includes(claim.reason),
-      `ClaimResult.reason '${claim.reason}' must be a valid ClaimFailureReason`,
-    );
-  }
+  // 3. claim — returns v2 ClaimResult discriminated union
+  const claim = await tracker.claim(inputs.existingIssueId, runId);
+  assertClaimResultShape(claim);
 
-  // 4. releaseClaim — void return
-  await tracker.releaseClaim(inputs.existingIssueId);
+  // 4. releaseClaim — void return; v2 takes (issueId, runId)
+  await tracker.releaseClaim(inputs.existingIssueId, runId);
 
   // 5. updateState — void return
   await tracker.updateState(inputs.existingIssueId, 'in_progress');
@@ -110,4 +111,74 @@ export async function runTrackerConformance(
     ['linear', 'github', 'notion'].includes(tracker.type),
     `Tracker.type '${tracker.type}' must be a known TrackerType`,
   );
+}
+
+/**
+ * Validate a ClaimResult against the v2 contract. Asserts:
+ *   - ok must be boolean
+ *   - if !ok: reason is one of the v2 ClaimFailureReason values
+ *   - if ok: tracker_version, when present, is a non-empty string
+ *
+ * The 'state_changed' reason from v1 is intentionally rejected — any
+ * adapter still emitting it fails this check, which is what makes the
+ * pre-patch code fail the conformance suite (AC bullet 1).
+ */
+function assertClaimResultShape(claim: ClaimResult): void {
+  assert.equal(typeof claim.ok, 'boolean', 'ClaimResult.ok must be boolean');
+  if (claim.ok) {
+    if (claim.tracker_version !== undefined) {
+      assert.equal(
+        typeof claim.tracker_version,
+        'string',
+        'ClaimResult.tracker_version must be string when present',
+      );
+      assert.ok(
+        claim.tracker_version.length > 0,
+        'ClaimResult.tracker_version must be non-empty when present',
+      );
+    }
+    return;
+  }
+  assert.ok(
+    ['already_claimed', 'version_conflict', 'transient_error'].includes(claim.reason),
+    `ClaimResult.reason '${claim.reason}' must be a valid v2 ClaimFailureReason`,
+  );
+}
+
+/**
+ * Exercise both `Result.ok=true` variants — `{ ok: true }` and
+ * `{ ok: true, tracker_version: '...' }` — against the v2 shape assertion.
+ *
+ * Satisfies AC bullet: "Conformance suite fixtures cover both Result.ok=true
+ * variants". Adapters emit only the bare `{ ok: true }` in this task; the
+ * tracker_version variant is exercised here so the assertion machinery
+ * itself is verified.
+ */
+export function runClaimResultUnionFixture(): void {
+  const bare: ClaimResult = { ok: true };
+  assertClaimResultShape(bare);
+
+  const withVersion: ClaimResult = { ok: true, tracker_version: 'rev-abc-123' };
+  assertClaimResultShape(withVersion);
+
+  const conflicting: ClaimResult = {
+    ok: false,
+    reason: 'version_conflict',
+    detail: 'lost-tiebreak-to:other',
+  };
+  assertClaimResultShape(conflicting);
+
+  const alreadyClaimed: ClaimResult = {
+    ok: false,
+    reason: 'already_claimed',
+    detail: 'claimed:agent-other',
+  };
+  assertClaimResultShape(alreadyClaimed);
+
+  const transient: ClaimResult = {
+    ok: false,
+    reason: 'transient_error',
+    detail: 'timeout',
+  };
+  assertClaimResultShape(transient);
 }

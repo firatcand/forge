@@ -24,8 +24,8 @@ export interface Tracker {
 
   listActiveIssues(): Promise<Issue[]>;
 
-  claim(issueId: string, agentId: string): Promise<ClaimResult>;
-  releaseClaim(issueId: string): Promise<void>;
+  claim(issueId: string, runId: string): Promise<ClaimResult>;
+  releaseClaim(issueId: string, runId: string): Promise<void>;
 
   updateState(issueId: string, state: IssueState): Promise<void>;
   comment(issueId: string, body: string): Promise<void>;
@@ -69,8 +69,8 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   }
 
   abstract listActiveIssues(): Promise<Issue[]>;
-  abstract claim(issueId: string, agentId: string): Promise<ClaimResult>;
-  abstract releaseClaim(issueId: string): Promise<void>;
+  abstract claim(issueId: string, runId: string): Promise<ClaimResult>;
+  abstract releaseClaim(issueId: string, runId: string): Promise<void>;
   abstract updateState(issueId: string, state: IssueState): Promise<void>;
   abstract comment(issueId: string, body: string): Promise<void>;
   abstract createProject(

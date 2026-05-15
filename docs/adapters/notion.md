@@ -96,12 +96,12 @@ Notion has no true CAS. The adapter uses a read–write–settle–reread tiebre
 
 1. Fetch page; read `forge_claimed_by` and `last_edited_time` T1.
 2. If `forge_claimed_by` is non-empty and not us → `{ ok: false, reason: 'already_claimed' }`.
-3. Write `forge_claimed_by = agentId`.
+3. Write `forge_claimed_by = runId`.
 4. Sleep `CLAIM_SETTLE_MS` (default 250 ms) to let near-simultaneous competing writes land.
 5. Re-fetch; read `forge_claimed_by` again.
-   - If it equals our agent ID → `{ ok: true }`.
-   - If it equals someone else's ID → race lost: `{ ok: false, reason: 'state_changed', detail: 'lost-tiebreak-to:<other>' }`.
-   - If empty → write didn't stick: `{ ok: false, reason: 'state_changed', detail: 'write-not-visible' }`.
+   - If it equals our run ID → `{ ok: true }`.
+   - If it equals someone else's ID → race lost: `{ ok: false, reason: 'version_conflict', detail: 'lost-tiebreak-to:<other>' }`.
+   - If empty → write didn't stick: `{ ok: false, reason: 'version_conflict', detail: 'write-not-visible' }`.
 6. Transport errors map to `{ ok: false, reason: 'transient_error' }`.
 7. Recheck failures: tryClearClaimIfOwned (read field; only clear if still ours) — never clears a competitor's claim.
 

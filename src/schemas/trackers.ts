@@ -28,11 +28,16 @@ export const CreateIssuePayloadSchema = z.object({
   dependsOn: z.array(z.string()),
 });
 
+// v2 contract (FORGE-72): 'state_changed' replaced by 'version_conflict';
+// 'tracker_version' added as optional opaque string on the ok variant.
 export const ClaimResultSchema = z.discriminatedUnion('ok', [
-  z.object({ ok: z.literal(true) }),
+  z.object({
+    ok: z.literal(true),
+    tracker_version: z.string().min(1).optional(),
+  }),
   z.object({
     ok: z.literal(false),
-    reason: z.enum(['already_claimed', 'state_changed', 'transient_error']),
+    reason: z.enum(['already_claimed', 'version_conflict', 'transient_error']),
     detail: z.string().optional(),
   }),
 ]);
