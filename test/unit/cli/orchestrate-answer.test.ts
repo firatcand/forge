@@ -41,10 +41,37 @@ function makeQuestion(id: string): Question {
   });
 }
 
-function writeQ(forgeDir: string, q: Question): void {
-  const dir = join(forgeDir, 'questions');
+const DEFAULT_ATTEMPT = '0190000000000000a1';
+
+function attemptDirOf(forgeDir: string, taskId: string, attemptId = DEFAULT_ATTEMPT): string {
+  return join(forgeDir, 'orchestrator', 'tasks', taskId, 'attempts', attemptId);
+}
+
+function writeQ(forgeDir: string, q: Question, attemptId = DEFAULT_ATTEMPT): void {
+  const dir = join(attemptDirOf(forgeDir, q.task_id, attemptId), 'questions');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${q.question_id}.json`), JSON.stringify(q));
+}
+
+function writeAnswerRaw(
+  forgeDir: string,
+  taskId: string,
+  questionId: string,
+  body: string,
+  attemptId = DEFAULT_ATTEMPT,
+): void {
+  const dir = join(attemptDirOf(forgeDir, taskId, attemptId), 'answers');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${questionId}.json`), body);
+}
+
+function answerPathFor(
+  forgeDir: string,
+  taskId: string,
+  questionId: string,
+  attemptId = DEFAULT_ATTEMPT,
+): string {
+  return join(attemptDirOf(forgeDir, taskId, attemptId), 'answers', `${questionId}.json`);
 }
 
 function captureStreams(): {
@@ -89,7 +116,7 @@ test('orchestrate answer happy path writes the answer atomically and exits 0', (
     assert.equal(result.exitCode, 0, `stderr was: ${err()}`);
     assert.match(out(), /Answered q1 with option a\./);
     const answer = JSON.parse(
-      readFileSync(join(forgeDir, 'answers', 'q1.json'), 'utf8'),
+      readFileSync(answerPathFor(forgeDir, 'FORGE-20', 'q1'), 'utf8'),
     ) as Answer;
     assert.equal(answer.question_id, 'q1');
     assert.equal(answer.option_id, 'a');
@@ -115,7 +142,7 @@ test('orchestrate answer with --note persists the note', () => {
     });
     assert.equal(result.exitCode, 0);
     const answer = JSON.parse(
-      readFileSync(join(forgeDir, 'answers', 'q1.json'), 'utf8'),
+      readFileSync(answerPathFor(forgeDir, 'FORGE-20', 'q1'), 'utf8'),
     ) as Answer;
     assert.equal(answer.note, 'because reasons');
   } finally {
@@ -168,9 +195,10 @@ test('orchestrate answer refuses to overwrite an already-answered question', () 
   const { stdout, stderr, err } = captureStreams();
   try {
     writeQ(forgeDir, makeQuestion('q1'));
-    mkdirSync(join(forgeDir, 'answers'), { recursive: true });
-    writeFileSync(
-      join(forgeDir, 'answers', 'q1.json'),
+    writeAnswerRaw(
+      forgeDir,
+      'FORGE-20',
+      'q1',
       JSON.stringify({
         version: 1,
         question_id: 'q1',
