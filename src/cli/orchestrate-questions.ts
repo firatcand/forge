@@ -1,4 +1,4 @@
-import { listOpenQuestions } from '../orchestrator/questions/index.ts';
+import { listOpenQuestionsAcrossTree } from '../orchestrator/questions/index.ts';
 import { QuestionChannelError } from '../orchestrator/questions/errors.ts';
 
 export interface OrchestrateQuestionsOptions {
@@ -39,7 +39,7 @@ export function runOrchestrateQuestions(
   }
   let questions;
   try {
-    questions = listOpenQuestions({
+    questions = listOpenQuestionsAcrossTree({
       forgeDir: opts.forgeDir,
       onSkip: (path, e) => {
         err.write(`[warn] skipping ${path}: ${e.code} ${e.message}\n`);

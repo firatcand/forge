@@ -1,5 +1,4 @@
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
 import {
   AnswerSchema,
   QUESTION_FILE_MAX_BYTES,
@@ -8,6 +7,7 @@ import {
   type Question,
 } from '../../schemas/questions.ts';
 import { QuestionChannelError, isNodeFsError } from './errors.ts';
+import { answerFilePath, questionFilePath } from './paths.ts';
 
 // Every fs call below is wrapped in its own try/catch — even though
 // statSync and readFileSync look adjacent, the TOCTOU window between them
@@ -101,10 +101,19 @@ function readFileChecked(path: string): string {
 
 export interface ReadOptions {
   forgeDir: string;
+  // task_id and attempt_id locate the file under the v2 task-keyed layout.
+  // Path-validated by the path helpers; an invalid value throws INVALID_ID.
+  taskId: string;
+  attemptId: string;
 }
 
 export function readQuestion(questionId: string, opts: ReadOptions): Question {
-  const path = join(opts.forgeDir, 'questions', `${questionId}.json`);
+  const path = questionFilePath(
+    opts.forgeDir,
+    opts.taskId,
+    opts.attemptId,
+    questionId,
+  );
   const raw = readFileChecked(path);
   let parsed: unknown;
   try {
@@ -127,7 +136,12 @@ export function readQuestion(questionId: string, opts: ReadOptions): Question {
 }
 
 export function readAnswer(questionId: string, opts: ReadOptions): Answer {
-  const path = join(opts.forgeDir, 'answers', `${questionId}.json`);
+  const path = answerFilePath(
+    opts.forgeDir,
+    opts.taskId,
+    opts.attemptId,
+    questionId,
+  );
   const raw = readFileChecked(path);
   let parsed: unknown;
   try {
@@ -147,71 +161,4 @@ export function readAnswer(questionId: string, opts: ReadOptions): Answer {
     );
   }
   return result.data;
-}
-
-export interface ListOpenQuestionsOptions extends ReadOptions {
-  // When a question file fails to parse, we log it via this callback and
-  // continue. Default is to silently skip (a corrupt file must never crash
-  // the listing). Tests inject this to assert that errors are surfaced.
-  onSkip?: (path: string, err: QuestionChannelError) => void;
-}
-
-export function listOpenQuestions(
-  opts: ListOpenQuestionsOptions,
-): readonly Question[] {
-  const questionsDir = join(opts.forgeDir, 'questions');
-  const answersDir = join(opts.forgeDir, 'answers');
-  let questionEntries: string[];
-  try {
-    questionEntries = readdirSync(questionsDir);
-  } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      // Directory not yet created is a valid empty state — not an error.
-      return [];
-    }
-    throw new QuestionChannelError(
-      'IO_ERROR',
-      `Failed to read directory ${questionsDir}`,
-      { path: questionsDir, cause: err },
-    );
-  }
-  let answerNames: Set<string>;
-  try {
-    answerNames = new Set(readdirSync(answersDir));
-  } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      answerNames = new Set();
-    } else {
-      throw new QuestionChannelError(
-        'IO_ERROR',
-        `Failed to read directory ${answersDir}`,
-        { path: answersDir, cause: err },
-      );
-    }
-  }
-  const open: Question[] = [];
-  for (const entry of questionEntries) {
-    if (!entry.endsWith('.json')) continue;
-    if (entry.includes('.tmp')) continue; // belt-and-suspenders; .tmp suffix
-    if (answerNames.has(entry)) continue;
-    const questionId = entry.slice(0, -'.json'.length);
-    try {
-      const q = readQuestion(questionId, { forgeDir: opts.forgeDir });
-      if (q.status === 'open') {
-        open.push(q);
-      }
-    } catch (err) {
-      if (err instanceof QuestionChannelError) {
-        opts.onSkip?.(join(questionsDir, entry), err);
-        continue;
-      }
-      throw err;
-    }
-  }
-  open.sort((a, b) => {
-    if (a.created_at < b.created_at) return -1;
-    if (a.created_at > b.created_at) return 1;
-    return 0;
-  });
-  return open;
 }

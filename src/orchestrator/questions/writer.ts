@@ -8,7 +8,7 @@ import {
   writeSync as _writeSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
 import {
   AnswerSchema,
   QUESTION_FILE_MAX_BYTES,
@@ -17,6 +17,11 @@ import {
   type Question,
 } from '../../schemas/questions.ts';
 import { QuestionChannelError, isNodeFsError } from './errors.ts';
+import {
+  answerFilePath,
+  questionFilePath,
+  validateIdSegment,
+} from './paths.ts';
 
 // Test seam: tests use node:test's `mock.method` to override individual entries
 // here when simulating fs failures (partial writeSync, closeSync errors, etc.).
@@ -188,6 +193,11 @@ function placeAtomic(tmpPath: string, targetPath: string): void {
 
 export interface WriteOptions {
   forgeDir: string;
+  // task_id and attempt_id together select the directory under
+  // .forge/orchestrator/tasks/<taskId>/attempts/<attemptId>/. They are
+  // path-validated by `validateIdSegment` inside the path helpers.
+  taskId: string;
+  attemptId: string;
 }
 
 function assertPayloadSize(payload: string, targetPath: string): void {
@@ -214,8 +224,30 @@ export function writeQuestionAtomic(
     );
   }
   const validated = parsed.data;
-  const dir = join(opts.forgeDir, 'questions');
-  const targetPath = join(dir, `${validated.question_id}.json`);
+  // Defense-in-depth: writer validates ids even though path helpers do too.
+  // A pre-flight INVALID_ID error is more actionable than a downstream link
+  // failure when callers pass crafted ids.
+  validateIdSegment(opts.taskId, 'taskId');
+  validateIdSegment(opts.attemptId, 'attemptId');
+  // Path/payload task_id must agree, otherwise the file lands under one task
+  // while its JSON content claims another — breaking cross-attempt
+  // decision_key lookup, which scans by path but reads payloads. Codex flagged
+  // this in review: silent acceptance lets a caller pollute a sibling task's
+  // mailbox.
+  if (opts.taskId !== validated.task_id) {
+    throw new QuestionChannelError(
+      'INVALID_ID',
+      `Path taskId (${opts.taskId}) does not match question payload task_id (${validated.task_id})`,
+      { pathTaskId: opts.taskId, payloadTaskId: validated.task_id },
+    );
+  }
+  const targetPath = questionFilePath(
+    opts.forgeDir,
+    opts.taskId,
+    opts.attemptId,
+    validated.question_id,
+  );
+  const dir = dirname(targetPath);
   const payload = JSON.stringify(validated);
   // Enforce the size cap BEFORE any disk I/O so producers fail fast and we
   // never even attempt to land an oversized file in the mailbox. Reader-side
@@ -248,8 +280,19 @@ export function writeAnswerAtomic(
     );
   }
   const validated = parsed.data;
-  const dir = join(opts.forgeDir, 'answers');
-  const targetPath = join(dir, `${validated.question_id}.json`);
+  validateIdSegment(opts.taskId, 'taskId');
+  validateIdSegment(opts.attemptId, 'attemptId');
+  // Note: AnswerSchema does not carry task_id (the answer is keyed by
+  // question_id alone). Path/payload consistency is enforced indirectly by
+  // the answer CLI: it locates the question via findQuestionFile and reuses
+  // the resulting (taskId, attemptId) for the answer write.
+  const targetPath = answerFilePath(
+    opts.forgeDir,
+    opts.taskId,
+    opts.attemptId,
+    validated.question_id,
+  );
+  const dir = dirname(targetPath);
   const payload = JSON.stringify(validated);
   assertPayloadSize(payload, targetPath);
   ensureDirectory(dir);

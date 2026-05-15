@@ -21,21 +21,24 @@ export type {
 } from './events.ts';
 export {
   QuestionChannelError,
-  createQuestionWatcher,
+  findAnsweredQuestionByDecisionKey,
+  findOpenQuestionByDecisionKey,
+  findQuestionFile,
   isQuestionChannelError,
-  listOpenQuestions,
+  listOpenQuestionsAcrossTree,
   readAnswer,
   readQuestion,
+  validateIdSegment,
   writeAnswerAtomic,
   writeQuestionAtomic,
 } from './questions/index.ts';
 export type {
-  ListOpenQuestionsOptions,
+  AnsweredQuestionMatch,
+  DecisionKeyLookupOptions,
+  FindOptions,
   QuestionChannelErrorCode,
   QuestionChannelErrorDetails,
-  QuestionWatcher,
-  QuestionWatcherEvent,
-  QuestionWatcherOptions,
+  QuestionLocation,
   ReadOptions,
   WriteOptions,
 } from './questions/index.ts';

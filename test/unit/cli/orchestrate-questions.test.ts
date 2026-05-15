@@ -41,10 +41,29 @@ function makeQuestion(id: string, created: string, expires: string): Question {
   });
 }
 
-function writeQ(forgeDir: string, q: Question): void {
-  const dir = join(forgeDir, 'questions');
+// Default attempt id for tests; tests with multi-attempt fixtures override it.
+const DEFAULT_ATTEMPT = '0190000000000000a1';
+
+function attemptDirOf(forgeDir: string, taskId: string, attemptId = DEFAULT_ATTEMPT): string {
+  return join(forgeDir, 'orchestrator', 'tasks', taskId, 'attempts', attemptId);
+}
+
+function writeQ(forgeDir: string, q: Question, attemptId = DEFAULT_ATTEMPT): void {
+  const dir = join(attemptDirOf(forgeDir, q.task_id, attemptId), 'questions');
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, `${q.question_id}.json`), JSON.stringify(q));
+}
+
+function writeAnswerRaw(
+  forgeDir: string,
+  taskId: string,
+  questionId: string,
+  body: string,
+  attemptId = DEFAULT_ATTEMPT,
+): void {
+  const dir = join(attemptDirOf(forgeDir, taskId, attemptId), 'answers');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, `${questionId}.json`), body);
 }
 
 function readStream(s: PassThrough): string {
@@ -118,9 +137,10 @@ test('orchestrate questions filters out questions that already have an answer', 
   try {
     writeQ(forgeDir, makeQuestion('open-1', '2026-05-13T12:00:00.000Z', '2026-05-13T12:30:00.000Z'));
     writeQ(forgeDir, makeQuestion('answered-1', '2026-05-13T12:00:00.000Z', '2026-05-13T12:30:00.000Z'));
-    mkdirSync(join(forgeDir, 'answers'), { recursive: true });
-    writeFileSync(
-      join(forgeDir, 'answers', 'answered-1.json'),
+    writeAnswerRaw(
+      forgeDir,
+      'FORGE-20',
+      'answered-1',
       JSON.stringify({
         version: 1,
         question_id: 'answered-1',
@@ -156,8 +176,9 @@ test('orchestrate questions surfaces corrupt files via stderr but still lists va
   const { stdout, stderr, out, err } = captureStreams();
   try {
     writeQ(forgeDir, makeQuestion('good', '2026-05-13T12:00:00.000Z', '2026-05-13T12:30:00.000Z'));
-    mkdirSync(join(forgeDir, 'questions'), { recursive: true });
-    writeFileSync(join(forgeDir, 'questions', 'bad.json'), 'not json');
+    const corruptDir = join(attemptDirOf(forgeDir, 'FORGE-20'), 'questions');
+    mkdirSync(corruptDir, { recursive: true });
+    writeFileSync(join(corruptDir, 'bad.json'), 'not json');
     const result = runOrchestrateQuestions({ open: true, forgeDir, stdout, stderr });
     assert.equal(result.exitCode, 0);
     assert.match(out(), /good/);

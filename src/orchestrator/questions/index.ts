@@ -11,15 +11,32 @@ export {
   type WriteOptions,
 } from './writer.ts';
 export {
-  listOpenQuestions,
   readAnswer,
   readQuestion,
-  type ListOpenQuestionsOptions,
   type ReadOptions,
 } from './reader.ts';
 export {
-  createQuestionWatcher,
-  type QuestionWatcher,
-  type QuestionWatcherEvent,
-  type QuestionWatcherOptions,
-} from './watcher.ts';
+  answerFilePath,
+  attemptDir,
+  attemptsDir,
+  answersDir,
+  legacyAnswersDir,
+  legacyArchiveRoot,
+  legacyArchiveSession,
+  legacyQuestionsDir,
+  questionFilePath,
+  questionsDir,
+  taskDir,
+  tasksRootDir,
+  validateIdSegment,
+} from './paths.ts';
+export {
+  findAnsweredQuestionByDecisionKey,
+  findOpenQuestionByDecisionKey,
+  findQuestionFile,
+  listOpenQuestionsAcrossTree,
+  type AnsweredQuestionMatch,
+  type DecisionKeyLookupOptions,
+  type FindOptions,
+  type QuestionLocation,
+} from './lookup.ts';
