@@ -1,3 +1,34 @@
+export {
+  TaskStateSchema,
+  AttemptStateSchema,
+  TASK_STATES,
+  TERMINAL_TASK_STATES,
+  ATTEMPT_STATES,
+  TERMINAL_ATTEMPT_STATES,
+} from './task-state.ts';
+export type {
+  TaskState,
+  TerminalTaskState,
+  AttemptState,
+  TerminalAttemptState,
+  TaskStateRecord,
+  AttemptStateRecord,
+} from './task-state.ts';
+
+export { AttemptEventSchema } from './attempt.ts';
+export type { AttemptEvent } from './attempt.ts';
+
+export {
+  LeaseSchema,
+  LEASE_TTL_MS_DEFAULT,
+  HEARTBEAT_INTERVAL_MS_DEFAULT,
+  STEAL_GRACE_MS_DEFAULT,
+} from './lease.ts';
+export type { Lease } from './lease.ts';
+
+export { VerdictSchema, ReviewVerdictSchema } from './verdict.ts';
+export type { Verdict, ReviewVerdict } from './verdict.ts';
+
 export { SettingsSchema, TrackerConfigSchema, SecretsSchema } from './settings.ts';
 export type {
   Settings,

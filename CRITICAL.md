@@ -37,3 +37,8 @@ infrastructure/**
 .github/workflows/**
 prisma/schema.prisma
 supabase/migrations/**
+
+# Orchestrator local-state CAS — atomic claim primitives at the FS layer
+# (Same reasoning as tracker adapters: generation-fenced CAS, multi-process race surface)
+src/orchestrator/leases.ts
+src/orchestrator/state-machine.ts
