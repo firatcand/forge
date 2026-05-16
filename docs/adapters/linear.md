@@ -150,6 +150,7 @@ Linear enforces per-key API quotas. The adapter respects `Retry-After` headers a
 
 ## Limitations and known gotchas
 
+- **Label name length**: Linear's label cap is 255 chars. `forge:claimed-by:<UUIDv7>` is 53 chars — comfortably under the cap. No UUID transform is applied; LinearTracker writes the canonical hyphenated UUID form directly. (GitHub requires a dehyphenation transform to stay under its 50-char cap; see `docs/adapters/github.md` for details.)
 - **Custom workflow state names**: forge maps by `WorkflowState.type`, not name. If your team uses `started`-typed states with names like "Active" or "WIP", forge treats them as `in_progress` regardless. This is correct behavior.
 - **Issue archival**: archived issues don't appear in `listActiveIssues` (filtered out by `state.type IN [...]`). Forge has no API to un-archive.
 - **Description size**: Linear caps descriptions at 65535 chars. forge does not silently truncate; `VALIDATION` errors from `createIssue` / `updateIssue` propagate.

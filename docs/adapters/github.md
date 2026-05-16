@@ -38,8 +38,8 @@ No additional environment variables. The adapter uses the same `gh` credentials 
 |---|---|
 | `healthCheck()` | `gh auth status` — returns ok if logged in |
 | `listActiveIssues()` | `gh issue list --state open --json id,number,title,labels,body,url --limit 200`; warns on hitting `GH_LIST_LIMIT = 200` |
-| `claim(issueId, runId)` | weak label-CAS with verify-on-readback: add `forge:claimed-by:<runId>` then re-read to detect concurrent claims (see [Claim semantics](#claim-semantics)) |
-| `releaseClaim(issueId, runId)` | strict-scope: `gh issue edit --remove-label forge:claimed-by:<runId>`. Idempotent — missing label is swallowed silently. |
+| `claim(issueId, runId)` | weak label-CAS with verify-on-readback: add `forge:claimed-by:<runId-dehyphenated>` then re-read to detect concurrent claims (see [Claim semantics](#claim-semantics)) |
+| `releaseClaim(issueId, runId)` | strict-scope: `gh issue edit --remove-label forge:claimed-by:<runId-dehyphenated>`. Idempotent — missing label is swallowed silently. |
 | `updateState(issueId, state)` | `gh issue close --reason completed`/`gh issue close --reason "not planned"` for terminal states; `gh issue reopen` + overlay label (`state:in-progress`, `state:in-review`, `state:blocked`) for open states |
 | `comment(issueId, body)` | `gh issue comment --body` (one-shot — no retry) |
 | `createProject(name, description?)` | `gh api repos/{repo}/milestones --method POST` → returns `{ id: milestoneNumber, url: html_url }`; precreates state overlay labels |
@@ -50,7 +50,9 @@ No additional environment variables. The adapter uses the same `gh` credentials 
 
 ## Claim semantics
 
-GitHubTracker claims issues by attaching the label `forge:claimed-by:<runId>` and then re-reading the label set to detect concurrent claims. This is the weak label-CAS + verify-on-readback contract from `spec/ORCHESTRATOR.md:373`.
+GitHubTracker claims issues by attaching the label `forge:claimed-by:<runId-dehyphenated>` and then re-reading the label set to detect concurrent claims. This is the weak label-CAS + verify-on-readback contract from `spec/ORCHESTRATOR.md:373`.
+
+> **Wire-format note**: GitHub enforces a 50-character hard cap on label names. A UUIDv7 with hyphens is 36 chars, giving `forge:claimed-by:` (17) + 36 = 53 chars — 3 over the cap. Forge strips hyphens from the UUID before writing to GitHub, producing 17 + 32 = 49 chars. The orchestrator always supplies and receives canonical UUID form (with hyphens); `toStoredLabel(runId)` / `runIdFromStoredLabel(stored)` handle the transform at the adapter boundary. See [Limitations](#limitations-and-known-gotchas) for the full rationale and backward-compat note.
 
 ### Two-step flow
 
@@ -130,13 +132,15 @@ If `blockerId` is non-numeric, `setBlockedBy` throws `TrackerError('VALIDATION')
 | `API rate limit exceeded` / `HTTP 403 ...rate` | `RATE_LIMITED` (with `retryAfterMs` if `Retry-After` header parsed) | yes — honors `Retry-After` |
 | `HTTP 404` / `could not resolve to` | `NOT_FOUND` | no |
 | `HTTP 422` / `validation failed` | `VALIDATION` | no |
+| `<label> not found` + `failed to update N issue` (stderr-only) | `VALIDATION` (with `details.reason = 'label-not-found'`) | no — `claim()` returns `version_conflict` |
+| `label X does not exist` (stderr-only, older gh versions) | `VALIDATION` (with `details.reason = 'label-not-found'`) | no |
 | `HTTP 409` / `already exists` | `CONFLICT` | no |
 | `ETIMEDOUT` / `timeout` | `TIMEOUT` | yes |
 | `HTTP 5xx` / `ECONNRESET` / `EAI_AGAIN` | `TRANSPORT` | yes |
 | `ENOENT` (gh CLI not installed) | `TRANSPORT` (with `reason: 'gh-not-installed'`) | no |
 | anything else | `UNKNOWN` | no |
 
-Branch order in `classifyGitHubError` is load-bearing: AUTH must come before NOT_FOUND because GitHub's 403 for private repos uses "Not Found" copy to avoid leaking existence; VALIDATION must come before CONFLICT because "Validation Failed" 422 bodies can include "already exists" verbatim.
+Branch order in `classifyGitHubError` is load-bearing: AUTH must come before NOT_FOUND because GitHub's 403 for private repos uses "Not Found" copy to avoid leaking existence; VALIDATION (HTTP 422) must come before the stderr-only label-not-found branch (which is also VALIDATION but pattern-matches differently) and before CONFLICT because "Validation Failed" 422 bodies can include "already exists" verbatim.
 
 ---
 
@@ -170,6 +174,24 @@ GitHub's REST API enforces 5000 req/hour for authenticated PATs (lower for unaut
 ---
 
 ## Limitations and known gotchas
+
+### GitHub label name cap — 50 characters
+
+GitHub enforces a hard 50-character limit on label names. Forge's claim label uses the pattern `forge:claimed-by:<UUID>`:
+
+| Component | Length |
+|---|---|
+| Prefix `forge:claimed-by:` | 17 chars |
+| UUIDv7 with hyphens (canonical form) | 36 chars |
+| **Total (naive)** | **53 chars — 3 over cap** |
+| UUIDv7 without hyphens (stored form) | 32 chars |
+| **Total (stored form)** | **49 chars — safely under cap** |
+
+Forge strips hyphens from the UUID at the write path (`toStoredLabel(runId)`) and never writes the hyphenated form to GitHub. The transform is invisible to the orchestrator — callers always supply and receive canonical UUIDv7 format. The `runIdFromStoredLabel(stored)` helper reverses the transform for tooling that reads raw labels from the GitHub API.
+
+**Old-format labels (backward compat)**: Labels written by binaries predating FORGE-82 used the hyphenated 53-char form. GitHub's 50-char cap means these labels could not have been created on github.com (GitHub would have returned HTTP 422 at label-create time). If you run GitHub Enterprise with a relaxed or absent label-name cap, old-format labels may exist. Forge tolerates them on read (the `forge:claimed-by:` prefix filter still matches) and never writes them (all writes go through `toStoredLabel`). No migration script is provided.
+
+**Linear and Notion are unaffected**: Linear's label cap is 255 chars — `forge:claimed-by:<UUIDv7>` (53 chars) fits comfortably; no transform needed. Notion stores the claim in a rich_text property value (not a label name), with no length pressure. See `docs/adapters/linear.md` and `docs/adapters/notion.md` for their adapter-specific notes.
 
 - **No native blocker relation**. Forge stores blockers in body-footer comments only. GitHub's project-board dependencies exist but require additional setup outside forge's scope.
 - **State mapping uses overlay labels**. `state:in-progress`, `state:in-review`, `state:blocked` are precreated on `createProject` but a manually-deleted state label causes `listActiveIssues` to report the issue as `todo` until forge re-applies state on next update.
