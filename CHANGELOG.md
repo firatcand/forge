@@ -20,6 +20,11 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ### Changed
 
+- **`LinearTracker.claim` + `releaseClaim`** (FORGE-76):
+  - Claim label prefix migrated `claimed:agent-*` → `forge:claimed-by:*` (hard cut, matches `GitHubTracker` per FORGE-77).
+  - Verify-on-readback now enforces our label is present on reread; previously a recheck that returned only another agent's label (or no labels) could return `{ ok: true }` (false positive). Now returns `{ ok: false, reason: 'version_conflict', detail: 'claim-label-missing-on-recheck' }`.
+  - `releaseClaim` is now strict-scope — removes only `forge:claimed-by:<runId>` (the caller's exact label), not all claim labels on the issue. Includes stale-cached-id retry (evict + refresh + retry once on `VALIDATION`).
+  - Legacy `claimed:agent-*` labels left on issues by pre-FORGE-76 forge are now invisible to claim logic. Tracker-side stale-claim reconciliation lands in FORGE-22 (`forge orchestrate gc`).
 - **`/sync-status`** — preflight and body generalized to read `tracker.type` first; uses `tracker-syncer` subagent.
 - **`/pickup-task`** — step 1 reads "Query the configured tracker (via Tracker interface)" instead of "Query Linear (via MCP)". Behavior unchanged for v0.3.x (still uses Linear MCP today); full behavioral generalization is a follow-up once FORGE-16/17 adapters land.
 - **`/decompose`** — final-print message updated from `/push-to-linear unlocked` to `/push-to-tracker unlocked`.

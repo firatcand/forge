@@ -17,7 +17,7 @@ same way `GitHubTracker` treats a GitHub repo.
 |---|---|---|---|
 | Transport | Linear MCP (planned) | `gh` CLI via `execa` | Notion MCP via `@modelcontextprotocol/sdk` (stdio) |
 | Auth | MCP server config | `gh auth login` | Env var (e.g. `NOTION_TOKEN`) inherited from process.env |
-| Atomic claim | Optimistic concurrency (Linear revisions) | Label add + tiebreak | `forge_claimed_by` rich_text + read-write-reread tiebreak |
+| Atomic claim | Weak label-CAS: `forge:claimed-by:*` add + verify-on-readback + tiebreak | Weak label-CAS: `forge:claimed-by:*` add + verify-on-readback + tiebreak | `forge_claimed_by` rich_text + read-write-reread tiebreak |
 | Secrets manager | Not used | Not used | **Not used** — auth goes through MCP server env, not forge's secrets manager |
 
 NotionTracker spawns its own connection to the Notion MCP server — it does
@@ -122,9 +122,11 @@ issue**.
 - **Single orchestrator per Notion DB** (recommended). The single-process
   orchestrator serializes its own claim calls, so this race cannot fire from
   within one forge process.
-- **GitHub or Linear** for multi-orchestrator setups. GitHub's per-agent
-  `claimed:agent-<id>` labels are race-safe (each agent has its own field).
-  Linear's revisions give true optimistic concurrency.
+- **GitHub or Linear** for multi-orchestrator setups. Both use per-agent
+  `forge:claimed-by:<runId>` labels with verify-on-readback + lexicographic
+  tiebreak (each agent gets its own label name; race losers self-clean).
+  Neither has native CAS — Linear's API does not expose `expectedVersion`
+  on `IssueUpdate` (verified against `@linear/sdk@84.0.0`).
 - **Raising `CLAIM_SETTLE_MS`** widens the window at the cost of slower
   claims. Not configurable today; file an issue if you need it tunable.
 

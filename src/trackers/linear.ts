@@ -99,7 +99,7 @@ export interface LinearSdkLike {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const CLAIM_LABEL_PREFIX = 'claimed:agent-';
+const CLAIM_LABEL_PREFIX = 'forge:claimed-by:';
 const STATE_OVERLAY_IN_REVIEW = 'state:in-review';
 const STATE_OVERLAY_BLOCKED = 'state:blocked';
 
@@ -565,9 +565,6 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     this.assertNonEmpty(runId, 'runId');
     this.assertValidRunId(runId);
     const client = await this.getClient();
-    // v2 stub (FORGE-72): runId carries the per-orchestrator identity.
-    // Wire format `claimed:agent-<runId>` is unchanged for this task;
-    // full migration to `forge:claimed-by:<run_id>` ships with FORGE-76.
     const myLabelName = this.makeClaimLabel(runId);
 
     // Step 1: read current labels.
@@ -686,7 +683,25 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     }
 
     const allClaims = post.labels.filter((l) => this.isClaimLabel(l.name));
-    if (allClaims.length <= 1) return { ok: true };
+
+    // Verify-on-readback contract (spec/ORCHESTRATOR.md §Tracker atomic claim):
+    // (a) our label MUST be present AND (b) no other forge:claimed-by:* label
+    // MUST be present. If our label is missing on reread, the add silently
+    // failed or was stripped (e.g., concurrent admin action, sibling
+    // orchestrator removed it). Either way: we don't hold the claim.
+    // Best-effort remove (in case it does exist on the server but our reread
+    // was stale) and return version_conflict. Mirrors FORGE-77 bug fix on
+    // GitHubTracker (src/trackers/github.ts:431-440).
+    if (!allClaims.some((l) => l.name === myLabelName)) {
+      await this.tryRemoveLabelByName(issueId, myLabelName);
+      return {
+        ok: false,
+        reason: 'version_conflict',
+        detail: 'claim-label-missing-on-recheck',
+      };
+    }
+
+    if (allClaims.length === 1) return { ok: true };
 
     const winner = this.resolveClaimTiebreak(allClaims.map((l) => l.name));
     if (winner === myLabelName) return { ok: true };
@@ -699,45 +714,92 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     };
   }
 
-  // v2 contract (FORGE-72): accepts (issueId, runId). runId is validated but
-  // NOT YET USED to scope removal — explicit AC-permitted stub. Targeted
-  // removal (release only the label matching the caller's runId) lands in
-  // FORGE-76 alongside Linear's verify-on-readback CAS.
+  // Strict-scope release: removes only `forge:claimed-by:<runId>` — the
+  // caller's exact label. Does not police other agents' labels. Trusted-
+  // caller contract: callers invoke release only on issues they own.
+  // Mirrors GitHubTracker.releaseClaim (src/trackers/github.ts:451-490).
   //
-  // Stub behavior: removes every claimed:agent-* label, broad-clear (same
-  // as v1 + GitHubTracker.releaseClaim). The orchestrator is single-process
-  // and trusted; callers only invoke this on issues they own or are
-  // explicitly cleaning up. See docs/adapters/linear.md "Claim semantics".
+  // Idempotent: a missing label (already-removed, never-set, or issue
+  // deleted) is swallowed silently. Per spec/ORCHESTRATOR.md §Tracker
+  // atomic claim — release is best-effort cleanup; tracker-side stale-claim
+  // reconciliation is FORGE-22's job (gc local-vs-tracker alignment).
+  //
+  // Linear-specific complication: removal requires a label ID (Linear's
+  // GraphQL surface), not just a name. We pay a cached team-label lookup
+  // to translate. The lookup is wrapped in withRetry so a transient
+  // network failure doesn't silently leak the claim (Codex 2nd-pass).
+  //
+  // Stale-cached-id guard: if a label was deleted+recreated out-of-band
+  // (e.g., Linear UI admin action), our cache may hold an obsolete id.
+  // The server then rejects the remove as VALIDATION. We evict and refresh
+  // once; if the fresh id differs, retry; if no label exists on the team,
+  // idempotent return (Codex 2nd-pass).
   async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(runId, 'runId');
-    // TODO(FORGE-76): use runId to scope removal to the caller's claim label.
-    void runId;
+    this.assertValidRunId(runId);
     const client = await this.getClient();
+    const myLabelName = this.makeClaimLabel(runId);
 
-    let issue: LinearIssueLike;
+    // First attempt: lookup the caller's label id (cache-first; refreshes
+    // via listIssueLabels once on miss). Uses the strict variant + withRetry
+    // so transient listIssueLabels failures retry per retry policy and, if
+    // still failing, surface as a thrown TrackerError — they MUST NOT silently
+    // no-op as "label not on team" (Codex 3rd-pass: the soft variant would
+    // reintroduce the leak the withRetry wrapper claimed to fix).
+    let label: LinearLabelLike | null;
     try {
-      issue = await this.withRetry(
-        'releaseClaim.read',
-        () => client.issue(issueId),
+      label = await this.withRetry(
+        'releaseClaim.lookup',
+        () => this.lookupExistingLabelStrict(myLabelName),
         this.retryOpts,
       );
     } catch (err) {
-      const hint = classifyLinearError(err);
-      if (hint.code === 'NOT_FOUND') return; // already gone — idempotent
-      throw this.normalizeError('releaseClaim', err, hint);
+      throw this.normalizeError('releaseClaim', err, classifyLinearError(err));
     }
-
-    const claimLabelIds = issue.labels
-      .filter((l) => this.isClaimLabel(l.name))
-      .map((l) => l.id);
-    if (claimLabelIds.length === 0) return;
+    if (!label) return; // never created on the team — idempotent
 
     try {
-      await client.updateIssue(issueId, { removedLabelIds: claimLabelIds });
+      await client.updateIssue(issueId, { removedLabelIds: [label.id] });
+      return;
     } catch (err) {
       const hint = classifyLinearError(err);
-      if (hint.code === 'NOT_FOUND') return; // raced with delete — idempotent
+
+      // Issue gone (deleted or no permission). Idempotent.
+      if (hint.code === 'NOT_FOUND') return;
+
+      // VALIDATION likely means the cached label id is stale (label
+      // deleted+recreated out-of-band — server rejects unknown id).
+      // Evict, refresh (strict + retry), retry once with the fresh id.
+      // Codex 3rd-pass: strict variant ensures a transient refresh failure
+      // does NOT silently exit treating the claim as "truly gone".
+      if (hint.code === 'VALIDATION') {
+        this.labelCacheByName.delete(myLabelName);
+        let fresh: LinearLabelLike | null;
+        try {
+          fresh = await this.withRetry(
+            'releaseClaim.refresh',
+            () => this.lookupExistingLabelStrict(myLabelName),
+            this.retryOpts,
+          );
+        } catch (refreshErr) {
+          throw this.normalizeError(
+            'releaseClaim',
+            refreshErr,
+            classifyLinearError(refreshErr),
+          );
+        }
+        if (!fresh || fresh.id === label.id) return; // truly gone — idempotent
+        try {
+          await client.updateIssue(issueId, { removedLabelIds: [fresh.id] });
+          return;
+        } catch (retryErr) {
+          const retryHint = classifyLinearError(retryErr);
+          if (retryHint.code === 'NOT_FOUND') return;
+          throw this.normalizeError('releaseClaim', retryErr, retryHint);
+        }
+      }
+
       throw this.normalizeError('releaseClaim', err, hint);
     }
   }
@@ -1181,6 +1243,39 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       });
       return null;
     }
+    return this.labelCacheByName.get(name) ?? null;
+  }
+
+  // Strict variant of lookupExistingLabel — throws a NORMALIZED TrackerError
+  // on list failure instead of warn-and-return-null. Used by releaseClaim
+  // (FORGE-76 / Codex 3rd-pass) where treating a transient listIssueLabels
+  // failure as "label not on team" silently leaks the claim. The lookup-side
+  // branches that want soft-fail (overlay label removal, claim-cleanup) keep
+  // using lookupExistingLabel.
+  //
+  // Critical: the thrown error MUST be a TrackerError with a classified code
+  // (TRANSPORT/TIMEOUT/RATE_LIMITED). BaseTracker.withRetry's defaultIsRetriable
+  // tests `err instanceof TrackerError && isRetriableTrackerErrorCode(err.code)`
+  // — a raw Linear error would short-circuit retry (Codex 4th-pass Finding 1).
+  protected async lookupExistingLabelStrict(
+    name: string,
+  ): Promise<LinearLabelLike | null> {
+    const cached = this.labelCacheByName.get(name);
+    if (cached) return cached;
+    const client = await this.getClient();
+    let all: LinearLabelLike[];
+    try {
+      all = await client.listIssueLabels(this.teamId);
+    } catch (err) {
+      // Normalize so withRetry recognizes retriable codes
+      // (TRANSPORT/TIMEOUT/RATE_LIMITED) and actually retries.
+      throw this.normalizeError(
+        'lookupExistingLabelStrict',
+        err,
+        classifyLinearError(err),
+      );
+    }
+    for (const l of all) this.labelCacheByName.set(l.name, l);
     return this.labelCacheByName.get(name) ?? null;
   }
 
