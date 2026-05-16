@@ -49,7 +49,7 @@ Each test cleans up its fixture issues via `gh api repos/{repo}/issues/{n} --met
 ### Limitations
 
 - The negative `healthCheck` case (expired auth) is **not** tested automatically — it would require corrupting the user's `gh` auth state. Verified manually instead.
-- Tests assume the fixture repo allows label creation; first run will create `claimed:agent-*` and `state:*` labels permanently.
+- Tests assume the fixture repo allows label creation; first run will create `forge:claimed-by:*` and `state:*` labels permanently.
 
 ---
 
@@ -92,7 +92,7 @@ Issues are archived in `finally` blocks via `client.archiveIssue(id)`. Manual cl
 
 - ~12 Linear GraphQL calls per run across the three tests.
 - Typical wall time: **<20 seconds** on a healthy connection.
-- Labels (`claimed:agent-*`, `state:in-review`, `state:blocked`) created on first run persist in the team.
+- Labels (`forge:claimed-by:*`, `state:in-review`, `state:blocked`) created on first run persist in the team.
 
 ### Limitations
 
