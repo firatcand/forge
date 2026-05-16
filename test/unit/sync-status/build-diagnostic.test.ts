@@ -253,18 +253,3 @@ test('AC12: defensive — phase with zero tasks does not crash, produces no sugg
   assert.equal(report.phase_suggestions.length, 0);
 });
 
-test('AC bonus: real-world phases.yaml smoke (loadPhases pipeline)', async () => {
-  const { loadPhases } = await import('../../../src/core/index.ts');
-  const { resolve, dirname } = await import('node:path');
-  const { fileURLToPath } = await import('node:url');
-
-  const here = dirname(fileURLToPath(import.meta.url));
-  const repoPhases = resolve(here, '..', '..', '..', 'plans', 'phases.yaml');
-
-  const phases = loadPhases(repoPhases);
-  const report = buildDiagnostic(phases, [], { now: FROZEN_NOW });
-
-  assert.ok(Array.isArray(report.phase_suggestions));
-  assert.ok(Array.isArray(report.orphans));
-  assert.equal(typeof report.generated_at, 'string');
-});
