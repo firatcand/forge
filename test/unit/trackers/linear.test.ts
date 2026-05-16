@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 
 import type { LinearTrackerConfig } from '../../../src/schemas/settings.ts';
@@ -181,51 +182,281 @@ await test('comment — rejects empty body via assertNonEmpty', async () => {
   );
 });
 
-// ─── releaseClaim — idempotent broad release ─────────────────────────────────
+// ─── releaseClaim — strict-scope, idempotent (FORGE-76) ──────────────────────
+//
+// Mirrors GitHubTracker (src/trackers/github.ts:451-490) and its tests at
+// test/unit/trackers/github.test.ts:481-518. Removes only the caller's
+// `forge:claimed-by:<runId>` label. No upfront issue read. Idempotent on
+// missing label or vanished issue.
 
-await test('releaseClaim — removes all claimed:agent-* labels in one updateIssue call', async () => {
+await test('releaseClaim — emits exactly one updateIssue call scoped to runId', async () => {
+  // Strict-scope contract: releaseClaim('issue-1', 'me') issues exactly one
+  // removeLabel call against `forge:claimed-by:me`, regardless of how many
+  // other claim labels exist on the issue. No upfront client.issue() read.
   const myLabel = makeClaimLabel('me');
   const otherLabel = makeClaimLabel('other');
-  const issue = makeIssue({
-    id: 'issue-1',
-    labels: [myLabel, otherLabel, LABEL_STATE_IN_REVIEW],
-  });
+  let issueReads = 0;
   let removed: readonly string[] | undefined;
   const { tracker } = makeTracker({
-    issue: async () => issue,
+    issue: async () => {
+      issueReads++;
+      return makeIssue({ id: 'issue-1', labels: [myLabel, otherLabel] });
+    },
+    listIssueLabels: async () => [myLabel, otherLabel],
     updateIssue: async (_id, input) => {
       removed = input.removedLabelIds;
-      return issue;
+      return makeIssue();
     },
   });
   await tracker.releaseClaim('issue-1', 'me');
-  assert.deepEqual(
-    [...(removed ?? [])].sort(),
-    [myLabel.id, otherLabel.id].sort(),
-  );
+  assert.equal(issueReads, 0, 'strict-scope must not read the issue');
+  assert.deepEqual([...(removed ?? [])], [myLabel.id]);
 });
 
-await test('releaseClaim — no-op when no claim labels are present', async () => {
-  const issue = makeIssue({ id: 'issue-1', labels: [LABEL_STATE_BLOCKED] });
+await test('releaseClaim — leaves other agents claim labels intact', async () => {
+  // Codex 2nd-pass: explicit guard against accidental broad-clear regression.
+  const myLabel = makeClaimLabel('me');
+  const otherLabel = makeClaimLabel('other');
+  let removed: readonly string[] | undefined;
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => [myLabel, otherLabel],
+    updateIssue: async (_id, input) => {
+      removed = input.removedLabelIds;
+      return makeIssue();
+    },
+  });
+  await tracker.releaseClaim('issue-1', 'me');
+  const removedIds = [...(removed ?? [])];
+  assert.ok(removedIds.includes(myLabel.id), 'should remove my label');
+  assert.ok(!removedIds.includes(otherLabel.id), 'must NOT remove other label');
+});
+
+await test("releaseClaim — no-op when caller's label was never created on the team", async () => {
+  // lookupExistingLabel returns null path. No updateIssue call at all.
   let updateCalled = false;
   const { tracker } = makeTracker({
-    issue: async () => issue,
+    listIssueLabels: async () => [], // team has no labels matching our name
     updateIssue: async () => {
       updateCalled = true;
-      return issue;
+      return makeIssue();
     },
   });
   await tracker.releaseClaim('issue-1', 'me');
   assert.equal(updateCalled, false);
 });
 
-await test('releaseClaim — swallows NOT_FOUND on initial read (idempotent)', async () => {
+await test('releaseClaim — tolerates updateIssue NOT_FOUND silently (issue vanished)', async () => {
+  // Mirrors github.test.ts:511-518. Lookup returns label; updateIssue throws
+  // NOT_FOUND because the issue was deleted between lookup and write.
+  const myLabel = makeClaimLabel('me');
   const { tracker } = makeTracker({
-    issue: async () => {
+    listIssueLabels: async () => [myLabel],
+    updateIssue: async () => {
       throw makeLinearNotFoundError();
     },
   });
   await tracker.releaseClaim('issue-1', 'me'); // must not throw
+});
+
+await test('releaseClaim — stale cached label id triggers refresh+retry (Codex 2nd-pass)', async () => {
+  // Linear-specific concern: cache may hold a stale label id if the label
+  // was deleted+recreated out-of-band. Server rejects the stale id as
+  // VALIDATION. We must evict, refresh once, and retry with the fresh id.
+  const myLabelName = 'forge:claimed-by:me';
+  const staleLabel = { id: 'label-stale-id', name: myLabelName };
+  const freshLabel = { id: 'label-fresh-id', name: myLabelName };
+  let listCallCount = 0;
+  const removedIds: string[] = [];
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => {
+      listCallCount++;
+      return listCallCount === 1 ? [staleLabel] : [freshLabel];
+    },
+    updateIssue: async (_id, input) => {
+      const ids = [...(input.removedLabelIds ?? [])];
+      removedIds.push(...ids);
+      if (ids.includes(staleLabel.id)) {
+        throw makeLinearValidationError('Unknown label id');
+      }
+      return makeIssue();
+    },
+  });
+  await tracker.releaseClaim('issue-1', 'me');
+  assert.deepEqual(removedIds, [staleLabel.id, freshLabel.id]);
+  assert.ok(listCallCount >= 2, 'cache should have been refreshed');
+});
+
+await test('releaseClaim — assertValidRunId rejects characters outside [A-Za-z0-9._-]', async () => {
+  const { tracker } = makeTracker({});
+  await assert.rejects(
+    () => tracker.releaseClaim('issue-1', '!malicious'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});
+
+await test('releaseClaim — transient listIssueLabels failure surfaces after retries exhausted [Codex 3rd-pass F1]', async () => {
+  // Codex 3rd-pass Finding 1: wrapping the soft `lookupExistingLabel` (which
+  // catches list failures and returns null) in withRetry does nothing —
+  // null is a successful return, retry never fires, release silently
+  // no-ops, claim label leaks. Strict variant must throw a CLASSIFIED
+  // TrackerError so withRetry recognizes it as retriable and actually
+  // retries; once retries exhaust, the caller must see the error.
+  let listCalls = 0;
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => {
+      listCalls++;
+      throw makeLinearTransportError();
+    },
+  });
+  await assert.rejects(
+    () => tracker.releaseClaim('issue-1', 'me'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'TRANSPORT',
+  );
+  // BaseTracker.withRetry default is 3 attempts. Proving retry actually
+  // happened (>1) is the load-bearing assertion vs Codex 4th-pass F1
+  // where the strict helper threw a raw error that withRetry didn't
+  // recognize as retriable (only retried once).
+  assert.ok(
+    listCalls > 1,
+    `listIssueLabels should have retried (got ${listCalls} calls; expected > 1)`,
+  );
+});
+
+await test('releaseClaim — transient listIssueLabels failure retries then succeeds (proves retry path) [Codex 4th-pass F2]', async () => {
+  // Stronger retry guard: fail once, succeed on retry. Asserts retry
+  // actually completed the operation, not just "got more than one call".
+  const myLabel = makeClaimLabel('me');
+  let listCalls = 0;
+  let removed: readonly string[] | undefined;
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => {
+      listCalls++;
+      if (listCalls === 1) throw makeLinearTransportError();
+      return [myLabel];
+    },
+    updateIssue: async (_id, input) => {
+      removed = input.removedLabelIds;
+      return makeIssue();
+    },
+  });
+  await tracker.releaseClaim('issue-1', 'me');
+  assert.equal(listCalls, 2, 'should have retried exactly once');
+  assert.deepEqual([...(removed ?? [])], [myLabel.id]);
+});
+
+await test('releaseClaim — VALIDATION retry: transient refresh failure surfaces after retries exhausted [Codex 3rd-pass F2]', async () => {
+  // Codex 3rd-pass Finding 2: the VALIDATION recovery path also used the
+  // soft lookup — a transient refresh failure was treated as "label gone"
+  // and silently exited, leaking the (now-fresh) claim. Strict variant
+  // must propagate the failure.
+  const staleLabel = { id: 'label-stale', name: 'forge:claimed-by:me' };
+  let listCalls = 0;
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => {
+      listCalls++;
+      if (listCalls === 1) return [staleLabel]; // primes cache
+      throw makeLinearTransportError(); // refresh fails transient
+    },
+    updateIssue: async () => {
+      throw makeLinearValidationError('Unknown label id');
+    },
+  });
+  await assert.rejects(
+    () => tracker.releaseClaim('issue-1', 'me'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'TRANSPORT',
+  );
+  // First call primes the cache; subsequent calls are the refresh retry
+  // attempts. With 3 default attempts, expect listCalls > 2 (1 prime + ≥2 retries).
+  assert.ok(
+    listCalls > 2,
+    `refresh should have retried (got ${listCalls} calls; expected > 2)`,
+  );
+});
+
+await test('releaseClaim — VALIDATION retry: transient refresh recovers on retry (proves retry path) [Codex 4th-pass F2]', async () => {
+  // Stronger guard for the VALIDATION recovery path: refresh fails transient
+  // once, returns fresh label on retry, release completes with fresh id.
+  const staleLabel = { id: 'label-stale', name: 'forge:claimed-by:me' };
+  const freshLabel = { id: 'label-fresh', name: 'forge:claimed-by:me' };
+  let listCalls = 0;
+  const removedIds: string[] = [];
+  const { tracker } = makeTracker({
+    listIssueLabels: async () => {
+      listCalls++;
+      // 1: prime cache with stale, 2: refresh fails transient,
+      // 3: refresh succeeds with fresh
+      if (listCalls === 1) return [staleLabel];
+      if (listCalls === 2) throw makeLinearTransportError();
+      return [freshLabel];
+    },
+    updateIssue: async (_id, input) => {
+      const ids = [...(input.removedLabelIds ?? [])];
+      removedIds.push(...ids);
+      if (ids.includes(staleLabel.id)) {
+        throw makeLinearValidationError('Unknown label id');
+      }
+      return makeIssue();
+    },
+  });
+  await tracker.releaseClaim('issue-1', 'me');
+  assert.deepEqual(removedIds, [staleLabel.id, freshLabel.id]);
+  assert.equal(listCalls, 3, 'refresh should have retried once before succeeding');
+});
+
+await test('claim+releaseClaim — 36-char UUID runId (production-shaped input) [FORGE-82 learning]', async () => {
+  // FORGE-82: GitHub's 50-char label cap broke production because tests used
+  // short literals ('me', 'aaa') that masked the cap. Linear's label name cap
+  // is much wider, so the 53-char production-shape label (17-char prefix +
+  // 36-char UUID) fits, but this test holds the line: any future Linear-side
+  // cap regression below 53 chars would surface here. crypto.randomUUID is
+  // technically UUIDv4 (Node 25); UUIDv7 has the same 36-char shape and same
+  // charset (the orchestrator's actual runId source — FORGE-20 — uses UUIDv7).
+  const runId = randomUUID(); // 36 chars (8-4-4-4-12), UUIDv4 shape
+  const labelName = `forge:claimed-by:${runId}`; // 17 + 36 = 53 chars
+  assert.equal(labelName.length, 53, 'production-shape sanity check');
+
+  const seed = makeIssue({ id: 'i1', labels: [] });
+  const server = new MockServerState([seed]);
+  const sdk: LinearSdkLike = {
+    viewer: async () => ({ id: 'u', email: 'u@x' }),
+    issue: async (id) => server.getIssue(id),
+    listIssues: async () => server.listIssues(),
+    createIssue: async () => makeIssue(),
+    updateIssue: async (id, input) => {
+      if (input.addedLabelIds) {
+        for (const lid of input.addedLabelIds) {
+          const l = server.labelById(lid);
+          if (l) server.addLabel(id, l.name);
+        }
+      }
+      if (input.removedLabelIds) {
+        for (const lid of input.removedLabelIds) server.removeLabel(id, lid);
+      }
+      return server.getIssue(id);
+    },
+    createComment: async () => {},
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => server.allLabels(),
+    createIssueLabel: async ({ name }) => server.ensureLabel(name),
+    createProject: async () => ({ id: 'p', url: 'u' }),
+    createIssueRelation: async () => {},
+  };
+  const tracker = new LinearTracker(linearConfig, noopLogger(), {
+    client: sdk,
+    retry: { sleep: async () => {} },
+  });
+  assert.deepEqual(await tracker.claim('i1', runId), { ok: true });
+  const labelsAfterClaim = server.getIssue('i1').labels.map((l) => l.name);
+  assert.ok(
+    labelsAfterClaim.includes(labelName),
+    `claim label should be present (UUIDv7-shape: ${labelName})`,
+  );
+  await tracker.releaseClaim('i1', runId);
+  const labelsAfterRelease = server.getIssue('i1').labels.map((l) => l.name);
+  assert.ok(
+    !labelsAfterRelease.includes(labelName),
+    'claim label removed after release',
+  );
 });
 
 // ─── classifyLinearError — branch coverage in classification order ───────────
@@ -404,7 +635,7 @@ await test('claim — recheck NOT_FOUND → version_conflict (label released)', 
     assert.equal(result.reason, 'version_conflict');
     assert.match(result.detail ?? '', /recheck/);
   }
-  assert.deepEqual([...(removedDuringCleanup ?? [])], ['label-claimed:agent-me']);
+  assert.deepEqual([...(removedDuringCleanup ?? [])], ['label-forge:claimed-by:me']);
 });
 
 await test('claim — recheck transient → transient_error (label release attempted)', async () => {
@@ -504,6 +735,84 @@ await test('claim — assertNonEmpty rejects empty runId', async () => {
   );
 });
 
+// ─── verify-on-readback contract (FORGE-76 fix) ──────────────────────────────
+//
+// Pre-fix: `if (allClaims.length <= 1) return { ok: true }` returned ok even
+// when our label was absent (false-positive). Post-fix: require myLabel
+// presence; otherwise return version_conflict 'claim-label-missing-on-recheck'.
+// Mirrors github.test.ts:419-462. The third test (happy-path-reread) is the
+// Codex 2nd-pass guard that would catch a `.includes(myLabel)`-instead-of-
+// `.some(l => l.name === myLabelName)` regression.
+
+await test('claim — reread shows our label present → returns ok (Codex 2nd-pass guard)', async () => {
+  // If the verify-on-readback uses `.includes(myLabel)` on an object array,
+  // every successful claim returns version_conflict. This test catches that.
+  const myLabel = makeClaimLabel('me');
+  const initial = makeIssue({ id: 'i1', labels: [] });
+  const post = makeIssue({ id: 'i1', labels: [myLabel] });
+  let stage = 'pre';
+  const { tracker } = makeTracker({
+    issue: async () => (stage === 'post' ? post : initial),
+    listIssueLabels: async () => [],
+    createIssueLabel: async ({ name }) => ({ id: `label-${name}`, name }),
+    updateIssue: async () => {
+      stage = 'post';
+      return post;
+    },
+  });
+  assert.deepEqual(await tracker.claim('i1', 'me'), { ok: true });
+});
+
+await test('claim — reread shows our label MISSING → version_conflict (claim-label-missing-on-recheck)', async () => {
+  // Our --add-label "succeeded" but the reread returns ZERO claim labels.
+  // Pre-fix bug: returned ok:true (allClaims.length <= 1). Post-fix: returns
+  // version_conflict because the contract requires our label present.
+  const issue = makeIssue({ id: 'i1', labels: [] });
+  let stage = 'pre';
+  const { tracker } = makeTracker({
+    issue: async () => issue, // reread returns same empty-label issue
+    listIssueLabels: async () => [],
+    createIssueLabel: async ({ name }) => ({ id: `label-${name}`, name }),
+    updateIssue: async () => {
+      stage = 'post';
+      return issue;
+    },
+  });
+  const result = await tracker.claim('i1', 'me');
+  // Touch `stage` so the lint catch doesn't flag the var (state used for setup).
+  void stage;
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'version_conflict');
+    assert.match(result.detail ?? '', /claim-label-missing-on-recheck/);
+  }
+});
+
+await test("claim — reread shows only OTHER agent's label → version_conflict (not false-positive ok)", async () => {
+  // Pre-fix bug: returned ok:true because allClaims.length === 1. Post-fix
+  // requires our label IN the set. Spec AC: "verify (a) our label is present
+  // AND (b) no other forge:claimed-by:* label is present".
+  const otherLabel = makeClaimLabel('other');
+  const initial = makeIssue({ id: 'i1', labels: [] });
+  const post = makeIssue({ id: 'i1', labels: [otherLabel] });
+  let stage = 'pre';
+  const { tracker } = makeTracker({
+    issue: async () => (stage === 'post' ? post : initial),
+    listIssueLabels: async () => [otherLabel],
+    createIssueLabel: async ({ name }) => ({ id: `label-${name}`, name }),
+    updateIssue: async () => {
+      stage = 'post';
+      return post;
+    },
+  });
+  const result = await tracker.claim('i1', 'me');
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'version_conflict');
+    assert.match(result.detail ?? '', /claim-label-missing-on-recheck/);
+  }
+});
+
 // ─── claim atomicity under concurrent agents (AC bullet 2) ───────────────────
 //
 // Runs the same two-agent race 20× via Promise.all to catch ordering flakes.
@@ -571,7 +880,7 @@ await test('claim is atomic when two orchestrators race (20× repeat)', async ()
     // Final server state must have exactly one claim label.
     const final = server.getIssue('i1');
     const finalClaims = final.labels.filter((l) =>
-      l.name.startsWith('claimed:agent-'),
+      l.name.startsWith('forge:claimed-by:'),
     );
     assert.equal(
       finalClaims.length,
@@ -1101,6 +1410,67 @@ await test('setBlockedBy — PRECONDITION_FAILED when issue has no forge:task fo
     () => tracker.setBlockedBy('i1', 'blocker-uuid-1'),
     (err: unknown) =>
       err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
+  );
+});
+
+// ─── User-label preservation (AC bullet 5 / regression guard) ───────────────
+//
+// Codex 2nd-pass: verify at the server-state level (not just removedLabelIds
+// inspection) that user-applied labels survive a full claim+release cycle.
+// The addedLabelIds/removedLabelIds discipline guarantees this in theory; this
+// test holds the line if anyone ever introduces a labelIds full-list replace.
+
+await test('claim+releaseClaim — user labels preserved across full cycle', async () => {
+  const userLabel: LinearLabelLike = {
+    id: 'label-priority-high',
+    name: 'priority:high',
+  };
+  const seed = makeIssue({ id: 'i1', identifier: 'FORGE-1', labels: [userLabel] });
+  const server = new MockServerState([seed]);
+  // Seed label so listIssueLabels returns it as a known team label.
+  server.ensureLabel(userLabel.name);
+
+  const sdk: LinearSdkLike = {
+    viewer: async () => ({ id: 'u', email: 'u@x' }),
+    issue: async (id) => server.getIssue(id),
+    listIssues: async () => server.listIssues(),
+    createIssue: async () => makeIssue(),
+    updateIssue: async (id, input) => {
+      if (input.addedLabelIds) {
+        for (const lid of input.addedLabelIds) {
+          const l = server.labelById(lid);
+          if (l) server.addLabel(id, l.name);
+        }
+      }
+      if (input.removedLabelIds) {
+        for (const lid of input.removedLabelIds) server.removeLabel(id, lid);
+      }
+      return server.getIssue(id);
+    },
+    createComment: async () => {},
+    listWorkflowStates: async () => DEFAULT_WORKFLOW_STATES,
+    listIssueLabels: async () => server.allLabels(),
+    createIssueLabel: async ({ name }) => server.ensureLabel(name),
+    createProject: async () => ({ id: 'p', url: 'u' }),
+    createIssueRelation: async () => {},
+  };
+  const tracker = new LinearTracker(linearConfig, noopLogger(), {
+    client: sdk,
+    retry: { sleep: async () => {} },
+  });
+
+  const claimResult = await tracker.claim('i1', 'me');
+  assert.deepEqual(claimResult, { ok: true });
+  let labels = server.getIssue('i1').labels.map((l) => l.name);
+  assert.ok(labels.includes('priority:high'), 'user label preserved after claim');
+  assert.ok(labels.includes('forge:claimed-by:me'), 'claim label present after claim');
+
+  await tracker.releaseClaim('i1', 'me');
+  labels = server.getIssue('i1').labels.map((l) => l.name);
+  assert.ok(labels.includes('priority:high'), 'user label preserved after release');
+  assert.ok(
+    !labels.includes('forge:claimed-by:me'),
+    'claim label removed after release',
   );
 });
 
