@@ -73,3 +73,39 @@ export class PhasesError extends Error {
     this.details = details;
   }
 }
+
+export type OrchestratorErrorCode =
+  | 'LEASE_EXISTS'          // lease.json already present; concurrent acquire lost
+  | 'LEASE_STOLEN'          // caller's (claim_id, generation) does not match stored lease
+  | 'LEASE_NOT_EXPIRED'     // steal attempted before expiry + grace period elapsed
+  | 'LEASE_NOT_FOUND'       // lease.json absent when expected (e.g. heartbeat with no prior acquire)
+  | 'ILLEGAL_TRANSITION'    // state machine rejected the requested (from, trigger, to) triple
+  | 'STATE_NOT_FOUND'       // state.json absent for a given task_id
+  | 'STATE_VERSION_CONFLICT' // new state_version !== current state_version + 1
+  | 'SCHEMA_INVALID'        // zod parse failed or JSON is malformed
+  | 'INVALID_ID'            // task_id / attempt_id failed segment validation
+  | 'IO_ERROR';             // unexpected filesystem error
+
+export interface OrchestratorErrorDetails {
+  readonly [key: string]: unknown;
+}
+
+export class OrchestratorError extends Error {
+  readonly code: OrchestratorErrorCode;
+  readonly details: OrchestratorErrorDetails;
+
+  constructor(
+    code: OrchestratorErrorCode,
+    message: string,
+    details: OrchestratorErrorDetails = {},
+  ) {
+    super(message);
+    this.name = 'OrchestratorError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export function isOrchestratorError(err: unknown): err is OrchestratorError {
+  return err instanceof OrchestratorError;
+}

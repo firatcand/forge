@@ -102,6 +102,38 @@ export function answerFilePath(
   );
 }
 
+// State, lease, claim-history, manifest, and events path helpers.
+// These new paths live in the same module to keep all path logic co-located.
+// Path computation is pure (no I/O). Validation is done by validateIdSegment.
+
+export function stateFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'state.json');
+}
+
+export function leaseFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'lease.json');
+}
+
+export function claimHistoryFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'claim-history.jsonl');
+}
+
+export function manifestFilePath(
+  forgeDir: string,
+  taskId: string,
+  attemptId: string,
+): string {
+  return join(attemptDir(forgeDir, taskId, attemptId), 'manifest.json');
+}
+
+export function eventsFilePath(
+  forgeDir: string,
+  taskId: string,
+  attemptId: string,
+): string {
+  return join(attemptDir(forgeDir, taskId, attemptId), 'events.jsonl');
+}
+
 // Legacy paths — referenced by gc to detect and migrate v1 trees.
 
 export function legacyQuestionsDir(forgeDir: string): string {
