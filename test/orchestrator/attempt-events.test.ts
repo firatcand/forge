@@ -8,8 +8,9 @@ import {
   readAttemptEvents,
   tryParseEventLine,
 } from '../../src/orchestrator/attempt-events.ts';
+import { acquire } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
-import { eventsFilePath } from '../../src/orchestrator/questions/paths.ts';
+import { eventsFilePath, leaseFilePath } from '../../src/orchestrator/questions/paths.ts';
 import type { AttemptEvent } from '../../src/schemas/attempt.ts';
 
 let tmpDir: string;
@@ -49,11 +50,18 @@ function startedEvent(): AttemptEvent {
   };
 }
 
+// Helper: acquire a real lease and return the caller identity for use in tests.
+function acquireLease(fd: string, taskId: string): { run_id: string; claim_id: string; generation: number } {
+  const lease = acquire({ forgeDir: fd, taskId, runId: 'run-001' });
+  return { run_id: lease.owner_run_id, claim_id: lease.claim_id, generation: lease.generation };
+}
+
 // ---- appendAttemptEvent: happy path ----
 
 test('attempt-events: appendAttemptEvent creates file and writes valid JSON line', () => {
   const fd = forgeDir('ae-happy');
-  appendAttemptEvent(heartbeatEvent(), { forgeDir: fd, taskId: 'TASK-AE1', attemptId: 'att-1' });
+  const caller = acquireLease(fd, 'TASK-AE1');
+  appendAttemptEvent(heartbeatEvent(), { forgeDir: fd, taskId: 'TASK-AE1', attemptId: 'att-1', caller });
   const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AE1', attemptId: 'att-1' });
   assert.equal(events.length, 1);
   assert.equal(events[0].ok, true);
@@ -66,7 +74,8 @@ test('attempt-events: appendAttemptEvent creates file and writes valid JSON line
 
 test('attempt-events: sequential appends produce multiple valid JSONL lines', () => {
   const fd = forgeDir('ae-sequential');
-  const opts = { forgeDir: fd, taskId: 'TASK-AE2', attemptId: 'att-1' };
+  const caller = acquireLease(fd, 'TASK-AE2');
+  const opts = { forgeDir: fd, taskId: 'TASK-AE2', attemptId: 'att-1', caller };
   appendAttemptEvent(startedEvent(), opts);
   appendAttemptEvent(heartbeatEvent(), opts);
   appendAttemptEvent(
@@ -121,8 +130,9 @@ test('attempt-events: unknown event type in file returns ok:false without throwi
 
 test('attempt-events: missing directory is created automatically', () => {
   const fd = forgeDir('ae-mkdir');
+  const caller = acquireLease(fd, 'TASK-AE5');
   // Do not pre-create the directory — appendAttemptEvent must do it
-  appendAttemptEvent(heartbeatEvent(), { forgeDir: fd, taskId: 'TASK-AE5', attemptId: 'att-new' });
+  appendAttemptEvent(heartbeatEvent(), { forgeDir: fd, taskId: 'TASK-AE5', attemptId: 'att-new', caller });
   const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AE5', attemptId: 'att-new' });
   assert.equal(events.length, 1);
   assert.equal(events[0].ok, true);
@@ -132,10 +142,11 @@ test('attempt-events: missing directory is created automatically', () => {
 
 test('attempt-events: invalid event throws SCHEMA_INVALID before any I/O', () => {
   const fd = forgeDir('ae-schema-invalid');
+  const caller = acquireLease(fd, 'TASK-AE6');
   const invalid = { type: 'unknown_event', ts: 'not-a-date' } as unknown as AttemptEvent;
   assert.throws(
     () =>
-      appendAttemptEvent(invalid, { forgeDir: fd, taskId: 'TASK-AE6', attemptId: 'att-1' }),
+      appendAttemptEvent(invalid, { forgeDir: fd, taskId: 'TASK-AE6', attemptId: 'att-1', caller }),
     (err) => err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID',
   );
   // No file should have been created
@@ -144,6 +155,28 @@ test('attempt-events: invalid event throws SCHEMA_INVALID before any I/O', () =>
   // verify readAttemptEvents returns empty (file absent)
   const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AE6', attemptId: 'att-1' });
   assert.equal(events.length, 0, 'no events should exist after schema validation failure');
+});
+
+// ---- B2: appendAttemptEvent rejects stale caller (LEASE_STOLEN) ----
+
+test('attempt-events: appendAttemptEvent throws LEASE_STOLEN for stale caller (B2)', () => {
+  const fd = forgeDir('ae-b2-stolen');
+  const realCaller = acquireLease(fd, 'TASK-AEB2');
+  // Pass a caller with a generation that doesn't match the stored lease.
+  const staleCaller = { ...realCaller, generation: realCaller.generation + 99 };
+  assert.throws(
+    () =>
+      appendAttemptEvent(heartbeatEvent(), {
+        forgeDir: fd,
+        taskId: 'TASK-AEB2',
+        attemptId: 'att-1',
+        caller: staleCaller,
+      }),
+    (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+  );
+  // No file should have been created
+  const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AEB2', attemptId: 'att-1' });
+  assert.equal(events.length, 0, 'no events should exist when ownership check fails');
 });
 
 // ---- readAttemptEvents: returns [] when file absent ----

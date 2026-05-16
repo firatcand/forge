@@ -315,6 +315,27 @@ test('leases: release throws LEASE_STOLEN for wrong caller', () => {
   );
 });
 
+// ---- B3: generation does not reset to 0 on release-then-reacquire ----
+
+test('leases: re-acquire after release uses generation from history, not 0 (B3)', () => {
+  const fd = forgeDir('b3-reacquire');
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-B3', runId: 'run-001' });
+  assert.equal(first.generation, 0, 'first acquire should be generation 0');
+
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-B3',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+
+  const second = acquire({ forgeDir: fd, taskId: 'TASK-B3', runId: 'run-002' });
+  assert.equal(
+    second.generation,
+    first.generation + 1,
+    'second acquire should use generation 1, not 0 (history read)',
+  );
+});
+
 // ---- steal writes state.json = unclaimed (OQ-6) ----
 
 test('leases: steal writes state.json with state=unclaimed (OQ-6)', () => {

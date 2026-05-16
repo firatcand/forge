@@ -260,6 +260,38 @@ function readLeaseFile(taskId: string, leasePath: string): Lease | null {
   return result.data;
 }
 
+// ---- Read last claim-history.jsonl entry (used by acquire for generation continuity) ----
+// Returns the last entry's generation number, or null if history is absent/empty.
+// This prevents generation resetting to 0 after a release-then-reacquire cycle.
+function readLastClaimHistoryEntry(
+  forgeDir: string,
+  taskId: string,
+): { generation: number } | null {
+  const historyPath = claimHistoryFilePath(forgeDir, taskId);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(historyPath, 'utf8');
+  } catch {
+    return null; // ENOENT or any read error — no history yet
+  }
+
+  const lines = raw.split('\n').filter((l) => l.trim() !== '');
+  if (lines.length === 0) return null;
+
+  // Walk backwards to find the last parseable line.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const entry = JSON.parse(lines[i]);
+      if (typeof entry.generation === 'number' && Number.isInteger(entry.generation)) {
+        return { generation: entry.generation };
+      }
+    } catch {
+      // skip malformed lines
+    }
+  }
+  return null;
+}
+
 // ---- Append to claim-history.jsonl (best-effort) ----
 
 function appendClaimHistory(
@@ -421,6 +453,15 @@ export function acquire(opts: AcquireOptions): Lease {
     // A lease exists — linkSync will fail with EEXIST and we'll throw LEASE_EXISTS.
     // Still compute generation in case a concurrent steal cleared it between read and link.
     nextGeneration = priorLease.generation + 1;
+  } else {
+    // B3: No lease file — but there may be history from a prior release.
+    // Use last history entry's generation + 1 to prevent reset to 0 after
+    // a release-then-reacquire cycle. Only use 0 if this is truly the first ever acquire.
+    const lastHistory = readLastClaimHistoryEntry(forgeDir, taskId);
+    if (lastHistory !== null) {
+      nextGeneration = lastHistory.generation + 1;
+    }
+    // else: nextGeneration stays 0 (genuine first acquire — no history file)
   }
 
   const now = Date.now();
@@ -579,6 +620,29 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
     overwriteAtomicLink(tmpPath, targetPath, taskId);
   } finally {
     bestEffortUnlink(tmpPath);
+  }
+
+  // B1 — Verify-after-write: re-read lease.json immediately after overwrite and
+  // confirm the written (claim_id, generation) is still present. A concurrent
+  // steal that unlinked our file between our unlink and our link would have won
+  // and replaced the file with a new generation. If the re-read disagrees with
+  // what we wrote, surface LEASE_STOLEN so the caller can abort safely.
+  const reread = readLeaseFile(taskId, targetPath);
+  if (
+    reread === null ||
+    reread.claim_id !== validation.data.claim_id ||
+    reread.generation !== validation.data.generation
+  ) {
+    throw new OrchestratorError(
+      'LEASE_STOLEN',
+      `Lease was stolen concurrently during heartbeat for task ${taskId}`,
+      {
+        taskId,
+        from_generation: caller.generation,
+        stored_generation: reread?.generation ?? null,
+        reason: 'concurrent_steal_after_heartbeat_write',
+      },
+    );
   }
 
   return validation.data;

@@ -27,6 +27,7 @@ import { OrchestratorError } from '../core/errors.ts';
 import { AttemptEventSchema, type AttemptEvent } from '../schemas/attempt.ts';
 import { eventsFilePath, validateIdSegment } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
+import { assertLeaseOwnership, type CallerIdentity } from './leases.ts';
 
 // Test seam — same pattern as writer.ts and leases.ts.
 export const __eventsFsForTesting = {
@@ -54,6 +55,8 @@ export interface AppendAttemptEventOptions {
   forgeDir: string;
   taskId: string;
   attemptId: string;
+  // B2: caller identity required — ownership must be validated before any mutation.
+  caller: CallerIdentity;
 }
 
 export function appendAttemptEvent(
@@ -63,6 +66,7 @@ export function appendAttemptEvent(
   const { forgeDir } = opts;
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
   const attemptId = validateOrchestratorId(opts.attemptId, 'attemptId');
+  const { caller } = opts;
 
   // Validate event against schema before any I/O.
   const validation = AttemptEventSchema.safeParse(event);
@@ -73,6 +77,10 @@ export function appendAttemptEvent(
       { taskId, attemptId, zodError: validation.error.message },
     );
   }
+
+  // B2: Assert lease ownership before writing. An event written by a stale
+  // worker (generation mismatch) would corrupt the audit log for the new holder.
+  assertLeaseOwnership(forgeDir, taskId, caller);
 
   const targetPath = eventsFilePath(forgeDir, taskId, attemptId);
   const dir = dirname(targetPath);
