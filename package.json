@@ -4,7 +4,8 @@
   "description": "A lightweight framework for shipping software products from idea to production with AI coding agents (Claude Code, Codex CLI, Cursor, Gemini)",
   "type": "module",
   "bin": {
-    "forge": "dist/bin/forge.cjs"
+    "forge": "dist/bin/forge.cjs",
+    "forge-sync-status-render": "dist/bin/sync-status-render.cjs"
   },
   "files": [
     "dist/",
