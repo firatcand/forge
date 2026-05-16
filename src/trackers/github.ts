@@ -63,10 +63,21 @@ export function toStoredLabel(runId: string): string {
   return `${CLAIM_LABEL_PREFIX}${runId.replaceAll('-', '')}`;
 }
 
+// Inverse of toStoredLabel. Strict: rejects anything that is not exactly 32
+// hex chars after the prefix (the dehyphenated UUIDv7 wire format). Non-UUID
+// inputs (test mocks, legacy ids) would otherwise silently round-trip to
+// malformed strings — Codex 2nd-opinion (FORGE-82) flagged this.
 export function runIdFromStoredLabel(stored: string): string {
   const hex = stored.startsWith(CLAIM_LABEL_PREFIX)
     ? stored.slice(CLAIM_LABEL_PREFIX.length)
     : stored;
+  if (!/^[0-9a-f]{32}$/i.test(hex)) {
+    throw new TrackerError(
+      'VALIDATION',
+      `runIdFromStoredLabel: expected 32 hex chars after prefix, got ${hex.length} chars`,
+      { stored, hex },
+    );
+  }
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
