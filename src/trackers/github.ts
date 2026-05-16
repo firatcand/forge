@@ -54,6 +54,33 @@ const defaultGhExec: GhExec = async (args, opts) => {
 
 const CLAIM_LABEL_PREFIX = 'forge:claimed-by:';
 
+// GitHub enforces a 50-character hard cap on label names. A UUIDv7 with
+// hyphens is 36 chars, giving 17 + 36 = 53 chars — 3 over the cap.
+// Stripping hyphens reduces the UUID suffix to 32 hex chars: 17 + 32 = 49.
+// The dehyphenation is a wire-format transform only; orchestrators always
+// receive and supply canonical UUID form (with hyphens).
+export function toStoredLabel(runId: string): string {
+  return `${CLAIM_LABEL_PREFIX}${runId.replaceAll('-', '')}`;
+}
+
+// Inverse of toStoredLabel. Strict: rejects anything that is not exactly 32
+// hex chars after the prefix (the dehyphenated UUIDv7 wire format). Non-UUID
+// inputs (test mocks, legacy ids) would otherwise silently round-trip to
+// malformed strings — Codex 2nd-opinion (FORGE-82) flagged this.
+export function runIdFromStoredLabel(stored: string): string {
+  const hex = stored.startsWith(CLAIM_LABEL_PREFIX)
+    ? stored.slice(CLAIM_LABEL_PREFIX.length)
+    : stored;
+  if (!/^[0-9a-f]{32}$/i.test(hex)) {
+    throw new TrackerError(
+      'VALIDATION',
+      `runIdFromStoredLabel: expected 32 hex chars after prefix, got ${hex.length} chars`,
+      { stored, hex },
+    );
+  }
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 // Exported so callers and tests can read the in-flight ceiling.
 export const GH_LIST_LIMIT = 200;
 
@@ -131,6 +158,18 @@ export function classifyGitHubError(err: unknown): NormalizeErrorHint {
 
   if (/HTTP 422|validation failed/i.test(stderr)) {
     return { code: 'VALIDATION', details: { stderr } };
+  }
+
+  // stderr-only "label not found" path: gh issue edit exits non-zero with no
+  // HTTP status code when the label name doesn't exist on the repo. Must come
+  // AFTER the HTTP 422 branch so explicit 422 responses still classify first.
+  // Compound guard: bare "not found" is already caught by the HTTP 404 branch
+  // above; we only match when accompanied by "failed to update N issue(s)".
+  if (
+    (/not found/i.test(stderr) && /failed to update \d+ issue/i.test(stderr)) ||
+    /label .+? does not exist/i.test(stderr)
+  ) {
+    return { code: 'VALIDATION', details: { stderr, reason: 'label-not-found' } };
   }
 
   // Must stay ordered after VALIDATION — "already exists" can appear inside
@@ -295,7 +334,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   async claim(issueId: string, runId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(runId, 'runId');
-    const myLabel = `${CLAIM_LABEL_PREFIX}${runId}`;
+    const myLabel = toStoredLabel(runId);
     const number = this.parseIssueNumber(issueId);
 
     // Step 1: read current labels (retriable on transport errors).
@@ -385,6 +424,13 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           detail: stderrOf(hint),
         };
       }
+      if (hint.code === 'VALIDATION') {
+        return {
+          ok: false,
+          reason: 'version_conflict',
+          detail: `label-mutation-failed:${(hint.details as { reason?: string } | undefined)?.reason ?? 'validation'}`,
+        };
+      }
       throw this.normalizeError('claim', err, hint);
     }
 
@@ -423,11 +469,11 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
 
     // Verify-on-readback contract (spec/ORCHESTRATOR.md §Tracker atomic claim):
     // (a) our label MUST be present AND (b) no other forge:claimed-by:* label
-    // MUST be present. If our label is missing on reread, the add silently
-    // failed or was stripped (e.g., GitHub label cap, concurrent admin action,
-    // or another orchestrator removed it). Either way: we don't hold the
-    // claim. Best-effort remove (in case it does exist on the server but our
-    // reread was stale) and return version_conflict.
+    // (stored dehyphenated form) MUST be present. If our label is missing on
+    // reread, the add silently failed or was stripped (e.g., GitHub label cap,
+    // concurrent admin action, or another orchestrator removed it). Either way:
+    // we don't hold the claim. Best-effort remove (in case it does exist on
+    // the server but our reread was stale) and return version_conflict.
     if (!allClaims.includes(myLabel)) {
       await this.tryRemoveLabel(number, myLabel);
       return {
@@ -452,9 +498,9 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
 
   // ─── releaseClaim — strict-scoped, idempotent ──────────────────────────────
   //
-  // Removes only `forge:claimed-by:{runId}` — the caller's own label. Does
-  // not police other agents' labels. Trusted-caller contract: callers only
-  // invoke this on issues they own.
+  // Removes only the stored (dehyphenated) form of forge:claimed-by:{runId} —
+  // the caller's own label. Does not police other agents' labels. Trusted-
+  // caller contract: callers only invoke this on issues they own.
   //
   // Idempotent: a missing label (already-removed, never-set, or issue closed
   // /deleted) is swallowed silently. Per spec/ORCHESTRATOR.md §Tracker
@@ -464,7 +510,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(runId, 'runId');
     const number = this.parseIssueNumber(issueId);
-    const myLabel = `${CLAIM_LABEL_PREFIX}${runId}`;
+    const myLabel = toStoredLabel(runId);
 
     try {
       await this.gh([
@@ -865,13 +911,21 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       const hint = classifyGitHubError(err);
       if (
         hint.code === 'CONFLICT' ||
+        hint.code === 'VALIDATION' ||
         /already exists/i.test(stderrOf(hint))
       ) {
+        // CONFLICT: label already exists — treat as success.
+        // VALIDATION: label create refused (e.g. invalid chars, or 422 from
+        // GitHub's cap — shouldn't occur post-dehyphenation but belt-and-
+        // suspenders). The downstream `issue edit --add-label` will fail with
+        // "label not found" stderr, which classifyGitHubError maps to
+        // VALIDATION → claim() returns version_conflict rather than throwing.
         this.precreatedLabels.add(name);
         return;
       }
-      // Don't fail the parent op — modern gh creates labels on `issue edit
-      // --add-label` automatically. Log so flakiness is observable.
+      // Don't fail the parent op — log so flakiness is observable. The
+      // downstream `issue edit --add-label` will fail with "label not found"
+      // stderr, handled by claim()'s catch block as version_conflict.
       this.logger.warn('tracker.ensureLabelExists', {
         name,
         err: errToString(err),

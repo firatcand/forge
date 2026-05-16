@@ -172,3 +172,53 @@ test('integration: setBlockedBy round-trips through listActiveIssues', {
     await ghDeleteIssue(Number(issueB.id));
   }
 });
+
+test('integration: claim with full UUIDv7 runId succeeds — label fits under 50-char GitHub cap (FORGE-82)', {
+  skip: skip ? 'FORGE_E2E_GITHUB!=1 or FORGE_E2E_REPO unset' : false,
+}, async () => {
+  const tracker = makeTracker();
+  const runId = crypto.randomUUID();
+  assert.equal(runId.length, 36, 'runId must be 36 chars (UUID with hyphens)');
+
+  const forgeTaskId = `FORGE-82-E2E-${Date.now()}`;
+  const issue = await tracker.createIssue({
+    title: `[e2e label-cap] ${forgeTaskId}`,
+    body: 'FORGE-82 label-cap integration test',
+    forgeTaskId,
+    ownerType: 'backend-dev',
+    acceptance: [],
+    dependsOn: [],
+  });
+  const issueNumber = Number(issue.id);
+
+  try {
+    const result = await tracker.claim(issue.id, runId);
+    assert.equal(result.ok, true, `claim failed: ${JSON.stringify(result)}`);
+
+    // Probe actual labels on GitHub to assert the stored form is under 50 chars
+    const labelsJson = await execa('gh', [
+      'issue',
+      'view',
+      String(issueNumber),
+      '--repo',
+      REPO,
+      '--json',
+      'labels',
+    ]);
+    const parsed = JSON.parse(labelsJson.stdout) as { labels: Array<{ name: string }> };
+    const claimLabels = parsed.labels
+      .map((l) => l.name)
+      .filter((n) => n.startsWith('forge:claimed-by:'));
+    assert.ok(claimLabels.length > 0, 'expected at least one forge:claimed-by:* label');
+    for (const label of claimLabels) {
+      assert.ok(
+        label.length <= 50,
+        `label "${label}" is ${label.length} chars — exceeds 50-char GitHub cap`,
+      );
+    }
+
+    await tracker.releaseClaim(issue.id, runId);
+  } finally {
+    await ghDeleteIssue(issueNumber);
+  }
+});

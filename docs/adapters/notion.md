@@ -159,3 +159,7 @@ backoff via `BaseTracker.withRetry`.
 Per the `gh-cli-flag-spelling-vs-api-enum` learning, mocks verify call shape
 only. Run the integration test locally before merging any change to
 `src/trackers/notion.ts`.
+
+## Claim label length (no-transform note)
+
+NotionTracker stores the claim `runId` as a rich_text property _value_ (not a Notion property _name_). The property name is the fixed string `forge_claimed_by` (16 chars). Notion's 100-char property name limit and its rich_text value limits are both far above the 53-char `forge:claimed-by:<UUIDv7>` string. No UUID transform is applied here. GitHub requires a dehyphenation transform to fit under its 50-char label-name cap; see `docs/adapters/github.md` for details.
