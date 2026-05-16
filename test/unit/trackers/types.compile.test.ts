@@ -105,7 +105,7 @@ test('ClaimResult — v2 failure variant discriminated-union narrowing', () => {
   const alreadyClaimed: ClaimResult = {
     ok: false,
     reason: 'already_claimed',
-    detail: 'claimed:agent-other',
+    detail: 'forge:claimed-by:other',
   };
   assert.equal(alreadyClaimed.ok, false);
 

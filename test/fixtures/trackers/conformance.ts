@@ -171,7 +171,7 @@ export function runClaimResultUnionFixture(): void {
   const alreadyClaimed: ClaimResult = {
     ok: false,
     reason: 'already_claimed',
-    detail: 'claimed:agent-other',
+    detail: 'forge:claimed-by:other',
   };
   assertClaimResultShape(alreadyClaimed);
 
