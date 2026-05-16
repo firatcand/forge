@@ -84,6 +84,7 @@ export type OrchestratorErrorCode =
   | 'STATE_VERSION_CONFLICT' // new state_version !== current state_version + 1
   | 'SCHEMA_INVALID'        // zod parse failed or JSON is malformed
   | 'INVALID_ID'            // task_id / attempt_id failed segment validation
+  | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries
   | 'IO_ERROR';             // unexpected filesystem error
 
 export interface OrchestratorErrorDetails {

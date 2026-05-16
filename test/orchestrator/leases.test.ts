@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,6 +9,7 @@ import {
   steal,
   release,
   assertLeaseOwnership,
+  __leasesFsForTesting,
 } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
 import { leaseFilePath, claimHistoryFilePath } from '../../src/orchestrator/questions/paths.ts';
@@ -401,4 +402,173 @@ test('leases: steal writes state.json with updated_by from the new owner identit
   assert.equal(stateRaw.updated_by.run_id, newLease.owner_run_id, 'updated_by.run_id should be the new owner');
   assert.equal(stateRaw.updated_by.claim_id, newLease.claim_id, 'updated_by.claim_id should be the new claim');
   assert.equal(stateRaw.updated_by.generation, newLease.generation, 'updated_by.generation should be the new generation');
+});
+
+// ---- Fix 1: steal verify-before-write — concurrent heartbeat race ----
+
+test('leases: steal throws LEASE_NOT_EXPIRED if heartbeat refreshed the lease after eligibility check (verify-before-write)', () => {
+  const fd = forgeDir('steal-vbw-race');
+
+  // Acquire an expiring lease (holder A, gen=0).
+  const original = acquire({
+    forgeDir: fd,
+    taskId: 'TASK-VBW',
+    runId: 'run-holder',
+    leaseTtlMs: 1, // expires immediately
+  });
+
+  // Advance clock past expiry + grace so steal's eligibility check would pass.
+  const futureNow = Date.now() + 10_000_000;
+
+  // Simulate a concurrent heartbeat that refreshes the lease AFTER steal has
+  // judged it stealable but BEFORE steal writes. We inject a custom readFileSync
+  // into the seam: the first call (steal's pre-write verify-read) returns a
+  // refreshed lease (new expires_at), causing the verify-before-write to abort.
+  //
+  // Mechanism: steal calls readLeaseFile once during eligibility (using the real
+  // readFileSync), then again immediately before overwrite (the verify-read).
+  // We wrap readFileSync so that the second call to the lease path returns a
+  // lease with a different expires_at — as if heartbeat ran in between.
+  const leasePath = leaseFilePath(fd, 'TASK-VBW');
+  const refreshedLease = {
+    ...original,
+    expires_at: new Date(futureNow + 30_000).toISOString(),
+    last_heartbeat_at: new Date(futureNow).toISOString(),
+  };
+
+  let readCallCount = 0;
+  const realReadFileSync = __leasesFsForTesting.readFileSync;
+  __leasesFsForTesting.readFileSync = (path: unknown, ...args: unknown[]) => {
+    if (path === leasePath) {
+      readCallCount++;
+      // First read: eligibility check — return original expired lease.
+      // Second read: verify-before-write — return refreshed lease (race injected).
+      if (readCallCount >= 2) {
+        return JSON.stringify(refreshedLease);
+      }
+    }
+    return (realReadFileSync as Function)(path, ...args);
+  };
+
+  try {
+    assert.throws(
+      () =>
+        steal({
+          forgeDir: fd,
+          taskId: 'TASK-VBW',
+          runId: 'run-thief',
+          now: futureNow,
+          stealGraceMs: 0,
+        }),
+      (err: unknown) =>
+        err instanceof OrchestratorError &&
+        err.code === 'LEASE_NOT_EXPIRED' &&
+        (err.details as Record<string, unknown>)?.reason === 'concurrent_heartbeat_renewed_lease',
+    );
+  } finally {
+    __leasesFsForTesting.readFileSync = realReadFileSync;
+  }
+});
+
+// ---- Fix 2: history corruption throw ----
+
+test('leases: acquire throws CLAIM_HISTORY_CORRUPT when history file is non-empty but fully malformed', () => {
+  const fd = forgeDir('history-corrupt');
+
+  // Acquire and release to create the directory structure.
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-CORRUPT', runId: 'run-001' });
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-CORRUPT',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+
+  // Overwrite claim-history.jsonl with 3 lines of non-JSON to corrupt it.
+  const histPath = claimHistoryFilePath(fd, 'TASK-CORRUPT');
+  writeFileSync(histPath, 'not-json\nalso-not-json\nstill-not-json\n', 'utf8');
+
+  // acquire should throw CLAIM_HISTORY_CORRUPT, not silently reset generation to 0.
+  assert.throws(
+    () => acquire({ forgeDir: fd, taskId: 'TASK-CORRUPT', runId: 'run-002' }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'CLAIM_HISTORY_CORRUPT',
+  );
+});
+
+test('leases: acquire with empty claim-history.jsonl still succeeds (generation 0)', () => {
+  const fd = forgeDir('history-empty');
+
+  // Acquire and release to create directory + history file.
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-HEMPTY', runId: 'run-001' });
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-HEMPTY',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+
+  // Truncate history to 0 bytes (legitimate edge case).
+  const histPath = claimHistoryFilePath(fd, 'TASK-HEMPTY');
+  writeFileSync(histPath, '', 'utf8');
+
+  // Should not throw — empty file is treated as "no history".
+  const second = acquire({ forgeDir: fd, taskId: 'TASK-HEMPTY', runId: 'run-002' });
+  assert.equal(second.generation, 0, 'empty history file treated as no history — generation resets to 0');
+});
+
+// ---- Fix 3: run_id included in heartbeat verify-after-write ----
+
+test('leases: heartbeat verify-after-write detects mismatched run_id and throws LEASE_STOLEN (Fix 3)', () => {
+  const fd = forgeDir('hb-verify-run-id');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-HBVR', runId: 'run-real' });
+
+  // Inject a fake re-read result that has the correct claim_id + generation
+  // but a different owner_run_id. This simulates the (defense-in-depth) case
+  // where the file on disk shows a different run_id than what we wrote.
+  const leasePath = leaseFilePath(fd, 'TASK-HBVR');
+  const realReadFileSync = __leasesFsForTesting.readFileSync;
+  let writeHappened = false;
+
+  __leasesFsForTesting.readFileSync = (path: unknown, ...args: unknown[]) => {
+    if (path === leasePath && writeHappened) {
+      // Return a lease with the correct claim_id + generation but a different run_id.
+      const spoofed = {
+        ...lease,
+        owner_run_id: 'run-impostor',
+      };
+      return JSON.stringify(spoofed);
+    }
+    return (realReadFileSync as Function)(path, ...args);
+  };
+
+  // Intercept overwriteAtomicLink completion by wrapping unlinkSync: after the
+  // overwrite sequence runs we flip writeHappened so the verify-read returns the
+  // spoofed lease.
+  const realUnlinkSync = __leasesFsForTesting.unlinkSync;
+  let unlinkCount = 0;
+  __leasesFsForTesting.unlinkSync = (path: unknown) => {
+    (realUnlinkSync as Function)(path);
+    // The overwrite path calls unlinkSync twice (unlink target + unlink tmp).
+    // After the first unlink (target removed), the link hasn't happened yet.
+    // After the second unlink (tmp cleanup), the write is done.
+    unlinkCount++;
+    if (unlinkCount >= 2) {
+      writeHappened = true;
+    }
+  };
+
+  try {
+    assert.throws(
+      () =>
+        heartbeat({
+          forgeDir: fd,
+          taskId: 'TASK-HBVR',
+          caller: { run_id: 'run-real', claim_id: lease.claim_id, generation: lease.generation },
+        }),
+      (err: unknown) =>
+        err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+    );
+  } finally {
+    __leasesFsForTesting.readFileSync = realReadFileSync;
+    __leasesFsForTesting.unlinkSync = realUnlinkSync;
+  }
 });

@@ -263,6 +263,13 @@ function readLeaseFile(taskId: string, leasePath: string): Lease | null {
 // ---- Read last claim-history.jsonl entry (used by acquire for generation continuity) ----
 // Returns the last entry's generation number, or null if history is absent/empty.
 // This prevents generation resetting to 0 after a release-then-reacquire cycle.
+//
+// Error contract:
+// - ENOENT: return null (no history yet — legitimate).
+// - File exists, 0 bytes: return null (legitimate edge case after first release).
+// - File exists, non-empty, but zero parseable lines: throw CLAIM_HISTORY_CORRUPT.
+//   Caller (acquire) must NOT silently re-use generation 0, as that would re-introduce B3.
+// - Non-ENOENT read error: throw IO_ERROR.
 function readLastClaimHistoryEntry(
   forgeDir: string,
   taskId: string,
@@ -271,12 +278,19 @@ function readLastClaimHistoryEntry(
   let raw: string;
   try {
     raw = fs.readFileSync(historyPath, 'utf8');
-  } catch {
-    return null; // ENOENT or any read error — no history yet
+  } catch (err) {
+    if (isNodeFsError(err) && err.code === 'ENOENT') {
+      return null; // no history yet
+    }
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to read claim-history.jsonl for task ${taskId}`,
+      { taskId, path: historyPath, cause: err },
+    );
   }
 
   const lines = raw.split('\n').filter((l) => l.trim() !== '');
-  if (lines.length === 0) return null;
+  if (lines.length === 0) return null; // empty file — legitimate
 
   // Walk backwards to find the last parseable line.
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -289,7 +303,14 @@ function readLastClaimHistoryEntry(
       // skip malformed lines
     }
   }
-  return null;
+
+  // File is non-empty but contains no parseable entries. This is corruption —
+  // do NOT return null (which would silently reset generation to 0 and re-introduce B3).
+  throw new OrchestratorError(
+    'CLAIM_HISTORY_CORRUPT',
+    `claim-history.jsonl for task ${taskId} is non-empty but contains no parseable entries`,
+    { taskId, path: historyPath, detail: 'no parseable entries in non-empty history file' },
+  );
 }
 
 // ---- Append to claim-history.jsonl (best-effort) ----
@@ -650,15 +671,19 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
   }
 
   // B1 — Verify-after-write: re-read lease.json immediately after overwrite and
-  // confirm the written (claim_id, generation) is still present. A concurrent
+  // confirm the written (claim_id, generation, owner_run_id) is still present. A concurrent
   // steal that unlinked our file between our unlink and our link would have won
   // and replaced the file with a new generation. If the re-read disagrees with
   // what we wrote, surface LEASE_STOLEN so the caller can abort safely.
+  // Fix 3: include owner_run_id in the mismatch condition for consistency with
+  // the 3-field comparison used at all H1 sites (assertLeaseOwnership, heartbeat
+  // initial check, assertLeaseOwnershipFromFile).
   const reread = readLeaseFile(taskId, targetPath);
   if (
     reread === null ||
     reread.claim_id !== validation.data.claim_id ||
-    reread.generation !== validation.data.generation
+    reread.generation !== validation.data.generation ||
+    reread.owner_run_id !== validation.data.owner_run_id
   ) {
     throw new OrchestratorError(
       'LEASE_STOLEN',
@@ -667,6 +692,7 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
         taskId,
         from_generation: caller.generation,
         stored_generation: reread?.generation ?? null,
+        stored_run_id: reread?.owner_run_id ?? null,
         reason: 'concurrent_steal_after_heartbeat_write',
       },
     );
@@ -750,6 +776,38 @@ export function steal(opts: StealOptions): Lease {
 
   const payload = JSON.stringify(validation.data);
   const tmpPath = tempName(targetPath);
+
+  // Fix 1 (steal verify-before-write): re-read lease.json just before overwrite to
+  // close the race where heartbeat refreshes the lease after our eligibility check
+  // but before our write. If the lease has changed since we judged it stealable,
+  // the holder has been actively renewed and we must not silently un-renew them.
+  //
+  // Residual window: a nanosecond gap remains between this re-read and the
+  // unlink+link in overwriteAtomicLink. Closing it fully requires OS-level file
+  // locking (e.g., flock(2)) which is out of scope for local-FS use. This check
+  // closes the practically significant race (heartbeat completing between
+  // readLeaseFile and overwriteAtomicLink) and is the accepted trade-off.
+  const preWriteLease = readLeaseFile(taskId, targetPath);
+  if (
+    preWriteLease === null ||
+    preWriteLease.claim_id !== existing.claim_id ||
+    preWriteLease.generation !== existing.generation ||
+    preWriteLease.owner_run_id !== existing.owner_run_id ||
+    preWriteLease.expires_at !== existing.expires_at
+  ) {
+    throw new OrchestratorError(
+      'LEASE_NOT_EXPIRED',
+      `Lease for task ${taskId} was refreshed between eligibility check and write — concurrent heartbeat renewed it`,
+      {
+        taskId,
+        reason: 'concurrent_heartbeat_renewed_lease',
+        detail: 'lease was refreshed after eligibility check',
+        judged_expires_at: existing.expires_at,
+        current_expires_at: preWriteLease?.expires_at ?? null,
+      },
+    );
+  }
+
   try {
     writeTempFile(tmpPath, payload, taskId);
     overwriteAtomicLink(tmpPath, targetPath, taskId);
