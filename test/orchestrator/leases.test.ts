@@ -55,6 +55,11 @@ test('leases: acquire creates lease.json at the correct path', () => {
 });
 
 // ---- acquire: concurrent — exactly 1 succeeds ----
+// Note: this test exercises correctness within a single event-loop turn, NOT
+// true inter-process concurrency. Node.js is single-threaded; Promise.allSettled
+// here schedules all microtasks in one turn and they run sequentially. The test
+// proves that linkSync is the correct atomic gate (EEXIST on the loser), but
+// does NOT simulate two real OS processes racing simultaneously.
 
 test('leases: concurrent acquire × 10 — exactly 1 succeeds, 9 throw LEASE_EXISTS', async () => {
   const fd = forgeDir('acq-concurrent');
@@ -352,7 +357,7 @@ test('leases: re-acquire after release uses generation from history, not 0 (B3)'
   );
 });
 
-// ---- steal writes state.json = unclaimed (OQ-6) ----
+// ---- steal writes state.json = unclaimed (OQ-6) + updated_by from new owner ----
 
 test('leases: steal writes state.json with state=unclaimed (OQ-6)', () => {
   const fd = forgeDir('steal-state');
@@ -373,4 +378,27 @@ test('leases: steal writes state.json with state=unclaimed (OQ-6)', () => {
   assert.equal(existsSync(statePath), true, 'state.json should exist after steal');
   const stateRaw = JSON.parse(readFileSync(statePath, 'utf8'));
   assert.equal(stateRaw.state, 'unclaimed');
+});
+
+test('leases: steal writes state.json with updated_by from the new owner identity', () => {
+  const fd = forgeDir('steal-updated-by');
+  acquire({
+    forgeDir: fd,
+    taskId: 'TASK-SUB',
+    runId: 'run-original',
+    leaseTtlMs: 1,
+  });
+  const newLease = steal({
+    forgeDir: fd,
+    taskId: 'TASK-SUB',
+    runId: 'run-thief',
+    now: Date.now() + 10_000_000,
+    stealGraceMs: 0,
+  });
+  const statePath = join(fd, 'orchestrator', 'tasks', 'TASK-SUB', 'state.json');
+  const stateRaw = JSON.parse(readFileSync(statePath, 'utf8'));
+  // updated_by must reflect the new owner (run-thief), not the original holder.
+  assert.equal(stateRaw.updated_by.run_id, newLease.owner_run_id, 'updated_by.run_id should be the new owner');
+  assert.equal(stateRaw.updated_by.claim_id, newLease.claim_id, 'updated_by.claim_id should be the new claim');
+  assert.equal(stateRaw.updated_by.generation, newLease.generation, 'updated_by.generation should be the new generation');
 });
