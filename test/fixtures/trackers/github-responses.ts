@@ -28,10 +28,10 @@ export const ghIssueListOpen = [
 ];
 
 export const ghIssueViewLabelsEmpty = { labels: [] };
-export const ghIssueViewLabelsClaimedOther = { labels: [{ name: 'claimed:agent-other' }] };
-export const ghIssueViewLabelsClaimedMe = { labels: [{ name: 'claimed:agent-me' }] };
+export const ghIssueViewLabelsClaimedOther = { labels: [{ name: 'forge:claimed-by:other' }] };
+export const ghIssueViewLabelsClaimedMe = { labels: [{ name: 'forge:claimed-by:me' }] };
 export const ghIssueViewLabelsClaimedMeAndOther = {
-  labels: [{ name: 'claimed:agent-me' }, { name: 'claimed:agent-other' }],
+  labels: [{ name: 'forge:claimed-by:me' }, { name: 'forge:claimed-by:other' }],
 };
 export const ghIssueViewLabelsStateInProgress = {
   labels: [{ name: 'state:in-progress' }],

@@ -52,7 +52,7 @@ const defaultGhExec: GhExec = async (args, opts) => {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const CLAIM_LABEL_PREFIX = 'claimed:agent-';
+const CLAIM_LABEL_PREFIX = 'forge:claimed-by:';
 
 // Exported so callers and tests can read the in-flight ceiling.
 export const GH_LIST_LIMIT = 200;
@@ -295,10 +295,6 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   async claim(issueId: string, runId: string): Promise<ClaimResult> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(runId, 'runId');
-    // v2 stub (FORGE-72): runId carries the per-orchestrator identity in the
-    // claim-label payload. The wire format prefix `claimed:agent-` is
-    // unchanged this task — the full migration to `forge:claimed-by:<run_id>`
-    // ships with FORGE-77 (verify-on-readback CAS work).
     const myLabel = `${CLAIM_LABEL_PREFIX}${runId}`;
     const number = this.parseIssueNumber(issueId);
 
@@ -424,7 +420,24 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     }
 
     const allClaims = post.filter((l) => l.startsWith(CLAIM_LABEL_PREFIX));
-    if (allClaims.length <= 1) return { ok: true };
+
+    // Verify-on-readback contract (spec/ORCHESTRATOR.md §Tracker atomic claim):
+    // (a) our label MUST be present AND (b) no other forge:claimed-by:* label
+    // MUST be present. If our label is missing on reread, the add silently
+    // failed or was stripped (e.g., GitHub label cap, concurrent admin action,
+    // or another orchestrator removed it). Either way: we don't hold the
+    // claim. Best-effort remove (in case it does exist on the server but our
+    // reread was stale) and return version_conflict.
+    if (!allClaims.includes(myLabel)) {
+      await this.tryRemoveLabel(number, myLabel);
+      return {
+        ok: false,
+        reason: 'version_conflict',
+        detail: 'claim-label-missing-on-recheck',
+      };
+    }
+
+    if (allClaims.length === 1) return { ok: true };
 
     const winner = tiebreakWinner(allClaims);
     if (winner === myLabel) return { ok: true };
@@ -437,55 +450,42 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     };
   }
 
-  // ─── releaseClaim — idempotent ─────────────────────────────────────────────
+  // ─── releaseClaim — strict-scoped, idempotent ──────────────────────────────
   //
-  // v2 contract (FORGE-72): accepts (issueId, runId). runId is validated but
-  // NOT YET USED to scope removal — this is the explicit AC-permitted stub.
-  // Targeted-removal (release only the label matching the caller's runId)
-  // lands in FORGE-77 alongside verify-on-readback CAS.
+  // Removes only `forge:claimed-by:{runId}` — the caller's own label. Does
+  // not police other agents' labels. Trusted-caller contract: callers only
+  // invoke this on issues they own.
   //
-  // Stub behavior: removes every `claimed:agent-*` label, broad-clear. Same
-  // as v1. Forge orchestrator is single-process and trusted: callers only
-  // invoke this on issues they own or are explicitly cleaning up.
+  // Idempotent: a missing label (already-removed, never-set, or issue closed
+  // /deleted) is swallowed silently. Per spec/ORCHESTRATOR.md §Tracker
+  // atomic claim — release is best-effort cleanup.
 
   async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(runId, 'runId');
-    // TODO(FORGE-77): use runId to scope removal to the caller's claim label
-    // only, instead of broad-clearing every claimed:agent-* label.
-    void runId;
     const number = this.parseIssueNumber(issueId);
+    const myLabel = `${CLAIM_LABEL_PREFIX}${runId}`;
 
-    let labels: string[];
     try {
-      labels = await this.readIssueLabels(number);
+      await this.gh([
+        'issue',
+        'edit',
+        String(number),
+        '--repo',
+        this.repo,
+        '--remove-label',
+        myLabel,
+      ]);
     } catch (err) {
-      throw this.normalizeError('releaseClaim', err, classifyGitHubError(err));
-    }
-
-    const claims = labels.filter((l) => l.startsWith(CLAIM_LABEL_PREFIX));
-    for (const label of claims) {
-      try {
-        await this.gh([
-          'issue',
-          'edit',
-          String(number),
-          '--repo',
-          this.repo,
-          '--remove-label',
-          label,
-        ]);
-      } catch (err) {
-        const hint = classifyGitHubError(err);
-        const stderrText = stderrOf(hint);
-        if (
-          hint.code === 'NOT_FOUND' ||
-          /not found|does not have label|is not on/i.test(stderrText)
-        ) {
-          continue;
-        }
-        throw this.normalizeError('releaseClaim', err, hint);
+      const hint = classifyGitHubError(err);
+      const stderrText = stderrOf(hint);
+      if (
+        hint.code === 'NOT_FOUND' ||
+        /not found|does not have label|is not on/i.test(stderrText)
+      ) {
+        return;
       }
+      throw this.normalizeError('releaseClaim', err, hint);
     }
   }
 

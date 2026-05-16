@@ -8,7 +8,7 @@
 - Transport: `gh` CLI. Requires `gh auth login` on the host.
 - Project → GitHub Milestone (`createProject` returns `{ id: milestoneNumber, url: html_url }`).
 - Issue body carries forge metadata via HTML-comment footers: `<!-- forge:task=P1-T01 -->`, `<!-- forge:ownerType=backend-dev -->`, and `<!-- forge:blockedBy=12,15 -->` for dependencies.
-- Claim labels: `claimed:agent-{runId}` (used by the orchestrator). The label prefix is unchanged from v1 wire-format; the second component is the v2 orchestrator `runId` (UUIDv7). Migration to a `forge:claimed-by:` prefix lands with FORGE-77.
+- Claim labels: `forge:claimed-by:{runId}` (used by the orchestrator) — the second component is the v2 orchestrator `runId` (UUIDv7). Weak label-CAS + verify-on-readback semantics; see [`docs/adapters/github.md`](../adapters/github.md) for the full deep-dive.
 
 ## Config
 
@@ -19,4 +19,4 @@ tracker:
     repo: owner/name
 ```
 
-A deeper deep-dive (label conventions, claim race semantics, body-footer parser contract) is coming — for now read the source at `src/trackers/github.ts` and the FORGE-15 PR description.
+Full deep-dive (claim semantics, state mapping, error classification, auth runbook, limitations): [`docs/adapters/github.md`](../adapters/github.md).
