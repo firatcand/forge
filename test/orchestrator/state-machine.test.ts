@@ -320,6 +320,12 @@ test('state-machine: writeTaskState STATE_VERSION_CONFLICT when state_version is
   );
 });
 
+// Note: this test exercises correctness within a single event-loop turn, NOT true
+// inter-process concurrency. Node.js is single-threaded; Promise.allSettled here
+// schedules all microtasks in one turn and they execute sequentially. The test
+// proves that the version-CAS guard correctly rejects duplicate state_version
+// values even when all callers hold the same lease, but does NOT simulate two
+// real OS processes racing on the file simultaneously.
 test('state-machine: concurrent writeTaskState with same state_version — exactly 1 succeeds', async () => {
   const fd = forgeDir('write-concurrent');
   makeLease(fd, 'TASK-CONC');
@@ -345,4 +351,31 @@ test('state-machine: concurrent writeTaskState with same state_version — exact
 
   assert.equal(succeeded, 1, 'exactly 1 write should succeed');
   assert.equal(failed, 9, 'remaining 9 should get STATE_VERSION_CONFLICT');
+});
+
+// ---- H1: writeTaskState rejects correct claim_id+generation but wrong run_id ----
+
+test('state-machine: writeTaskState throws LEASE_STOLEN for correct claim_id/gen but wrong run_id (H1)', () => {
+  const fd = forgeDir('write-wrong-runid');
+  makeLease(fd, 'TASK-WRI', { owner_run_id: 'run-real' });
+  const state = baseState('TASK-WRI');
+  const wrongRunCaller = { run_id: 'run-impersonator', claim_id: 'claim-001', generation: 0 };
+  assert.throws(
+    () => writeTaskState(fd, state, wrongRunCaller),
+    (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+  );
+});
+
+// ---- H2: writeTaskState rejects corrupted (non-parseable) state.json ----
+
+test('state-machine: writeTaskState throws SCHEMA_INVALID when state.json contains garbage bytes (H2)', () => {
+  const fd = forgeDir('write-corrupt-state');
+  makeLease(fd, 'TASK-CRR');
+  // Write garbage bytes directly — simulates a partial write / corruption.
+  writeFileSync(stateFilePath(fd, 'TASK-CRR'), '{garbage:not-json!!!', 'utf8');
+  const state = baseState('TASK-CRR', { state_version: 0 });
+  assert.throws(
+    () => writeTaskState(fd, state, defaultCaller),
+    (err) => err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID',
+  );
 });

@@ -406,8 +406,13 @@ function writeStateUnclaimed(
       if (written === 0) break;
       offset += written;
     }
-    try { fs.fsyncSync(fd); } catch { /* best-effort */ }
-    writeOk = true;
+    // H3: set writeOk ONLY after fsync completes without error. Setting it
+    // before fsync would allow rename to proceed on a file whose data hasn't
+    // been flushed to stable storage, defeating the durability guarantee.
+    try {
+      fs.fsyncSync(fd);
+      writeOk = true; // only set after successful fsync
+    } catch { /* best-effort — gc will reconcile */ }
   } catch {
     // best-effort
   } finally {
@@ -524,7 +529,16 @@ export interface CallerIdentity {
 
 // assertLeaseOwnership is the shared fence used by all state-mutating verbs.
 // Each verb that mutates attempt or task state must call this before any mutation.
-// Reads lease.json, compares all three identity fields, throws LEASE_STOLEN on mismatch.
+// Reads lease.json, compares all three identity fields (run_id, claim_id, generation),
+// throws LEASE_STOLEN on mismatch.
+//
+// H1: run_id is included in the comparison. A process with the correct claim_id
+// and generation but a different run_id indicates a forged or replayed caller —
+// treat as a stolen lease.
+//
+// TWIN: assertLeaseOwnershipFromFile in state-machine.ts is an intentional
+// duplicate (avoids circular dependency). Any change to the comparison logic
+// here MUST be mirrored there. Search for "TWIN" to locate it.
 export function assertLeaseOwnership(
   forgeDir: string,
   taskId: string,
@@ -539,7 +553,11 @@ export function assertLeaseOwnership(
       { taskId, path: leasePath },
     );
   }
-  if (stored.claim_id !== caller.claim_id || stored.generation !== caller.generation) {
+  if (
+    stored.claim_id !== caller.claim_id ||
+    stored.generation !== caller.generation ||
+    stored.owner_run_id !== caller.run_id
+  ) {
     throw new OrchestratorError(
       'LEASE_STOLEN',
       `Lease ownership mismatch for task ${taskId}: caller generation ${caller.generation} vs stored ${stored.generation}`,
@@ -549,6 +567,8 @@ export function assertLeaseOwnership(
         caller_claim_id: caller.claim_id,
         stored_generation: stored.generation,
         caller_generation: caller.generation,
+        stored_run_id: stored.owner_run_id,
+        caller_run_id: caller.run_id,
       },
     );
   }
@@ -579,7 +599,12 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
   }
 
   // 2. Validate ownership — throws LEASE_STOLEN on mismatch.
-  if (stored.claim_id !== caller.claim_id || stored.generation !== caller.generation) {
+  // H1: include run_id in the comparison (same logic as assertLeaseOwnership).
+  if (
+    stored.claim_id !== caller.claim_id ||
+    stored.generation !== caller.generation ||
+    stored.owner_run_id !== caller.run_id
+  ) {
     throw new OrchestratorError(
       'LEASE_STOLEN',
       `Heartbeat rejected: lease has been stolen for task ${taskId}`,
@@ -589,6 +614,8 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
         caller_claim_id: caller.claim_id,
         stored_generation: stored.generation,
         caller_generation: caller.generation,
+        stored_run_id: stored.owner_run_id,
+        caller_run_id: caller.run_id,
       },
     );
   }

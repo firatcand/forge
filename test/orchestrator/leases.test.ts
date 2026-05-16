@@ -315,6 +315,22 @@ test('leases: release throws LEASE_STOLEN for wrong caller', () => {
   );
 });
 
+// ---- H1: assertLeaseOwnership rejects correct claim_id+generation but wrong run_id ----
+
+test('leases: heartbeat with correct claim_id+generation but wrong run_id throws LEASE_STOLEN (H1)', () => {
+  const fd = forgeDir('h1-run-id');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-H1', runId: 'run-real' });
+  assert.throws(
+    () =>
+      heartbeat({
+        forgeDir: fd,
+        taskId: 'TASK-H1',
+        caller: { run_id: 'run-impersonator', claim_id: lease.claim_id, generation: lease.generation },
+      }),
+    (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+  );
+});
+
 // ---- B3: generation does not reset to 0 on release-then-reacquire ----
 
 test('leases: re-acquire after release uses generation from history, not 0 (B3)', () => {

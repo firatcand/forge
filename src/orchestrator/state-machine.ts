@@ -187,23 +187,34 @@ export function writeTaskState(
 
   // 3. Read current state.json to enforce state_version CAS.
   //    Initial write (no prior state.json) expects state_version === 0.
+  //    H2: if the file exists but contains non-parseable JSON, throw SCHEMA_INVALID.
+  //    Silently treating corruption as a missing file would bypass CAS and allow
+  //    a stale writer to land a version-0 write over valid state.
   let priorVersion: number | null = null;
   const currentStatePath = stateFilePath(forgeDir, taskId);
   try {
     const currentRaw = fs.readFileSync(currentStatePath, 'utf8');
+    // H2: file exists — parse strictly. Non-empty bytes that fail JSON.parse
+    // indicate corruption; surface as SCHEMA_INVALID rather than silently
+    // falling through to initial-write path.
     let currentParsed: unknown;
     try {
       currentParsed = JSON.parse(currentRaw);
-    } catch {
-      // corrupted state.json — allow overwrite if state_version is 0 (fresh write)
+    } catch (parseErr) {
+      throw new OrchestratorError(
+        'SCHEMA_INVALID',
+        `state.json for task ${taskId} contains invalid JSON (corruption detected)`,
+        { taskId, path: currentStatePath, cause: parseErr },
+      );
     }
-    if (currentParsed !== undefined) {
-      const currentResult = TaskStateSchema.safeParse(currentParsed);
-      if (currentResult.success) {
-        priorVersion = currentResult.data.state_version;
-      }
+    const currentResult = TaskStateSchema.safeParse(currentParsed);
+    if (currentResult.success) {
+      priorVersion = currentResult.data.state_version;
     }
+    // If safeParse fails (valid JSON but wrong schema shape), priorVersion stays
+    // null and the version-0 check below will gate the write.
   } catch (err) {
+    if (err instanceof OrchestratorError) throw err; // re-throw SCHEMA_INVALID from above
     if (!(isNodeFsError(err) && err.code === 'ENOENT')) {
       throw new OrchestratorError(
         'IO_ERROR',
@@ -332,8 +343,14 @@ export function writeTaskState(
 }
 
 // ---- Lease ownership assertion (used by writeTaskState + leases.ts) ----
-// Reads lease.json and asserts caller matches stored (claim_id, generation).
+// Reads lease.json and asserts caller matches stored (run_id, claim_id, generation).
 // Exported so leases.ts can import and reuse without circular dependency.
+//
+// H1: run_id is included in the comparison — see same logic in leases.ts
+// assertLeaseOwnership.
+// TWIN: assertLeaseOwnership in leases.ts is an intentional duplicate (avoids
+// circular dependency). Any change to the comparison logic here MUST be mirrored
+// there. Search for "TWIN" to locate it.
 
 export function assertLeaseOwnershipFromFile(
   forgeDir: string,
@@ -380,7 +397,11 @@ export function assertLeaseOwnershipFromFile(
   }
 
   const stored = result.data;
-  if (stored.claim_id !== caller.claim_id || stored.generation !== caller.generation) {
+  if (
+    stored.claim_id !== caller.claim_id ||
+    stored.generation !== caller.generation ||
+    stored.owner_run_id !== caller.run_id
+  ) {
     throw new OrchestratorError(
       'LEASE_STOLEN',
       `Lease ownership mismatch for task ${taskId}: caller generation ${caller.generation} vs stored generation ${stored.generation}`,
@@ -390,6 +411,8 @@ export function assertLeaseOwnershipFromFile(
         caller_claim_id: caller.claim_id,
         stored_generation: stored.generation,
         caller_generation: caller.generation,
+        stored_run_id: stored.owner_run_id,
+        caller_run_id: caller.run_id,
       },
     );
   }
