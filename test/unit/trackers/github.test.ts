@@ -323,19 +323,19 @@ test('claim is idempotent when this agent already holds the only claim', async (
 });
 
 test('claim race: re-read shows multiple claims; loser releases own label', async () => {
-  // 'claimed:agent-aaa' < 'claimed:agent-zzz' lexicographically, so aaa wins; zzz loses.
+  // 'forge:claimed-by:aaa' < 'forge:claimed-by:zzz' lexicographically, so aaa wins; zzz loses.
   const raceLabels = {
     labels: [
-      { name: 'claimed:agent-aaa' },
-      { name: 'claimed:agent-zzz' },
+      { name: 'forge:claimed-by:aaa' },
+      { name: 'forge:claimed-by:zzz' },
     ],
   };
   const { tracker, mock } = makeTracker([
     ok(ghIssueViewLabelsEmpty), // step 1: initial read (no claims)
     ok(),                       // ensureLabel
-    ok(),                       // edit --add-label claimed:agent-zzz
+    ok(),                       // edit --add-label forge:claimed-by:zzz
     ok(raceLabels),             // re-read: both aaa + zzz
-    ok(),                       // tryRemoveLabel claimed:agent-zzz
+    ok(),                       // tryRemoveLabel forge:claimed-by:zzz
   ]);
   const result = await tracker.claim('42', 'zzz');
   assert.equal(result.ok, false);
@@ -346,15 +346,15 @@ test('claim race: re-read shows multiple claims; loser releases own label', asyn
   // verify we removed our own label
   const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
   assert.equal(removeCalls.length, 1);
-  assert.ok(removeCalls[0]?.includes('claimed:agent-zzz'));
+  assert.ok(removeCalls[0]?.includes('forge:claimed-by:zzz'));
 });
 
-test('claim race: "me" wins lexicographic tiebreak', async () => {
-  // 'claimed:agent-aaa' < 'claimed:agent-zzz', so aaa wins.
+test('claim race: "aaa" wins lexicographic tiebreak on reread', async () => {
+  // 'forge:claimed-by:aaa' < 'forge:claimed-by:zzz', so aaa wins.
   const labelsBoth = {
     labels: [
-      { name: 'claimed:agent-aaa' },
-      { name: 'claimed:agent-zzz' },
+      { name: 'forge:claimed-by:aaa' },
+      { name: 'forge:claimed-by:zzz' },
     ],
   };
   const { tracker } = makeTracker([
@@ -416,6 +416,48 @@ test('claim step-1 NOT_FOUND → version_conflict (issue vanished pre-read)', as
   }
 });
 
+test('claim reread shows our label missing → version_conflict (label stripped or add lost)', async () => {
+  // Our --add-label succeeded but the reread returns ZERO claim labels. This can
+  // happen if a concurrent actor removed the label, or the add was silently
+  // dropped server-side. AC: must return version_conflict, not false-positive ok.
+  const { tracker, mock } = makeTracker([
+    ok(ghIssueViewLabelsEmpty), // step 1: initial read (no claims)
+    ok(),                       // ensureLabel
+    ok(),                       // edit --add-label
+    ok(ghIssueViewLabelsEmpty), // reread: also empty (our label gone)
+    ok(),                       // tryRemoveLabel (best-effort cleanup)
+  ]);
+  const result = await tracker.claim('42', 'me');
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'version_conflict');
+    assert.match(result.detail ?? '', /claim-label-missing-on-recheck/);
+  }
+  // verify we attempted the best-effort cleanup
+  const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
+  assert.equal(removeCalls.length, 1);
+  assert.ok(removeCalls[0]?.includes('forge:claimed-by:me'));
+});
+
+test('claim reread shows only OTHER agent\'s label → version_conflict (not false-positive ok)', async () => {
+  // Pre-fix bug: code returned ok:true because allClaims.length === 1. Now it
+  // must check myLabel inclusion. Spec AC: "verify (a) our label is present
+  // AND (b) no other forge:claimed-by:* label is present".
+  const { tracker } = makeTracker([
+    ok(ghIssueViewLabelsEmpty),   // step 1: initial read
+    ok(),                          // ensureLabel
+    ok(),                          // edit --add-label
+    ok(ghIssueViewLabelsClaimedOther), // reread: only other's label
+    ok(),                          // tryRemoveLabel
+  ]);
+  const result = await tracker.claim('42', 'me');
+  assert.equal(result.ok, false);
+  if (!result.ok) {
+    assert.equal(result.reason, 'version_conflict');
+    assert.match(result.detail ?? '', /claim-label-missing-on-recheck/);
+  }
+});
+
 test('claim step-3 NOT_FOUND → version_conflict (issue vanished after add)', async () => {
   const notFound = makeExecaError({
     stderr: 'HTTP 404: Not Found',
@@ -438,56 +480,40 @@ test('claim step-3 NOT_FOUND → version_conflict (issue vanished after add)', a
 
 // ─── releaseClaim ────────────────────────────────────────────────────────────
 
-test('releaseClaim removes only claim labels', async () => {
+test('releaseClaim emits exactly one --remove-label call scoped to runId', async () => {
+  // Strict-scope contract: releaseClaim('42', 'me') issues exactly one
+  // `gh issue edit --remove-label forge:claimed-by:me` and nothing else.
+  // No upfront read; no iteration over the issue's other labels. The mock
+  // only supplies one response — if the implementation tried to read first
+  // or remove additional labels, the mock would throw "unexpected call".
   const { tracker, mock } = makeTracker([
-    ok({
-      labels: [{ name: 'claimed:agent-me' }, { name: 'enhancement' }],
-    }),
-    ok(), // remove-label
+    ok(), // remove-label forge:claimed-by:me
   ]);
   await tracker.releaseClaim('42', 'me');
-  const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
-  assert.equal(removeCalls.length, 1);
-  assert.ok(removeCalls[0]?.includes('claimed:agent-me'));
+  assert.equal(mock.calls.length, 1, 'expected exactly one gh invocation');
+  const args = mock.calls[0];
+  assert.ok(args?.includes('--remove-label'));
+  const removed = args[args.indexOf('--remove-label') + 1];
+  assert.equal(removed, 'forge:claimed-by:me');
 });
 
-test('releaseClaim is idempotent (no claim labels → no-op)', async () => {
-  const { tracker, mock } = makeTracker([ok(ghIssueViewLabelsEmpty)]);
-  await tracker.releaseClaim('42', 'me');
-  const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
-  assert.equal(removeCalls.length, 0);
-});
-
-test('releaseClaim tolerates "label not present" on remove', async () => {
+test('releaseClaim tolerates "label not present" on remove (no-op)', async () => {
   const { tracker } = makeTracker([
-    ok(ghIssueViewLabelsClaimedMe),
     makeExecaError({
-      stderr: 'label does not have label "claimed:agent-me"',
+      stderr: 'label does not have label "forge:claimed-by:me"',
       exitCode: 1,
     }),
   ]);
-  // Should not throw.
+  // Should not throw — strict-scope release of a label that isn't present is idempotent.
   await tracker.releaseClaim('42', 'me');
 });
 
-test('releaseClaim removes ALL stale claim labels (documented behavior)', async () => {
-  const { tracker, mock } = makeTracker([
-    ok({
-      labels: [
-        { name: 'claimed:agent-stale1' },
-        { name: 'claimed:agent-stale2' },
-        { name: 'enhancement' },
-      ],
-    }),
-    ok(), // remove stale1
-    ok(), // remove stale2
+test('releaseClaim tolerates HTTP 404 on remove (issue vanished)', async () => {
+  const { tracker } = makeTracker([
+    makeExecaError({ stderr: 'HTTP 404: Not Found', exitCode: 1 }),
   ]);
+  // Should not throw — issue closed/deleted during release is benign.
   await tracker.releaseClaim('42', 'me');
-  const removeCalls = mock.calls.filter((c) => c.includes('--remove-label'));
-  assert.equal(removeCalls.length, 2);
-  const removed = removeCalls.map((c) => c[c.indexOf('--remove-label') + 1]);
-  assert.ok(removed.includes('claimed:agent-stale1'));
-  assert.ok(removed.includes('claimed:agent-stale2'));
 });
 
 // ─── updateState ─────────────────────────────────────────────────────────────
