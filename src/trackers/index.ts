@@ -31,6 +31,8 @@ export {
   GH_LIST_LIMIT,
   GitHubTracker,
   classifyGitHubError,
+  toStoredLabel,
+  runIdFromStoredLabel,
 } from './github.ts';
 export type {
   GhExec,
