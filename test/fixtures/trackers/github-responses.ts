@@ -64,6 +64,15 @@ export const ghMilestoneCreated = {
   state: 'open',
 };
 
+// FORGE-82: stored-form (dehyphenated) label for a known UUIDv7
+export const FORGE_82_UUID = '018f1e2a-dead-7abc-bdef-01234567890a';
+export const FORGE_82_STORED_LABEL = 'forge:claimed-by:018f1e2adead7abcbdef01234567890a';
+export const ghIssueViewLabelsClaimedMeStored = {
+  labels: [{ name: FORGE_82_STORED_LABEL }],
+};
+export const ghLabelNotFoundError =
+  `'${FORGE_82_STORED_LABEL}' not found\nfailed to update 1 issue`;
+
 export function makeExecaError(opts: {
   stderr?: string;
   stdout?: string;

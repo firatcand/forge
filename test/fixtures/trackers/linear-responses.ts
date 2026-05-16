@@ -62,7 +62,7 @@ export const LABEL_STATE_BLOCKED: LinearLabelLike = {
 };
 
 export function makeClaimLabel(agentId: string): LinearLabelLike {
-  return { id: `label-claim-${agentId}`, name: `claimed:agent-${agentId}` };
+  return { id: `label-claim-${agentId}`, name: `forge:claimed-by:${agentId}` };
 }
 
 // ─── Issues ──────────────────────────────────────────────────────────────────

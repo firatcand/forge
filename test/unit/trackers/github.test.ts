@@ -8,6 +8,8 @@ import {
   classifyGitHubError,
   parseForgeFooters,
   serializeWithForgeFooters,
+  toStoredLabel,
+  runIdFromStoredLabel,
   type GhExec,
   type GhExecResult,
   type Logger,
@@ -23,6 +25,10 @@ import {
   ghIssueViewBodyMissingFooter,
   ghMilestoneCreated,
   makeExecaError,
+  FORGE_82_UUID,
+  FORGE_82_STORED_LABEL,
+  ghIssueViewLabelsClaimedMeStored,
+  ghLabelNotFoundError,
 } from '../../fixtures/trackers/github-responses.ts';
 import {
   MockGhServerState,
@@ -761,6 +767,98 @@ test('issue id rejects garbage', async () => {
     () => tracker.claim('not-an-id', 'me'),
     (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
   );
+});
+
+// ─── FORGE-82: label-cap dehyphenation ───────────────────────────────────────
+
+test('toStoredLabel: strips hyphens from UUIDv7 → 49-char label (FORGE-82)', () => {
+  const result = toStoredLabel(FORGE_82_UUID);
+  assert.equal(result, FORGE_82_STORED_LABEL);
+  assert.equal(result.length, 49);
+});
+
+test('runIdFromStoredLabel: round-trips UUIDv7 through toStoredLabel (FORGE-82)', () => {
+  const stored = toStoredLabel(FORGE_82_UUID);
+  assert.equal(runIdFromStoredLabel(stored), FORGE_82_UUID);
+});
+
+test('classifyGitHubError → VALIDATION on "label not found / failed to update" stderr (FORGE-82)', () => {
+  const err = makeExecaError({ stderr: ghLabelNotFoundError, exitCode: 1 });
+  const hint = classifyGitHubError(err);
+  assert.equal(hint.code, 'VALIDATION');
+  assert.equal((hint.details as { reason?: string } | undefined)?.reason, 'label-not-found');
+});
+
+test('classifyGitHubError → VALIDATION still fires on HTTP 422 (regression guard — FORGE-82)', () => {
+  const err = makeExecaError({ stderr: 'HTTP 422: validation failed', exitCode: 1 });
+  assert.equal(classifyGitHubError(err).code, 'VALIDATION');
+});
+
+test('claim happy path: 36-char UUID runId → stored label uses 32-char hex suffix (no hyphens) (FORGE-82)', async () => {
+  const { tracker, mock } = makeTracker([
+    ok(ghIssueViewLabelsEmpty),           // step 1: read labels
+    ok(),                                  // ensureLabel `label create --force`
+    ok(),                                  // gh issue edit --add-label
+    ok(ghIssueViewLabelsClaimedMeStored), // step 4: re-read labels
+  ]);
+  const result = await tracker.claim('42', FORGE_82_UUID);
+  assert.deepEqual(result, { ok: true });
+  // The --add-label arg must use the dehyphenated stored form
+  const addLabelCall = mock.calls.find((c) => c.includes('--add-label'));
+  assert.ok(addLabelCall, 'expected an --add-label call');
+  const labelArg = addLabelCall[addLabelCall.indexOf('--add-label') + 1];
+  assert.equal(labelArg, FORGE_82_STORED_LABEL);
+  // The UUID suffix (after the prefix) must contain no hyphens
+  const suffix = (labelArg ?? '').slice('forge:claimed-by:'.length);
+  assert.doesNotMatch(suffix, /-/);
+});
+
+test('claim: ensureLabel VALIDATION (422 cap) → version_conflict, does not throw (FORGE-82)', async () => {
+  // Mock: initial read succeeds (no claims), then ensureLabel fails with VALIDATION (HTTP 422),
+  // then claim() issue-edit also fails with label-not-found stderr.
+  const { tracker } = makeTracker([
+    ok(ghIssueViewLabelsEmpty),
+    makeExecaError({ stderr: 'HTTP 422: label name too long', exitCode: 1 }),
+    makeExecaError({ stderr: ghLabelNotFoundError, exitCode: 1 }),
+  ]);
+  const result = await tracker.claim('42', FORGE_82_UUID);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'version_conflict');
+});
+
+test('claim: "label not found / failed to update" on issue edit → version_conflict, does not throw (FORGE-82)', async () => {
+  const { tracker } = makeTracker([
+    ok(ghIssueViewLabelsEmpty),
+    ok(), // ensureLabel succeeds
+    makeExecaError({ stderr: ghLabelNotFoundError, exitCode: 1 }), // issue edit fails
+  ]);
+  const result = await tracker.claim('42', FORGE_82_UUID);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.reason, 'version_conflict');
+});
+
+test('releaseClaim: uses stored (dehyphenated) label form in --remove-label arg (FORGE-82)', async () => {
+  const { tracker, mock } = makeTracker([ok()]);
+  await tracker.releaseClaim('42', FORGE_82_UUID);
+  assert.equal(mock.calls.length, 1, 'expected exactly one gh invocation');
+  const args = mock.calls[0];
+  assert.ok(args?.includes('--remove-label'));
+  const removedLabel = args[args.indexOf('--remove-label') + 1];
+  assert.equal(removedLabel, FORGE_82_STORED_LABEL);
+  // The UUID suffix (after the prefix) must contain no hyphens
+  const suffix = (removedLabel ?? '').slice('forge:claimed-by:'.length);
+  assert.doesNotMatch(suffix, /-/);
+});
+
+test('claim idempotent: stored label already on issue → ok:true without re-adding (FORGE-82)', async () => {
+  // The initial read returns the stored-form label for our runId — no further calls needed.
+  const { tracker, mock } = makeTracker([
+    ok(ghIssueViewLabelsClaimedMeStored),
+  ]);
+  const result = await tracker.claim('42', FORGE_82_UUID);
+  assert.deepEqual(result, { ok: true });
+  const addLabelCalls = mock.calls.filter((c) => c.includes('--add-label'));
+  assert.equal(addLabelCalls.length, 0, 'should not re-add label');
 });
 
 // ─── shared tracker conformance suite ────────────────────────────────────────
