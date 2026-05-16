@@ -787,6 +787,13 @@ export function steal(opts: StealOptions): Lease {
   // locking (e.g., flock(2)) which is out of scope for local-FS use. This check
   // closes the practically significant race (heartbeat completing between
   // readLeaseFile and overwriteAtomicLink) and is the accepted trade-off.
+  //
+  // Defense-in-depth: even if the nanosecond race fires, every downstream state
+  // mutation (writeTaskState, appendAttemptEvent, heartbeat, release) calls
+  // assertLeaseOwnership which reads fresh from disk and throws LEASE_STOLEN if
+  // generation/claim_id/run_id have advanced. A silently-stolen holder cannot
+  // corrupt state — they fail-fast on their next mutation. Follow-up: optional
+  // flock-based hardening tracked separately as a Phase 3 ticket.
   const preWriteLease = readLeaseFile(taskId, targetPath);
   if (
     preWriteLease === null ||
