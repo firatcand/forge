@@ -27,6 +27,17 @@ export interface ScaffoldResult {
   warningsPath?: string;
 }
 
+export interface ToolingExcludeWarning {
+  target: string;
+  snippet: string;
+}
+
+export interface ToolingExcludeResult {
+  written: string[];
+  skipped: string[];
+  warned: ToolingExcludeWarning[];
+}
+
 const STAGING_DIR = '.forge/.init-staging';
 const GITIGNORE_MARKER = '# forge';
 const GITIGNORE_BLOCK = [
@@ -37,6 +48,12 @@ const GITIGNORE_BLOCK = [
   '.forge/.init-staging/',
   '',
 ].join('\n');
+
+// Exclude entry for flat-ignore files (.eslintignore, .prettierignore).
+const TOOLING_EXCLUDE_LINE = '.forge/worktrees/';
+// Marker for substring detection in JSON/TS configs (warn-only targets).
+const TOOLING_EXCLUDE_MARKER = '.forge/worktrees';
+const VITEST_CONFIG_EXTS = ['ts', 'js', 'mjs', 'cjs'] as const;
 
 interface Artifact {
   // Path relative to cwd.
@@ -130,6 +147,97 @@ export function appendGitignoreBlock(existing: string | null): { content: string
   return { content: base + sep + GITIGNORE_BLOCK, appended: true };
 }
 
+/**
+ * Append `line` to `filePath` if the file exists and doesn't already contain
+ * that exact line. Returns the outcome:
+ *   - `existed: false` → file missing (caller treats as no-op, neither written nor skipped)
+ *   - `existed: true, appended: false` → file existed, line already present (skipped)
+ *   - `existed: true, appended: true` → file existed, line was appended (written)
+ */
+export function appendLineIfMissing(
+  filePath: string,
+  line: string,
+): { existed: boolean; appended: boolean } {
+  if (!existsSync(filePath)) {
+    return { existed: false, appended: false };
+  }
+  const content = readFileSync(filePath, 'utf8');
+  // Exact-line match against newline-split entries — avoids false positives from
+  // substring matches (e.g. a comment that mentions the path).
+  const lines = content.split('\n');
+  if (lines.includes(line)) {
+    return { existed: true, appended: false };
+  }
+  const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
+  writeAtomic(filePath, content + sep + line + '\n');
+  return { existed: true, appended: true };
+}
+
+/**
+ * Hybrid scaffolding (FORGE-115 / P2.5-T19): the forge orchestrator writes
+ * worktrees to `.forge/worktrees/`, which lives inside the project root. Without
+ * tool-side exclusion, ESLint / Prettier / TypeScript / Vitest will all recurse
+ * into worktrees and double-process every file.
+ *
+ * For flat-ignore files (`.eslintignore`, `.prettierignore`) we append one line —
+ * format is well-defined, idempotent via line-match, low blast radius.
+ *
+ * For code configs (`tsconfig.json` may contain `//` comments and reject JSON.parse;
+ * `vitest.config.*` is TypeScript) we WARN-ONLY: emit a copy-paste snippet to
+ * `.forge/init-warnings.md` rather than risk corrupting the user's config.
+ */
+export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
+  const result: ToolingExcludeResult = { written: [], skipped: [], warned: [] };
+
+  // Flat-ignore files — safe to append.
+  for (const name of ['.eslintignore', '.prettierignore'] as const) {
+    const p = resolve(cwd, name);
+    const r = appendLineIfMissing(p, TOOLING_EXCLUDE_LINE);
+    if (r.appended) {
+      result.written.push(name);
+    } else if (r.existed) {
+      result.skipped.push(name);
+    }
+    // r.existed === false → file missing, silent no-op
+  }
+
+  // tsconfig.json — warn-only (may have // comments; may use extends/composite/references).
+  const tsconfigPath = resolve(cwd, 'tsconfig.json');
+  if (existsSync(tsconfigPath)) {
+    const raw = readFileSync(tsconfigPath, 'utf8');
+    if (raw.includes(TOOLING_EXCLUDE_MARKER)) {
+      result.skipped.push('tsconfig.json');
+    } else {
+      result.warned.push({
+        target: 'tsconfig.json',
+        snippet:
+          'Add `".forge/worktrees"` to the `exclude` array (forge does not auto-edit JSON configs):\n\n```json\n{\n  "exclude": ["node_modules", ".forge/worktrees"]\n}\n```',
+      });
+    }
+  }
+
+  // vitest.config.{ts,js,mjs,cjs} — warn-only (TS/JS code, no safe AST mutation).
+  for (const ext of VITEST_CONFIG_EXTS) {
+    const name = `vitest.config.${ext}`;
+    const p = resolve(cwd, name);
+    if (!existsSync(p)) continue;
+    const raw = readFileSync(p, 'utf8');
+    if (raw.includes(TOOLING_EXCLUDE_MARKER)) {
+      result.skipped.push(name);
+    } else {
+      result.warned.push({
+        target: name,
+        snippet:
+          `Add \`'.forge/worktrees/**'\` to \`test.exclude\` in ${name} (forge does not auto-edit code configs):\n\n` +
+          `\`\`\`ts\nexport default defineConfig({\n  test: {\n    exclude: ['node_modules', '.forge/worktrees/**'],\n  },\n});\n\`\`\``,
+      });
+    }
+    break; // only one vitest.config.* should exist
+  }
+
+  return result;
+}
+
 function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   const templatesDir = opts.templatesDir ?? resolveTemplatesDir();
   const yamlContent = yamlStringify(toMinimalYamlObject(opts.answers), { lineWidth: 0 });
@@ -151,18 +259,36 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   return artefacts;
 }
 
-function buildWarningsBody(unverified: string[]): string {
-  const lines = [
-    '# forge init — unverified tooling',
-    '',
-    'These probes failed or were skipped during `forge init`. Resolve before running `forge orchestrate`.',
-    '',
-  ];
-  for (const key of unverified) {
-    lines.push(`- [ ] \`${key}\``);
+function buildWarningsBody(
+  unverified: string[],
+  toolingWarnings: ToolingExcludeWarning[],
+): string {
+  const out: string[] = ['# forge init — manual follow-ups', ''];
+
+  if (unverified.length > 0) {
+    out.push(
+      '## Unverified tooling probes',
+      '',
+      'These probes failed or were skipped during `forge init`. Resolve before running `forge orchestrate`.',
+      '',
+    );
+    for (const key of unverified) out.push(`- [ ] \`${key}\``);
+    out.push('');
   }
-  lines.push('');
-  return lines.join('\n');
+
+  if (toolingWarnings.length > 0) {
+    out.push(
+      '## Tooling-exclude entries needed',
+      '',
+      'forge worktrees live at `.forge/worktrees/`. The following config files exist but were not auto-edited (forge does not mutate JSON or TypeScript config files). Add the snippets below manually so lint/typecheck/test runs skip worktrees.',
+      '',
+    );
+    for (const w of toolingWarnings) {
+      out.push(`### ${w.target}`, '', w.snippet, '');
+    }
+  }
+
+  return out.join('\n') + (out[out.length - 1] === '' ? '' : '\n');
 }
 
 export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
@@ -227,19 +353,26 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     skipped.push('.gitignore');
   }
 
-  // 4) Init warnings sidecar (if any unverified tools).
+  // 4) Tooling-exclude entries (FORGE-115 / P2.5-T19) — hybrid:
+  //    append to flat-ignore files; warn-only for code configs.
+  const tooling = appendToolingExcludes(opts.cwd);
+  for (const f of tooling.written) written.push(f);
+  for (const f of tooling.skipped) skipped.push(f);
+
+  // 5) Init warnings sidecar — merges unverified tool probes + tooling-exclude warnings.
   let warningsPath: string | undefined;
-  if (opts.unverified && opts.unverified.length > 0) {
+  const unverified = opts.unverified ?? [];
+  if (unverified.length > 0 || tooling.warned.length > 0) {
     const p = resolve(opts.cwd, '.forge/init-warnings.md');
-    writeAtomic(p, buildWarningsBody(opts.unverified));
+    writeAtomic(p, buildWarningsBody(unverified, tooling.warned));
     warningsPath = p;
     written.push('.forge/init-warnings.md');
   }
 
-  // 5) Cleanup staging dir.
+  // 6) Cleanup staging dir.
   rmSync(stagingRoot, { recursive: true, force: true });
 
-  // 6) Round-trip sanity-check: parse YAML through SettingsSchema.
+  // 7) Round-trip sanity-check: parse YAML through SettingsSchema.
   const yamlContent = readFileSync(resolve(opts.cwd, '.forge/settings.yaml'), 'utf8');
   const parsed = SettingsSchema.safeParse(yamlParse(yamlContent));
   if (!parsed.success) {

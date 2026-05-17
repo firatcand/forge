@@ -8,6 +8,8 @@ import { parse as yamlParse } from 'yaml';
 import {
   scaffoldProject,
   appendGitignoreBlock,
+  appendLineIfMissing,
+  appendToolingExcludes,
   toMinimalYamlObject,
 } from '../../../src/cli/init/scaffold.ts';
 import { SettingsSchema } from '../../../src/schemas/index.ts';
@@ -194,6 +196,154 @@ test('scaffold omits init-warnings.md when unverified is empty', () => {
   });
   assert.equal(r.warningsPath, undefined);
   assert.equal(existsSync(resolve(cwd, '.forge/init-warnings.md')), false);
+});
+
+// --- appendLineIfMissing (FORGE-115 / P2.5-T19) ---
+
+test('appendLineIfMissing appends when file exists and line absent', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.eslintignore');
+  writeFileSync(p, 'node_modules\ndist\n');
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.existed, true);
+  assert.equal(r.appended, true);
+  const after = readFileSync(p, 'utf8');
+  assert.equal(after, 'node_modules\ndist\n.forge/worktrees/\n');
+});
+
+test('appendLineIfMissing is idempotent when line already present', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.eslintignore');
+  writeFileSync(p, 'node_modules\n.forge/worktrees/\ndist\n');
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.existed, true);
+  assert.equal(r.appended, false);
+  const after = readFileSync(p, 'utf8');
+  assert.equal(after, 'node_modules\n.forge/worktrees/\ndist\n');
+});
+
+test('appendLineIfMissing no-ops when file is missing', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.eslintignore'); // never created
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.existed, false);
+  assert.equal(r.appended, false);
+  assert.equal(existsSync(p), false);
+});
+
+test('appendLineIfMissing handles file without trailing newline', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.prettierignore');
+  writeFileSync(p, 'node_modules'); // no trailing newline
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.appended, true);
+  const after = readFileSync(p, 'utf8');
+  assert.equal(after, 'node_modules\n.forge/worktrees/\n');
+});
+
+// --- appendToolingExcludes (FORGE-115 / P2.5-T19) ---
+
+test('appendToolingExcludes appends to .eslintignore and .prettierignore when present', () => {
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, '.eslintignore'), 'node_modules\n');
+  writeFileSync(resolve(cwd, '.prettierignore'), 'dist\n');
+  const r = appendToolingExcludes(cwd);
+  assert.deepEqual(r.written.sort(), ['.eslintignore', '.prettierignore']);
+  assert.deepEqual(r.skipped, []);
+  assert.deepEqual(r.warned, []);
+  assert.match(readFileSync(resolve(cwd, '.eslintignore'), 'utf8'), /\.forge\/worktrees\//);
+  assert.match(readFileSync(resolve(cwd, '.prettierignore'), 'utf8'), /\.forge\/worktrees\//);
+});
+
+test('appendToolingExcludes skips flat-ignore files that already have the entry', () => {
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, '.eslintignore'), 'node_modules\n.forge/worktrees/\n');
+  const r = appendToolingExcludes(cwd);
+  assert.deepEqual(r.written, []);
+  assert.deepEqual(r.skipped, ['.eslintignore']);
+  assert.deepEqual(r.warned, []);
+});
+
+test('appendToolingExcludes silently skips flat-ignore files that do not exist', () => {
+  const cwd = tmp();
+  // neither .eslintignore nor .prettierignore exists
+  const r = appendToolingExcludes(cwd);
+  assert.deepEqual(r.written, []);
+  assert.deepEqual(r.skipped, []);
+  assert.deepEqual(r.warned, []);
+});
+
+test('appendToolingExcludes warns (does not mutate) when tsconfig.json is present', () => {
+  const cwd = tmp();
+  const original = '{\n  "compilerOptions": { "strict": true }\n}\n';
+  writeFileSync(resolve(cwd, 'tsconfig.json'), original);
+  const r = appendToolingExcludes(cwd);
+  assert.equal(r.warned.length, 1);
+  assert.equal(r.warned[0]?.target, 'tsconfig.json');
+  assert.match(r.warned[0]?.snippet ?? '', /\.forge\/worktrees/);
+  // Crucially: file is NOT mutated.
+  assert.equal(readFileSync(resolve(cwd, 'tsconfig.json'), 'utf8'), original);
+});
+
+test('appendToolingExcludes skips tsconfig.json that already mentions the path', () => {
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, 'tsconfig.json'), '{ "exclude": [".forge/worktrees"] }\n');
+  const r = appendToolingExcludes(cwd);
+  assert.deepEqual(r.warned, []);
+  assert.ok(r.skipped.includes('tsconfig.json'));
+});
+
+test('appendToolingExcludes warns (does not mutate) when vitest.config.ts is present', () => {
+  const cwd = tmp();
+  const original = "import { defineConfig } from 'vitest/config';\nexport default defineConfig({});\n";
+  writeFileSync(resolve(cwd, 'vitest.config.ts'), original);
+  const r = appendToolingExcludes(cwd);
+  assert.equal(r.warned.length, 1);
+  assert.equal(r.warned[0]?.target, 'vitest.config.ts');
+  assert.match(r.warned[0]?.snippet ?? '', /\.forge\/worktrees\/\*\*/);
+  assert.equal(readFileSync(resolve(cwd, 'vitest.config.ts'), 'utf8'), original);
+});
+
+test('scaffoldProject end-to-end with all four tooling targets present', () => {
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, '.eslintignore'), 'node_modules\n');
+  writeFileSync(resolve(cwd, '.prettierignore'), 'dist\n');
+  writeFileSync(resolve(cwd, 'tsconfig.json'), '{ "compilerOptions": {} }\n');
+  writeFileSync(resolve(cwd, 'vitest.config.ts'), 'export default {};\n');
+  const r = scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+
+  // Flat ignores → written.
+  assert.ok(r.written.includes('.eslintignore'));
+  assert.ok(r.written.includes('.prettierignore'));
+
+  // Code configs → warned (not in written, not in skipped).
+  assert.equal(r.written.includes('tsconfig.json'), false);
+  assert.equal(r.skipped.includes('tsconfig.json'), false);
+
+  // init-warnings.md exists with both warning sections.
+  assert.ok(r.warningsPath);
+  const body = readFileSync(resolve(cwd, '.forge/init-warnings.md'), 'utf8');
+  assert.match(body, /## Tooling-exclude entries needed/);
+  assert.match(body, /### tsconfig\.json/);
+  assert.match(body, /### vitest\.config\.ts/);
+});
+
+test('scaffoldProject merges unverified probes + tooling warnings into one sidecar', () => {
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, 'tsconfig.json'), '{}\n');
+  const r = scaffoldProject({
+    cwd,
+    answers: fixtureAnswers(),
+    templatesDir,
+    isoDate: '2026-05-12',
+    unverified: ['primary_host'],
+  });
+  assert.ok(r.warningsPath);
+  const body = readFileSync(resolve(cwd, '.forge/init-warnings.md'), 'utf8');
+  assert.match(body, /## Unverified tooling probes/);
+  assert.match(body, /primary_host/);
+  assert.match(body, /## Tooling-exclude entries needed/);
+  assert.match(body, /tsconfig\.json/);
 });
 
 test('toMinimalYamlObject omits description when absent', () => {
