@@ -306,6 +306,15 @@ test('create — spawns a worktree with default branch and copyMeta manifest', a
     assert.ok(existsSync(path.join(result.path, 'spec', 'SPEC.md')));
     assert.ok(existsSync(path.join(result.path, 'CLAUDE.md')));
 
+    assert.equal(result.taskMarkerPath, path.join(result.path, '.forge', 'worktree-task.json'));
+    assert.ok(existsSync(result.taskMarkerPath));
+    const marker = JSON.parse(readFileSync(result.taskMarkerPath, 'utf8'));
+    assert.equal(marker.version, 1);
+    assert.equal(marker.taskId, 'FD-7');
+    assert.equal(marker.branch, 'feat/FD-7');
+    assert.equal(marker.createdBy, 'forge/workspace.create');
+    assert.ok(typeof marker.createdAt === 'string' && marker.createdAt.length > 0);
+
     const { stdout } = await execa('git', ['worktree', 'list', '--porcelain'], { cwd: repoDir });
     assert.ok(stdout.includes(result.path));
   } finally {
@@ -335,6 +344,12 @@ test('create — copyMeta:false skips meta and writes no manifest', async () => 
     assert.equal(result.manifestPath, null);
     assert.equal(result.copiedFiles.length, 0);
     assert.ok(!existsSync(path.join(result.path, '.forge', 'copied-from-main.json')));
+
+    // marker is the worktree binding — written regardless of copyMeta
+    assert.ok(existsSync(result.taskMarkerPath));
+    const marker = JSON.parse(readFileSync(result.taskMarkerPath, 'utf8'));
+    assert.equal(marker.taskId, 'FD-8');
+    assert.equal(marker.branch, 'feat/FD-8');
   } finally {
     try {
       await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-8')], {

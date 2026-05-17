@@ -9,6 +9,7 @@ import {
   readlinkSync,
   copyFileSync,
   writeFileSync,
+  rmSync,
 } from 'node:fs';
 import * as path from 'node:path';
 
@@ -269,7 +270,10 @@ export interface CreateResult {
   branch: string;
   copiedFiles: string[];
   manifestPath: string | null;
+  taskMarkerPath: string;
 }
+
+export const TASK_MARKER_RELPATH = path.join('.forge', 'worktree-task.json');
 
 export async function create(taskId: string, opts: CreateOptions): Promise<CreateResult> {
   const sanitized = sanitizeIssueId(taskId);
@@ -291,6 +295,23 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
   } catch (err) {
     throw wrapExecaError('git worktree add', err, { branch, target, base });
   }
+
+  // Task marker — binds this worktree to its task ID for the worktree-guard
+  // preflight in /implement, /ship, /qa, etc. Always written, regardless of
+  // copyMeta, because the marker IS the binding: skills check for its presence
+  // to refuse running task-scoped mutations from the main checkout, which
+  // otherwise corrupts parallel sessions sharing the same HEAD.
+  const markerDir = path.join(target, '.forge');
+  mkdirSync(markerDir, { recursive: true });
+  const taskMarkerPath = path.join(target, TASK_MARKER_RELPATH);
+  const taskMarker = {
+    version: 1,
+    taskId: sanitized,
+    branch,
+    createdAt: new Date().toISOString(),
+    createdBy: 'forge/workspace.create',
+  };
+  writeFileSync(taskMarkerPath, JSON.stringify(taskMarker, null, 2) + '\n', 'utf8');
 
   const copyMeta = opts.copyMeta ?? true;
   let copiedFiles: string[] = [];
@@ -332,7 +353,7 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
   }
 
-  return { path: target, branch, copiedFiles, manifestPath };
+  return { path: target, branch, copiedFiles, manifestPath, taskMarkerPath };
 }
 
 export interface CleanupOptions {
@@ -379,6 +400,8 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
   const manifestRel = path.join('.forge', 'copied-from-main.json');
   const manifestAbs = path.join(target, manifestRel);
   const baseline = new Set<string>();
+  // Forge-managed binding marker — always written by create(), always allowed to be removed.
+  baseline.add(TASK_MARKER_RELPATH);
   if (existsSync(manifestAbs)) {
     try {
       const parsed = JSON.parse(readFileSync(manifestAbs, 'utf8')) as { files?: unknown };
@@ -398,9 +421,7 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
     }
   }
 
-  const remaining = baseline.size > 0
-    ? ignoredFiles.filter((f) => !baseline.has(f))
-    : ignoredFiles;
+  const remaining = ignoredFiles.filter((f) => !baseline.has(f));
 
   const count = remaining.length;
   if (count > 0 && opts.force !== true) {
@@ -408,6 +429,19 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
       count,
       files: remaining.slice(0, 10),
     });
+  }
+
+  // Forge-managed baseline files (marker + manifest + copied meta) are safe to delete.
+  // Physically remove them so `git worktree remove` sees a clean tree and doesn't
+  // refuse with "contains modified or untracked files" — the baseline filter only
+  // suppresses the GITIGNORED_LOSS check, not git's own untracked-file check.
+  for (const rel of baseline) {
+    const abs = path.join(target, rel);
+    try {
+      rmSync(abs, { force: true });
+    } catch {
+      // best-effort — if rm fails the subsequent git command will surface the real error
+    }
   }
 
   const removeArgs = ['worktree', 'remove', ...(opts.force ? ['--force'] : []), target];
