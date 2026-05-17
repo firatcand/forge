@@ -53,17 +53,21 @@ function mkScratchWorktree(opts: { phasesYaml: string }): { dir: string; cleanup
 }
 
 // FakeTracker — single in-memory adapter implementing the Tracker contract.
-// Stores issues by id; updateIssueBody mutates the body in place; allows tests
-// to drive both directions against a consistent shared state.
+// Stores issues AND bodies pushed via updateIssueBody so the round-trip test
+// can assert what reached the tracker. Per Codex 2nd-pass: the prior version
+// discarded the body argument, making "round-trip preserves all fields" a
+// structural placebo.
 function makeFakeTracker(initial: Issue[]): {
   tracker: Tracker;
   setIssue: (issue: Issue) => void;
   getIssue: (id: string) => Issue | undefined;
   callsToUpdateBody: string[];
+  bodiesById: Map<string, string>;
 } {
   const issues = new Map<string, Issue>();
   for (const i of initial) issues.set(i.id, i);
   const calls: string[] = [];
+  const bodiesById = new Map<string, string>();
   const tracker: Tracker = {
     type: 'linear',
     listActiveIssues: async () => Array.from(issues.values()),
@@ -73,11 +77,9 @@ function makeFakeTracker(initial: Issue[]): {
     async releaseClaim() {},
     async updateState() {},
     async comment() {},
-    async updateIssueBody(id: string) {
+    async updateIssueBody(id: string, body: string) {
       calls.push(id);
-      // No-op on body: the round-trip property we test is field-level
-      // (title, depends_on). The verb does not write a separate "body"
-      // field on phases.yaml — bodies are render-only from local task data.
+      bodiesById.set(id, body);
     },
     async createProject() {
       return { id: 'p', url: 'u' };
@@ -95,6 +97,7 @@ function makeFakeTracker(initial: Issue[]): {
     setIssue: (issue: Issue) => issues.set(issue.id, issue),
     getIssue: (id: string) => issues.get(id),
     callsToUpdateBody: calls,
+    bodiesById,
   };
 }
 
@@ -183,6 +186,21 @@ test('e2e — round-trip: pull → push → re-pull yields no further updates', 
     const p2: JsonPayload = JSON.parse(r2.out);
     assert.deepEqual(p2.data?.push?.succeeded.slice().sort(), ['P1-T01', 'P1-T02']);
     assert.deepEqual(fake.callsToUpdateBody.slice().sort(), ['t-1', 't-2']);
+
+    // Body fidelity — per Codex 2nd-pass: assert what reached the tracker,
+    // not just that the call happened. renderTaskBody output must include
+    // the task ID, type, owner, priority, description, and acceptance.
+    const body1 = fake.bodiesById.get('t-1');
+    assert.ok(body1, 'updateIssueBody must have stored a body for t-1');
+    assert.match(body1!, /\*\*Forge task ID:\*\* P1-T01/);
+    assert.match(body1!, /\*\*Type:\*\* foundation/);
+    assert.match(body1!, /\*\*Owner:\*\* backend-dev/);
+    assert.match(body1!, /First task/);
+    assert.match(body1!, /## Acceptance\n- \[ \] It works/);
+
+    const body2 = fake.bodiesById.get('t-2');
+    assert.ok(body2, 'updateIssueBody must have stored a body for t-2');
+    assert.match(body2!, /\*\*Depends on:\*\* P1-T01/);
 
     // Re-pull: tracker state unchanged → still no diff
     const r3 = await runVerb({ cwd: wt.dir, argv: ['--pull'], tracker: fake.tracker });

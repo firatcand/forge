@@ -200,7 +200,7 @@ test('runOrchestrateReconcile — --pull --dry-run with title diff returns updat
   }
 });
 
-test('runOrchestrateReconcile — --pull with orphan exits 1 PRUNE_PENDING with ok:false signaling', async () => {
+test('runOrchestrateReconcile — --pull with orphan exits 1 PRUNE_PENDING (data on stdout, diagnostic on stderr)', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
   try {
     const out = captureStream();
@@ -213,15 +213,14 @@ test('runOrchestrateReconcile — --pull with orphan exits 1 PRUNE_PENDING with 
       trackerOverride: fakeTracker({ list: async () => [] }),
     });
     assert.equal(result.exitCode, 1);
-    // Per review feedback: PRUNE_PENDING uses ok:false so JSON consumers
-    // don't have to look at data.pull.removed.length.
+    // Per Codex 2nd-pass: stdout carries the structured plan, stderr the
+    // human-readable diagnostic — matches orchestrate-spec-diff's convention.
+    // The skill detects PRUNE_PENDING via (exitCode===1 && removed.length>0).
     const outJson = JSON.parse(out.chunks.join(''));
-    assert.equal(outJson.ok, false);
-    assert.equal(outJson.error.code, 'PRUNE_PENDING');
-    // Plan attached on stderr for skill rendering.
-    const errJson = JSON.parse(err.chunks.join(''));
-    assert.equal(errJson.ok, true);
-    assert.equal(errJson.data.pull.removed.length, 1);
+    assert.equal(outJson.ok, true);
+    assert.equal(outJson.data.applied, false);
+    assert.equal(outJson.data.pull.removed.length, 1);
+    assert.match(err.chunks.join(''), /orphan task/);
   } finally {
     wt.cleanup();
   }

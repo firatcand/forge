@@ -142,19 +142,28 @@ function noopLogger(): Logger {
   };
 }
 
-// Allowlist for the Notion MCP launch command. settings.yaml is read into a
-// trusted-config context, but `mcp_command[0]` becomes the binary spawned by
-// StdioClientTransport — an attacker with write access to .forge/settings.yaml
-// (e.g. a malicious PR in CI) could otherwise achieve arbitrary command
-// execution. We pin the launcher to the two binaries that produce all real
-// MCP server invocations in practice.
-const MCP_COMMAND_ALLOWLIST = new Set<string>(['npx', 'node']);
-
 interface TrackerHandle {
   readonly tracker: Tracker;
   readonly close?: () => Promise<void>;
 }
 
+// Threat model for createTracker:
+//
+// settings.yaml is treated as TRUSTED EXECUTABLE CONFIG (same trust level as
+// package.json scripts or a Makefile). The Notion launcher accepts an
+// arbitrary `mcp_command` because that's the customization point for users
+// who want a different Notion MCP server build/version. An earlier review
+// suggested allowlisting `mcp_command[0]` to {npx, node}, but Codex 2nd-pass
+// pointed out that `node -e '...'` or `npx -y <attacker-pkg>` are still
+// arbitrary code execution — argv[0] is not a meaningful boundary. So
+// allowlisting was security theater.
+//
+// Honest mitigation: settings.yaml must be repo-tracked and review-gated
+// (branch protection, CODEOWNERS). The same applies to package.json, Makefile,
+// and any other dev-time config that names a binary forge will run. CI
+// systems that allow PR contributors to mutate settings.yaml without review
+// have a broader trust-model issue that this allowlist would not have
+// resolved either.
 function createTracker(settings: Settings, logger: Logger): TrackerHandle {
   const t = settings.tracker;
   switch (t.type) {
@@ -166,11 +175,6 @@ function createTracker(settings: Settings, logger: Logger): TrackerHandle {
       const [command, ...args] = t.config.mcp_command;
       if (!command) {
         throw new Error('notion tracker: mcp_command must be non-empty');
-      }
-      if (!MCP_COMMAND_ALLOWLIST.has(command)) {
-        throw new Error(
-          `notion tracker: mcp_command[0] '${command}' not in allowlist (${[...MCP_COMMAND_ALLOWLIST].join(',')})`,
-        );
       }
       const handle: StdioMcpHandle = createStdioMcpCall({
         command,
@@ -333,20 +337,18 @@ async function runPull(
   }
 
   if (plan.removed.length > 0 && !args.confirmPrune && !args.noPrune) {
-    // Signal PRUNE_PENDING with ok:false so JSON consumers don't have to
-    // inspect data.pull.removed.length to decide. The plan is still
-    // attached for the skill to render the orphan list.
+    // PRUNE_PENDING: stdout carries the structured plan (ok:true), stderr
+    // carries the human-readable error line. Matches orchestrate-spec-diff's
+    // convention (data on stdout, diagnostics on stderr). The skill detects
+    // the orphan-pending state by checking exitCode === 1 AND
+    // data.pull.removed.length > 0 — both signals consistent.
     writeJson(out, {
-      ok: false,
-      error: {
-        code: 'PRUNE_PENDING',
-        message: `${plan.removed.length} orphan task(s) — re-run with --confirm-prune or --no-prune`,
-      },
-    });
-    writeJson(err, {
       ok: true,
       data: { direction: 'pull', dry_run: false, pull: plan, applied: false },
     });
+    err.write(
+      `forge orchestrate reconcile: ${plan.removed.length} orphan task(s) — re-run with --confirm-prune or --no-prune\n`,
+    );
     return { exitCode: 1 };
   }
 

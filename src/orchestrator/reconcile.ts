@@ -7,8 +7,16 @@
 // no conflict-resolution UI. The verb writes phases.yaml or calls
 // updateIssueBody atomically; the skill confirms orphan prune before apply.
 
-import type { Document } from 'yaml';
+import type { Document, Node } from 'yaml';
 import { YAMLSeq, isMap, isSeq } from 'yaml';
+
+// A YAML node has an anchor when its source had `&name` syntax. yaml v2 stores
+// it on `node.anchor`. We can't safely splice the node out of its parent
+// sequence because any `*name` alias elsewhere in the document would become a
+// dangling reference on serialize.
+function hasYamlAnchor(node: Node): boolean {
+  return typeof (node as { anchor?: unknown }).anchor === 'string';
+}
 import type { Issue } from '../trackers/types.ts';
 import type { Phase, Phases, Task } from '../schemas/phases.ts';
 
@@ -160,7 +168,32 @@ export function diffPull(issues: readonly Issue[], phases: Phases): PullPlan {
       });
       continue;
     }
-    const local = idx.byTrackerId.get(issue.id) ?? idx.byTaskId.get(issue.forgeTaskId);
+    // Match by tracker_issue_id first. Fall back to forgeTaskId footer ONLY
+    // if the local task has no tracker_issue_id yet (e.g. the issue was
+    // created via `forge orchestrate` outside this yaml's lifetime and the
+    // back-link hasn't been recorded). Per Codex 2nd-pass review: if the
+    // local task already binds a *different* tracker_issue_id, a duplicate
+    // or adversarial issue carrying the same forge:task footer must NOT
+    // attribute updates back to that local task — it's an unmanaged
+    // collision, not a match.
+    const byTrackerId = idx.byTrackerId.get(issue.id);
+    let local: { phase: Phase; task: Task } | undefined = byTrackerId;
+    if (!local) {
+      const byTaskId = idx.byTaskId.get(issue.forgeTaskId);
+      if (byTaskId && byTaskId.task.tracker_issue_id === undefined) {
+        local = byTaskId;
+      } else if (byTaskId) {
+        // Local task already binds a different tracker_issue_id — this
+        // incoming issue is a duplicate-footer collision. Surface as
+        // unmanaged so the user can investigate; do NOT silently apply.
+        unmanaged.push({
+          tracker_issue_id: issue.id,
+          identifier: issue.identifier,
+          title: issue.title,
+        });
+        continue;
+      }
+    }
     if (!local) {
       added.push({
         tracker_issue_id: issue.id,
@@ -305,6 +338,17 @@ export function applyPlanToDocument(
       if (!id) continue;
 
       if (removedTaskIds.has(id)) {
+        // Safety: refuse to splice a YAML-anchored node. yaml v2's Document
+        // does not re-resolve aliases on toString() after a splice, so any
+        // remaining alias would surface as "Unresolved alias" on serialize.
+        // forge-emitted phases.yaml never uses anchors, but a hand-edited
+        // file might. Throw early with a clear message rather than corrupt
+        // the file. (Codex/Claude 2nd-pass BLOCK.)
+        if (hasYamlAnchor(taskNode)) {
+          throw new Error(
+            `applyPlanToDocument: refusing to prune task '${id}' — its node has a YAML anchor; aliases elsewhere in the document would dangle. Resolve the anchor manually before re-running --pull --confirm-prune.`,
+          );
+        }
         tasksNode.items.splice(ti, 1);
         mutations++;
         continue;

@@ -167,12 +167,17 @@ test('diffPull — tracker blockerId pointing to unknown task is dropped from di
   assert.equal(plan.updated.length, 0);
 });
 
-test('diffPull — local-only depends_on (dep without tracker_issue_id) is NOT silently truncated', () => {
+test('diffPull — local-only depends_on (dep without tracker_issue_id) does NOT trigger a depends_on diff', () => {
   // Regression for code-review BLOCK #3: a local task with depends_on
   // [P1-T01, P1-T02] where P1-T02 has no tracker_issue_id can never be
   // represented on the tracker side. The previous implementation produced
   // a spurious diff and would have overwritten depends_on to [P1-T01],
   // silently dropping the local-only P1-T02.
+  //
+  // Per Codex 2nd-pass: the assertion is SCOPED to "no depends_on change for
+  // P1-T03" — earlier version asserted `childUpdate === undefined` which
+  // would mask the regression if a future change introduced an unrelated
+  // title/etc diff for the same task.
   const localOnlyDep = mkTask({
     id: 'P1-T02',
     tracker_issue_id: undefined,
@@ -186,7 +191,6 @@ test('diffPull — local-only depends_on (dep without tracker_issue_id) is NOT s
     depends_on: ['P1-T01', 'P1-T02'],
   });
   const blockerIssue = mkIssue({ id: 't-1', forgeTaskId: 'P1-T01' });
-  // Tracker can only carry P1-T01 as blockerId; P1-T02 has no tracker mirror
   const childIssue = mkIssue({
     id: 't-3',
     forgeTaskId: 'P1-T03',
@@ -197,9 +201,52 @@ test('diffPull — local-only depends_on (dep without tracker_issue_id) is NOT s
     [blockerIssue, childIssue],
     mkPhases([blocker, localOnlyDep, child]),
   );
-  // No depends_on diff — the local-only dep means we skip the diff entirely
   const childUpdate = plan.updated.find((u) => u.task_id === 'P1-T03');
-  assert.equal(childUpdate, undefined, 'expected no diff for child task');
+  const dependsChange = childUpdate?.changes.find((c) => c.field === 'depends_on');
+  assert.equal(
+    dependsChange,
+    undefined,
+    'expected no depends_on diff because P1-T02 is local-only (no tracker_issue_id)',
+  );
+});
+
+test('diffPull — duplicate forgeTaskId footer on a different tracker issue does NOT attribute updates', () => {
+  // Regression for Codex 2nd-pass BLOCK (confidence 9): a malicious or
+  // duplicate tracker issue carrying a `<!-- forge:task=P1-T01 -->` footer
+  // when the local P1-T01 already binds a different tracker_issue_id used
+  // to fall back via `byTaskId` and silently apply the duplicate issue's
+  // title/deps to the local task. Now: the collision is reported as
+  // unmanaged, not applied.
+  const local = mkTask({ id: 'P1-T01', tracker_issue_id: 't-real', title: 'Real' });
+  const realIssue = mkIssue({ id: 't-real', forgeTaskId: 'P1-T01', title: 'Real' });
+  const evilIssue = mkIssue({
+    id: 't-evil',
+    identifier: 'F-EVIL',
+    forgeTaskId: 'P1-T01',
+    title: 'Hijacked title',
+  });
+  const plan = diffPull([realIssue, evilIssue], mkPhases([local]));
+  // No update — t-real matches by id, t-evil is treated as unmanaged
+  // collision rather than re-attributed to P1-T01 via forgeTaskId fallback.
+  assert.equal(plan.updated.length, 0);
+  const unmanaged = plan.unmanaged.find((u) => u.tracker_issue_id === 't-evil');
+  assert.ok(unmanaged, 'evil duplicate-footer issue should surface as unmanaged');
+});
+
+test('diffPull — forgeTaskId fallback DOES match when local task has no tracker_issue_id yet', () => {
+  // The fallback is preserved for the legitimate case: a tracker issue
+  // exists with a forge footer pointing at a local task whose
+  // tracker_issue_id hasn't been recorded (yet). Without this case, the
+  // first sync after `forge orchestrate` issue creation would be a no-op.
+  const local = mkTask({ id: 'P1-T01', tracker_issue_id: undefined, title: 'Local' });
+  const issue = mkIssue({
+    id: 't-new',
+    forgeTaskId: 'P1-T01',
+    title: 'Tracker title',
+  });
+  const plan = diffPull([issue], mkPhases([local]));
+  assert.equal(plan.updated.length, 1);
+  assert.equal(plan.updated[0]!.task_id, 'P1-T01');
 });
 
 // ---------------- diffPush ----------------
@@ -429,6 +476,67 @@ test('applyPlanToDocument — does NOT prune without confirmPrune', () => {
   const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
   assert.equal(n, 0);
   assert.match(doc.toString(), /P1-T02/);
+});
+
+test('applyPlanToDocument — refuses to prune an anchored task (would dangle aliases)', () => {
+  // Regression for Claude 2nd-pass BLOCK: yaml v2 does not re-resolve
+  // aliases on toString() after a parent-sequence splice. If a task uses
+  // &anchor and another node uses *alias, splicing the anchored task
+  // produces "Unresolved alias" on serialize. We throw early instead.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-gone
+        title: &anchor Anchored title
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+        alias_field: *anchor
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [],
+    removed: [{ task_id: 'P1-T01', tracker_issue_id: 'tracker-gone' }],
+    added: [],
+    unmanaged: [],
+  };
+  // Note: this fixture anchors `title`, not the whole task node — adjusting:
+  const yaml2 = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - &task1
+        id: P1-T01
+        tracker_issue_id: tracker-gone
+        title: Anchored task
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc2 = parseDocument(yaml2);
+  assert.throws(
+    () => applyPlanToDocument(doc2, plan, { confirmPrune: true }),
+    /YAML anchor/,
+  );
+  void doc;
 });
 
 test('applyPlanToDocument — depends_on update writes flow-style array', () => {
