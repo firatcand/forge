@@ -119,10 +119,25 @@ function diffTaskAgainstIssue(
   if (task.title !== issue.title) {
     changes.push({ field: 'title', from: task.title, to: issue.title });
   }
-  const trackerDepsAsTaskIds = mapBlockerIdsToTaskIds(issue.blockerIds, idx);
-  const localDeps = [...task.depends_on].sort();
-  if (!sameStringArray(localDeps, trackerDepsAsTaskIds)) {
-    changes.push({ field: 'depends_on', from: localDeps, to: trackerDepsAsTaskIds });
+
+  // depends_on diff is only meaningful when EVERY local dep can be
+  // represented on the tracker side (i.e. every local dep maps to a
+  // tracker_issue_id). If any local dep is "local-only" (a phases.yaml task
+  // with no tracker_issue_id), the tracker can never carry it as a
+  // blockerId, so comparing the full local list against the mapped tracker
+  // list would always show a spurious diff and silently overwrite the
+  // local-only dep on --pull. Bail out of the depends_on diff for those
+  // tasks — local-only deps stay local.
+  const allLocalDepsMapToTracker = task.depends_on.every((depTaskId) => {
+    const entry = idx.byTaskId.get(depTaskId);
+    return entry !== undefined && entry.task.tracker_issue_id !== undefined;
+  });
+  if (allLocalDepsMapToTracker) {
+    const trackerDepsAsTaskIds = mapBlockerIdsToTaskIds(issue.blockerIds, idx);
+    const localDeps = [...task.depends_on].sort();
+    if (!sameStringArray(localDeps, trackerDepsAsTaskIds)) {
+      changes.push({ field: 'depends_on', from: localDeps, to: trackerDepsAsTaskIds });
+    }
   }
   return changes;
 }
@@ -256,6 +271,11 @@ export interface ApplyOptions {
 // strips ~100 comment lines from the live forge phases.yaml. Per
 // [[validator-narrower-than-preserver-causes-silent-corruption]] we navigate
 // the Document API instead.
+//
+// `plan.added[]` is intentionally NOT applied here. Tracker issues that
+// don't yet exist in phases.yaml are surfaced to the user as informational;
+// formalizing them into phases.yaml is the job of /amend-roadmap (deferred
+// v0.5). Same contract as applyPullToPhases.
 export function applyPlanToDocument(
   doc: Document,
   plan: PullPlan,

@@ -167,6 +167,41 @@ test('diffPull — tracker blockerId pointing to unknown task is dropped from di
   assert.equal(plan.updated.length, 0);
 });
 
+test('diffPull — local-only depends_on (dep without tracker_issue_id) is NOT silently truncated', () => {
+  // Regression for code-review BLOCK #3: a local task with depends_on
+  // [P1-T01, P1-T02] where P1-T02 has no tracker_issue_id can never be
+  // represented on the tracker side. The previous implementation produced
+  // a spurious diff and would have overwritten depends_on to [P1-T01],
+  // silently dropping the local-only P1-T02.
+  const localOnlyDep = mkTask({
+    id: 'P1-T02',
+    tracker_issue_id: undefined,
+    title: 'Local-only blocker',
+  });
+  const blocker = mkTask({ id: 'P1-T01', tracker_issue_id: 't-1' });
+  const child = mkTask({
+    id: 'P1-T03',
+    tracker_issue_id: 't-3',
+    title: 'Child',
+    depends_on: ['P1-T01', 'P1-T02'],
+  });
+  const blockerIssue = mkIssue({ id: 't-1', forgeTaskId: 'P1-T01' });
+  // Tracker can only carry P1-T01 as blockerId; P1-T02 has no tracker mirror
+  const childIssue = mkIssue({
+    id: 't-3',
+    forgeTaskId: 'P1-T03',
+    title: 'Child',
+    blockerIds: ['t-1'],
+  });
+  const plan = diffPull(
+    [blockerIssue, childIssue],
+    mkPhases([blocker, localOnlyDep, child]),
+  );
+  // No depends_on diff — the local-only dep means we skip the diff entirely
+  const childUpdate = plan.updated.find((u) => u.task_id === 'P1-T03');
+  assert.equal(childUpdate, undefined, 'expected no diff for child task');
+});
+
 // ---------------- diffPush ----------------
 
 test('diffPush — task without tracker_issue_id is skipped', () => {

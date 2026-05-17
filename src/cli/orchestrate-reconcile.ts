@@ -9,17 +9,18 @@
 // updateIssueBody on the tracker), so the skill is responsible for confirming
 // destructive operations (orphan prune).
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { writeAtomic } from '../core/fs-atomic.ts';
 import { loadSettings } from '../core/settings.ts';
+import { validateUnderRoot } from '../core/workspace.ts';
 import { PhasesSchema, type Phases } from '../schemas/phases.ts';
 import type { Logger, Tracker } from '../trackers/base.ts';
 import { GitHubTracker } from '../trackers/github.ts';
 import { LinearTracker } from '../trackers/linear.ts';
 import { NotionTracker } from '../trackers/notion.ts';
-import { createStdioMcpCall } from '../trackers/notion-mcp-transport.ts';
+import { createStdioMcpCall, type StdioMcpHandle } from '../trackers/notion-mcp-transport.ts';
 import {
   TrackerError,
   type TrackerErrorCode,
@@ -141,24 +142,45 @@ function noopLogger(): Logger {
   };
 }
 
-function createTracker(settings: Settings, logger: Logger): Tracker {
+// Allowlist for the Notion MCP launch command. settings.yaml is read into a
+// trusted-config context, but `mcp_command[0]` becomes the binary spawned by
+// StdioClientTransport — an attacker with write access to .forge/settings.yaml
+// (e.g. a malicious PR in CI) could otherwise achieve arbitrary command
+// execution. We pin the launcher to the two binaries that produce all real
+// MCP server invocations in practice.
+const MCP_COMMAND_ALLOWLIST = new Set<string>(['npx', 'node']);
+
+interface TrackerHandle {
+  readonly tracker: Tracker;
+  readonly close?: () => Promise<void>;
+}
+
+function createTracker(settings: Settings, logger: Logger): TrackerHandle {
   const t = settings.tracker;
   switch (t.type) {
     case 'linear':
-      return new LinearTracker(t, logger);
+      return { tracker: new LinearTracker(t, logger) };
     case 'github':
-      return new GitHubTracker(t, logger);
+      return { tracker: new GitHubTracker(t, logger) };
     case 'notion': {
       const [command, ...args] = t.config.mcp_command;
       if (!command) {
         throw new Error('notion tracker: mcp_command must be non-empty');
       }
-      const handle = createStdioMcpCall({
+      if (!MCP_COMMAND_ALLOWLIST.has(command)) {
+        throw new Error(
+          `notion tracker: mcp_command[0] '${command}' not in allowlist (${[...MCP_COMMAND_ALLOWLIST].join(',')})`,
+        );
+      }
+      const handle: StdioMcpHandle = createStdioMcpCall({
         command,
         args,
         env: t.config.mcp_env,
       });
-      return new NotionTracker(t, logger, { mcp: handle.call });
+      return {
+        tracker: new NotionTracker(t, logger, { mcp: handle.call }),
+        close: () => handle.close(),
+      };
     }
     default: {
       const exhaustive: never = t;
@@ -168,14 +190,18 @@ function createTracker(settings: Settings, logger: Logger): Tracker {
 }
 
 function loadPhasesWithDocument(absPath: string): { phases: Phases; doc: ReturnType<typeof parseDocument>; raw: string } {
-  const raw = readFileSync(absPath, 'utf8');
-  if (raw.length > PHASES_FILE_MAX_BYTES) {
+  // Size guard via stat BEFORE read — otherwise a 4 MiB+ adversarial file is
+  // already in memory by the time we throw. Matches the pattern in
+  // [[toctou-between-stat-and-read-leaks-raw-fs-errors]].
+  const st = statSync(absPath);
+  if (st.size > PHASES_FILE_MAX_BYTES) {
     throw new TrackerError(
       'VALIDATION' as TrackerErrorCode,
       `phases.yaml exceeds ${PHASES_FILE_MAX_BYTES} bytes`,
-      { path: absPath, bytes: raw.length },
+      { path: absPath, bytes: st.size },
     );
   }
+  const raw = readFileSync(absPath, 'utf8');
   const doc = parseDocument(raw);
   if (doc.errors.length > 0) {
     throw new TrackerError(
@@ -204,11 +230,29 @@ export async function runOrchestrateReconcile(
 
   const parsed = parseReconcileArgv(opts.argv);
   if ('error' in parsed) {
+    // Exit code 3 (hard error) — NOT 1, which is reserved for PRUNE_PENDING.
+    // The skill distinguishes "user must answer prune" (1) from "verb refused
+    // due to malformed call" (3); collapsing both to 1 misroutes callers.
     writeJson(err, { ok: false, error: { code: 'INVALID_ARGS', message: parsed.error } });
-    return { exitCode: 1 };
+    return { exitCode: 3 };
   }
 
-  const phasesPath = resolve(opts.cwd, PHASES_PATH_DEFAULT);
+  let phasesPath: string;
+  let settingsPath: string;
+  try {
+    // Symlink-escape guard on both read and write targets — matches the
+    // pattern used by every other path-touching verb in this codebase.
+    phasesPath = validateUnderRoot(resolve(opts.cwd, PHASES_PATH_DEFAULT), opts.cwd);
+    settingsPath = validateUnderRoot(
+      resolve(opts.cwd, SETTINGS_PATH_DEFAULT),
+      opts.cwd,
+    );
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    writeJson(err, { ok: false, error: { code: 'INVALID_CONFIG', message } });
+    return { exitCode: 3 };
+  }
+
   let loaded;
   try {
     loaded = loadPhasesWithDocument(phasesPath);
@@ -220,12 +264,15 @@ export async function runOrchestrateReconcile(
   }
 
   let tracker: Tracker;
+  let closeTracker: (() => Promise<void>) | undefined;
   if (opts.trackerOverride) {
     tracker = opts.trackerOverride;
   } else {
     try {
-      const settings = loadSettings(resolve(opts.cwd, SETTINGS_PATH_DEFAULT));
-      tracker = createTracker(settings, opts.loggerOverride ?? noopLogger());
+      const settings = loadSettings(settingsPath);
+      const handle = createTracker(settings, opts.loggerOverride ?? noopLogger());
+      tracker = handle.tracker;
+      closeTracker = handle.close;
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       writeJson(err, { ok: false, error: { code: 'INVALID_CONFIG', message } });
@@ -233,10 +280,25 @@ export async function runOrchestrateReconcile(
     }
   }
 
-  if (parsed.direction === 'pull') {
-    return runPull(parsed, loaded, phasesPath, tracker, out, err);
+  try {
+    if (parsed.direction === 'pull') {
+      return await runPull(parsed, loaded, phasesPath, tracker, out, err);
+    }
+    return await runPush(parsed, loaded, tracker, out, err);
+  } finally {
+    // Tear down the MCP child process spawned for Notion. createStdioMcpCall
+    // returns a handle the caller is contractually required to close
+    // (notion-mcp-transport.ts:24). For Linear/GitHub closeTracker is
+    // undefined.
+    if (closeTracker) {
+      try {
+        await closeTracker();
+      } catch {
+        // Best-effort tear-down — never let a close error mask the verb's
+        // primary exit code.
+      }
+    }
   }
-  return runPush(parsed, loaded, tracker, out, err);
 }
 
 async function runPull(
@@ -271,18 +333,24 @@ async function runPull(
   }
 
   if (plan.removed.length > 0 && !args.confirmPrune && !args.noPrune) {
+    // Signal PRUNE_PENDING with ok:false so JSON consumers don't have to
+    // inspect data.pull.removed.length to decide. The plan is still
+    // attached for the skill to render the orphan list.
     writeJson(out, {
+      ok: false,
+      error: {
+        code: 'PRUNE_PENDING',
+        message: `${plan.removed.length} orphan task(s) — re-run with --confirm-prune or --no-prune`,
+      },
+    });
+    writeJson(err, {
       ok: true,
       data: { direction: 'pull', dry_run: false, pull: plan, applied: false },
     });
-    err.write(
-      `forge orchestrate reconcile: ${plan.removed.length} orphan task(s) — re-run with --confirm-prune or --no-prune\n`,
-    );
     return { exitCode: 1 };
   }
 
   const applyOpts = { confirmPrune: args.confirmPrune };
-  const titleAndDepsChanges = plan.updated.length;
   const mutationsDoc = applyPlanToDocument(loaded.doc, plan, applyOpts);
 
   let wrote = false;
@@ -302,10 +370,6 @@ async function runPull(
     },
   });
 
-  // Non-fatal exit if there were `added` issues (tracker has new things) or
-  // unmanaged issues — informational only.
-  // Mutations is the only real success indicator.
-  void titleAndDepsChanges;
   return { exitCode: 0 };
 }
 

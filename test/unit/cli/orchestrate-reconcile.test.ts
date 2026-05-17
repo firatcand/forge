@@ -143,7 +143,7 @@ phases:
         acceptance: ['a']
 `;
 
-test('runOrchestrateReconcile — INVALID_ARGS on missing direction', async () => {
+test('runOrchestrateReconcile — INVALID_ARGS exits 3 (NOT 1, which is reserved for PRUNE_PENDING)', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
   try {
     const out = captureStream();
@@ -155,7 +155,8 @@ test('runOrchestrateReconcile — INVALID_ARGS on missing direction', async () =
       stderr: err.stream,
       trackerOverride: fakeTracker({ list: async () => [] }),
     });
-    assert.equal(result.exitCode, 1);
+    // exit code 3 distinguishes hard-error (malformed call) from PRUNE_PENDING (1)
+    assert.equal(result.exitCode, 3);
     const errJson = JSON.parse(err.chunks.join(''));
     assert.equal(errJson.ok, false);
     assert.equal(errJson.error.code, 'INVALID_ARGS');
@@ -199,7 +200,7 @@ test('runOrchestrateReconcile — --pull --dry-run with title diff returns updat
   }
 });
 
-test('runOrchestrateReconcile — --pull with orphan exits PRUNE_PENDING (1)', async () => {
+test('runOrchestrateReconcile — --pull with orphan exits 1 PRUNE_PENDING with ok:false signaling', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
   try {
     const out = captureStream();
@@ -212,11 +213,15 @@ test('runOrchestrateReconcile — --pull with orphan exits PRUNE_PENDING (1)', a
       trackerOverride: fakeTracker({ list: async () => [] }),
     });
     assert.equal(result.exitCode, 1);
-    const payload = JSON.parse(out.chunks.join(''));
-    assert.equal(payload.ok, true);
-    assert.equal(payload.data.applied, false);
-    assert.equal(payload.data.pull.removed.length, 1);
-    assert.match(err.chunks.join(''), /orphan task/);
+    // Per review feedback: PRUNE_PENDING uses ok:false so JSON consumers
+    // don't have to look at data.pull.removed.length.
+    const outJson = JSON.parse(out.chunks.join(''));
+    assert.equal(outJson.ok, false);
+    assert.equal(outJson.error.code, 'PRUNE_PENDING');
+    // Plan attached on stderr for skill rendering.
+    const errJson = JSON.parse(err.chunks.join(''));
+    assert.equal(errJson.ok, true);
+    assert.equal(errJson.data.pull.removed.length, 1);
   } finally {
     wt.cleanup();
   }
