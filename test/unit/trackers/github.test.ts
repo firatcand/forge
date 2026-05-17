@@ -754,7 +754,7 @@ test('assertValidBodyInput rejects embedded forge:task footer', () => {
     (e: unknown) =>
       e instanceof TrackerError &&
       e.code === 'VALIDATION' &&
-      /forge-managed footers/.test(e.message),
+      /forge-managed footer/.test(e.message),
   );
 });
 
@@ -768,8 +768,29 @@ test('assertValidBodyInput rejects embedded forge:blockedBy footer', () => {
     (e: unknown) =>
       e instanceof TrackerError &&
       e.code === 'VALIDATION' &&
-      /forge-managed footers/.test(e.message),
+      /forge-managed footer/.test(e.message),
   );
+});
+
+test('assertValidBodyInput rejects ANY unknown forge:KEY footer (codex 2nd-pass regression)', () => {
+  // Codex + claude reviewer flagged: rejecting only task/blockedBy let
+  // callers smuggle `<!-- forge:ownerType=evil -->` past validation and
+  // collide with the existing extra-footer preservation, producing two
+  // contradictory ownerType comments on round-trip. Reject every forge:KEY.
+  for (const key of ['ownerType', 'threshold', 'made-up-key', 'X']) {
+    assert.throws(
+      () =>
+        assertValidBodyInput(
+          `body\n<!-- forge:${key}=anything -->\n`,
+          GH_ISSUE_BODY_MAX_BYTES,
+        ),
+      (e: unknown) =>
+        e instanceof TrackerError &&
+        e.code === 'VALIDATION' &&
+        /forge-managed footer/.test(e.message),
+      `must reject forge:${key}`,
+    );
+  }
 });
 
 test('assertValidBodyInput allows non-forge HTML comments', () => {
@@ -802,14 +823,19 @@ test('assertValidBodyInput counts bytes (not chars) for multi-byte UTF-8', () =>
 
 // ─── updateIssueBody (GitHub adapter) ────────────────────────────────────────
 
-test('updateIssueBody replaces body and preserves forge:task footer', async () => {
+test('updateIssueBody replaces body and preserves forge:task footer (round-trip via parseForgeFooters)', async () => {
+  // AC-as-unit-test: not just "the footer string appears" — actually parse
+  // the resulting body back through parseForgeFooters and confirm the
+  // tracker→forgeTaskId mapping round-trips. Codex/claude 2nd-pass.
   const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
   await tracker.updateIssueBody('42', 'fresh body content');
   const edit = mock.calls[1];
   const bodyArgIdx = edit?.indexOf('--body') ?? -1;
   const newBody = bodyArgIdx >= 0 ? (edit?.[bodyArgIdx + 1] ?? '') : '';
   assert.match(newBody, /fresh body content/);
-  assert.match(newBody, /forge:task=FORGE-99/);
+  const parsed = parseForgeFooters(newBody);
+  assert.equal(parsed.forgeTaskId, 'FORGE-99', 'round-trip forgeTaskId');
+  assert.deepEqual(parsed.blockerIds, ['10'], 'round-trip blockerIds');
 });
 
 test('updateIssueBody preserves forge:blockedBy footer through replace', async () => {

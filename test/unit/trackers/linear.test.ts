@@ -7,6 +7,7 @@ import {
   LinearTracker,
   classifyLinearError,
   TrackerError,
+  parseForgeFooters,
   type LinearCreateIssueInput,
   type LinearCreateProjectInput,
   type LinearIssueLike,
@@ -17,6 +18,7 @@ import {
   type LinearWorkflowStateLike,
   type Logger,
 } from '../../../src/trackers/index.ts';
+import { LINEAR_DESCRIPTION_MAX_BYTES } from '../../../src/trackers/linear.ts';
 import {
   DEFAULT_WORKFLOW_STATES,
   LABEL_STATE_IN_REVIEW,
@@ -1399,7 +1401,10 @@ await test('setBlockedBy — CONFLICT on relation create is swallowed (idempoten
 
 // ─── updateIssueBody (FORGE-94) ──────────────────────────────────────────────
 
-await test('updateIssueBody — replaces description and preserves forge:task footer', async () => {
+await test('updateIssueBody — replaces description and preserves forge:task footer (round-trip via parseForgeFooters)', async () => {
+  // AC-as-unit-test: parse the resulting description back through
+  // parseForgeFooters and confirm the round-trip mapping holds.
+  // Codex/claude 2nd-pass.
   const issue = makeIssue({
     id: 'i1',
     identifier: 'FORGE-77',
@@ -1415,7 +1420,27 @@ await test('updateIssueBody — replaces description and preserves forge:task fo
   });
   await tracker.updateIssueBody('i1', 'fresh body content');
   assert.match(captured!.description ?? '', /fresh body content/);
-  assert.match(captured!.description ?? '', /<!-- forge:task=FORGE-77 -->/);
+  const parsed = parseForgeFooters(captured!.description);
+  assert.equal(parsed.forgeTaskId, 'FORGE-77', 'round-trip forgeTaskId');
+});
+
+await test('updateIssueBody — VALIDATION when body exceeds Linear byte cap (no SDK call)', async () => {
+  let issueCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => {
+      issueCalled = true;
+      return makeIssue({ id: 'i1' });
+    },
+  });
+  const tooBig = 'a'.repeat(LINEAR_DESCRIPTION_MAX_BYTES + 1);
+  await assert.rejects(
+    () => tracker.updateIssueBody('i1', tooBig),
+    (err: unknown) =>
+      err instanceof TrackerError &&
+      err.code === 'VALIDATION' &&
+      /exceeds provider limit/.test(err.message),
+  );
+  assert.equal(issueCalled, false, 'must reject before issuing any SDK call');
 });
 
 await test('updateIssueBody — preserves forge:blockedBy footer across replace', async () => {

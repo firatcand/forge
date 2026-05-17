@@ -21,7 +21,18 @@ const FORGE_BLOCKED_STRIP_RE = /<!--\s*forge:blockedBy=[^>]*-->\n?/g;
 // Match every `<!-- forge:KEY=VALUE -->` comment regardless of KEY. Used by
 // parseExtraForgeFooters to collect everything except task/blockedBy so that
 // updateIssueBody can carry them through a body replace.
-const FORGE_ANY_RE = /<!--\s*forge:([A-Za-z][A-Za-z0-9_]*)=([^>]*?)\s*-->/g;
+//
+// Value capture is `[\s\S]*?` (non-greedy, dot-includes-newline) terminated
+// by `\s*-->`. Earlier `[^>]*?` truncated values containing a bare `>`
+// (e.g. `<!-- forge:threshold=a>b -->`) — silent data loss. Codex 2nd-pass
+// (FORGE-94 review).
+const FORGE_ANY_RE = /<!--\s*forge:([A-Za-z][A-Za-z0-9_]*)=([\s\S]*?)\s*-->/g;
+// Caller-input rejection: ANY `<!--\s*forge:KEY` regardless of which KEY.
+// Stricter than (FORGE_TASK_RE|FORGE_BLOCKED_RE) because unknown forge keys
+// (e.g. `forge:ownerType`) collide with adapter-managed extra-footer
+// preservation and would silently double on round-trip. Code-reviewer +
+// codex 2nd-pass converged on this (FORGE-94 review).
+const FORGE_ANY_INPUT_RE = /<!--\s*forge:[A-Za-z]/;
 
 // Reject bare values (forgeTaskId, blockerId) that would break the HTML
 // comment structure if concatenated raw. A `-->` inside a value would
@@ -88,10 +99,10 @@ export function assertValidBodyInput(
       { type: typeof body },
     );
   }
-  if (FORGE_TASK_RE.test(body) || FORGE_BLOCKED_RE.test(body)) {
+  if (FORGE_ANY_INPUT_RE.test(body)) {
     throw new TrackerError(
       'VALIDATION',
-      `updateIssueBody: body must not contain forge-managed footers (<!-- forge:task=... --> or <!-- forge:blockedBy=... -->); the adapter appends them`,
+      `updateIssueBody: body must not contain any forge-managed footer (<!-- forge:KEY=... -->); the adapter appends them`,
       { bodyPreview: body.slice(0, 80) },
     );
   }
