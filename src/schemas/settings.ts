@@ -130,6 +130,38 @@ const DesignSchema = z
   })
   .default({});
 
+// Added 2026-05-18 (FORGE-105 P2.5-T13) — closed-loop workflow control.
+// auto_codex_enabled is the disable lever consumed by `forge codex-suggest`.
+// auto_codex_token_cap is RESERVED — defined in SPEC §Auto-codex skill-level
+// hooks but NOT enforced by codex-suggest. Passive suggestions bound nothing
+// meaningful; the field is kept here so settings.yaml stays SPEC-compliant.
+// Follow-up: amend SPEC to either drop the field or build session accounting.
+const CodexSchema = z
+  .object({
+    auto_codex_enabled: z.boolean().default(true),
+    auto_codex_token_cap: z.number().int().nonnegative().default(50_000),
+  })
+  .default({});
+
+// Added 2026-05-18 (FORGE-105) — declared per SPEC §Settings schema for
+// adopter forward-compat. Consumers land with the /update-spec skill (separate
+// ticket); no code in this PR reads decisions.* yet.
+const DecisionsSchema = z
+  .object({
+    decision_dir: z.string().default('./spec/decisions'),
+    stale_draft_threshold_days: z.number().int().positive().default(7),
+  })
+  .default({});
+
+// Added 2026-05-18 (FORGE-105) — declared per SPEC §Settings schema for
+// adopter forward-compat. Consumer lands with the `forge doctor` verb
+// (separate ticket); no code in this PR reads doctor.* yet.
+const DoctorSchema = z
+  .object({
+    spec_code_check_enabled: z.boolean().default(true),
+  })
+  .default({});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -140,6 +172,9 @@ export const SettingsSchema = z.object({
   secrets: SecretsSchema,
   agents: AgentsSchema,
   design: DesignSchema,
+  codex: CodexSchema,
+  decisions: DecisionsSchema,
+  doctor: DoctorSchema,
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

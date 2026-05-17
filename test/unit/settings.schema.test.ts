@@ -394,5 +394,127 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
     design: {
       mode: 'project_owned' | 'reference_external';
     };
+    codex: {
+      auto_codex_enabled: boolean;
+      auto_codex_token_cap: number;
+    };
+    decisions: {
+      decision_dir: string;
+      stale_draft_threshold_days: number;
+    };
+    doctor: {
+      spec_code_check_enabled: boolean;
+    };
   };
+});
+
+// FORGE-105: codex / decisions / doctor blocks (added 2026-05-18)
+
+test('FORGE-105 — codex block: defaults expand when block omitted', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.codex.auto_codex_enabled, true);
+  assert.equal(result.data.codex.auto_codex_token_cap, 50_000);
+});
+
+test('FORGE-105 — codex block: explicit values preserved', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    codex: { auto_codex_enabled: false, auto_codex_token_cap: 0 },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.codex.auto_codex_enabled, false);
+  assert.equal(result.data.codex.auto_codex_token_cap, 0);
+});
+
+test('FORGE-105 — codex block: negative token cap rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    codex: { auto_codex_token_cap: -1 },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-105 — codex block: non-boolean enabled rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    codex: { auto_codex_enabled: 'yes' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-105 — codex block: non-integer token cap rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    codex: { auto_codex_token_cap: 1.5 },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-105 — decisions block: defaults expand when omitted', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.decisions.decision_dir, './spec/decisions');
+  assert.equal(result.data.decisions.stale_draft_threshold_days, 7);
+});
+
+test('FORGE-105 — decisions block: zero or negative threshold rejected', () => {
+  const zero = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    decisions: { stale_draft_threshold_days: 0 },
+  });
+  assert.equal(zero.success, false);
+});
+
+test('FORGE-105 — doctor block: default enabled', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.doctor.spec_code_check_enabled, true);
+});
+
+test('FORGE-105 — doctor block: override respected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    doctor: { spec_code_check_enabled: false },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.doctor.spec_code_check_enabled, false);
 });
