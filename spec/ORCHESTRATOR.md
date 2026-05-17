@@ -2,10 +2,54 @@
 
 > Drafted: 2026-05-13 (v1 — daemon design)
 > Revised: 2026-05-14 (v2 — CLI-as-control-plane + skill-as-dispatch)
-> Scope: contract for the orchestrator subsystem (Phase 2 tasks FORGE-20, FORGE-21, FORGE-31, FORGE-32, FORGE-22, FORGE-65).
-> Status: frozen reference. Every Phase 2 implementation task is built against this spec. Changes here require re-review of any unfinished task.
+> **Re-amended 2026-05-17 PM (team-mode minimum architecture — partially supersedes morning's uncommitted CLI surface rewrite)**
+> Scope: contract for the orchestrator subsystem (Phase 2 + Phase 2.5 tasks).
+> Status: amendment header below is authoritative for v0.4; body below contains uncommitted morning-redesign content that needs surgical trimming per the amendment.
 >
 > **v2 changes:** The daemon process and `execa`-based subprocess workers are deleted. Workers are now host-native subagents (Claude Code's Task tool / Codex's native subagent dispatch). State lives in a stateless CLI control plane plus durable on-disk state. See "Changes from v1" at the end for the rationale and a point-by-point mapping.
+
+## Amendment 2026-05-17 PM — team-mode minimum architecture (partial supersession of uncommitted body)
+
+This file currently has **uncommitted morning-redesign edits** (CLI surface split into read-only vs mutating bands; new verbs `claim`/`dispatch`/`heartbeat`/`question`/`answer`/`event`/`apply-decision`/`amend-roadmap`/`worktree-drift-guard`/`reconcile`/`doctor`/`status`/`phases`/`attach`/`run`; `QuestionIndex` extended with `drift_event_id` + `routing_hint`).
+
+Per [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode-minimum-architecture.md), v0.4 ships **only a subset** of those. Surgical trim required on the next pass:
+
+### Keep from the uncommitted body
+
+- The **CLI surface split** into read-only vs user-approved-mutate bands. Good architecture, retain.
+- **Read-only verbs:** `phases` (with `--ready`, `--phase implement|review|ship`), `status`, `questions`, `doctor`, `attach`, `run list`.
+- **Mutating verbs:** `claim`, `dispatch` (refuses without claim_id), `heartbeat`, `question`, `answer`, `event`, `complete`, `cancel`, `gc`, `reconcile`, `run start`.
+- The **stable JSON envelope** `{ ok, data?, error? }` on `--json`.
+
+### Remove from the uncommitted body (deferred to v0.5 opt-in)
+
+- `forge orchestrate apply-decision` verb (entire section)
+- `forge orchestrate amend-roadmap` verb (entire section)
+- `forge orchestrate worktree-drift-guard` verb (entire section)
+
+### Remove from the uncommitted body (dropped entirely)
+
+- `QuestionIndex.drift_event_id` field (the comment "Added 2026-05-17 per Codex C5 — drift routing fields" near the top of the file)
+- `QuestionIndex.routing_hint` field
+- All references to `--drift-event-id` and `--routing-hint amend-roadmap` flags on `question` verb
+- All references to `--type drift` on the `event` verb (the `event` verb stays for other types; just the drift-typed events are removed)
+- The "Note (2026-05-17 simplification)" block referencing `suggest-next`/`session-check`/`intent-detect` (already removed at decompose time; the block referencing their removal can also go now that nobody is reading the comparison).
+
+### Simplify in the uncommitted body
+
+- **Worker prompt template section** — replace the 6-level precedence rules with **authority-by-field** (SPEC owns architecture; tracker owns execution; phases.yaml is a derived snapshot with freshness display). Drop the drift event/question protocol. Add: on resume, the dispatch skill emits an informational `SPEC changed since claim — N commits` block; the worker proceeds regardless.
+- **Doctor section** — scope down to SPEC↔code reference checks only. Drop ADR-drafts scope. Drop apply-journal scope.
+- **Reconcile section** — bidirectional but no conflict-resolution UI (team handles via git/tracker normally). Diff preview only.
+- **`/forge orchestrate` dispatch skill section** — keep the present → approve → claim flow. Add the SPEC-diff-since-claim notification at worker-resume time.
+
+### Add to the body (new)
+
+- `phases.yaml` carries a `source:` block (tracker, project_id, synced_at, tracker_revision, spec_revision). Every CLI verb that reads `phases.yaml` prints a freshness summary line. Reference the schema in `spec/SPEC.md` §`phases.yaml is a derived snapshot`.
+- Claim record gains a `spec_revision` field stamped at claim time. Dispatch skill computes commits-since-claim-against-spec/ on resume and emits informational block.
+
+**Process note:** the surgical trim above is itself a P2.5 task (P2.5-T05 in `plans/phases.yaml`, refactoring FORGE-20). It is NOT done in this amendment — the amendment just freezes the trim plan so the body can be safely committed in its current uncommitted shape (or partially reverted via `git restore -p`) without losing the intent.
+
+---
 
 ## Purpose
 
@@ -73,6 +117,9 @@ type QuestionIndex = {
       decision_key: string;
       created_at: string;
       resolved_at: string | null;
+      // Added 2026-05-17 per Codex C5 — drift routing fields
+      drift_event_id?: string;
+      routing_hint?: 'amend-roadmap';  // 'apply-decision' was originally here, removed for ephemeral ADRs (use --draft + --apply directly)
     };
   };
 };
@@ -80,31 +127,144 @@ type QuestionIndex = {
 
 The index is written atomically on every `forge orchestrate question` and `answer`. If the index is corrupted or out-of-sync (detectable via the global event log on next gc pass), it is fully rebuilt from the task tree — the canonical store is per-task; the index is derivable.
 
-## CLI surface
+## CLI surface (rewritten 2026-05-17, simplified — read-only / mutate split per "suggest-don't-force")
 
-The `forge orchestrate` command tree is the entire public surface of the control plane. Every state mutation flows through one of these verbs. Every command is idempotent and validates inputs with zod before touching disk or tracker.
+The `forge orchestrate` command tree is the entire public surface of the control plane. **Verbs are classified into two strictly-separated bands:**
+
+- **Read-only verbs** never acquire leases, never mutate tracker, never write task state.
+- **User-approved mutating verbs** require explicit user approval per invocation, either at the verb call (e.g., `claim` is only called after the user picked a task from `phases --ready` output) or implicitly via the invoking skill having gathered approval (e.g., `apply-decision` is only called by `/update-spec --apply` skill which has user diff-review confirmation).
+
+Every command is idempotent within its band, validates inputs with zod before touching disk or tracker, and returns a stable JSON envelope on `--json`: `{ ok: boolean, data?: ..., error?: { code, message, retriable } }`.
+
+**Note (2026-05-17 simplification):** Feature 7's `suggest-next`, `session-check`, `intent-detect` verbs and the deprecated `next` alias were ALL dropped. Use cases:
+- Listing ready tasks → `forge orchestrate phases --ready` (already existed, now extended with `--phase implement|review|ship`)
+- Session re-grounding → `forge orchestrate status` (already existed) or the `/status-check` skill (FORGE-90)
+- "I had an idea" intent → user explicitly invokes `/amend-roadmap` (no automatic detection)
+
+### Read-only verbs
 
 ```
-forge orchestrate next [--limit N]                                  # claim & return ready tasks
-forge orchestrate dispatch <task-id> --run <run-id>                 # register a new worker attempt
-forge orchestrate heartbeat <task-id> --attempt <attempt-id>        # renew lease
+forge orchestrate doctor [--scope spec-code|adr-drafts|apply-journal|all] [--json]
+    # Read-only drift diagnostics per SPEC §Precedence rules (simplified for ephemeral ADRs).
+    # Scopes: spec-code (SPEC symbols not in src/), adr-drafts (stale drafts), apply-journal (pending journals).
+    # Exit codes: 0 clean, 1 warnings, 2 drift detected.
+
+forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]
+    # Snapshot of task state(s). Also used for session re-grounding.
+
+forge orchestrate questions [--open] [--run <run-id>] [--json]
+    # List questions.
+
+forge orchestrate phases [--ready] [--phase implement|review|ship] \
+    [--blocked-by <task-id>] [--limit N] [--run <run-id>] [--json]
+    # Read-only graph state inspection. With --ready, returns tasks ready for the given phase
+    # (deps shipped + merged + no worktree overlap for implement). Used by the dispatch skill to
+    # present options to the user before user-approved claim+dispatch.
+
+forge orchestrate attach --run <run-id> [--type <event-types>] [--json]
+    # Tail .forge/orchestrator/runs/<run-id>/notifications.jsonl. Read-only (consumer side).
+```
+
+### User-approved mutating verbs
+
+```
+forge orchestrate claim <task-id> --run <run-id> [--json]
+    # (Renamed from the mutating half of `next`.) Atomically claims task via tracker CAS + local lease.
+    # Refuses if task is not in `unclaimed` state or lease is held by another active claim.
+    # Returns claim_id (UUIDv7) on success. Caller (skill) MUST have user approval per Flow 2.
+
+forge orchestrate dispatch <task-id> --claim <claim-id> --run <run-id> \
+    --worktree <path> [--phase implement|review|ship] [--json]
+    # Register a new worker attempt. REFUSES without a valid claim_id from a prior `claim` call.
+    # --phase defaults to implement on first dispatch; review/ship continue under the original IMPLEMENT claim.
+
+forge orchestrate heartbeat <task-id> --attempt <attempt-id> [--json]
+    # Renew lease. Returns LEASE_STOLEN if generation has moved past the holder.
+
 forge orchestrate question <task-id> --attempt <attempt-id> \
-    --decision-key <key> --question <text> [--options-file <path>]  # write a question
-forge orchestrate answer <question-id> --answer <text>              # supervisor answers a question
+    --decision-key <key> --question <text> [--options-file <path>] \
+    [--drift-event-id <id>] [--routing-hint apply-decision|amend-roadmap] [--json]
+    # Worker writes a question. --drift-event-id + --routing-hint added 2026-05-17 for §Precedence rules
+    # integration: when a worker emits a drift event before writing the question, link them so the
+    # supervisor's dispatch skill can suggest the right routing skill (/update-spec --apply or /amend-roadmap).
+
+forge orchestrate answer <question-id> --answer <text> [--json]
+    # Supervisor answers a question.
+
 forge orchestrate event <task-id> --attempt <attempt-id> \
-    --type <event-type> [--data <json>]                             # append to attempt event log
+    --type <event-type> [--data <json>] [--json]
+    # Append to attempt event log. event-type includes drift (added 2026-05-17 per §Precedence rules).
+
 forge orchestrate complete <task-id> --attempt <attempt-id> \
-    --verdict-file <path>                                           # finalize an attempt
-forge orchestrate cancel <task-id> [--reason <text>]                # cancel + flag cleanup
-forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]  # snapshot
-forge orchestrate questions [--open] [--run <run-id>] [--json]      # list questions
-forge orchestrate gc [--dry-run] [--run <run-id>]                   # reconciliation pass
-forge orchestrate phases [--ready] [--blocked-by <task-id>] [--json]  # graph state
-forge orchestrate run start [--name <text>]                         # start a new run
-forge orchestrate run list [--active]                               # list runs
+    --verdict-file <path> [--phase implement|review|ship] [--json]
+    # Finalize an attempt. CLI re-verifies tests, lint, diff stats independently before accepting.
+
+forge orchestrate cancel <task-id> [--reason <text>] [--json]
+    # Cancel + flag cleanup. Marks current attempt cancelled, releases lease, preserves worktree.
+
+forge orchestrate gc [--dry-run] [--run <run-id>] [--json]
+    # Reconciliation pass per gc divergence table.
+
+forge orchestrate run start [--name <text>] [--json]
+    # Start a new orchestrator run. Allowed because invocation of /forge orchestrate constitutes
+    # user approval to begin a run; subsequent task-level approvals still required for each claim.
+
+forge orchestrate run list [--active] [--json]
 ```
 
-Every command returns a stable JSON envelope on `--json` for skill consumption: `{ ok: boolean, data?: ..., error?: { code, message, retriable } }`. Plain output is human-formatted via chalk for direct terminal use.
+### Closed-loop workflow control verbs (added 2026-05-17, simplified for ephemeral ADRs)
+
+```
+forge orchestrate apply-decision --adr <slug> [--yes-all] [--resume] [--dry-run] [--json]
+    # CLI verb wrapping /update-spec --apply skill's mutations.
+    # Propagate accepted ephemeral ADR to SPEC + PRD § + phases.yaml task amendments + tracker issue body updates.
+    # Refuses if ADR frontmatter status != "accepted". Shows diff per artifact; user confirms each unless --yes-all.
+    # Writes journal at .forge/orchestrator/global/update-spec-apply-journal/<slug>.json before each mutation
+    # so --resume can recover from partial tracker failures (Codex C2).
+    # On full success: writes ADR content (Context + Decision + Alternatives + Consequences) to commit message body,
+    # DELETES spec/decisions/<slug>.md, archives journal under .../completed/, invokes worktree-drift-guard.
+
+forge orchestrate amend-roadmap [--from-file <yaml>] [--task-id <id>] \
+    [--title <text>] [--depends-on <ids>] [--owner-type <type>] [--json]
+    # Mid-flight new-task creation. Writes to phases.yaml AND pushes to tracker atomically (local rollback
+    # on tracker failure; resumable journal under .forge/orchestrator/global/amend-journal/).
+
+forge orchestrate reconcile {--pull|--push} [--task <task-id>] [--dry-run] [--json]
+    # Bi-directional phases.yaml ↔ tracker sync.
+    # --pull: tracker → phases.yaml (detects new issues, status changes); conflict prompts user.
+    # --push: phases.yaml → tracker (mirrors local canonical state).
+
+forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-run] [--json]
+    # Invoked by /update-spec --apply and /amend-roadmap to proactively flag active worktrees whose task
+    # depends on a SPEC section being mutated. Writes drift events + questions into worker channels.
+    # Targets worktrees in states: running, blocked_on_question, awaiting_respawn, ready_for_review (Codex I3).
+    # --dry-run returns affected list without writing events (Codex I1).
+```
+
+### Verb classification table
+
+| Verb | Band | User approval source |
+|---|---|---|
+| `doctor` | read | n/a |
+| `status` | read | n/a |
+| `questions` | read | n/a |
+| `phases` | read | n/a |
+| `attach` | read | n/a |
+| `run list` | read | n/a |
+| `claim` | mutate | Per-task: user picked from `phases --ready` output |
+| `dispatch` | mutate | Inherits from prior `claim` |
+| `heartbeat` | mutate | Inherits from prior `dispatch` |
+| `question` | mutate | Worker has dispatch grant |
+| `answer` | mutate | Supervisor explicit |
+| `event` | mutate | Worker has dispatch grant |
+| `complete` | mutate | Worker has dispatch grant |
+| `cancel` | mutate | Supervisor explicit |
+| `gc` | mutate | Supervisor explicit OR auto-gc opt-in |
+| `run start` | mutate | Invocation of `/forge orchestrate` = approval |
+| `apply-decision` | mutate | `/update-spec --apply` skill diff-review |
+| `amend-roadmap` | mutate | `/amend-roadmap` skill prompt confirmation |
+| `reconcile` | mutate | Per-task diff confirmation |
+| `worktree-drift-guard` | mutate | Inherited from parent `/update-spec --apply` or `/amend-roadmap` |
 
 ## State machine
 
@@ -230,7 +390,7 @@ Stored at `.forge/orchestrator/tasks/<task_id>/lease.json`. Atomic write via tmp
 
 ### Steal-after-expiry
 
-`forge orchestrate next` is the only operation that can steal an expired lease:
+`forge orchestrate claim` is the only operation that can steal an expired lease:
 
 1. Read existing lease record (if any).
 2. If `now > expires_at + steal_grace_ms`: increment `generation`, write a new lease atomically (tmp+link with new `claim_id`). Old `generation` is now fenced.
@@ -433,7 +593,7 @@ gc plan (no changes will be made):
 
 ### Auto-gc
 
-A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate next` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
+A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate phases --ready` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
 
 ## Worker prompt template
 
@@ -456,6 +616,42 @@ Acceptance criteria:
 
 Conventions:
 <contents of project's CLAUDE.md / AGENTS.md>
+
+# Artifact precedence (binding contract — added 2026-05-17, simplified)
+
+When two artifacts disagree about what this task should do, follow this order:
+
+1. **Current user instruction** (from supervisor session via `answer` to your question) — highest
+2. **spec/SPEC.md** (sole architectural source of truth; ephemeral ADRs propagate here at apply time)
+3. **spec/PRD.md**
+4. **plans/phases.yaml task body** (your acceptance criteria above)
+5. **Tracker issue body** (your task description above — projection of phases.yaml)
+6. **Older attempt notes** (your save-points / prior verdicts) — lowest
+
+Note: ADRs are NOT in this chain. If an ADR is currently being drafted in `spec/decisions/`, it has NO authority — it's a proposal under review. Once `/update-spec --apply` runs, SPEC reflects the change and the ADR is deleted.
+
+## When you detect drift (lower disagrees with higher)
+
+DO NOT silently fix the discrepancy. Instead:
+
+1. Emit a drift event:
+   ```
+   forge orchestrate event <TASK_ID> --attempt <ATTEMPT_ID> --type drift \
+     --data '{"from_artifact": "phases", "to_artifact": "spec", "from_ref": "<ref>", "to_ref": "spec/SPEC.md#<section>", "detail": "<one-line>"}'
+   ```
+2. Write a question with the drift event linked:
+   ```
+   forge orchestrate question <TASK_ID> --attempt <ATTEMPT_ID> \
+     --decision-key "drift:<from_artifact>-vs-<to_artifact>:<short-slug>:<content-hash>" \
+     --question "<one-paragraph: what contradicts what; what you'd do per each artifact; recommended routing>" \
+     --drift-event-id <event_id> [--routing-hint amend-roadmap]
+   ```
+   Set `--routing-hint amend-roadmap` when the contradiction is about scope/new work (supervisor formalizes via /amend-roadmap).
+   Omit `--routing-hint` for architectural drift between SPEC/PRD/phases (supervisor uses `/update-spec --draft` + `--apply` to formalize a SPEC change, or answers the question directly to update lower-precedence artifacts).
+   `<content-hash>` is a short hash of the contradicting content to dedupe distinct drift cases that share a slug (Codex C5).
+3. Pause: return to parent with "Blocked on question <ID>: drift between <X> and <Y>".
+
+The supervisor's dispatch skill will surface the question with the routing-hint, then formally resolve via the appropriate workflow-control skill.
 
 Working directory rules (CLAUDE-SPECIFIC — Codex workers skip this section):
 - All Bash commands must be prefixed with `cd <WORKTREE> && `
@@ -581,7 +777,7 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 
 ### Phase 1 — IMPLEMENT (primary host)
 
-- Dispatch skill calls `forge orchestrate next` to get a ready task.
+- Dispatch skill calls `forge orchestrate phases --ready` (read-only) to surface ready tasks for user approval, then `forge orchestrate claim` once user picks.
 - Dispatch skill creates worktree at `.forge/worktrees/<sanitized-task-id>` via `git worktree add` (idempotent: skip if exists).
 - Dispatch skill calls `forge orchestrate dispatch` to register the attempt.
 - Subagent runs with worker prompt + task context.
@@ -592,7 +788,7 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 
 > **Cross-host direction restricted in v0.3.0.** Only `primary=Claude, review=Codex` is supported. The reverse (`primary=Codex, review=Claude`) requires spawning `claude -p` from a Codex session, which lands in Anthropic's Agent SDK quota and violates the v2 subscription-only invariant. The Codex direction is safe because OpenAI does NOT have an equivalent Agent-SDK-vs-interactive billing split — `codex exec` invoked from a Claude session bills against the user's ChatGPT Plus subscription identically to interactive Codex usage. The reverse direction unlocks in v0.3.1 alongside skill portability and proper MCP-based host bridging.
 
-- Dispatch skill detects `ready_for_review` tasks via `forge orchestrate next --phase review`.
+- Dispatch skill detects `ready_for_review` tasks via `forge orchestrate phases --ready --phase review` (read-only listing within already-approved IMPLEMENT scope).
 - Dispatch skill spawns a Codex subagent when primary is Claude (only supported direction in v0.3.0), with a review prompt that includes the worktree diff. Implementation: skill calls `codex exec --cd <worktree> --sandbox read-only` via Bash with the review prompt. This is subprocess dispatch in shape but subscription-billed in substance.
 - Review subagent reads `git diff <base>...HEAD`, runs the host's `/review` skill, writes `review_verdict.json` to the same attempt directory.
 - Review verdict schema:
@@ -628,10 +824,10 @@ Rationale (chosen over stacked PRs):
 - Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
 - Eliminates rebase churn that stacked PRs require when an upstream PR is amended during review.
 - Each PR is reviewable in isolation against `main`.
-- Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate next` tick).
+- Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate phases --ready` tick).
 
 Concretely:
-- `forge orchestrate next` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
+- `forge orchestrate phases --ready` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
 - A task whose dependency is `reviewed` but PR not yet merged is **not ready** — it waits.
 - If a dependency PR is closed without merge: task moves to `blocked`.
 
@@ -655,7 +851,7 @@ phases:
         # ... existing fields
 ```
 
-`write_globs` is optional. When present, `forge orchestrate next` performs an **overlap check** before dispatching parallel tasks:
+`write_globs` is optional. When present, `forge orchestrate phases --ready` performs an **overlap check** before recommending parallel tasks (overlap detection is read-only; ranking surfaces non-overlapping tasks higher):
 
 | Overlap class | Behavior |
 |---|---|
@@ -763,7 +959,7 @@ This is documented honestly: **forge is workflow tooling, not a security sandbox
 
 Multiple supervisor sessions ("mains") can run concurrently against the same forge project. Each has its own `run_id`. Coordination is fully mediated by the local lease + tracker:
 
-1. **Discovery.** Each main runs `forge orchestrate next`. The CLI:
+1. **Discovery.** Each main runs `forge orchestrate phases --ready` (read-only) → user picks → `forge orchestrate claim`. The CLI's `claim` verb:
    - Reads `phases.yaml` (graph hasn't changed).
    - Computes ready set (tasks with all `depends_on` shipped, no overlap conflict with active tasks).
    - For each candidate, attempts atomic claim against the tracker.
@@ -771,13 +967,71 @@ Multiple supervisor sessions ("mains") can run concurrently against the same for
 
 2. **Working window.** Once claimed, the lease is the ownership truth. Other mains see the lease and skip the task.
 
-3. **Race resolution.** Two mains hitting `forge orchestrate next` within the same tracker-claim window may both write a tentative claim. The slower writer detects the conflict on re-fetch and releases. Worst case: both successfully write a claim to different tracker fields simultaneously (e.g., GitHub doesn't reject the second label-add); race-loss detection on re-fetch resolves: only one keeps its claim, the other releases.
+3. **Race resolution.** Two mains hitting `forge orchestrate claim` within the same tracker-claim window may both write a tentative claim. The slower writer detects the conflict on re-fetch and releases. Worst case: both successfully write a claim to different tracker fields simultaneously (e.g., GitHub doesn't reject the second label-add); race-loss detection on re-fetch resolves: only one keeps its claim, the other releases.
 
 4. **Cross-main visibility.** Any main can run `forge orchestrate status` and see all active runs, leases, and attempts across the project. The CLI reads task-keyed state under `.forge/orchestrator/tasks/`.
 
 5. **Cleanup on main exit.** When a main's session ends, its run is marked `quiesced`. Active leases owned by that run continue to heartbeat from any active subagent worker. When the lease TTL elapses without a heartbeat, the lease becomes steal-eligible. Another main can pick up the task; the worktree's git state is the continuity.
 
 The dependency graph plus the tracker plus the lease combine to give: **at most one worker per task at any moment**, with eventual recovery from any main / worker / tracker failure.
+
+## ADR integration (added 2026-05-17, simplified for ephemeral ADRs)
+
+Per SPEC §ADR layer and §Precedence rules, the orchestrator integrates with ephemeral ADRs in two places (worker hydration was REMOVED 2026-05-17 because ADRs are now ephemeral and SPEC reflects all accepted decisions).
+
+Workers no longer hydrate ADRs into their prompt. ADRs are ephemeral — once `/update-spec --apply` runs, the ADR is deleted and the change lives in SPEC. Workers read `spec/SPEC.md` for current architecture. No "Active ADRs" prompt block.
+
+### 1. Drift detection (worker runtime)
+
+When a worker reading SPEC, PRD, phases.yaml, or tracker body finds content that contradicts a higher-precedence artifact per §Precedence rules, it MUST emit a drift event + question rather than silently fix. See "Worker prompt template" above for the exact protocol. Drift events are typed:
+
+```ts
+type DriftEventData = {
+  from_artifact: ArtifactKind;  // 'user' | 'spec' | 'prd' | 'phases' | 'tracker' | 'attempt'
+  to_artifact: ArtifactKind;
+  from_ref: string;
+  to_ref: string;
+  detail: string;
+};
+```
+
+Note: `'adr'` is NOT in `ArtifactKind` because ephemeral ADRs are not durable artifacts — by the time a worker runs, an accepted ADR has already been propagated to SPEC (and the ADR file deleted). Drift is between SPEC/PRD/phases/tracker, not between ADR and anything.
+
+Events written to `.forge/orchestrator/tasks/<task_id>/attempts/<attempt_id>/events.jsonl` (worker-emitted) and `.forge/orchestrator/global/drift-events.jsonl` (doctor/update-spec-apply/reconcile-emitted).
+
+### 2. Proactive worktree drift guard (`/update-spec --apply` and `/amend-roadmap` runtime)
+
+When the supervisor invokes `/update-spec --apply` or `/amend-roadmap` (mid-flight artifact mutations), the skill calls:
+
+```
+forge orchestrate worktree-drift-guard --adr <slug> [--dry-run] --json
+```
+
+The guard:
+
+1. Reads the ADR's frontmatter (`affected_spec_sections`, `affected_prd_sections`, `affected_phases_tasks`, `affected_tasks`) — for `/amend-roadmap`, reads the new-task descriptor
+2. Iterates active worktrees: queries `.forge/orchestrator/tasks/*/state.json` for tasks in `running`, `blocked_on_question`, `awaiting_respawn`, or `ready_for_review` states (Codex I3 — NOT `dispatched` or terminal)
+3. For each affected worktree (unless `--dry-run`):
+   - Writes a drift event to the worker's events.jsonl
+   - Writes a question to the worker's question channel via the existing question-write atomic helpers, with `--drift-event-id` linking to the event AND `--routing-hint amend-roadmap` (for new tasks) or no routing-hint (for SPEC mutations where worker should just answer "rebase or restart")
+4. The next worker heartbeat surfaces the question; worker pauses with `blocked_on_question`; dispatch skill polls it on next loop
+
+With `--dry-run`: returns the list of would-affect worktrees as JSON without writing events/questions. Used by the skill for preview before user confirms.
+
+This complements (does not replace) worker-side drift detection. The guard bounds discovery latency to `heartbeat_interval_ms` instead of relying on worker read patterns.
+
+### 3. Doctor checks
+
+`forge orchestrate doctor` (read-only) enforces SPEC §ADR layer doctor checks (simplified for ephemeral model): stale draft warning, pending apply-journal warning, SPEC↔code drift. NO SPEC↔ADR check (ADRs are ephemeral so there's never a drift between an "accepted ADR" and SPEC — the apply skill deletes the ADR when SPEC is updated).
+
+### Files the orchestrator does NOT own
+
+- `spec/decisions/*.md` — ADR draft files are user-owned (drafted via `/update-spec --draft`, accepted by user editing frontmatter, applied + deleted via `/update-spec --apply`). Orchestrator reads them only via `apply-decision` CLI verb invoked by the skill.
+- `templates/adr.template.md` — owned by the forge framework templates.
+- `spec/PRD.md`, `spec/SPEC.md`, `plans/phases.yaml` — `/update-spec --apply` skill (via `apply-decision` verb) mutates these with diff preview + user confirm.
+- `.forge/orchestrator/global/update-spec-apply-journal/*.json` — owned by the `apply-decision` verb; written before each artifact mutation, archived under `completed/` after successful full propagation.
+
+---
 
 ## Settings (extended schema)
 
