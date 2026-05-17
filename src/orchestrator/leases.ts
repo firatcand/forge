@@ -48,6 +48,10 @@ import {
 } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
 import { TaskStateSchema, type TaskStateRecord } from '../schemas/task-state.ts';
+import {
+  computeSpecRevisionSync,
+  type SpecRevisionResult,
+} from './spec-diff.ts';
 
 // Test seam — same pattern as writer.ts.
 export const __leasesFsForTesting = {
@@ -460,11 +464,20 @@ export interface AcquireOptions {
   taskId: string;
   runId: string;
   leaseTtlMs?: number;
+  // Pre-computed SPEC revision marker. If omitted, computeSpecRevisionSync()
+  // is invoked against `repoRoot` (defaulting to dirname(forgeDir), since by
+  // convention forgeDir is "<root>/.forge"). Provide explicitly when the caller
+  // already computed the revision asynchronously, or for deterministic tests.
+  specRevision?: SpecRevisionResult;
+  repoRoot?: string;
 }
 
 export function acquire(opts: AcquireOptions): Lease {
   const { forgeDir, runId, leaseTtlMs = LEASE_TTL_MS_DEFAULT } = opts;
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
+  const repoRoot = opts.repoRoot ?? dirname(forgeDir);
+  const specRevision =
+    opts.specRevision ?? computeSpecRevisionSync(repoRoot);
 
   const targetPath = leaseFilePath(forgeDir, taskId);
   ensureDirectory(dirname(targetPath), taskId);
@@ -501,6 +514,7 @@ export function acquire(opts: AcquireOptions): Lease {
     expires_at: new Date(now + leaseTtlMs).toISOString(),
     last_heartbeat_at: new Date(now).toISOString(),
     generation: nextGeneration,
+    spec_revision: specRevision.revision,
   };
 
   // id-in-path-and-payload invariant: already equal since we derived taskId from opts.taskId
@@ -708,6 +722,9 @@ export interface StealOptions {
   leaseTtlMs?: number;
   stealGraceMs?: number;
   now?: number; // injectable for testing
+  // Pre-computed SPEC revision marker for the new claim. See AcquireOptions.specRevision.
+  specRevision?: SpecRevisionResult;
+  repoRoot?: string;
 }
 
 export function steal(opts: StealOptions): Lease {
@@ -721,18 +738,25 @@ export function steal(opts: StealOptions): Lease {
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
   const targetPath = leaseFilePath(forgeDir, taskId);
   const now = nowOverride ?? Date.now();
+  const repoRoot = opts.repoRoot ?? dirname(forgeDir);
+  const specRevision =
+    opts.specRevision ?? computeSpecRevisionSync(repoRoot);
 
   ensureDirectory(dirname(targetPath), taskId);
 
   const existing = readLeaseFile(taskId, targetPath);
 
   if (existing === null) {
-    // No existing lease — proceed as normal acquire.
+    // No existing lease — proceed as normal acquire. Forward the resolved
+    // specRevision so the steal-as-acquire path doesn't recompute (and so
+    // tests passing a sentinel via steal() see the same value on the lease).
     return acquire({
       forgeDir,
       taskId,
       runId,
       leaseTtlMs,
+      specRevision,
+      repoRoot,
     });
   }
 
@@ -763,6 +787,7 @@ export function steal(opts: StealOptions): Lease {
     expires_at: new Date(now + leaseTtlMs).toISOString(),
     last_heartbeat_at: new Date(now).toISOString(),
     generation: newGeneration,
+    spec_revision: specRevision.revision,
   };
 
   const validation = LeaseSchema.safeParse(newLease);

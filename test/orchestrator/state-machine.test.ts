@@ -49,6 +49,7 @@ function makeLease(
     expires_at: new Date(Date.now() + 1_800_000).toISOString(),
     last_heartbeat_at: new Date().toISOString(),
     generation: 0,
+    spec_revision: 'digest:empty',
     ...overrides,
   };
   writeFileSync(leaseFilePath(forgeDir, taskId), JSON.stringify(lease));

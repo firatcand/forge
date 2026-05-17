@@ -13,7 +13,7 @@ import {
 } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
 import { leaseFilePath, claimHistoryFilePath } from '../../src/orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../src/schemas/lease.ts';
+import { LeaseSchema, STEAL_GRACE_MS_DEFAULT } from '../../src/schemas/lease.ts';
 
 let tmpDir: string;
 
@@ -571,4 +571,77 @@ test('leases: heartbeat verify-after-write detects mismatched run_id and throws 
     __leasesFsForTesting.readFileSync = realReadFileSync;
     __leasesFsForTesting.unlinkSync = realUnlinkSync;
   }
+});
+
+// ---- spec_revision stamping (FORGE-114 / P2.5-T18) ----
+
+test('leases: acquire stamps the supplied spec_revision', () => {
+  const fd = forgeDir('acq-spec-rev');
+  const lease = acquire({
+    forgeDir: fd,
+    taskId: 'TASK-SR1',
+    runId: 'run-001',
+    specRevision: { revision: 'git:abc1234567890abcdef1234567890abcdef12345', source: 'git' },
+  });
+  assert.equal(lease.spec_revision, 'git:abc1234567890abcdef1234567890abcdef12345');
+});
+
+test('leases: acquire persisted lease.json round-trips with spec_revision', () => {
+  const fd = forgeDir('acq-spec-rev-disk');
+  acquire({
+    forgeDir: fd,
+    taskId: 'TASK-SR2',
+    runId: 'run-001',
+    specRevision: { revision: 'digest:0123456789abcdef', source: 'digest' },
+  });
+  const raw = readFileSync(leaseFilePath(fd, 'TASK-SR2'), 'utf8');
+  const parsed = LeaseSchema.parse(JSON.parse(raw));
+  assert.equal(parsed.spec_revision, 'digest:0123456789abcdef');
+});
+
+test('leases: acquire without specRevision falls back to computed value', () => {
+  const fd = forgeDir('acq-spec-rev-default');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-SR3', runId: 'run-001' });
+  // tmpDir is not a git repo and has no spec/ → expect digest:empty
+  assert.equal(lease.spec_revision, 'digest:empty');
+});
+
+test('leases: heartbeat preserves spec_revision', () => {
+  const fd = forgeDir('hb-spec-rev');
+  const lease = acquire({
+    forgeDir: fd,
+    taskId: 'TASK-HBR',
+    runId: 'run-001',
+    specRevision: { revision: 'git:1111111111111111111111111111111111111111', source: 'git' },
+  });
+  const after = heartbeat({
+    forgeDir: fd,
+    taskId: 'TASK-HBR',
+    caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+  });
+  assert.equal(after.spec_revision, 'git:1111111111111111111111111111111111111111');
+});
+
+test('leases: steal re-stamps spec_revision (new claim = new revision)', () => {
+  const fd = forgeDir('steal-spec-rev');
+  const original = acquire({
+    forgeDir: fd,
+    taskId: 'TASK-STR',
+    runId: 'run-old',
+    leaseTtlMs: 1_000,
+    specRevision: { revision: 'git:2222222222222222222222222222222222222222', source: 'git' },
+  });
+  // Force expiry + grace by advancing the clock via the `now` option.
+  const future = Date.now() + 1_000 + STEAL_GRACE_MS_DEFAULT + 1_000;
+  const stolen = steal({
+    forgeDir: fd,
+    taskId: 'TASK-STR',
+    runId: 'run-new',
+    leaseTtlMs: 1_000,
+    now: future,
+    specRevision: { revision: 'git:3333333333333333333333333333333333333333', source: 'git' },
+  });
+  assert.equal(original.spec_revision, 'git:2222222222222222222222222222222222222222');
+  assert.equal(stolen.spec_revision, 'git:3333333333333333333333333333333333333333');
+  assert.equal(stolen.generation, original.generation + 1);
 });
