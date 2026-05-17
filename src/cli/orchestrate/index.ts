@@ -14,6 +14,10 @@ import { runOrchestrateQuestions } from './questions.ts';
 import { runOrchestrateSpecDiff } from './spec-diff.ts';
 import { runOrchestrateStatus } from './status.ts';
 import { parseFlag, firstPositional } from './flags.ts';
+import { phasesHandler } from './phases.ts';
+import { doctorHandler } from './doctor.ts';
+import { runStartHandler } from './run-start.ts';
+import { runListHandler } from './run-list.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -124,21 +128,22 @@ const specDiffHandler: VerbHandler = {
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
-export const VERBS: VerbRegistry = new Map([
-  // Read-only band (existing).
+export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, VerbHandler>>([
+  // Read-only band.
+  ['phases', phasesHandler],
+  ['doctor', doctorHandler],
   ['questions', questionsHandler],
   ['status', statusHandler],
   ['attach', attachHandler],
   ['spec-diff', specDiffHandler],
-  // Mutating band (existing).
+  ['run', new Map<string, VerbHandler>([
+    ['start', runStartHandler],
+    ['list', runListHandler],
+  ])],
+  // Mutating band.
   ['answer', answerHandler],
   ['gc', gcHandler],
-  // New verbs registered by their own modules in later steps:
-  // ['phases', phasesHandler], ['doctor', doctorHandler],
-  // ['claim', claimHandler], ['dispatch', dispatchHandler],
-  // ['heartbeat', heartbeatHandler], ['question', questionWriteHandler],
-  // ['event', eventHandler], ['complete', completeHandler], ['cancel', cancelHandler],
-  // ['run', new Map([['start', runStartHandler], ['list', runListHandler]])],
+  // claim/dispatch/heartbeat/question/event/complete/cancel land in Steps 4 + 5.
 ]);
 
 // Order used for --help rendering. Read-only first, then mutating, then nested.

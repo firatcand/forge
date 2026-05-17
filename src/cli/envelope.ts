@@ -21,8 +21,14 @@ export const ErrorEnvelopeSchema = z.object({
   details: z.record(z.unknown()).optional(),
 });
 
+// z.unknown() silently accepts `undefined`, which would let a malformed
+// `{ ok: true }` (no data) sneak through. Require `data` to be defined.
+const RequiredUnknown = z.unknown().refine((v) => v !== undefined, {
+  message: 'data is required',
+});
+
 export const EnvelopeSchema = z.discriminatedUnion('ok', [
-  z.object({ ok: z.literal(true), data: z.unknown() }),
+  z.object({ ok: z.literal(true), data: RequiredUnknown }),
   z.object({ ok: z.literal(false), error: ErrorEnvelopeSchema }),
 ]);
 

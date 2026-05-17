@@ -26,6 +26,12 @@ export const ESTIMATES = ['S', 'M', 'L', 'XL'] as const;
 
 export const PHASE_STATUSES = ['active', 'blocked', 'done'] as const;
 
+// Per-task lifecycle status overlay used by the orchestrator to filter
+// phases --ready and by reconciliation to keep phases.yaml ↔ tracker aligned.
+// 'active' is implicit when omitted; the explicit forms are how phases.yaml
+// records deferral / drop / completion at the task level.
+export const TASK_STATUSES = ['active', 'paused', 'done', 'deferred-v0.5', 'dropped'] as const;
+
 export const TaskSchema = z.object({
   id: z.string().regex(/^P\d+-T\d+[a-z]?$/),
   tracker_issue_id: z.string().optional(),
@@ -38,6 +44,17 @@ export const TaskSchema = z.object({
   owner_type: z.enum(OWNER_TYPES),
   acceptance: z.array(z.string().min(1)).min(1),
   split_into: z.array(z.string().min(1)).optional(),
+  // Optional lifecycle overlay (default = 'active' if absent).
+  status: z.enum(TASK_STATUSES).optional(),
+  // Optional file-glob declaration consumed by src/orchestrator/overlap.ts to
+  // classify candidate-vs-active overlap when phases --ready surfaces tasks.
+  write_globs: z.array(z.string().min(1)).optional(),
+  // Free-form metadata used by phases.yaml today; kept loose so the loader
+  // doesn't reject the production file.
+  deferred_at: z.string().optional(),
+  deferred_reason: z.string().optional(),
+  dropped_at: z.string().optional(),
+  dropped_reason: z.string().optional(),
 });
 
 export const PhaseSchema = z.object({
@@ -172,3 +189,4 @@ export type Priority = (typeof PRIORITIES)[number];
 export type TaskType = (typeof TASK_TYPES)[number];
 export type Estimate = (typeof ESTIMATES)[number];
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];
+export type TaskStatus = (typeof TASK_STATUSES)[number];

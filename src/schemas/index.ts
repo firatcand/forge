@@ -53,6 +53,7 @@ export {
   TASK_TYPES,
   ESTIMATES,
   PHASE_STATUSES,
+  TASK_STATUSES,
 } from './phases.ts';
 export type {
   Phases,
@@ -63,6 +64,7 @@ export type {
   TaskType,
   Estimate,
   PhaseStatus,
+  TaskStatus,
 } from './phases.ts';
 
 export {
