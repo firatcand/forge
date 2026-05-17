@@ -17,6 +17,8 @@ import {
 } from './base.ts';
 import { TrackerError } from './errors.ts';
 import {
+  assertValidBodyInput,
+  parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
   type ForgeFooters,
@@ -83,6 +85,9 @@ export function runIdFromStoredLabel(stored: string): string {
 
 // Exported so callers and tests can read the in-flight ceiling.
 export const GH_LIST_LIMIT = 200;
+// GitHub Issues body field hard cap (docs: 65,536 chars / bytes — UTF-8
+// counted by GitHub as bytes per their API error responses).
+export const GH_ISSUE_BODY_MAX_BYTES = 65_536;
 
 const STATE_TO_LABEL: Readonly<Record<'in_progress' | 'in_review' | 'blocked', string>> = {
   in_progress: 'state:in-progress',
@@ -812,6 +817,82 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       ]);
     } catch (err) {
       throw this.normalizeError('setBlockedBy', err, classifyGitHubError(err));
+    }
+  }
+
+  // ─── updateIssueBody — body-footer rewrite (FORGE-94) ──────────────────────
+  //
+  // Replaces issue body wholesale while preserving forge:task + forge:blockedBy
+  // footers. Mirror of setBlockedBy's view-parse-edit loop, except the *body*
+  // is the input and *blockerIds* are read-through.
+  async updateIssueBody(issueId: string, body: string): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    assertValidBodyInput(body, GH_ISSUE_BODY_MAX_BYTES);
+    const number = this.parseIssueNumber(issueId);
+
+    let viewResult: GhExecResult;
+    try {
+      viewResult = await this.gh([
+        'issue',
+        'view',
+        String(number),
+        '--repo',
+        this.repo,
+        '--json',
+        'body',
+      ]);
+    } catch (err) {
+      throw this.normalizeError(
+        'updateIssueBody',
+        err,
+        classifyGitHubError(err),
+      );
+    }
+
+    let existing: string;
+    try {
+      const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
+      existing = parsed.body ?? '';
+    } catch (err) {
+      throw this.normalizeError('updateIssueBody', err, {
+        code: 'VALIDATION',
+        details: { reason: 'view-parse-failed' },
+      });
+    }
+
+    const { forgeTaskId, blockerIds } = parseForgeFooters(existing);
+    if (forgeTaskId === undefined) {
+      throw new TrackerError(
+        'PRECONDITION_FAILED',
+        `updateIssueBody: issue #${number} has no forge:task footer; was it created outside of forge?`,
+        { issueId, number },
+      );
+    }
+    const extraFooters = parseExtraForgeFooters(existing);
+
+    const newBody = serializeWithForgeFooters(
+      body,
+      forgeTaskId,
+      blockerIds,
+      extraFooters,
+    );
+
+    try {
+      await this.gh([
+        'issue',
+        'edit',
+        String(number),
+        '--repo',
+        this.repo,
+        '--body',
+        newBody,
+      ]);
+    } catch (err) {
+      throw this.normalizeError(
+        'updateIssueBody',
+        err,
+        classifyGitHubError(err),
+      );
     }
   }
 

@@ -22,6 +22,8 @@ export type {
 } from './base.ts';
 
 export {
+  assertValidBodyInput,
+  parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
 } from './footers.ts';

@@ -14,6 +14,8 @@ import {
   type GhExecResult,
   type Logger,
 } from '../../../src/trackers/index.ts';
+import { assertValidBodyInput } from '../../../src/trackers/footers.ts';
+import { GH_ISSUE_BODY_MAX_BYTES } from '../../../src/trackers/github.ts';
 import type { GithubTrackerConfig } from '../../../src/schemas/settings.ts';
 import {
   ghIssueListOpen,
@@ -724,6 +726,148 @@ test('setBlockedBy PRECONDITION_FAILED when no forge:task footer', async () => {
     (err: unknown) =>
       err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
   );
+});
+
+// ─── assertValidBodyInput (shared helper, exercised via GitHub for convenience) ─
+
+test('assertValidBodyInput accepts plain string under cap', () => {
+  assertValidBodyInput('hello world', GH_ISSUE_BODY_MAX_BYTES);
+  assertValidBodyInput('', GH_ISSUE_BODY_MAX_BYTES);
+});
+
+test('assertValidBodyInput rejects non-string with VALIDATION', () => {
+  for (const bad of [42, null, undefined, {}, [], true]) {
+    assert.throws(
+      () => assertValidBodyInput(bad as unknown, 100),
+      (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+    );
+  }
+});
+
+test('assertValidBodyInput rejects embedded forge:task footer', () => {
+  assert.throws(
+    () =>
+      assertValidBodyInput(
+        'some body\n\n<!-- forge:task=FORGE-99 -->\n',
+        GH_ISSUE_BODY_MAX_BYTES,
+      ),
+    (e: unknown) =>
+      e instanceof TrackerError &&
+      e.code === 'VALIDATION' &&
+      /forge-managed footers/.test(e.message),
+  );
+});
+
+test('assertValidBodyInput rejects embedded forge:blockedBy footer', () => {
+  assert.throws(
+    () =>
+      assertValidBodyInput(
+        'body\n<!-- forge:blockedBy=10,11 -->\n',
+        GH_ISSUE_BODY_MAX_BYTES,
+      ),
+    (e: unknown) =>
+      e instanceof TrackerError &&
+      e.code === 'VALIDATION' &&
+      /forge-managed footers/.test(e.message),
+  );
+});
+
+test('assertValidBodyInput allows non-forge HTML comments', () => {
+  assertValidBodyInput(
+    'body with <!-- TODO --> and <!-- some-tool:meta=x --> comments',
+    GH_ISSUE_BODY_MAX_BYTES,
+  );
+});
+
+test('assertValidBodyInput rejects body over provider byte cap', () => {
+  const tooBig = 'a'.repeat(GH_ISSUE_BODY_MAX_BYTES + 1);
+  assert.throws(
+    () => assertValidBodyInput(tooBig, GH_ISSUE_BODY_MAX_BYTES),
+    (e: unknown) =>
+      e instanceof TrackerError &&
+      e.code === 'VALIDATION' &&
+      /exceeds provider limit/.test(e.message),
+  );
+});
+
+test('assertValidBodyInput counts bytes (not chars) for multi-byte UTF-8', () => {
+  // '👋' is 4 bytes in UTF-8. cap=3 → 4-byte single char must reject.
+  assert.throws(
+    () => assertValidBodyInput('👋', 3),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  // cap=4 → exact-fit must pass.
+  assertValidBodyInput('👋', 4);
+});
+
+// ─── updateIssueBody (GitHub adapter) ────────────────────────────────────────
+
+test('updateIssueBody replaces body and preserves forge:task footer', async () => {
+  const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
+  await tracker.updateIssueBody('42', 'fresh body content');
+  const edit = mock.calls[1];
+  const bodyArgIdx = edit?.indexOf('--body') ?? -1;
+  const newBody = bodyArgIdx >= 0 ? (edit?.[bodyArgIdx + 1] ?? '') : '';
+  assert.match(newBody, /fresh body content/);
+  assert.match(newBody, /forge:task=FORGE-99/);
+});
+
+test('updateIssueBody preserves forge:blockedBy footer through replace', async () => {
+  // ghIssueViewBodyOnly has forge:blockedBy=10 already.
+  const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
+  await tracker.updateIssueBody('42', 'replaced');
+  const edit = mock.calls[1];
+  const newBody = edit?.[edit.indexOf('--body') + 1] ?? '';
+  assert.match(newBody, /forge:blockedBy=10/);
+});
+
+test('updateIssueBody preserves unknown forge:* footers (ownerType)', async () => {
+  const bodyWithOwnerType = {
+    body:
+      'Original body.\n\n' +
+      '<!-- forge:task=FORGE-7 -->\n' +
+      '<!-- forge:ownerType=backend-dev -->\n' +
+      '<!-- forge:blockedBy=10 -->\n',
+  };
+  const { tracker, mock } = makeTracker([ok(bodyWithOwnerType), ok()]);
+  await tracker.updateIssueBody('42', 'overwritten');
+  const edit = mock.calls[1];
+  const newBody = edit?.[edit.indexOf('--body') + 1] ?? '';
+  assert.match(newBody, /overwritten/);
+  assert.match(newBody, /forge:task=FORGE-7/);
+  assert.match(newBody, /forge:ownerType=backend-dev/);
+  assert.match(newBody, /forge:blockedBy=10/);
+});
+
+test('updateIssueBody PRECONDITION_FAILED when no forge:task footer', async () => {
+  const { tracker } = makeTracker([ok(ghIssueViewBodyMissingFooter)]);
+  await assert.rejects(
+    () => tracker.updateIssueBody('42', 'irrelevant'),
+    (e: unknown) =>
+      e instanceof TrackerError && e.code === 'PRECONDITION_FAILED',
+  );
+});
+
+test('updateIssueBody VALIDATION on non-string body (no I/O issued)', async () => {
+  const { tracker, mock } = makeTracker([]);
+  await assert.rejects(
+    () => tracker.updateIssueBody('42', 42 as unknown as string),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  assert.equal(mock.calls.length, 0, 'must reject before issuing any gh call');
+});
+
+test('updateIssueBody VALIDATION on embedded forge footer (no I/O issued)', async () => {
+  const { tracker, mock } = makeTracker([]);
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody(
+        '42',
+        'malicious\n<!-- forge:task=evil -->\n',
+      ),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  assert.equal(mock.calls.length, 0);
 });
 
 test('setBlockedBy preserves unknown forge:* footers (ownerType)', async () => {

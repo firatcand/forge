@@ -9,6 +9,8 @@ import {
 } from './base.ts';
 import { TrackerError } from './errors.ts';
 import {
+  assertValidBodyInput,
+  parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
 } from './footers.ts';
@@ -105,6 +107,11 @@ const STATE_OVERLAY_BLOCKED = 'state:blocked';
 
 export const LINEAR_LIST_LIMIT = 200;
 export const LINEAR_WORKFLOW_STATES_LIMIT = 250;
+// Linear's GraphQL `description` field is a Markdown string capped at 65,536
+// bytes (matches GitHub's body cap). Sourced from observed `description.length`
+// validation errors in the Linear GraphQL API; Linear docs are silent on the
+// exact number, so we use the conservative cross-provider cap.
+export const LINEAR_DESCRIPTION_MAX_BYTES = 65_536;
 
 // ─── Error classification (per-adapter; BaseTracker stays generic) ───────────
 //
@@ -993,6 +1000,55 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       const hint = classifyLinearError(err);
       if (hint.code === 'CONFLICT') return; // idempotent
       throw this.normalizeError('setBlockedBy', err, hint);
+    }
+  }
+
+  // ─── updateIssueBody — body-footer rewrite (FORGE-94) ──────────────────────
+  //
+  // Replaces description wholesale while preserving forge:task + forge:blockedBy
+  // footers. Mirror of setBlockedBy's read-parse-serialize-write loop, except
+  // the *body content* is the input and *blockerIds* are read-through.
+  async updateIssueBody(issueId: string, body: string): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    assertValidBodyInput(body, LINEAR_DESCRIPTION_MAX_BYTES);
+    const client = await this.getClient();
+
+    let issue: LinearIssueLike;
+    try {
+      issue = await client.issue(issueId);
+    } catch (err) {
+      throw this.normalizeError(
+        'updateIssueBody',
+        err,
+        classifyLinearError(err),
+      );
+    }
+
+    const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
+    if (forgeTaskId === undefined) {
+      throw new TrackerError(
+        'PRECONDITION_FAILED',
+        `updateIssueBody: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
+        { issueId, identifier: issue.identifier },
+      );
+    }
+    const extraFooters = parseExtraForgeFooters(issue.description);
+
+    const newDescription = serializeWithForgeFooters(
+      body,
+      forgeTaskId,
+      blockerIds,
+      extraFooters,
+    );
+
+    try {
+      await client.updateIssue(issueId, { description: newDescription });
+    } catch (err) {
+      throw this.normalizeError(
+        'updateIssueBody',
+        err,
+        classifyLinearError(err),
+      );
     }
   }
 

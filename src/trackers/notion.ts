@@ -985,6 +985,22 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     }
   }
 
+  // ─── updateIssueBody — NOT_IMPLEMENTED stub (FORGE-94 → FORGE-117) ─────────
+  //
+  // The full implementation lands in FORGE-117 as part of the NotionTracker
+  // refactor onto the `ntn` CLI transport (https://developers.notion.com/cli).
+  // Until then, /reconcile --push and /apply-decision MUST skip Notion-backed
+  // projects.
+  async updateIssueBody(_issueId: string, _body: string): Promise<void> {
+    throw new TrackerError(
+      'NOT_IMPLEMENTED',
+      `NotionTracker.updateIssueBody is not implemented in this release. ` +
+        `Tracked in FORGE-117: refactor NotionTracker to ntn CLI transport. ` +
+        `Until then, /reconcile --push and /apply-decision must skip Notion-backed projects.`,
+      { followUpIssue: 'FORGE-117' },
+    );
+  }
+
   // ─── helpers ───────────────────────────────────────────────────────────────
 
   private async fetchPage(pageId: string): Promise<NotionPage> {

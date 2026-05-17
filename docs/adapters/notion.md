@@ -1,5 +1,15 @@
 # NotionTracker
 
+> **`updateIssueBody` status: planned, not launched.** Calling this method on
+> NotionTracker throws `TrackerError(NOT_IMPLEMENTED)` referencing
+> [FORGE-117](https://linear.app/firatdogan/issue/FORGE-117), which refactors
+> NotionTracker onto the new official [`ntn` CLI][ntn] transport and ships the
+> full `updateIssueBody` implementation. Until FORGE-117 lands, the verbs that
+> depend on body rewriting (`/reconcile --push`, `/apply-decision`) must skip
+> Notion-backed projects.
+>
+> [ntn]: https://developers.notion.com/cli/get-started/overview
+
 forge's third tracker adapter. Treats a Notion database as the issue store, the
 same way `GitHubTracker` treats a GitHub repo.
 

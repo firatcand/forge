@@ -754,6 +754,25 @@ test('setBlockedBy: rejects non-UUID blockerId', async () => {
   );
 });
 
+// ─── updateIssueBody — NOT_IMPLEMENTED until FORGE-117 ───────────────────────
+
+test('updateIssueBody throws NOT_IMPLEMENTED pointing to FORGE-117', async () => {
+  const { tracker, mock } = makeTracker([]);
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody(
+        'aaaa1111-2222-3333-4444-555566667777',
+        'whatever',
+      ),
+    (e: unknown) =>
+      e instanceof TrackerError &&
+      e.code === 'NOT_IMPLEMENTED' &&
+      /FORGE-117/.test(e.message) &&
+      e.details?.followUpIssue === 'FORGE-117',
+  );
+  assert.equal(mock.calls.length, 0, 'must throw before issuing any MCP call');
+});
+
 // ─── full lifecycle (acceptance bullet 4) ────────────────────────────────────
 
 test('full lifecycle: createIssue → claim → updateState → comment → releaseClaim → updateState(done)', async () => {

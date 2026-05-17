@@ -7,6 +7,7 @@ export type TrackerErrorCode =
   | 'VALIDATION'
   | 'TRANSPORT'
   | 'TIMEOUT'
+  | 'NOT_IMPLEMENTED'
   | 'UNKNOWN';
 
 const RETRIABLE_CODES: ReadonlySet<TrackerErrorCode> = new Set([

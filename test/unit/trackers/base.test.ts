@@ -43,6 +43,7 @@ class TestTracker extends BaseTracker {
   async releaseClaim(_issueId: string, _runId: string): Promise<void> {}
   async updateState(_issueId: string, _state: IssueState): Promise<void> {}
   async comment(_issueId: string, _body: string): Promise<void> {}
+  async updateIssueBody(_issueId: string, _body: string): Promise<void> {}
   async createProject(
     _name: string,
     _description?: string,

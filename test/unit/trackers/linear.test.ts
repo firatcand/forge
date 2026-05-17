@@ -1397,6 +1397,117 @@ await test('setBlockedBy — CONFLICT on relation create is swallowed (idempoten
   await tracker.setBlockedBy('i1', 'blocker-uuid-1');
 });
 
+// ─── updateIssueBody (FORGE-94) ──────────────────────────────────────────────
+
+await test('updateIssueBody — replaces description and preserves forge:task footer', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-77',
+    description: 'old body\n\n<!-- forge:task=FORGE-77 -->\n',
+  });
+  let captured: LinearUpdateIssueInput | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      captured = input;
+      return issue;
+    },
+  });
+  await tracker.updateIssueBody('i1', 'fresh body content');
+  assert.match(captured!.description ?? '', /fresh body content/);
+  assert.match(captured!.description ?? '', /<!-- forge:task=FORGE-77 -->/);
+});
+
+await test('updateIssueBody — preserves forge:blockedBy footer across replace', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    description:
+      'old\n\n<!-- forge:task=FORGE-77 -->\n<!-- forge:blockedBy=blocker-a,blocker-b -->\n',
+  });
+  let captured: LinearUpdateIssueInput | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      captured = input;
+      return issue;
+    },
+  });
+  await tracker.updateIssueBody('i1', 'replaced');
+  assert.match(
+    captured!.description ?? '',
+    /<!-- forge:blockedBy=blocker-a,blocker-b -->/,
+  );
+});
+
+await test('updateIssueBody — preserves unknown forge:* footers (ownerType)', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    description:
+      'old\n\n<!-- forge:task=FORGE-77 -->\n<!-- forge:ownerType=backend-dev -->\n',
+  });
+  let captured: LinearUpdateIssueInput | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      captured = input;
+      return issue;
+    },
+  });
+  await tracker.updateIssueBody('i1', 'replaced');
+  assert.match(captured!.description ?? '', /forge:ownerType=backend-dev/);
+  assert.match(captured!.description ?? '', /forge:task=FORGE-77/);
+});
+
+await test('updateIssueBody — PRECONDITION_FAILED when issue has no forge:task footer', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-99',
+    description: 'non-forge body',
+  });
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+  });
+  await assert.rejects(
+    () => tracker.updateIssueBody('i1', 'anything'),
+    (err: unknown) =>
+      err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
+  );
+});
+
+await test('updateIssueBody — VALIDATION on non-string body (no SDK call)', async () => {
+  let issueCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => {
+      issueCalled = true;
+      return makeIssue({ id: 'i1' });
+    },
+  });
+  await assert.rejects(
+    () => tracker.updateIssueBody('i1', null as unknown as string),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+  assert.equal(issueCalled, false, 'must reject before issuing any SDK call');
+});
+
+await test('updateIssueBody — VALIDATION on embedded forge footer in input body', async () => {
+  let issueCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => {
+      issueCalled = true;
+      return makeIssue({ id: 'i1' });
+    },
+  });
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody(
+        'i1',
+        'body\n<!-- forge:blockedBy=x -->\n',
+      ),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+  assert.equal(issueCalled, false);
+});
+
 await test('setBlockedBy — PRECONDITION_FAILED when issue has no forge:task footer', async () => {
   const issue = makeIssue({
     id: 'i1',
@@ -1508,6 +1619,10 @@ await test('LinearTracker passes the shared Tracker conformance suite', async ()
       }
       if (input.removedLabelIds) {
         for (const lid of input.removedLabelIds) server.removeLabel(id, lid);
+      }
+      if (input.description !== undefined) {
+        const current = server.getIssue(id);
+        server.setIssue({ ...current, description: input.description });
       }
       return server.getIssue(id);
     },

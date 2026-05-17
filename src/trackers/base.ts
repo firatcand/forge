@@ -30,6 +30,12 @@ export interface Tracker {
   updateState(issueId: string, state: IssueState): Promise<void>;
   comment(issueId: string, body: string): Promise<void>;
 
+  // Replaces the entire issue body. Adapter implementations MUST preserve the
+  // trailing forgeTaskId footer added by createIssue() so the round-trip mapping
+  // (tracker → forgeTaskId) keeps working. Caller assembles new body content.
+  // Added 2026-05-17 for /apply-decision + /reconcile propagation (FORGE-94).
+  updateIssueBody(issueId: string, body: string): Promise<void>;
+
   createProject(name: string, description?: string): Promise<{ id: string; url: string }>;
   createIssue(payload: CreateIssuePayload): Promise<Issue>;
   setBlockedBy(issueId: string, blockerId: string): Promise<void>;
@@ -73,6 +79,7 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   abstract releaseClaim(issueId: string, runId: string): Promise<void>;
   abstract updateState(issueId: string, state: IssueState): Promise<void>;
   abstract comment(issueId: string, body: string): Promise<void>;
+  abstract updateIssueBody(issueId: string, body: string): Promise<void>;
   abstract createProject(
     name: string,
     description?: string,
