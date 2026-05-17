@@ -139,7 +139,11 @@ export function toSettingsObject(answers: InitAnswers): Settings {
       on_persistent_failure: 'notify' as const,
       primary_host_cli: answers.agents.primary_host_cli,
       review_host_cli: answers.agents.review_host_cli,
-    },
+      // preflight_globs is intentionally omitted — the zod default in
+      // SettingsSchema fills it on load. Keeping it out of the scaffolded
+      // YAML lets future default-list updates ship transparently to
+      // adopters (code-reviewer on FORGE-97).
+    } as Settings['agents'],
     design: {
       mode: answers.design.mode,
       ...(answers.design.reference ? { reference: answers.design.reference } : {}),

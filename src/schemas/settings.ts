@@ -88,6 +88,29 @@ const AgentsSchema = z
       .enum(['claude', 'codex', 'cursor', 'gemini'])
       .nullable()
       .default('codex'),
+    // Paths a worker must call `forge orchestrate guardrail-check` against
+    // before writing to. Patterns: `**`, `*`, literal — repo-relative,
+    // anchored at both ends. See src/orchestrator/glob-match.ts.
+    //
+    // Default list mirrors spec/ORCHESTRATOR.md §Preflight wrapper —
+    // touching any of these forces an architectural-question checkpoint
+    // even when the worker's structured classifier returns `routine`.
+    preflight_globs: z.array(z.string().min(1)).default([
+      'src/index.ts',
+      'src/schemas/**',
+      'src/bin/**',
+      'src/cli/**',
+      'src/trackers/base.ts',
+      // Note: src/cli/migrate.ts is omitted because src/cli/** already
+      // covers it. First-hit-wins matching makes a more-specific literal
+      // unreachable after a broader glob (code-reviewer on FORGE-97).
+      'spec/**',
+      'CRITICAL.md',
+      'CLAUDE.md',
+      'AGENTS.md',
+      'package.json',
+      'phases.yaml',
+    ]),
   })
   // .refine() before .default({}) — the collision check must see the
   // resolved object after inner defaults expand.

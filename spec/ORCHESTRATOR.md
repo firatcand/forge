@@ -47,7 +47,7 @@ Per [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode-minim
 - `phases.yaml` carries a `source:` block (tracker, project_id, synced_at, tracker_revision, spec_revision). Every CLI verb that reads `phases.yaml` prints a freshness summary line. Reference the schema in `spec/SPEC.md` §`phases.yaml is a derived snapshot`.
 - Claim record gains a `spec_revision` field stamped at claim time. Dispatch skill computes commits-since-claim-against-spec/ on resume and emits informational block.
 
-**Process note:** the surgical trim above is itself a P2.5 task (P2.5-T05 in `plans/phases.yaml`, refactoring FORGE-20). It is NOT done in this amendment — the amendment just freezes the trim plan so the body can be safely committed in its current uncommitted shape (or partially reverted via `git restore -p`) without losing the intent.
+**Process note:** the §Worker prompt template body (below) has been rewritten in P2.5-T06 / FORGE-97 to match the authority-by-field contract. The other simplifications enumerated above (Doctor scope-down, Reconcile UI, dispatch-skill resume notification, `phases.yaml` source block, claim `spec_revision`) are handled by their respective tickets (P2.5-T08 / FORGE-99, P2.5-T09 / FORGE-100, P2.5-T07 / FORGE-98, P2.5-T17 / FORGE-113, P2.5-T18 / FORGE-114).
 
 ---
 
@@ -73,7 +73,7 @@ The orchestrator is **not** a long-running process. It is three layered surfaces
 |---|---|---|
 | **CLI control plane** | State machine, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation, status snapshots, event log | `src/cli/orchestrate/*.ts`, `src/orchestrator/state/*.ts`, `src/orchestrator/leases/*.ts` |
 | **Skill dispatch layer** | Read ready tasks, dispatch subagents, relay questions to the user, record answers, poll completion | `skills/forge-orchestrate/SKILL.md` (host-specific files compiled from a shared source in Phase 3) |
-| **Worker subagent** | Implement a task in a worktree, call CLI to register questions/verdicts, return to parent on completion or block | `templates/worker-prompt.md` (loaded into every subagent dispatch) |
+| **Worker subagent** | Implement a task in a worktree, call CLI to register questions/verdicts, return to parent on completion or block | `templates/worker-prompt.template.md` (rendered by `src/orchestrator/render-worker-prompt.ts` and loaded into every subagent dispatch) |
 
 The three are file-disjoint. They share contracts (schemas, filesystem layout, event types) defined in this document. The CLI is the only surface that mutates persistent state. Skills and workers call the CLI; they never read or write `.forge/orchestrator/` directly.
 
@@ -597,85 +597,53 @@ A lightweight reconcile (only the cheap rows in the table — local-vs-tracker s
 
 ## Worker prompt template
 
-Every worker subagent is dispatched with `templates/worker-prompt.md` as the system/user prompt, with placeholders filled by the dispatch skill.
+Every worker subagent is dispatched with `templates/worker-prompt.template.md` as the system/user prompt, with placeholders rendered by `src/orchestrator/render-worker-prompt.ts` and the rendered string passed to the host's subagent primitive by the dispatch skill (P2.5-T07 / FORGE-98).
 
-### Template structure
+### Authority by field — binding contract
 
-```
-You are a forge worker subagent on task <TASK_ID>, attempt <ATTEMPT_ID>.
+When two artifacts seem to disagree, the worker asks **"whose field is this?"** — not "which artifact ranks higher?" Ownership is a matrix:
 
-Run: <RUN_ID>
-Worktree: <ABSOLUTE_WORKTREE_PATH>
-Phase: <IMPLEMENT | REVIEW | SHIP>
+| Artifact | Owns |
+|---|---|
+| `spec/SPEC.md` | Architecture, constraints, non-functional requirements |
+| `spec/PRD.md` | Product behavior, user-facing acceptance criteria |
+| `plans/phases.yaml` | Local execution snapshot (derived from tracker) |
+| Tracker issue body | Execution metadata: assignee, status, sequencing, live coordination |
+| Source code | Implementation |
 
-Task description:
-<rendered from tracker issue body>
+A "disagreement" between artifacts often isn't one — it's two artifacts each owning a different field of the same decision. The template carries 5 worked examples covering the common shapes (false-collision, real-collision, stale-snapshot, narrower-vs-wider, code-out-of-date).
 
-Acceptance criteria:
-<rendered from phases.yaml acceptance bullets>
+### Disagreement protocol
 
-Conventions:
-<contents of project's CLAUDE.md / AGENTS.md>
+When the matrix is unclear, the worker writes a standard question via the existing `forge orchestrate question` verb with `decision-key: authority-collision:<field>:<short-slug>` and pauses. The supervisor resolves via `/answer` as for any other open question.
 
-# Artifact precedence (binding contract — added 2026-05-17, simplified)
+### On-resume informational block
 
-When two artifacts disagree about what this task should do, follow this order:
+The dispatch skill emits an informational `SPEC changed since claim — N commits` block on worker resume (powered by `forge orchestrate spec-diff <task>`, P2.5-T18 / FORGE-114). The worker treats it as informational and proceeds unless the diff conflicts with current scope, in which case it writes a question.
 
-1. **Current user instruction** (from supervisor session via `answer` to your question) — highest
-2. **spec/SPEC.md** (sole architectural source of truth; ephemeral ADRs propagate here at apply time)
-3. **spec/PRD.md**
-4. **plans/phases.yaml task body** (your acceptance criteria above)
-5. **Tracker issue body** (your task description above — projection of phases.yaml)
-6. **Older attempt notes** (your save-points / prior verdicts) — lowest
+### phases.yaml freshness
 
-Note: ADRs are NOT in this chain. If an ADR is currently being drafted in `spec/decisions/`, it has NO authority — it's a proposal under review. Once `/update-spec --apply` runs, SPEC reflects the change and the ADR is deleted.
+CLI verbs that read `phases.yaml` print a freshness line on stderr (P2.5-T17 / FORGE-113). If the snapshot is > 24h old, the worker treats phases.yaml as advisory and asks before relying on it for scope. Tracker is the source of truth.
 
-## When you detect drift (lower disagrees with higher)
+### Host portability
 
-DO NOT silently fix the discrepancy. Instead:
+The template carries host-conditional blocks via the markers `<!-- host: claude -->...<!-- /host -->` and `<!-- host: codex -->...<!-- /host -->`. The renderer strips other-host blocks before the prompt reaches the host. The worker never sees instructions intended for another host.
 
-1. Emit a drift event:
-   ```
-   forge orchestrate event <TASK_ID> --attempt <ATTEMPT_ID> --type drift \
-     --data '{"from_artifact": "phases", "to_artifact": "spec", "from_ref": "<ref>", "to_ref": "spec/SPEC.md#<section>", "detail": "<one-line>"}'
-   ```
-2. Write a question with the drift event linked:
-   ```
-   forge orchestrate question <TASK_ID> --attempt <ATTEMPT_ID> \
-     --decision-key "drift:<from_artifact>-vs-<to_artifact>:<short-slug>:<content-hash>" \
-     --question "<one-paragraph: what contradicts what; what you'd do per each artifact; recommended routing>" \
-     --drift-event-id <event_id> [--routing-hint amend-roadmap]
-   ```
-   Set `--routing-hint amend-roadmap` when the contradiction is about scope/new work (supervisor formalizes via /amend-roadmap).
-   Omit `--routing-hint` for architectural drift between SPEC/PRD/phases (supervisor uses `/update-spec --draft` + `--apply` to formalize a SPEC change, or answers the question directly to update lower-precedence artifacts).
-   `<content-hash>` is a short hash of the contradicting content to dedupe distinct drift cases that share a slug (Codex C5).
-3. Pause: return to parent with "Blocked on question <ID>: drift between <X> and <Y>".
+### Heartbeat protocol
 
-The supervisor's dispatch skill will surface the question with the routing-hint, then formally resolve via the appropriate workflow-control skill.
+The worker calls `forge orchestrate heartbeat <task> --attempt <attempt>` every ~5 minutes. On `LEASE_STOLEN`, it emits an `attempt_abandoned_by_steal` event and returns to the parent.
 
-Working directory rules (CLAUDE-SPECIFIC — Codex workers skip this section):
-- All Bash commands must be prefixed with `cd <WORKTREE> && `
-- All Read / Write / Edit operations use absolute paths under <WORKTREE>
-- Never `cd` to a path outside <WORKTREE>
-- The parent main session retains its own cwd — do not modify it
+### Decision guidelines — the 70/30 rule
 
-Heartbeat protocol:
-- Every 5 minutes of active work, run: `forge orchestrate heartbeat <TASK_ID> --attempt <ATTEMPT_ID>`
-- If the call returns `LEASE_STOLEN`, your lease has been stolen by a newer attempt. Stop work, write a final event with `forge orchestrate event ... --type attempt_abandoned_by_steal`, and return to the parent.
+Tactical decisions (~70%) — variable names, helper extraction, comment placement, regex specifics, test naming, log verbosity within documented ranges — the worker decides itself and logs via `forge orchestrate event --type files_modified`.
 
-Decision guidelines (the 70/30 rule):
-- ESCALATE via `forge orchestrate question` when the decision sets a public contract:
-  · Exported symbol names (functions, types, classes consumed outside the file)
-  · File paths intended for import by other modules
-  · Schema shapes consumed downstream
-  · Deprecation strategies (delete vs warn vs alias)
-  · Migration approaches for irreversible changes
-  · Scope: "does this PR also cover X, or punt to a follow-up?"
-  · Error semantics propagating across module boundaries
-- DECIDE yourself: internal variable names, helper function extraction, comment placement, regex specifics, test naming, log verbosity within documented ranges.
-- When unsure, classify with the structured rubric below and err toward escalation.
+Architectural decisions (~30%) — exported symbol names, schema shapes consumed downstream, file paths intended for import by other modules, deprecation strategies, irreversible migration approaches, scope, error semantics across module boundaries — the worker escalates via `forge orchestrate question`.
 
-Structured classification (before any question):
+### Structured classification rubric
+
+Before any question, the worker classifies:
+
+```json
 {
   "decision_type": "routine" | "architectural",
   "category": "public_api" | "scope" | "naming" | "deprecation" | "error_semantics" | "file_lifecycle" | "other",
@@ -684,32 +652,15 @@ Structured classification (before any question):
   "default_action": "decide" | "ask",
   "reason": "<1-2 sentences>"
 }
-
-If `decision_type === "routine"`: decide and log via `forge orchestrate event ... --type files_modified`.
-If `decision_type === "architectural"`: write a question.
-
-To write a question:
-1. Run: `forge orchestrate question <TASK_ID> --attempt <ATTEMPT_ID> --decision-key <KEY> --question "<TEXT>"`
-   Optional: `--options-file <PATH>` to attach options.
-   `<KEY>` is a stable dedupe key like `public-api:event-payload-shape:v1` or `naming:src/orchestrator/events.ts:NotificationEvent`.
-2. Update save-point.md with a 5-line note on where you are.
-3. Return to parent with: "Blocked on question <ID>: <one-line summary>".
-
-To complete the attempt:
-1. Run tests: capture passed/failed/skipped/duration.
-2. Run lint: capture clean/violations.
-3. Write verdict.json with the rich schema (see below).
-4. Run: `forge orchestrate complete <TASK_ID> --attempt <ATTEMPT_ID> --verdict-file verdict.json`
-   The CLI will verify tests, lint, and diff stats independently. If your self-report disagrees with CLI verification, the attempt is rejected as `verdict_unverified` and you stay in `running` state to fix it.
-5. Update save-point.md.
-6. Return to parent with: "Task <TASK_ID> attempt <ATTEMPT_ID>: <verdict>".
-
-Prior attempts on this task (if any):
-<rendered: list of prior attempt_ids with their terminal status, plus links to prior save-points and answered questions>
-
-Answered questions from prior attempts:
-<rendered: decision_key → answer map>
 ```
+
+`routine` → log a `files_modified` event and proceed. `architectural` → write a question.
+
+### Template placeholders (allowlisted)
+
+The renderer accepts only this set; unknown tokens throw at render time (no silent expansion):
+
+`{{TASK_ID}}`, `{{ATTEMPT_ID}}`, `{{RUN_ID}}`, `{{WORKTREE_PATH}}`, `{{PHASE}}`, `{{TASK_DESCRIPTION}}`, `{{ACCEPTANCE_CRITERIA}}`, `{{CONVENTIONS}}`, `{{PRIOR_ATTEMPTS}}`, `{{ANSWERED_QUESTIONS}}`.
 
 ### Verdict schema
 
@@ -752,9 +703,14 @@ type Verdict = {
 
 The verified record is written to `verdict.verified.json`. Only after verification does the task state transition to `ready_for_review`. Worker self-reports are kept as historical context in `verdict.json` but are never authoritative.
 
-### Preflight wrapper (mechanical guardrail — preserved from v1)
+### Preflight wrapper — `forge orchestrate guardrail-check`
 
-Independent of prompt-level classification, a code-level wrapper in the worker prompt inspects every file write attempted by the worker. If the path matches any of the **guardrail globs**, the wrapper forces a decision checkpoint (writes a question before allowing the write):
+Forge cannot mechanically intercept the host's file-write tools (no PreToolUse hook into Claude Task subagents or Codex native subagents). Preflight is therefore **prompt-discipline + verb side-effects** in v0.4, with **post-hoc audit deferred** to a follow-up release:
+
+1. The worker prompt instructs every worker to call `forge orchestrate guardrail-check --path <p>` before any write.
+2. The verb reads `.forge/settings.yaml#agents.preflight_globs` (default list below), realpaths the target (rejecting symlinks that escape the repo), matches the proposed path, and returns `{architectural, matched_glob, suggested_decision_key}`.
+3. When `--task` + `--attempt` are supplied (and the ids pass `validateIdSegment`), the verb appends a `guardrail_checked` event to the attempt log.
+4. **Post-hoc audit — deferred** (FORGE-FOLLOWUP-A): a future release will have `forge orchestrate complete` cross-reference the verdict's computed `files_changed` against the `guardrail_checked` event stream and mark `verdict_unverified` if a guardrail write occurred without a prior check. Until that ships, calling `guardrail-check` is a prompt-discipline requirement, not a mechanical one — skipping it leaves no audit record and forfeits the suggested decision-key, but does not block the attempt's `complete`.
 
 | Glob | Rationale |
 |---|---|
@@ -769,7 +725,9 @@ Independent of prompt-level classification, a code-level wrapper in the worker p
 | `package.json` (deps + bin fields) | Distribution surface |
 | `phases.yaml` | Dependency graph |
 
-This list lives in `.forge/settings.yaml` (`agents.preflight_globs`) so projects can tune it. The default ships with the list above. Guardrails compose with classification: even if the worker classifies a change as `decision_type: routine`, a write to a guardrail path forces an `architectural` question.
+The list lives in `.forge/settings.yaml` (`agents.preflight_globs`) so projects can tune it. Globs are matched against repo-relative paths by `src/orchestrator/glob-match.ts` (supports `**`, `*`, and literal patterns; no new dependency).
+
+When `guardrail-check` returns `architectural: true`, the worker writes a question using the returned `suggested_decision_key` regardless of what the structured rubric returned. Guardrails compose with classification by always upgrading.
 
 ## Phase machine — IMPLEMENT → REVIEW → SHIP
 
