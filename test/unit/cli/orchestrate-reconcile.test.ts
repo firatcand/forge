@@ -375,3 +375,54 @@ phases:
     wt.cleanup();
   }
 });
+
+test('runOrchestrateReconcile — exits 3 when phases.yaml is absent', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'forge-no-phases-'));
+  mkdirSync(join(dir, 'plans'), { recursive: true });
+  // No phases.yaml written — should produce PHASES_NOT_FOUND
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    assert.equal(result.exitCode, 3);
+    const payload = JSON.parse(err.chunks.join(''));
+    assert.equal(payload.ok, false);
+    assert.ok(
+      payload.error.code === 'PHASES_NOT_FOUND' || payload.error.code === 'VALIDATION',
+      `expected PHASES_NOT_FOUND or VALIDATION, got ${payload.error.code}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('runOrchestrateReconcile — exits 4 when listActiveIssues throws', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => {
+          throw new TrackerError('AUTH', 'token expired');
+        },
+      }),
+    });
+    assert.equal(result.exitCode, 4);
+    const payload = JSON.parse(err.chunks.join(''));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'AUTH');
+  } finally {
+    wt.cleanup();
+  }
+});
