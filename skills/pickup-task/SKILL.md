@@ -81,6 +81,13 @@ EOF
    # Root cause:    docs/learnings/2026-Q2/worktrees-blind-to-gitignored-context.md
    # Hydration set: docs/learnings/2026-Q2/worktree-hydration-runbook.md
 
+   # Hydration uses `find -exec` rather than `cp <glob>` because globs expanded
+   # after a quoted variable (e.g. cp "${REPO_ROOT}"/spec/*.md ...) re-split on
+   # whitespace at the shell level — if the user's repo path contains a space
+   # ("/Users/foo bar/repos/forge"), the cp command silently mis-applies args.
+   # `find` handles the entire path as one argument to -exec; safe for paths
+   # containing spaces, newlines, or other shell metacharacters.
+
    # plans/phases.yaml — task graph + scope source-of-truth (read by /plan-task)
    if [ -f "${REPO_ROOT}/plans/phases.yaml" ]; then
      mkdir -p "${WORKTREE_PATH}/plans"
@@ -89,21 +96,21 @@ EOF
 
    # spec/*.md — BRIEF, PRD, SPEC, DESIGN, CONTEXT (read by /plan-task).
    # ORCHESTRATOR.md is tracked but cp overwrites with identical content — harmless.
-   if compgen -G "${REPO_ROOT}/spec/*.md" > /dev/null; then
+   if [ -d "${REPO_ROOT}/spec" ]; then
      mkdir -p "${WORKTREE_PATH}/spec"
-     cp "${REPO_ROOT}"/spec/*.md "${WORKTREE_PATH}/spec/"
+     find "${REPO_ROOT}/spec" -maxdepth 1 -type f -name '*.md' -exec cp {} "${WORKTREE_PATH}/spec/" \;
    fi
 
    # plans/tasks/*.plan.md — required by /implement's plan-must-exist precondition
-   if compgen -G "${REPO_ROOT}/plans/tasks/*.plan.md" > /dev/null; then
+   if [ -d "${REPO_ROOT}/plans/tasks" ]; then
      mkdir -p "${WORKTREE_PATH}/plans/tasks"
-     cp "${REPO_ROOT}"/plans/tasks/*.plan.md "${WORKTREE_PATH}/plans/tasks/"
+     find "${REPO_ROOT}/plans/tasks" -maxdepth 1 -type f -name '*.plan.md' -exec cp {} "${WORKTREE_PATH}/plans/tasks/" \;
    fi
 
    # docs/learnings/ — required by step 6 (learning-curator). MUST happen before step 6.
    if [ -d "${REPO_ROOT}/docs/learnings" ]; then
      mkdir -p "${WORKTREE_PATH}/docs/learnings"
-     cp -r "${REPO_ROOT}"/docs/learnings/. "${WORKTREE_PATH}/docs/learnings/"
+     cp -r "${REPO_ROOT}/docs/learnings/." "${WORKTREE_PATH}/docs/learnings/"
    fi
    ```
 6. Delegate to `learning-curator` to retrieve relevant learnings (runs AFTER step 5

@@ -241,6 +241,32 @@ test('appendLineIfMissing handles file without trailing newline', () => {
   assert.equal(after, 'node_modules\n.forge/worktrees/\n');
 });
 
+test('appendLineIfMissing is idempotent under CRLF line endings (Windows / autocrlf)', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.eslintignore');
+  // File checked out on Windows or with core.autocrlf=true uses CRLF separators.
+  // Naive split('\n') would leave '\r' on each entry and miss the match.
+  writeFileSync(p, 'node_modules\r\n.forge/worktrees/\r\ndist\r\n');
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.existed, true);
+  assert.equal(r.appended, false, 'CRLF-encoded file should not double-append');
+  // Original content must be preserved byte-for-byte when we skip.
+  assert.equal(readFileSync(p, 'utf8'), 'node_modules\r\n.forge/worktrees/\r\ndist\r\n');
+});
+
+test('appendLineIfMissing treats oversized file as missing (size cap)', () => {
+  const cwd = tmp();
+  const p = resolve(cwd, '.eslintignore');
+  // Just over 1 MiB — config files have no legitimate reason to be this big,
+  // and a symlink-to-/dev/zero or pathological generated config could OOM init.
+  writeFileSync(p, 'x'.repeat(1_048_577));
+  const r = appendLineIfMissing(p, '.forge/worktrees/');
+  assert.equal(r.existed, false);
+  assert.equal(r.appended, false);
+  // File must not have been mutated.
+  assert.equal(readFileSync(p, 'utf8').length, 1_048_577);
+});
+
 // --- appendToolingExcludes (FORGE-115 / P2.5-T19) ---
 
 test('appendToolingExcludes appends to .eslintignore and .prettierignore when present', () => {

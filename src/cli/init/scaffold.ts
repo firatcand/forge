@@ -4,6 +4,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -54,6 +55,43 @@ const TOOLING_EXCLUDE_LINE = '.forge/worktrees/';
 // Marker for substring detection in JSON/TS configs (warn-only targets).
 const TOOLING_EXCLUDE_MARKER = '.forge/worktrees';
 const VITEST_CONFIG_EXTS = ['ts', 'js', 'mjs', 'cjs'] as const;
+// Configs read by appendToolingExcludes are user-controlled. Cap their size so a
+// symlink to /dev/zero or a pathological generated config can't stall init.
+// 1 MiB is ~3 orders of magnitude above the largest legitimate tsconfig/.ignore.
+const MAX_CONFIG_BYTES = 1_048_576;
+
+/**
+ * Read a text file, returning null if it doesn't exist or exceeds MAX_CONFIG_BYTES.
+ *
+ * Race-safe: a stat-then-read pattern would leak raw ENOENT if the file disappears
+ * between the two syscalls (see docs/learnings/2026-Q2/toctou-between-stat-and-read-leaks-raw-fs-errors.md).
+ * Here we read inside a try/catch and treat ENOENT as "doesn't exist", so concurrent
+ * deletes during init don't crash the caller.
+ *
+ * Size cap precedes the read — statSync is a single syscall and gives us the file
+ * size without touching contents, so we can refuse oversized files before any large
+ * allocation.
+ */
+function safeReadConfig(filePath: string): string | null {
+  let size: number;
+  try {
+    size = statSync(filePath).size;
+  } catch (e) {
+    if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw e;
+  }
+  if (size > MAX_CONFIG_BYTES) return null;
+  try {
+    return readFileSync(filePath, 'utf8');
+  } catch (e) {
+    if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
+      return null;
+    }
+    throw e;
+  }
+}
 
 interface Artifact {
   // Path relative to cwd.
@@ -150,21 +188,27 @@ export function appendGitignoreBlock(existing: string | null): { content: string
 /**
  * Append `line` to `filePath` if the file exists and doesn't already contain
  * that exact line. Returns the outcome:
- *   - `existed: false` → file missing (caller treats as no-op, neither written nor skipped)
+ *   - `existed: false` → file missing or over MAX_CONFIG_BYTES (treated as no-op)
  *   - `existed: true, appended: false` → file existed, line already present (skipped)
  *   - `existed: true, appended: true` → file existed, line was appended (written)
+ *
+ * Idempotent under CRLF line endings: a file checked out on Windows or with
+ * autocrlf=true contains `\r\n` separators, so a naive `split('\n')` would
+ * leave `\r` on each entry and miss the match — we normalize before splitting
+ * but preserve the original byte sequence when writing the appended line.
  */
 export function appendLineIfMissing(
   filePath: string,
   line: string,
 ): { existed: boolean; appended: boolean } {
-  if (!existsSync(filePath)) {
+  const content = safeReadConfig(filePath);
+  if (content === null) {
     return { existed: false, appended: false };
   }
-  const content = readFileSync(filePath, 'utf8');
   // Exact-line match against newline-split entries — avoids false positives from
-  // substring matches (e.g. a comment that mentions the path).
-  const lines = content.split('\n');
+  // substring matches (e.g. a comment that mentions the path). CRLF-normalized
+  // so Windows-style files don't double-append on re-run.
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
   if (lines.includes(line)) {
     return { existed: true, appended: false };
   }
@@ -202,10 +246,15 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
   }
 
   // tsconfig.json — warn-only (may have // comments; may use extends/composite/references).
+  // Marker check is a plain substring lookup — false-positive if the user has
+  // `.forge/worktrees` mentioned in a // comment but not in the exclude array.
+  // Acceptable: a false positive merely suppresses the warning (worst case: user
+  // doesn't get a snippet they didn't need). A false negative produces a snippet
+  // they should already have followed. Neither corrupts state.
   const tsconfigPath = resolve(cwd, 'tsconfig.json');
-  if (existsSync(tsconfigPath)) {
-    const raw = readFileSync(tsconfigPath, 'utf8');
-    if (raw.includes(TOOLING_EXCLUDE_MARKER)) {
+  const tsconfigRaw = safeReadConfig(tsconfigPath);
+  if (tsconfigRaw !== null) {
+    if (tsconfigRaw.includes(TOOLING_EXCLUDE_MARKER)) {
       result.skipped.push('tsconfig.json');
     } else {
       result.warned.push({
@@ -217,11 +266,11 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
   }
 
   // vitest.config.{ts,js,mjs,cjs} — warn-only (TS/JS code, no safe AST mutation).
+  // Same false-positive caveat as tsconfig above; impact is identical.
   for (const ext of VITEST_CONFIG_EXTS) {
     const name = `vitest.config.${ext}`;
-    const p = resolve(cwd, name);
-    if (!existsSync(p)) continue;
-    const raw = readFileSync(p, 'utf8');
+    const raw = safeReadConfig(resolve(cwd, name));
+    if (raw === null) continue;
     if (raw.includes(TOOLING_EXCLUDE_MARKER)) {
       result.skipped.push(name);
     } else {
