@@ -1,0 +1,207 @@
+// `forge orchestrate cancel` — terminate a task, release lease, preserve worktree.
+//
+// Legal from any non-terminal state: claimed / dispatched / running /
+// blocked_on_question / awaiting_respawn. Marks the task state 'cancelled'
+// (terminal), appends 'attempt_cancelled' event if there's a current attempt,
+// and releases the lease so the next claim attempt can proceed.
+
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+
+import { CancelArgsSchema, type CancelArgs } from '../../schemas/cli-args.ts';
+import {
+  readTaskState,
+  writeTaskState,
+} from '../../orchestrator/state-machine.ts';
+import { release as releaseLease } from '../../orchestrator/leases.ts';
+import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
+import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import { OrchestratorError } from '../../core/errors.ts';
+import type { TaskState } from '../../schemas/task-state.ts';
+import { emit, fail, ok } from '../envelope.ts';
+import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import type { VerbHandler } from './index.ts';
+
+const CANCELLABLE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
+  'claimed',
+  'dispatched',
+  'running',
+  'blocked_on_question',
+  'awaiting_respawn',
+]);
+
+export async function runOrchestrateCancel(args: CancelArgs): Promise<{ exitCode: number }> {
+  const parsed = CancelArgsSchema.safeParse(args);
+  if (!parsed.success) {
+    return { exitCode: emit(fail('INVALID_ARGS', parsed.error.message, false), { json: args.json }) };
+  }
+  const opts = parsed.data;
+
+  // 1. Read state.
+  let state;
+  try {
+    state = readTaskState(opts.forgeDir, opts.taskId);
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+  if (!CANCELLABLE_STATES.has(state.state)) {
+    return {
+      exitCode: emit(
+        fail(
+          'INVALID_STATE',
+          `cannot cancel task ${opts.taskId}: state is '${state.state}' (terminal or not yet claimed).`,
+          false,
+          { current_state: state.state },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 2. Read lease for caller identity (so state write + lease release pass ownership).
+  let lease: Lease;
+  try {
+    lease = readLease(opts.forgeDir, opts.taskId);
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 3. Append 'attempt_cancelled' event if there's a current attempt.
+  if (state.current_attempt_id) {
+    try {
+      appendAttemptEvent(
+        {
+          type: 'attempt_cancelled',
+          ts: new Date().toISOString(),
+          reason: opts.reason ?? 'user-initiated cancel',
+        },
+        {
+          forgeDir: opts.forgeDir,
+          taskId: opts.taskId,
+          attemptId: state.current_attempt_id,
+          caller: {
+            run_id: lease.owner_run_id,
+            claim_id: lease.claim_id,
+            generation: lease.generation,
+          },
+        },
+      );
+    } catch {
+      // best-effort
+    }
+  }
+
+  // 4. Transition to 'cancelled' (terminal).
+  try {
+    writeTaskState(
+      opts.forgeDir,
+      {
+        ...state,
+        state: 'cancelled',
+        state_version: state.state_version + 1,
+        updated_at: new Date().toISOString(),
+        updated_by: {
+          run_id: lease.owner_run_id,
+          claim_id: lease.claim_id,
+          generation: lease.generation,
+        },
+      },
+      {
+        run_id: lease.owner_run_id,
+        claim_id: lease.claim_id,
+        generation: lease.generation,
+      },
+    );
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          true,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 5. Release lease (idempotent).
+  try {
+    releaseLease({
+      forgeDir: opts.forgeDir,
+      taskId: opts.taskId,
+      caller: {
+        run_id: lease.owner_run_id,
+        claim_id: lease.claim_id,
+        generation: lease.generation,
+      },
+    });
+  } catch {
+    // Best-effort lease release; state is already cancelled which is the source of truth.
+  }
+
+  return {
+    exitCode: emit(
+      ok({ state: 'cancelled', released_lease: true, reason: opts.reason ?? null }),
+      { json: opts.json },
+    ),
+  };
+}
+
+function readLease(forgeDir: string, taskId: string): Lease {
+  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
+  let raw: string;
+  try {
+    raw = readFileSync(leasePath, 'utf8');
+  } catch {
+    throw new OrchestratorError(
+      'LEASE_NOT_FOUND',
+      `lease.json not found for task ${taskId}`,
+      { taskId, path: leasePath },
+    );
+  }
+  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    throw new OrchestratorError(
+      'SCHEMA_INVALID',
+      `lease.json schema invalid for task ${taskId}`,
+      { taskId, zodError: parsed.error.message },
+    );
+  }
+  return parsed.data;
+}
+
+export const cancelHandler: VerbHandler = {
+  band: 'mutate',
+  synopsis: 'Cancel a task: state → cancelled (terminal), release lease, preserve worktree.',
+  async run(rest, opts) {
+    const forgeDir = resolveForgeDir(rest, opts.cwd);
+    const taskId = parseFlag(rest, 'task') ?? rest.find((a) => !a.startsWith('--')) ?? '';
+    const reason = parseFlag(rest, 'reason');
+    const json = hasFlag(rest, 'json');
+    return runOrchestrateCancel({
+      taskId,
+      forgeDir,
+      json,
+      ...(reason ? { reason } : {}),
+    });
+  },
+};
