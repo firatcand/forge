@@ -1001,6 +1001,35 @@ phases:
           - "/wrap-up --all mode handles batch cleanup with a single confirmation"
           - "Skill is host-portable (works under Claude Code; Codex/Gemini variants are a future-task)"
           - "Integration test: dispatch task → mock-merge PR → run /wrap-up → verify worktree gone, branch deleted, main fast-forwarded, tracker state Done"
+      - id: P2.5-T21
+        tracker_issue_id: "FORGE-122"
+        title: "Fix e2e/perf tests failing from worktree — hardcoded ${repoRoot}/node_modules/.bin/tsx path"
+        description: "Six e2e/perf tests in `test/unit/bin/forge.test.ts`, `test/integration/cli/init.e2e.test.ts`, `test/integration/cli/init.perf.test.ts`, and `test/integration/orchestrate/spec-diff.e2e.test.ts` fail with `AssertionError: undefined !== 1` when `npm test` runs from any `.forge/worktrees/<id>` checkout (git worktrees inherit refs but not the `node_modules` symlink tree, so the hardcoded `resolve(repoRoot, 'node_modules/.bin/tsx')` path doesn't exist). The same tests pass from the main checkout because Node's module resolution walks up from `cwd: repoRoot` and finds `node_modules/tsx` in the parent. Fix: resolve `tsxBin` via Node's module resolution (`createRequire(import.meta.url).resolve('tsx/dist/cli.mjs')`) or use `npx --no-install tsx` as the spawn target. Surfaced inside FORGE-97 implementation (2026-05-18); blocks running the PR-gate from any worktree after FORGE-115's `.forge/worktrees/` standardization. Path-resolution change only — no behavior change in the tests themselves and no new dependencies."
+        type: infra
+        priority: P1
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "All 6 affected tests pass when npm test runs from .forge/worktrees/<id> AND from the main checkout"
+          - "No new dependencies introduced"
+          - "No behavior change in the tests themselves — only the path-resolution strategy"
+          - "Path resolution uses Node-native module resolution (createRequire) or npx --no-install, not hardcoded repoRoot/node_modules/.bin paths"
+      - id: P2.5-T22
+        tracker_issue_id: "FORGE-81"
+        title: "Fix /learn back-propagation — writes hit worktree only; /pickup-task hydrates from main"
+        description: "Compound-learning loop silently breaks for any `/learn` invocation inside a worktree. `/learn` writes the new learning markdown to `docs/learnings/{quarter}/<slug>.md` in the current worktree, but `/pickup-task` hydrates `docs/learnings/` from the main repo's checkout (FORGE-66's hydration block). `docs/learnings/` is gitignored by the forge-dogfood rule (internal docs not shipped to npm), so worktree-written learnings never sync back to main unless the human manually `cp`s them. Reproduced on FORGE-77 retro 2026-05-16. Root cause: the 'canonical store = main checkout, worktrees = copies' invariant is enforced on hydration (FORGE-66) but not on writes. Task is the fix; the design options live in the Linear ticket body (A–E) but are not pre-bound here — implementer should brainstorm and pick the right shape (most likely C: `/ship` propagates worktree learnings to main on merge). The forge-local AC is: the canonical store stays single-source-of-truth across main/worktree boundaries, and the chosen authority path is documented in spec/SPEC.md or skills/learn/SKILL.md."
+        type: skill
+        priority: P1
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Learnings written from any worktree are visible to /pickup-task hydration on subsequent runs"
+          - "Canonical learnings store remains single-source-of-truth — no duplicate-write divergence between main and worktree copies"
+          - "Chosen authority/source path documented in spec/SPEC.md §Learnings (or equivalent) and in skills/learn/SKILL.md"
+          - "Integration test: write a learning from a worktree → assert it lands in the canonical store AND is visible via Read from the worktree in the same session"
+          - "Update docs/learnings/2026-Q2/ac-as-unit-test-vs-it-already-exists.md (or appropriate retro) to note the gap is closed"
 
   - id: phase-3
     tracker_milestone_id: "9f147eda-4ec3-4ada-b77b-230e6a516d46"
@@ -1056,7 +1085,7 @@ phases:
         description: "examples/ fixture projects for greenfield-github, greenfield-linear, greenfield-notion. CI runs the full v0.4 lifecycle on Claude Code primary + Codex review combo against each fixture: init → /forge → /draft-prd → /draft-spec → /draft-design → /ingest-spec → /decompose → /push-to-tracker → /pickup-task → build → MID-FLIGHT /update-spec --draft → flip accepted → /update-spec --apply (propagates + deletes ADR + writes commit message body) → /ship → /reconcile --pull verifies tracker drift handling. Closed-loop drift scenarios tested: worker emits drift event on contradictory phases/SPEC content; supervisor surfaces with routing-hint. CLI-verified-verdict path verified."
         type: integration
         priority: P0
-        depends_on: [P2.5-T02, P2.5-T04, P2.5-T05, P2.5-T06, P2.5-T07, P2.5-T08, P2.5-T09]
+        depends_on: [P2.5-T02, P2.5-T04, P2.5-T05, P2.5-T06, P2.5-T07, P2.5-T08, P2.5-T09, P3-T05]
         estimate: L
         owner_type: qa-engineer
         acceptance:
@@ -1082,3 +1111,21 @@ phases:
           - "GitHub release with CHANGELOG body + closed-loop workflow callout"
           - "npx @firatcand/forge --version on a fresh machine returns 0.4.0"
           - "Maintainer dogfood sign-off: ran v0.4.0 against a non-forge personal project; shipped at least one task end-to-end including a mid-flight /update-spec --draft + --apply propagation"
+      - id: P3-T05
+        tracker_issue_id: "FORGE-117"
+        title: "Refactor NotionTracker to `ntn` CLI transport + implement updateIssueBody"
+        description: "Notion launched an official CLI (`ntn`) that mirrors `gh`'s shape exactly: auth via `ntn login` (system keychain — no API key env var management), calls via `ntn api v1/...`, `execa`-friendly stdout/stderr/exitCode contract. Today `NotionTracker` uses the Notion MCP server (`@modelcontextprotocol/sdk` + `notion-mcp-transport.ts`), which is heavier than necessary and makes new method implementations (e.g., `updateIssueBody` block-children manipulation) awkward. FORGE-94 shipped `updateIssueBody` on Linear + GitHub and left Notion as `NOT_IMPLEMENTED` in `src/trackers/notion.ts`. This task replaces the `McpCall` seam with an `NtnExec` seam (same shape as `GhExec`), maps every `runTool('API-...')` to the equivalent `ntn api v1/...` invocation, implements `updateIssueBody` against `ntn api -X PATCH v1/blocks/{page_id}/children`, removes the `@modelcontextprotocol/sdk` dependency, and updates the docs/release-notes adapter matrix. Required for FORGE-110 (P3-T03) greenfield-notion e2e to exercise the closed-loop workflow's tracker-body-mutation path."
+        type: backend
+        priority: P1
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "NotionTracker exposes the same Tracker interface (no breaking changes to interface contract)"
+          - "All existing test/unit/trackers/notion.test.ts cases pass against a NtnExec-mocked transport (same mock-injection pattern as GhExec)"
+          - "updateIssueBody implemented; matches Linear/GitHub validation contract (non-string rejection, embedded-forge-footer rejection, length cap)"
+          - "Integration round-trip createIssue → updateIssueBody → listActiveIssues preserves forgeTaskId (property survives)"
+          - "NOT_IMPLEMENTED stub from FORGE-94 is deleted"
+          - "docs/adapters/notion.md updated for ntn auth + install + removed MCP dependency"
+          - "README adapter matrix flags Notion updateIssueBody as launched"
+          - "@modelcontextprotocol/sdk and src/trackers/notion-mcp-transport.ts removed (or retained only with documented justification)"
