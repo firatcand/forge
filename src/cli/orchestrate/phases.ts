@@ -84,7 +84,11 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   }
   let phases: Phases;
   try {
-    phases = loadPhases(phasesPath);
+    const loaded = loadPhases(phasesPath);
+    phases = loaded.phases;
+    // Freshness line goes to stderr before main output. Loader stays pure;
+    // caller decides surfacing (FORGE-113 plan §0 Q1).
+    process.stderr.write(loaded.freshnessLine + '\n');
   } catch (err) {
     return {
       exitCode: emit(

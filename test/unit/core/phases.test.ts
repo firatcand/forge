@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { YAMLParseError } from 'yaml';
 
 import { loadPhases, PhasesError } from '../../../src/core/index.ts';
-import type { Phases } from '../../../src/core/index.ts';
+import type { LoadPhasesResult } from '../../../src/core/index.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixturesDir = resolve(here, '..', '..', 'fixtures', 'phases');
@@ -27,17 +27,24 @@ function expectPhasesError(fn: () => unknown): PhasesError {
 }
 
 test('AC1: valid live snapshot returns parsed Phases', () => {
-  const result: Phases = loadPhases(fixture('live-snapshot.yaml'));
-  assert.equal(result.project, 'forge');
-  assert.ok(result.phases.length >= 1);
-  assert.equal(result.phases[0]!.id, 'phase-1');
+  const result: LoadPhasesResult = loadPhases(fixture('live-snapshot.yaml'));
+  assert.equal(result.phases.project, 'forge');
+  assert.ok(result.phases.phases.length >= 1);
+  assert.equal(result.phases.phases[0]!.id, 'phase-1');
+  assert.equal(typeof result.freshnessLine, 'string');
 });
 
 test('AC1: valid minimal fixture returns Phases shape', () => {
   const result = loadPhases(fixture('valid-minimal.yaml'));
-  assert.equal(result.project, 'minimal');
-  assert.equal(result.phases.length, 1);
-  assert.equal(result.phases[0]!.tasks[0]!.id, 'P1-T01');
+  assert.equal(result.phases.project, 'minimal');
+  assert.equal(result.phases.phases.length, 1);
+  assert.equal(result.phases.phases[0]!.tasks[0]!.id, 'P1-T01');
+});
+
+test('AC1: result includes a freshnessLine string', () => {
+  const result = loadPhases(fixture('valid-minimal.yaml'));
+  assert.equal(typeof result.freshnessLine, 'string');
+  assert.ok(result.freshnessLine.startsWith('phases.yaml:'));
 });
 
 test('AC2: two-task cycle throws SCHEMA_INVALID with cycle issue', () => {

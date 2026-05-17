@@ -5,8 +5,17 @@ import { z } from 'zod';
 
 import { PhasesSchema, type Phases } from '../schemas/phases.ts';
 import { PhasesError } from './errors.ts';
+import { computeFreshnessLine } from './freshness.ts';
 
-export function loadPhases(filePath: string): Phases {
+export interface LoadPhasesResult {
+  phases: Phases;
+  // Pre-rendered freshness summary line; callers print to stderr before their
+  // own output. Loader stays pure of I/O side-effects; each caller decides
+  // whether/where to surface this. See plans/tasks/FORGE-113.plan.md §0 Q1.
+  freshnessLine: string;
+}
+
+export function loadPhases(filePath: string): LoadPhasesResult {
   const resolved = path.resolve(filePath);
 
   let raw: string;
@@ -47,8 +56,9 @@ export function loadPhases(filePath: string): Phases {
     );
   }
 
+  let phases: Phases;
   try {
-    return PhasesSchema.parse(parsed);
+    phases = PhasesSchema.parse(parsed);
   } catch (err) {
     if (err instanceof z.ZodError) {
       throw new PhasesError(
@@ -60,4 +70,6 @@ export function loadPhases(filePath: string): Phases {
     }
     throw err;
   }
+
+  return { phases, freshnessLine: computeFreshnessLine(phases.source) };
 }

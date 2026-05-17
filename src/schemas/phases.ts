@@ -210,7 +210,9 @@ export type Phases = z.infer<typeof PhasesSchema>;
 export type Source = z.infer<typeof SourceSchema>;
 export type OwnerType = (typeof OWNER_TYPES)[number];
 export type Priority = (typeof PRIORITIES)[number];
-export type TrackerType = (typeof TRACKER_TYPES)[number];
+// NOTE: `TrackerType` is canonically defined in src/trackers/types.ts.
+// Source.tracker is structurally `'linear' | 'github' | 'notion'`; the
+// trackers module's type alias remains the single canonical export.
 export type TaskType = (typeof TASK_TYPES)[number];
 export type Estimate = (typeof ESTIMATES)[number];
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];
