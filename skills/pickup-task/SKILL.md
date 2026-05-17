@@ -22,8 +22,29 @@ subagent: learning-curator
 4. Compute branch name: `feat/{LINEAR-ID}-{kebab-case-title}`
 5. Create git worktree, write the task binding marker, then hydrate gitignored project meta the worker needs:
    ```bash
-   PROJECT_NAME=$(basename "$(pwd)")
-   WORKTREE_PATH="../${PROJECT_NAME}-worktrees/${LINEAR-ID}"
+   # Validate the ticket ID against the same rules as src/core/workspace.ts sanitizeIssueId.
+   # The skill produces a filesystem path from LINEAR_ID, so we abort on anything
+   # that could escape `.forge/worktrees/` or yield a malformed worktree dir.
+   if [[ -z "${LINEAR_ID}" ]] || \
+      [[ ${#LINEAR_ID} -gt 64 ]] || \
+      [[ "${LINEAR_ID}" =~ [^A-Za-z0-9._-] ]] || \
+      [[ "${LINEAR_ID}" == -* ]] || \
+      [[ "${LINEAR_ID}" == */* ]] || \
+      [[ "${LINEAR_ID}" == *\\* ]] || \
+      [[ "${LINEAR_ID}" == *..* ]]; then
+     echo "ERROR: ticket id '${LINEAR_ID}' is not a valid sanitized id (see src/core/workspace.ts sanitizeIssueId)" >&2
+     exit 1
+   fi
+
+   # Anchor on the main checkout root, not pwd or current-worktree toplevel.
+   # If the user runs /pickup-task from inside an existing worktree,
+   # `git rev-parse --show-toplevel` would return that worktree's root and
+   # the new worktree would be nested. --git-common-dir always resolves to
+   # the main checkout's .git (file vs dir), so its parent is the main root.
+   GIT_COMMON_DIR="$(git rev-parse --git-common-dir)"
+   REPO_ROOT="$(cd "$(dirname "${GIT_COMMON_DIR}")" && pwd)"
+   WORKTREE_PATH="${REPO_ROOT}/.forge/worktrees/${LINEAR_ID}"
+
    git worktree add "${WORKTREE_PATH}" -b "${BRANCH_NAME}" main
 
    # Write the worktree-task marker — binds this worktree to its task ID
@@ -33,7 +54,7 @@ subagent: learning-curator
    cat > "${WORKTREE_PATH}/.forge/worktree-task.json" <<EOF
 {
   "version": 1,
-  "taskId": "${LINEAR-ID}",
+  "taskId": "${LINEAR_ID}",
   "branch": "${BRANCH_NAME}",
   "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "createdBy": "skills/pickup-task"
@@ -50,6 +71,10 @@ EOF
    #   - /implement can't find plans/tasks/{ID}.plan.md (precondition fails)
    #   - learning-curator (step 6) finds zero learnings
    #
+   # Source paths are relative to ${REPO_ROOT} (the main checkout), not pwd:
+   # if the user invoked /pickup-task from a sibling worktree, pwd would
+   # point at the wrong tree and the cp commands would silently no-op.
+   #
    # All four copies are best-effort: a missing source tree is not fatal
    # (a fresh forge project has no plans/tasks/ yet, no spec/ during bootstrap).
    #
@@ -57,28 +82,28 @@ EOF
    # Hydration set: docs/learnings/2026-Q2/worktree-hydration-runbook.md
 
    # plans/phases.yaml — task graph + scope source-of-truth (read by /plan-task)
-   if [ -f plans/phases.yaml ]; then
+   if [ -f "${REPO_ROOT}/plans/phases.yaml" ]; then
      mkdir -p "${WORKTREE_PATH}/plans"
-     cp plans/phases.yaml "${WORKTREE_PATH}/plans/"
+     cp "${REPO_ROOT}/plans/phases.yaml" "${WORKTREE_PATH}/plans/"
    fi
 
    # spec/*.md — BRIEF, PRD, SPEC, DESIGN, CONTEXT (read by /plan-task).
    # ORCHESTRATOR.md is tracked but cp overwrites with identical content — harmless.
-   if compgen -G "spec/*.md" > /dev/null; then
+   if compgen -G "${REPO_ROOT}/spec/*.md" > /dev/null; then
      mkdir -p "${WORKTREE_PATH}/spec"
-     cp spec/*.md "${WORKTREE_PATH}/spec/"
+     cp "${REPO_ROOT}"/spec/*.md "${WORKTREE_PATH}/spec/"
    fi
 
    # plans/tasks/*.plan.md — required by /implement's plan-must-exist precondition
-   if compgen -G "plans/tasks/*.plan.md" > /dev/null; then
+   if compgen -G "${REPO_ROOT}/plans/tasks/*.plan.md" > /dev/null; then
      mkdir -p "${WORKTREE_PATH}/plans/tasks"
-     cp plans/tasks/*.plan.md "${WORKTREE_PATH}/plans/tasks/"
+     cp "${REPO_ROOT}"/plans/tasks/*.plan.md "${WORKTREE_PATH}/plans/tasks/"
    fi
 
    # docs/learnings/ — required by step 6 (learning-curator). MUST happen before step 6.
-   if [ -d docs/learnings ]; then
+   if [ -d "${REPO_ROOT}/docs/learnings" ]; then
      mkdir -p "${WORKTREE_PATH}/docs/learnings"
-     cp -r docs/learnings/. "${WORKTREE_PATH}/docs/learnings/"
+     cp -r "${REPO_ROOT}"/docs/learnings/. "${WORKTREE_PATH}/docs/learnings/"
    fi
    ```
 6. Delegate to `learning-curator` to retrieve relevant learnings (runs AFTER step 5
@@ -88,7 +113,7 @@ EOF
 7. Output:
 
 ```
-✓ Worktree created: ../my-project-worktrees/TLOG-101
+✓ Worktree created: .forge/worktrees/TLOG-101
 ✓ Linear issue TLOG-101 → In Progress
 ✓ Branch: feat/TLOG-101-bootstrap-nextjs
 
@@ -103,7 +128,7 @@ Relevant learnings (3):
   - 2026-Q1/git-hooks-prettier-conflict.md
 
 Next:
-  cd ../my-project-worktrees/TLOG-101
+  cd .forge/worktrees/TLOG-101
   claude
   > /plan-task
 ```
