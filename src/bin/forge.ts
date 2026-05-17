@@ -76,12 +76,15 @@ function failNoCommand(version: string): never {
 const args = process.argv.slice(2);
 const version = readVersion();
 
-if (args.includes('--help') || args.includes('-h')) {
+// Global --help / --version only fire when they're the first argument.
+// Subcommands (e.g., `forge orchestrate run --help`) keep --help so the
+// dispatcher can render scoped usage.
+if (args[0] === '--help' || args[0] === '-h') {
   printHelp(version);
   process.exit(0);
 }
 
-if (args.includes('--version') || args.includes('-v')) {
+if (args[0] === '--version' || args[0] === '-v') {
   console.log(version);
   process.exit(0);
 }
