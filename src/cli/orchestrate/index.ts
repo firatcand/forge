@@ -18,6 +18,9 @@ import { phasesHandler } from './phases.ts';
 import { doctorHandler } from './doctor.ts';
 import { runStartHandler } from './run-start.ts';
 import { runListHandler } from './run-list.ts';
+import { claimHandler } from './claim.ts';
+import { dispatchHandler } from './dispatch.ts';
+import { heartbeatHandler } from './heartbeat.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -141,9 +144,12 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
     ['list', runListHandler],
   ])],
   // Mutating band.
+  ['claim', claimHandler],
+  ['dispatch', dispatchHandler],
+  ['heartbeat', heartbeatHandler],
   ['answer', answerHandler],
   ['gc', gcHandler],
-  // claim/dispatch/heartbeat/question/event/complete/cancel land in Steps 4 + 5.
+  // question/event/complete/cancel land in Step 5.
 ]);
 
 // Order used for --help rendering. Read-only first, then mutating, then nested.
