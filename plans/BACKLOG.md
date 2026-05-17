@@ -31,11 +31,11 @@ Add an optional `touches: [paths]` field to each task in `plans/phases.yaml`. `/
 
 ### `/pickup-task` should print sandbox-grant snippet
 
-When `/pickup-task` creates a worktree, its "Next:" output should detect whether the user's sandbox is enabled and, if so, print the `sandbox.filesystem.allowWrite` entry they need to add. Otherwise the first `git commit` inside the worktree fails with a cryptic EPERM and the user has to diagnose it.
+When `/pickup-task` creates a worktree (at `.forge/worktrees/<TICKET>/`), its "Next:" output should detect whether the user's sandbox is enabled and, if so, print the `sandbox.filesystem.allowWrite` entry they need to add. Otherwise the first `git commit` inside the worktree fails with a cryptic EPERM and the user has to diagnose it.
 
 **Detection logic:** read merged settings (`~/.claude/settings.json` + project `.claude/settings.json`). If `sandbox.enabled === true` and `~/repos/<project>/.git` is not already in `sandbox.filesystem.allowWrite`, append a one-line note to the existing "Next:" block:
 
-> Note: sandbox is enabled. Add `"~/repos/forge/.git"` to `sandbox.filesystem.allowWrite` in `.claude/settings.json` so git operations succeed inside this worktree.
+> Note: sandbox is enabled. Add `"~/repos/forge/.git"` to `sandbox.filesystem.allowWrite` in `.claude/settings.json` so git operations succeed inside this worktree at `.forge/worktrees/<TICKET>/`.
 
 **Scope:** ~15 lines in `skills/pickup-task/SKILL.md` + a tiny settings-resolver helper. No new dependencies.
 

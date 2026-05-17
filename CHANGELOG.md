@@ -18,6 +18,10 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 - **`/push-to-linear`** is now an alias for `/push-to-tracker` and prints a deprecation warning before forwarding.
 
+### Behavior change
+
+- **Worktree location standardized to `.forge/worktrees/<sanitized-id>/`** (FORGE-115 / P2.5-T19) — `/pickup-task` now creates worktrees inside the project at `.forge/worktrees/`, matching the orchestrator's existing convention. Previously the skill used `../${PROJECT}-worktrees/${TICKET}/` (sibling directory outside the repo). **Migration:** existing sibling worktrees keep working — git tracks them by absolute path. To consolidate, run `git worktree list` to find them, then either `git worktree move <old-path> .forge/worktrees/<id>` to relocate or `git worktree remove <old-path>` if the branch is already merged. `forge init` now also writes tooling-exclude entries (`.eslintignore`, `.prettierignore` get a one-line append; `tsconfig.json` and `vitest.config.*` get a copy-paste snippet in `.forge/init-warnings.md`) so lint / typecheck / test runs don't recurse into worktrees.
+
 ### Changed
 
 - **`LinearTracker.claim` + `releaseClaim`** (FORGE-76):

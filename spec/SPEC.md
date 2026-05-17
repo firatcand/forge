@@ -467,7 +467,7 @@ src/
   core/
     settings.ts               // load + validate + hot-reload settings.yaml (extended with codex/decisions/doctor blocks)
     phases.ts                 // load + validate phases.yaml
-    workspace.ts              // worktree create / cleanup / sanitize-id
+    workspace.ts              // worktree create / cleanup / sanitize-id; canonical worktree path is `.forge/worktrees/<sanitized-id>/`
     logger.ts                 // chalk stdout + JSONL append
     secrets.ts                // dispatch to secret manager adapter
   orchestrator/
@@ -509,6 +509,20 @@ test/
   integration/                // CLI harness via execa, scratch tmpdir
   e2e/                        // examples/ as fixture projects
 ```
+
+### Worktree location convention
+
+Worker worktrees live at `.forge/worktrees/<sanitized-id>/` (project-relative, inside the repo). This applies to **both** the autonomous orchestrator (`src/orchestrator/`) and the manual `/pickup-task` skill — there is one canonical location, owned by `src/core/workspace.ts`.
+
+Rationale:
+- Consistency between human and orchestrator flows (the same worktree path resolves the same way for both).
+- Self-contained: removing the project directory cleans up all worktrees with it.
+- Project-relative paths (no `../` math, no sibling-directory ambiguity).
+- `.forge/` is already in `forge init`'s `.gitignore` block — worktree files do not appear in `git status` of the main checkout.
+
+`forge init` extends this convention by writing tooling-exclude entries so ESLint / Prettier / TypeScript / Vitest skip `.forge/worktrees/`:
+- `.eslintignore` and `.prettierignore` get a one-line append (if present).
+- `tsconfig.json` and `vitest.config.*` get a copy-paste snippet emitted to `.forge/init-warnings.md` (forge never auto-edits JSON or TypeScript config files).
 
 ---
 
