@@ -230,3 +230,34 @@ test('FORGE-105 — FORGE_AUTO_CODEX=1 leaves default behavior (suggestion fires
   });
   assert.match(stdout.buf, /\/codex review-plan/);
 });
+
+// Codex F1 (confidence 8): GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR env vars
+// can redirect `git rev-parse --git-common-dir` to an attacker-chosen repo.
+// codex-suggest sanitizes the env before invoking git so resolution stays
+// anchored on cwd. This test plants a poisoned GIT_DIR pointing at a tmp
+// directory whose `.forge/settings.yaml` would disable codex-suggest; if
+// the sanitization works, the suggestion still fires (cwd has no settings
+// and falls through to defaults).
+test('FORGE-105 — GIT_DIR/GIT_WORK_TREE env cannot redirect settings discovery', () => {
+  // Set up an attacker-controlled "settings" dir with auto_codex_enabled: false
+  const attackerRoot = tmp();
+  writeSettings(attackerRoot, { auto_codex_enabled: false });
+  // The victim cwd is a fresh tmp dir with no .forge/settings.yaml
+  const victimCwd = tmp();
+  const { stdout } = capture();
+  runCodexSuggest({
+    cwd: victimCwd,
+    argv: ['plan-task'],
+    env: {
+      // Poisoned env that an unsanitized git invocation would honor.
+      GIT_DIR: `${attackerRoot}/.git`,
+      GIT_WORK_TREE: attackerRoot,
+      GIT_COMMON_DIR: `${attackerRoot}/.git`,
+    },
+    stdout,
+    stderr: capture().stderr,
+  });
+  // Sanitization works → git resolves to cwd's parent tree (or null) → no
+  // attacker settings consumed → defaults expand → suggestion fires.
+  assert.match(stdout.buf, /\/codex review-plan/);
+});

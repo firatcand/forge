@@ -55,10 +55,22 @@ function isEnvDisabled(env: NodeJS.ProcessEnv): boolean {
 // Resolve the main checkout root from cwd via git-common-dir. Returns null
 // if cwd is not in a git repo (e.g., test fixtures outside any worktree).
 // Uses execFileSync (not execSync) — no shell, no injection surface.
+//
+// Path-trust hardening (Codex F1, confidence 8): Git honors GIT_DIR /
+// GIT_WORK_TREE / GIT_COMMON_DIR env vars and would resolve the common-dir
+// relative to those, not cwd. An attacker who can set those env vars could
+// redirect us to a `.forge/settings.yaml` outside the user's actual project.
+// We strip those vars before invoking git so resolution is anchored on cwd.
 function resolveGitCommonRoot(cwd: string): string | null {
+  const sanitizedEnv = { ...process.env };
+  delete sanitizedEnv.GIT_DIR;
+  delete sanitizedEnv.GIT_WORK_TREE;
+  delete sanitizedEnv.GIT_COMMON_DIR;
+  delete sanitizedEnv.GIT_CEILING_DIRECTORIES;
   try {
     const out = execFileSync('git', ['rev-parse', '--git-common-dir'], {
       cwd,
+      env: sanitizedEnv,
       stdio: ['ignore', 'pipe', 'ignore'],
       encoding: 'utf8',
     }).trim();
