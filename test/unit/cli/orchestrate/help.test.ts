@@ -26,6 +26,7 @@ const EXPECTED_BANDS: ReadonlyArray<readonly [string, 'read' | 'mutate']> = [
   ['event', 'mutate'],
   ['complete', 'mutate'],
   ['cancel', 'mutate'],
+  ['reconcile', 'mutate'],
   ['gc', 'mutate'],
 ];
 

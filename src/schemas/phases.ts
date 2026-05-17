@@ -20,11 +20,13 @@ export const TASK_TYPES = [
   'integration',
   'content',
   'infra',
+  'skill',
+  'docs',
 ] as const;
 
 export const ESTIMATES = ['S', 'M', 'L', 'XL'] as const;
 
-export const PHASE_STATUSES = ['active', 'blocked', 'done'] as const;
+export const PHASE_STATUSES = ['active', 'blocked', 'done', 'paused'] as const;
 
 // Per-task lifecycle status overlay used by the orchestrator to filter
 // phases --ready and by reconciliation to keep phases.yaml ↔ tracker aligned.
@@ -33,7 +35,7 @@ export const PHASE_STATUSES = ['active', 'blocked', 'done'] as const;
 export const TASK_STATUSES = ['active', 'paused', 'done', 'deferred-v0.5', 'dropped'] as const;
 
 export const TaskSchema = z.object({
-  id: z.string().regex(/^P\d+-T\d+[a-z]?$/),
+  id: z.string().regex(/^P\d+(\.\d+)?-T\d+[a-z]?$/),
   tracker_issue_id: z.string().optional(),
   title: z.string().min(1),
   description: z.string().min(1),
@@ -44,21 +46,25 @@ export const TaskSchema = z.object({
   owner_type: z.enum(OWNER_TYPES),
   acceptance: z.array(z.string().min(1)).min(1),
   split_into: z.array(z.string().min(1)).optional(),
-  // Optional lifecycle overlay (default = 'active' if absent).
+  // Optional lifecycle overlay (default = 'active' if absent). Enum validates
+  // production phases.yaml; the loader silently dropped this field prior to
+  // FORGE-96 because it wasn't declared.
   status: z.enum(TASK_STATUSES).optional(),
   // Optional file-glob declaration consumed by src/orchestrator/overlap.ts to
   // classify candidate-vs-active overlap when phases --ready surfaces tasks.
   write_globs: z.array(z.string().min(1)).optional(),
-  // Free-form metadata used by phases.yaml today; kept loose so the loader
-  // doesn't reject the production file.
+  // Free-form lifecycle metadata used by phases.yaml today; kept loose so the
+  // loader doesn't reject the production file.
   deferred_at: z.string().optional(),
   deferred_reason: z.string().optional(),
   dropped_at: z.string().optional(),
   dropped_reason: z.string().optional(),
+  paused_at: z.string().optional(),
+  paused_reason: z.string().optional(),
 });
 
 export const PhaseSchema = z.object({
-  id: z.string().regex(/^phase-\d+$/),
+  id: z.string().regex(/^phase-\d+(\.\d+)?$/),
   tracker_milestone_id: z.string().optional(),
   name: z.string().min(1),
   status: z.enum(PHASE_STATUSES),

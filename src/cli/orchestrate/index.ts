@@ -25,6 +25,7 @@ import { questionWriteHandler } from './question-write.ts';
 import { eventHandler } from './event.ts';
 import { completeHandler } from './complete.ts';
 import { cancelHandler } from './cancel.ts';
+import { runOrchestrateReconcile } from './reconcile.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -133,6 +134,18 @@ const specDiffHandler: VerbHandler = {
   },
 };
 
+const reconcileHandler: VerbHandler = {
+  band: 'mutate',
+  synopsis: 'Bi-directional phases.yaml ↔ tracker sync (--pull | --push).',
+  async run(rest, opts) {
+    const result = await runOrchestrateReconcile({
+      cwd: opts.cwd,
+      argv: rest,
+    });
+    return { exitCode: result.exitCode };
+  },
+};
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, VerbHandler>>([
@@ -156,6 +169,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['event', eventHandler],
   ['complete', completeHandler],
   ['cancel', cancelHandler],
+  ['reconcile', reconcileHandler],
   ['gc', gcHandler],
 ]);
 
@@ -176,6 +190,7 @@ export const HELP_ORDER: readonly string[] = [
   'event',
   'complete',
   'cancel',
+  'reconcile',
   'gc',
 ];
 

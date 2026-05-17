@@ -129,7 +129,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 
 - **When to invoke:** start of every new task.
 - **Inputs:** configured tracker (or `phases.yaml` if no tracker is configured).
-- **Outputs:** picks next available task (status Todo, all dependencies Done), sets it to In Progress, creates a worktree at `../{project}-worktrees/{TICKET}`, retrieves recent learnings tagged with the task's type.
+- **Outputs:** picks next available task (status Todo, all dependencies Done), sets it to In Progress, creates a worktree at `.forge/worktrees/{TICKET}/`, retrieves recent learnings tagged with the task's type.
 - **Unlocks:** `/plan-task` in the new worktree.
 
 ### `/plan-task`

@@ -60,7 +60,7 @@ In Claude Code:
 
 ```
 > /pickup-task        # claim task, worktree created
-cd ../<project>-worktrees/<TICKET-ID>
+cd .forge/worktrees/<TICKET-ID>
 claude
 > /plan-task          # plan mode
 > /implement          # execute
