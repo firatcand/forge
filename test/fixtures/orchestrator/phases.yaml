@@ -1,6 +1,10 @@
 project: "orchestrator-fixture"
-tracker_project_id: "fixture-project"
 gate_check_command: "echo gate-ok"
+source:
+  tracker: linear
+  project_id: "fixture-project"
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: "fixturesha000000000000000000000000000000"
 
 phases:
   - id: phase-1

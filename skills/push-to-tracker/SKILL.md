@@ -52,11 +52,12 @@ The agent classifies adapter errors via `src/trackers/errors.ts` codes and retri
 
 Tracker-agnostic keys:
 
-- top level: `tracker_project_id`, `tracker_url`
+- top level: `tracker_url`
+- in `source` block: `tracker`, `project_id`, `synced_at`, `spec_revision`
 - per phase: `tracker_milestone_id`
 - per task: `tracker_issue_id`
 
-All adapters write the same keys; the tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml` under `tracker.config`, not in `phases.yaml`.
+All adapters write the same keys; the tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml` under `tracker.config`, not in `phases.yaml`. After bootstrap, `/reconcile --pull` keeps the `source` block fresh on every regeneration.
 
 ## Step 4 — Per-tracker post-step
 
@@ -75,5 +76,5 @@ Print:
 
 ## Edge cases
 
-- `phases.yaml` already has `tracker_project_id` set → update mode; reconcile against the existing tracker-side project rather than creating a new one.
+- `phases.yaml` already has `source.project_id` set → update mode; reconcile against the existing tracker-side project rather than creating a new one. (Pre-v0.4 files with legacy top-level `tracker_project_id` are migrated into `source.project_id` on first `/reconcile --pull`.)
 - A `depends_on` references a task that wasn't created (filtered out, typo) → adapter throws `VALIDATION`; surface the offending task IDs and abort the second pass.
