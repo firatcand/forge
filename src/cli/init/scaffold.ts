@@ -10,6 +10,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
+import { writeAtomic } from '../../core/fs-atomic.ts';
 import type { InitAnswers } from './prompts.ts';
 import { renderTemplate, resolveTemplatesDir, type TemplateVars } from './templates.ts';
 
@@ -171,13 +172,6 @@ export function toMinimalYamlObject(answers: InitAnswers): Record<string, unknow
     agents,
     design,
   };
-}
-
-function writeAtomic(absPath: string, contents: string): void {
-  mkdirSync(dirname(absPath), { recursive: true });
-  const tmpPath = `${absPath}.forge-tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmpPath, contents, 'utf8');
-  renameSync(tmpPath, absPath);
 }
 
 function injectBriefGoal(briefRaw: string, goal: string): string {
