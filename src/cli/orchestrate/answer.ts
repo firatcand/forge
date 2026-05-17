@@ -4,8 +4,8 @@ import {
   readAnswer,
   readQuestion,
   writeAnswerAtomic,
-} from '../orchestrator/questions/index.ts';
-import { AnswerSchema } from '../schemas/questions.ts';
+} from '../../orchestrator/questions/index.ts';
+import { AnswerSchema } from '../../schemas/questions.ts';
 
 export interface OrchestrateAnswerOptions {
   readonly questionId: string;

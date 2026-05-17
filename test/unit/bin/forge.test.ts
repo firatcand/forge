@@ -80,13 +80,18 @@ test('forge orchestrate with no subcommand prints usage and exits 1', async () =
   const result = await runCli(['orchestrate']);
   assert.equal(result.exitCode, 1);
   assert.match(result.stderr, /Usage: forge orchestrate/);
-  assert.match(result.stderr, /questions\|answer\|status\|attach/);
+  // Usage lists each verb on its own line; assert presence of representative verbs.
+  for (const v of ['questions', 'answer', 'status', 'attach', 'gc', 'spec-diff']) {
+    assert.match(result.stderr, new RegExp(`\\b${v}\\b`), `usage should mention ${v}`);
+  }
 });
 
-test('forge orchestrate <unknown> rejects the subcommand and exits 1', async () => {
+test('forge orchestrate <unknown> rejects the verb and exits 1', async () => {
   const result = await runCli(['orchestrate', 'mystery']);
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /unknown subcommand 'mystery'/);
+  // Verb-table dispatcher emits a stable error envelope code.
+  assert.match(result.stderr, /UNKNOWN_VERB/);
+  assert.match(result.stderr, /'mystery'/);
 });
 
 test('forge orchestrate questions --open returns 0 against an empty forge dir', async () => {

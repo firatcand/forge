@@ -7,8 +7,8 @@ import { PassThrough } from 'node:stream';
 import {
   QuestionSchemaWithRecommendationCheck,
   type Question,
-} from '../../../src/schemas/questions.ts';
-import { runOrchestrateQuestions } from '../../../src/cli/orchestrate-questions.ts';
+} from '../../../../src/schemas/questions.ts';
+import { runOrchestrateQuestions } from '../../../../src/cli/orchestrate/questions.ts';
 
 function makeQuestion(id: string, created: string, expires: string): Question {
   return QuestionSchemaWithRecommendationCheck.parse({

@@ -6,8 +6,8 @@ import {
   isQuestionResolvedEvent,
   tryParseEventLine,
   type NotificationEvent,
-} from '../orchestrator/events.ts';
-import { isNodeFsError } from '../orchestrator/questions/errors.ts';
+} from '../../orchestrator/events.ts';
+import { isNodeFsError } from '../../orchestrator/questions/errors.ts';
 
 export interface OrchestrateAttachOptions {
   readonly runId?: string;

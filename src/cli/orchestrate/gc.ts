@@ -11,7 +11,7 @@ import {
   legacyArchiveSession,
   legacyQuestionsDir,
   QuestionChannelError,
-} from '../orchestrator/questions/index.ts';
+} from '../../orchestrator/questions/index.ts';
 
 // `forge orchestrate gc` is the deterministic reconciler defined by
 // spec/ORCHESTRATOR.md §"gc reconciliation rules". The full divergence table

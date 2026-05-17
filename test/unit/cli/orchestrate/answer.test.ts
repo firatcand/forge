@@ -8,8 +8,8 @@ import {
   QuestionSchemaWithRecommendationCheck,
   type Answer,
   type Question,
-} from '../../../src/schemas/questions.ts';
-import { runOrchestrateAnswer } from '../../../src/cli/orchestrate-answer.ts';
+} from '../../../../src/schemas/questions.ts';
+import { runOrchestrateAnswer } from '../../../../src/cli/orchestrate/answer.ts';
 
 function makeQuestion(id: string): Question {
   return QuestionSchemaWithRecommendationCheck.parse({
