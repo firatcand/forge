@@ -7,6 +7,7 @@ import { runOrchestrateAnswer } from '../cli/orchestrate-answer.ts';
 import { runOrchestrateAttach } from '../cli/orchestrate-attach.ts';
 import { runOrchestrateGc } from '../cli/orchestrate-gc.ts';
 import { runOrchestrateQuestions } from '../cli/orchestrate-questions.ts';
+import { runOrchestrateSpecDiff } from '../cli/orchestrate-spec-diff.ts';
 import { runOrchestrateStatus } from '../cli/orchestrate-status.ts';
 
 type PackageJson = { version: string };
@@ -158,7 +159,7 @@ function dispatchOrchestrate(rest: readonly string[]): void {
   const sub = rest[0];
   if (!sub) {
     console.error(
-      'Usage: forge orchestrate <questions|answer|status|attach|gc> [...]',
+      'Usage: forge orchestrate <questions|answer|status|attach|gc|spec-diff> [...]',
     );
     process.exit(1);
   }
@@ -207,8 +208,23 @@ function dispatchOrchestrate(rest: readonly string[]): void {
     const result = runOrchestrateGc({ forgeDir, dryRun });
     process.exit(result.exitCode);
   }
+  if (sub === 'spec-diff') {
+    const taskId = firstPositional(subArgs) ?? '';
+    const json = hasFlag(subArgs, 'json');
+    const repoRoot = parseFlag(subArgs, 'repo-root');
+    void (async () => {
+      const result = await runOrchestrateSpecDiff({
+        taskId,
+        forgeDir,
+        json,
+        ...(repoRoot ? { repoRoot } : {}),
+      });
+      process.exit(result.exitCode);
+    })();
+    return;
+  }
   console.error(
-    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach|gc.`,
+    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach|gc|spec-diff.`,
   );
   process.exit(1);
 }

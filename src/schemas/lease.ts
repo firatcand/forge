@@ -14,6 +14,8 @@ export const LeaseSchema = z.object({
   expires_at: z.string().datetime(),
   last_heartbeat_at: z.string().datetime(),
   generation: z.number().int().min(0),
+  // "git:<40-hex>" or "digest:<hex>" — stamped at claim time. See spec-diff.ts.
+  spec_revision: z.string().min(1).max(128),
 });
 
 export type Lease = z.infer<typeof LeaseSchema>;

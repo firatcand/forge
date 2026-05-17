@@ -15,6 +15,7 @@ function baseLease(
     expires_at: '2026-05-15T10:30:00.000Z',
     last_heartbeat_at: '2026-05-15T10:00:00.000Z',
     generation: 0,
+    spec_revision: 'git:abc1234567890abcdef1234567890abcdef12345',
     ...overrides,
   };
 }
@@ -63,5 +64,47 @@ test('schemas/lease: LeaseSchema rejects wrong version', () => {
 
 test('schemas/lease: LeaseSchema rejects generation as float', () => {
   const result = LeaseSchema.safeParse(baseLease({ generation: 0.5 }));
+  assert.equal(result.success, false);
+});
+
+test('schemas/lease: LeaseSchema rejects missing spec_revision', () => {
+  const l = baseLease();
+  delete (l as Record<string, unknown>).spec_revision;
+  const result = LeaseSchema.safeParse(l);
+  assert.equal(result.success, false);
+});
+
+test('schemas/lease: LeaseSchema accepts git:<40-hex> spec_revision', () => {
+  const result = LeaseSchema.safeParse(
+    baseLease({ spec_revision: 'git:0123456789abcdef0123456789abcdef01234567' }),
+  );
+  assert.equal(result.success, true);
+});
+
+test('schemas/lease: LeaseSchema accepts digest:<hex> spec_revision', () => {
+  const result = LeaseSchema.safeParse(
+    baseLease({
+      spec_revision:
+        'digest:' +
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    }),
+  );
+  assert.equal(result.success, true);
+});
+
+test('schemas/lease: LeaseSchema accepts digest:empty', () => {
+  const result = LeaseSchema.safeParse(baseLease({ spec_revision: 'digest:empty' }));
+  assert.equal(result.success, true);
+});
+
+test('schemas/lease: LeaseSchema rejects empty spec_revision', () => {
+  const result = LeaseSchema.safeParse(baseLease({ spec_revision: '' }));
+  assert.equal(result.success, false);
+});
+
+test('schemas/lease: LeaseSchema rejects spec_revision longer than 128 chars', () => {
+  const result = LeaseSchema.safeParse(
+    baseLease({ spec_revision: 'git:' + 'a'.repeat(200) }),
+  );
   assert.equal(result.success, false);
 });
