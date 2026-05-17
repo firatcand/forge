@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInit } from '../cli/init.ts';
+import { runCodexSuggest } from '../cli/codex-suggest.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 
 type PackageJson = { version: string };
@@ -116,6 +117,11 @@ if (command === 'init') {
     const result = await dispatchOrchestrate(args.slice(1), { cwd: process.cwd() });
     process.exit(result.exitCode);
   })();
+} else if (command === 'codex-suggest') {
+  // FORGE-105: in-skill auto-codex hint emitter. Synchronous + stateless;
+  // safe to call from /plan-task and /ship at skill end.
+  const result = runCodexSuggest({ cwd: process.cwd(), argv: args.slice(1) });
+  process.exit(result.exitCode);
 } else {
   failUnknown(command, version);
 }

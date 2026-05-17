@@ -148,6 +148,13 @@ export function toSettingsObject(answers: InitAnswers): Settings {
       mode: answers.design.mode,
       ...(answers.design.reference ? { reference: answers.design.reference } : {}),
     },
+    // FORGE-105: codex / decisions / doctor blocks. Defaults match SettingsSchema —
+    // duplicated here because Settings is the strict typed shape used by callers,
+    // not the parsed-with-defaults output. toMinimalYamlObject omits these so
+    // adopters get a clean settings.yaml; zod defaults expand on load.
+    codex: { auto_codex_enabled: true, auto_codex_token_cap: 50_000 },
+    decisions: { decision_dir: './spec/decisions', stale_draft_threshold_days: 7 },
+    doctor: { spec_code_check_enabled: true },
   };
   return out;
 }

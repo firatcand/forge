@@ -57,3 +57,13 @@ If any gate fails, list what's missing. Do not proceed.
 ## Output
 
 PR URL. Linear issue link. Reminder to run `/learn` if anything notable happened.
+
+After the PR is open, emit the auto-codex suggestion hint:
+
+```bash
+forge codex-suggest ship
+```
+
+Prints `💡 Suggested next: /codex review-impl (run with FORGE_AUTO_CODEX=0 to disable)`.
+Silent when `FORGE_AUTO_CODEX=0` is set or `codex.auto_codex_enabled: false` in `.forge/settings.yaml`.
+Independent of the CRITICAL.md hard-gate in §Gates.7 — that runs Codex automatically; this is a soft suggestion for the user to invoke `/codex review-impl` after the fact.
