@@ -486,17 +486,80 @@ test('TaskSchema accepts tracker_issue_id', () => {
   assert.equal(result.data.tracker_issue_id, 'gh#42');
 });
 
-test('PhasesSchema accepts tracker_project_id and tracker_url', () => {
+test('PhasesSchema accepts tracker_url at top level', () => {
   const data = {
     ...basePhases(),
-    tracker_project_id: 'proj_abc',
     tracker_url: 'https://github.com/org/repo',
   };
   const result = PhasesSchema.safeParse(data);
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.tracker_project_id, 'proj_abc');
   assert.equal(result.data.tracker_url, 'https://github.com/org/repo');
+});
+
+test('PhasesSchema accepts optional source block', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'linear' as const,
+      project_id: 'proj_abc',
+      synced_at: '2026-05-17T22:17:11Z',
+      spec_revision: '8fa22260dfb272c0ba61a6b78288942fc1d0f418',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.source?.tracker, 'linear');
+  assert.equal(result.data.source?.project_id, 'proj_abc');
+  assert.equal(result.data.source?.synced_at, '2026-05-17T22:17:11Z');
+  assert.equal(
+    result.data.source?.spec_revision,
+    '8fa22260dfb272c0ba61a6b78288942fc1d0f418',
+  );
+});
+
+test('PhasesSchema rejects unknown tracker in source.tracker', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'jira',
+      project_id: 'proj_abc',
+      synced_at: '2026-05-17T22:17:11Z',
+      spec_revision: 'abc1234',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+});
+
+test('PhasesSchema rejects non-ISO synced_at in source', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'linear' as const,
+      project_id: 'proj_abc',
+      synced_at: 'last tuesday',
+      spec_revision: 'abc1234',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
+});
+
+test('PhasesSchema rejects extra keys inside source (strict)', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'linear' as const,
+      project_id: 'proj_abc',
+      synced_at: '2026-05-17T22:17:11Z',
+      spec_revision: 'abc1234',
+      tracker_revision: 'sneaky-extra-field',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, false);
 });
 
 test('PhaseSchema accepts tracker_milestone_id', () => {
