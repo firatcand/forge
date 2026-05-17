@@ -19,6 +19,7 @@
 
 import assert from 'node:assert/strict';
 
+import { TrackerError } from '../../../src/trackers/errors.ts';
 import type { ClaimResult, Tracker } from '../../../src/trackers/index.ts';
 
 export interface ConformanceInputs {
@@ -28,6 +29,14 @@ export interface ConformanceInputs {
   blockerId: string;
   /** Run ID used for claim/releaseClaim. Must not yet hold a claim on existingIssueId. */
   runId?: string;
+  /**
+   * Expected outcome for updateIssueBody:
+   *   'works' — adapter must successfully replace the body.
+   *   'not_implemented' — adapter must throw TrackerError(NOT_IMPLEMENTED).
+   *     Used by NotionTracker until FORGE-117 ships the ntn-CLI refactor.
+   * Default: 'works'.
+   */
+  expectUpdateIssueBody?: 'works' | 'not_implemented';
 }
 
 /**
@@ -103,6 +112,27 @@ export async function runTrackerConformance(
 
   // 9. setBlockedBy — void return
   await tracker.setBlockedBy(inputs.existingIssueId, inputs.blockerId);
+
+  // 10. updateIssueBody — void return when supported; NOT_IMPLEMENTED for
+  //     Notion until FORGE-117 refactor lands.
+  const expect = inputs.expectUpdateIssueBody ?? 'works';
+  if (expect === 'works') {
+    await tracker.updateIssueBody(
+      inputs.existingIssueId,
+      'conformance updateIssueBody body',
+    );
+  } else {
+    await assert.rejects(
+      () =>
+        tracker.updateIssueBody(
+          inputs.existingIssueId,
+          'conformance updateIssueBody body',
+        ),
+      (err: unknown) =>
+        err instanceof TrackerError && err.code === 'NOT_IMPLEMENTED',
+      'expected updateIssueBody to throw TrackerError(NOT_IMPLEMENTED)',
+    );
+  }
 
   // Type-level guard: the `tracker.type` discriminator exists and is one of
   // the three known values. Caught at compile time by `Tracker.type` literal

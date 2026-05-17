@@ -18,6 +18,21 @@ const FORGE_BLOCKED_RE = /<!--\s*forge:blockedBy=([^>]*?)\s*-->/;
 // Strip variants are global — defensive against duplicate footers.
 const FORGE_TASK_STRIP_RE = /<!--\s*forge:task=[^>]*-->\n?/g;
 const FORGE_BLOCKED_STRIP_RE = /<!--\s*forge:blockedBy=[^>]*-->\n?/g;
+// Match every `<!-- forge:KEY=VALUE -->` comment regardless of KEY. Used by
+// parseExtraForgeFooters to collect everything except task/blockedBy so that
+// updateIssueBody can carry them through a body replace.
+//
+// Value capture is `[\s\S]*?` (non-greedy, dot-includes-newline) terminated
+// by `\s*-->`. Earlier `[^>]*?` truncated values containing a bare `>`
+// (e.g. `<!-- forge:threshold=a>b -->`) — silent data loss. Codex 2nd-pass
+// (FORGE-94 review).
+const FORGE_ANY_RE = /<!--\s*forge:([A-Za-z][A-Za-z0-9_]*)=([\s\S]*?)\s*-->/g;
+// Caller-input rejection: ANY `<!--\s*forge:KEY` regardless of which KEY.
+// Stricter than (FORGE_TASK_RE|FORGE_BLOCKED_RE) because unknown forge keys
+// (e.g. `forge:ownerType`) collide with adapter-managed extra-footer
+// preservation and would silently double on round-trip. Code-reviewer +
+// codex 2nd-pass converged on this (FORGE-94 review).
+const FORGE_ANY_INPUT_RE = /<!--\s*forge:[A-Za-z]/;
 
 // Reject bare values (forgeTaskId, blockerId) that would break the HTML
 // comment structure if concatenated raw. A `-->` inside a value would
@@ -62,6 +77,62 @@ function assertExtraFooterSafe(footer: string): void {
 export interface ForgeFooters {
   forgeTaskId?: string;
   blockerIds: string[];
+}
+
+// Body validation for updateIssueBody. Three rejection cases:
+//  1. Non-string input (programmer error)
+//  2. Body contains a forge-managed footer comment (forge:task / forge:blockedBy).
+//     The adapter stamps these on; if a caller includes them (e.g., copy-paste of
+//     an old body), serialization would produce duplicate or contradictory
+//     footers and silently corrupt the tracker→forgeTaskId round-trip.
+//  3. Body exceeds the per-provider byte cap (passed in by adapter — Linear and
+//     GitHub both document caps in bytes, not chars).
+// Non-forge HTML comments in the body are allowed.
+export function assertValidBodyInput(
+  body: unknown,
+  maxBytes: number,
+): asserts body is string {
+  if (typeof body !== 'string') {
+    throw new TrackerError(
+      'VALIDATION',
+      `updateIssueBody: body must be a string, got ${typeof body}`,
+      { type: typeof body },
+    );
+  }
+  if (FORGE_ANY_INPUT_RE.test(body)) {
+    throw new TrackerError(
+      'VALIDATION',
+      `updateIssueBody: body must not contain any forge-managed footer (<!-- forge:KEY=... -->); the adapter appends them`,
+      { bodyPreview: body.slice(0, 80) },
+    );
+  }
+  const bytes = Buffer.byteLength(body, 'utf8');
+  if (bytes > maxBytes) {
+    throw new TrackerError(
+      'VALIDATION',
+      `updateIssueBody: body exceeds provider limit: ${bytes} bytes > ${maxBytes} bytes`,
+      { bytes, maxBytes },
+    );
+  }
+}
+
+// Returns every `<!-- forge:KEY=VALUE -->` comment in the body that is NOT
+// `forge:task` or `forge:blockedBy`, as the original pre-formed comment
+// strings (suitable for passing back to serializeWithForgeFooters as
+// extraFooters). Used by updateIssueBody to preserve adapter-emitted footers
+// (e.g. forge:ownerType from createIssue) across a body replace.
+// Order is preserved; duplicates are kept (the serializer dedups upstream).
+export function parseExtraForgeFooters(
+  body: string | null | undefined,
+): string[] {
+  const text = body ?? '';
+  const out: string[] = [];
+  for (const match of text.matchAll(FORGE_ANY_RE)) {
+    const key = match[1];
+    if (key === 'task' || key === 'blockedBy') continue;
+    out.push(match[0]);
+  }
+  return out;
 }
 
 export function parseForgeFooters(body: string | null | undefined): ForgeFooters {

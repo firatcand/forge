@@ -150,6 +150,54 @@ test(
 );
 
 test(
+  'integration: updateIssueBody round-trip preserves forgeTaskId (FORGE-94 AC bullet 4)',
+  { skip: skip ? skipReason : false },
+  async () => {
+    const tracker = makeTracker();
+
+    const forgeTaskId = `FORGE-E2E-UPB-${Date.now()}`;
+    const created = await tracker.createIssue({
+      title: `[e2e updateIssueBody] ${forgeTaskId}`,
+      body: 'initial body',
+      forgeTaskId,
+      ownerType: 'backend-dev',
+      acceptance: [],
+      dependsOn: [],
+    });
+
+    try {
+      await tracker.updateIssueBody(created.id, 'replaced body content');
+
+      const listed = await tracker.listActiveIssues();
+      const found = listed.find((i) => i.id === created.id);
+      assert.ok(
+        found,
+        'replaced issue should still appear in listActiveIssues',
+      );
+      assert.equal(
+        found?.forgeTaskId,
+        forgeTaskId,
+        'forgeTaskId must survive the body replace',
+      );
+
+      // Probe the raw description via fresh SDK call to assert footers intact.
+      const fresh = new LinearClient({ apiKey: API_KEY });
+      const issueProbe = await fresh.issue(created.id);
+      const description = issueProbe.description ?? '';
+      assert.match(description, /replaced body content/);
+      assert.match(
+        description,
+        new RegExp(`<!-- forge:task=${forgeTaskId} -->`),
+      );
+      assert.match(description, /<!-- forge:ownerType=backend-dev -->/);
+      assert.doesNotMatch(description, /initial body/);
+    } finally {
+      await archiveIssueBestEffort(created.id);
+    }
+  },
+);
+
+test(
   'integration: setBlockedBy writes footer AND native blocks relation',
   { skip: skip ? skipReason : false },
   async () => {

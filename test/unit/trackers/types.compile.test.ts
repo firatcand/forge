@@ -43,6 +43,7 @@ const fakeAdapter: Tracker = {
   releaseClaim: async (_id: string, _runId: string) => {},
   updateState: async () => {},
   comment: async () => {},
+  updateIssueBody: async () => {},
   createProject: async (_name: string) => ({
     id: 'p_1',
     url: 'https://github.com/foo/bar',
@@ -52,7 +53,7 @@ const fakeAdapter: Tracker = {
   healthCheck: async () => ({ ok: true }),
 };
 
-// @ts-expect-error — interface requires all 9 methods
+// @ts-expect-error — interface requires all 10 methods
 const _missingMethods: Tracker = {
   type: 'github',
   listActiveIssues: async () => [],

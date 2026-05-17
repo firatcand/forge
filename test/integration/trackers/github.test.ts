@@ -173,6 +173,54 @@ test('integration: setBlockedBy round-trips through listActiveIssues', {
   }
 });
 
+test('integration: updateIssueBody round-trip preserves forgeTaskId (FORGE-94 AC bullet 4)', {
+  skip: skip ? 'FORGE_E2E_GITHUB!=1 or FORGE_E2E_REPO unset' : false,
+}, async () => {
+  const tracker = makeTracker();
+
+  const forgeTaskId = `FORGE-E2E-UPB-${Date.now()}`;
+  const created = await tracker.createIssue({
+    title: `[e2e updateIssueBody] ${forgeTaskId}`,
+    body: 'initial body',
+    forgeTaskId,
+    ownerType: 'backend-dev',
+    acceptance: [],
+    dependsOn: [],
+  });
+  const issueNumber = Number(created.id);
+
+  try {
+    await tracker.updateIssueBody(created.id, 'replaced body content');
+
+    const listed = await tracker.listActiveIssues();
+    const found = listed.find((i) => i.id === created.id);
+    assert.ok(found, 'replaced issue should still appear in listActiveIssues');
+    assert.equal(
+      found?.forgeTaskId,
+      forgeTaskId,
+      'forgeTaskId must survive the body replace',
+    );
+
+    // Probe the raw body to assert the body was replaced AND footers are intact.
+    const view = await execa('gh', [
+      'issue',
+      'view',
+      String(issueNumber),
+      '--repo',
+      REPO,
+      '--json',
+      'body',
+    ]);
+    const body = (JSON.parse(view.stdout) as { body: string }).body;
+    assert.match(body, /replaced body content/);
+    assert.match(body, new RegExp(`<!-- forge:task=${forgeTaskId} -->`));
+    assert.match(body, /<!-- forge:ownerType=backend-dev -->/);
+    assert.doesNotMatch(body, /initial body/);
+  } finally {
+    await ghDeleteIssue(issueNumber);
+  }
+});
+
 test('integration: claim with full UUIDv7 runId succeeds — label fits under 50-char GitHub cap (FORGE-82)', {
   skip: skip ? 'FORGE_E2E_GITHUB!=1 or FORGE_E2E_REPO unset' : false,
 }, async () => {
