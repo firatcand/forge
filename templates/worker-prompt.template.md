@@ -36,9 +36,9 @@ A "disagreement" between artifacts often isn't one — it's two artifacts each o
 
 ### Example 1 — looks like disagreement, isn't
 
-`spec/SPEC.md` says "dispatch is async." The tracker body for your ticket says "also retry on transient failure."
+`spec/SPEC.md` says "dispatch is async." Your `phases.yaml` task body lists an AC bullet "also retry on transient failure."
 
-These don't collide. SPEC owns architecture (async). The tracker body owns scope (also handle retry). **Implement both.** No question.
+These don't collide. SPEC owns architecture (async dispatch). The phases.yaml task body owns the local execution snapshot of what this ticket must deliver (a retry path). **Implement both.** No question.
 
 ### Example 2 — real architectural collision
 
@@ -189,7 +189,7 @@ Output (JSON envelope, `data` portion):
 
 If `architectural: true`, classify the write as architectural regardless of what the structured rubric says, write a question using the `suggested_decision_key`, and pause. If `architectural: false`, proceed.
 
-The verb logs a `guardrail_checked` event to your attempt's event stream. `forge orchestrate complete` cross-references those events against your verdict's `files_changed` and rejects the verdict if a guardrail write occurred without a prior check.
+The verb logs a `guardrail_checked` event to your attempt's event stream. A forthcoming check (planned for a follow-up release) will have `forge orchestrate complete` cross-reference those events against your verdict's `files_changed` and reject the verdict if a guardrail write occurred without a prior check. Until that ships, calling `guardrail-check` is a prompt-discipline requirement, not a mechanical one — skipping it leaves no audit record and forfeits the suggested decision-key.
 
 # To write a question
 

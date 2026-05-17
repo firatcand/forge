@@ -111,6 +111,34 @@ test('template: host blocks balance (claude and codex pair open/close)', () => {
   assert.ok(openCount >= 2, 'expected at least one claude + one codex host block');
 });
 
+test('template: worked examples agree with the authority-by-field matrix', () => {
+  // Regression guard for the Codex/code-reviewer finding on FORGE-97:
+  // Example 1 originally said "tracker body owns scope," contradicting
+  // the matrix row that gives Tracker only metadata. Catch any future
+  // regression that puts "scope" into a tracker-ownership claim.
+  const tracker = /Tracker issue body[^|]*\|([^|]+)\|/i.exec(template);
+  assert.ok(tracker, 'expected a Tracker matrix row');
+  const trackerOwns = tracker[1] ?? '';
+  assert.doesNotMatch(
+    trackerOwns,
+    /\bscope\b/i,
+    `Tracker row must not claim ownership of "scope" — belongs to PRD/phases.yaml. Got: "${trackerOwns.trim()}"`,
+  );
+});
+
+test('template: preflight wrapper does NOT claim mechanical enforcement (v0.4)', () => {
+  // BLOCK B2: prompt originally claimed `forge orchestrate complete` already
+  // cross-references guardrail events and rejects on skip. That's
+  // FORGE-FOLLOWUP-A and not in this PR. Soften to honest framing.
+  const preflightSection = template.split(/^# Preflight wrapper/m)[1] ?? '';
+  // Must reference "forthcoming" / "follow-up" / "planned" to signal deferred.
+  assert.match(
+    preflightSection,
+    /forthcoming|follow-?up|planned/i,
+    'preflight wrapper must label complete-enforcement as deferred',
+  );
+});
+
 test('template: forbidden strings — no drift/6-level/ADR-hydration references', () => {
   // These were the dropped concepts from the 2026-05-17 PM pivot.
   const forbidden = [

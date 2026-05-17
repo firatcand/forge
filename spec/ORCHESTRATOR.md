@@ -73,7 +73,7 @@ The orchestrator is **not** a long-running process. It is three layered surfaces
 |---|---|---|
 | **CLI control plane** | State machine, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation, status snapshots, event log | `src/cli/orchestrate/*.ts`, `src/orchestrator/state/*.ts`, `src/orchestrator/leases/*.ts` |
 | **Skill dispatch layer** | Read ready tasks, dispatch subagents, relay questions to the user, record answers, poll completion | `skills/forge-orchestrate/SKILL.md` (host-specific files compiled from a shared source in Phase 3) |
-| **Worker subagent** | Implement a task in a worktree, call CLI to register questions/verdicts, return to parent on completion or block | `templates/worker-prompt.md` (loaded into every subagent dispatch) |
+| **Worker subagent** | Implement a task in a worktree, call CLI to register questions/verdicts, return to parent on completion or block | `templates/worker-prompt.template.md` (rendered by `src/orchestrator/render-worker-prompt.ts` and loaded into every subagent dispatch) |
 
 The three are file-disjoint. They share contracts (schemas, filesystem layout, event types) defined in this document. The CLI is the only surface that mutates persistent state. Skills and workers call the CLI; they never read or write `.forge/orchestrator/` directly.
 
@@ -705,12 +705,12 @@ The verified record is written to `verdict.verified.json`. Only after verificati
 
 ### Preflight wrapper — `forge orchestrate guardrail-check`
 
-Forge cannot mechanically intercept the host's file-write tools (no PreToolUse hook into Claude Task subagents or Codex native subagents). Preflight enforcement is therefore **prompt-discipline + verb side-effects + post-hoc audit**:
+Forge cannot mechanically intercept the host's file-write tools (no PreToolUse hook into Claude Task subagents or Codex native subagents). Preflight is therefore **prompt-discipline + verb side-effects** in v0.4, with **post-hoc audit deferred** to a follow-up release:
 
 1. The worker prompt instructs every worker to call `forge orchestrate guardrail-check --path <p>` before any write.
-2. The verb reads `.forge/settings.yaml#agents.preflight_globs` (default list below), matches the proposed path, and returns `{architectural, matched_glob, suggested_decision_key}`.
-3. When `--task` + `--attempt` are supplied, the verb appends a `guardrail_checked` event to the attempt log.
-4. **Post-hoc audit** (FORGE-FOLLOWUP-A): `forge orchestrate complete` cross-references the verdict's computed `files_changed` against the `guardrail_checked` event stream and marks `verdict_unverified` if a guardrail write occurred without a prior check.
+2. The verb reads `.forge/settings.yaml#agents.preflight_globs` (default list below), realpaths the target (rejecting symlinks that escape the repo), matches the proposed path, and returns `{architectural, matched_glob, suggested_decision_key}`.
+3. When `--task` + `--attempt` are supplied (and the ids pass `validateIdSegment`), the verb appends a `guardrail_checked` event to the attempt log.
+4. **Post-hoc audit — deferred** (FORGE-FOLLOWUP-A): a future release will have `forge orchestrate complete` cross-reference the verdict's computed `files_changed` against the `guardrail_checked` event stream and mark `verdict_unverified` if a guardrail write occurred without a prior check. Until that ships, calling `guardrail-check` is a prompt-discipline requirement, not a mechanical one — skipping it leaves no audit record and forfeits the suggested decision-key, but does not block the attempt's `complete`.
 
 | Glob | Rationale |
 |---|---|

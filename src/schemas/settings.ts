@@ -101,7 +101,9 @@ const AgentsSchema = z
       'src/bin/**',
       'src/cli/**',
       'src/trackers/base.ts',
-      'src/cli/migrate.ts',
+      // Note: src/cli/migrate.ts is omitted because src/cli/** already
+      // covers it. First-hit-wins matching makes a more-specific literal
+      // unreachable after a broader glob (code-reviewer on FORGE-97).
       'spec/**',
       'CRITICAL.md',
       'CLAUDE.md',

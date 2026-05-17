@@ -85,7 +85,6 @@ test('AC3 — applies defaults when agents+design absent', () => {
     'src/bin/**',
     'src/cli/**',
     'src/trackers/base.ts',
-    'src/cli/migrate.ts',
     'spec/**',
     'CRITICAL.md',
     'CLAUDE.md',

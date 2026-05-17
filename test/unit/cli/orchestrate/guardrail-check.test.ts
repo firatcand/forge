@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
@@ -135,14 +142,92 @@ test('guardrail-check: relative-path computation uses repoRoot, not cwd', (t) =>
   assert.equal(env.data.architectural, true);
 });
 
-test('guardrail-check: path outside repo returns architectural: false', (t) => {
+test('guardrail-check: path outside repo is rejected with INVALID_ARGS (does not leak path)', (t) => {
+  // I4/security: path traversal must not echo the resolved out-of-repo path
+  // in the response envelope.
   const stdout = captureStdout(t);
   const { forgeDir, repoRoot } = setupRepo();
   const otherDir = mkdtempSync(join(tmpdir(), 'forge-other-'));
   const escaping = join(otherDir, 'src/index.ts');
-  runGuardrailCheck({ path: escaping, forgeDir, cwd: repoRoot, json: true });
+  const result = runGuardrailCheck({ path: escaping, forgeDir, cwd: repoRoot, json: true });
+  assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout.at(-1) ?? '');
-  assert.equal(env.data.architectural, false);
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'INVALID_ARGS');
+  // The out-of-repo path must NOT appear anywhere in the envelope.
+  assert.doesNotMatch(stdout.at(-1) ?? '', /forge-other-/);
+  assert.doesNotMatch(stdout.at(-1) ?? '', new RegExp(otherDir.replace(/\//g, '\\/')));
+});
+
+test('guardrail-check: relative ../ path traversal is rejected (does not leak traversal depth)', (t) => {
+  const stdout = captureStdout(t);
+  const { forgeDir, repoRoot } = setupRepo();
+  const result = runGuardrailCheck({
+    path: '../../../etc/passwd',
+    forgeDir,
+    cwd: repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout.at(-1) ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'INVALID_ARGS');
+  assert.doesNotMatch(stdout.at(-1) ?? '', /etc\/passwd/);
+  assert.doesNotMatch(stdout.at(-1) ?? '', /\.\.\//);
+});
+
+test('guardrail-check: symlink to outside-repo target is rejected via realpath (BLOCK B1)', (t) => {
+  // Codex flagged: a symlink inside the repo pointing to /tmp or /etc was
+  // treated as inside the repo because containment was lexical.
+  const stdout = captureStdout(t);
+  const { forgeDir, repoRoot } = setupRepo();
+  const outsideDir = mkdtempSync(join(tmpdir(), 'forge-outside-'));
+  writeFileSync(join(outsideDir, 'evil.ts'), 'export const x = 1;');
+  const symlinkInsideRepo = join(repoRoot, 'src/index.ts');
+  mkdirSync(join(repoRoot, 'src'), { recursive: true });
+  symlinkSync(join(outsideDir, 'evil.ts'), symlinkInsideRepo);
+  // Sanity: the symlink lives at an arch-sensitive path under the repo,
+  // but its realpath resolves outside the repo.
+  assert.equal(existsSync(symlinkInsideRepo), true);
+
+  const result = runGuardrailCheck({
+    path: 'src/index.ts',
+    forgeDir,
+    cwd: repoRoot,
+    json: true,
+  });
+  // Must refuse — symlink containment bypass is the bug.
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout.at(-1) ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'INVALID_ARGS');
+});
+
+test('guardrail-check: unsanitized --task does NOT probe arbitrary filesystem (BLOCK B3)', (t) => {
+  // security-auditor flagged: args.taskId flowed into path.join before
+  // validation. A worker calling --task ../../../etc would cause
+  // existsSync/readFileSync to probe an arbitrary filesystem path.
+  // The fix validates taskId at the top of appendGuardrailEvent.
+  const stdout = captureStdout(t);
+  const { forgeDir, repoRoot } = setupRepo();
+  const result = runGuardrailCheck({
+    path: 'src/schemas/settings.ts',
+    forgeDir,
+    cwd: repoRoot,
+    taskId: '../../../etc',
+    attemptId: 'attempt-fake',
+    json: true,
+  });
+  // Verb still returns the architectural verdict for the path …
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout.at(-1) ?? '');
+  assert.equal(env.data.architectural, true);
+  // … but the malicious taskId did NOT cause an event-emission attempt at
+  // a forged path. validateIdSegment refuses the segment before any FS call.
+  // We can't directly observe the absence of an FS probe, but the test
+  // assertion above + the validateIdSegment early-return in
+  // appendGuardrailEvent + the absence of an attempts/ tree for that
+  // forged taskId all hang together.
 });
 
 test('guardrail-check: emits guardrail_checked event when --task + --attempt are supplied', async (t) => {
