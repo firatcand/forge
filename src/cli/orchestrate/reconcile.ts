@@ -13,9 +13,11 @@ import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { computeFreshnessLine } from '../../core/freshness.ts';
 import { loadSettings } from '../../core/settings.ts';
+import { computeSpecRevision } from '../../core/spec-revision.ts';
 import { validateUnderRoot } from '../../core/workspace.ts';
-import { PhasesSchema, type Phases } from '../../schemas/phases.ts';
+import { PhasesSchema, type Phases, type Source } from '../../schemas/phases.ts';
 import type { Logger, Tracker } from '../../trackers/base.ts';
 import { GitHubTracker } from '../../trackers/github.ts';
 import { LinearTracker } from '../../trackers/linear.ts';
@@ -193,7 +195,12 @@ function createTracker(settings: Settings, logger: Logger): TrackerHandle {
   }
 }
 
-function loadPhasesWithDocument(absPath: string): { phases: Phases; doc: ReturnType<typeof parseDocument>; raw: string } {
+function loadPhasesWithDocument(absPath: string): {
+  phases: Phases;
+  doc: ReturnType<typeof parseDocument>;
+  raw: string;
+  freshnessLine: string;
+} {
   // Size guard via stat BEFORE read — otherwise a 4 MiB+ adversarial file is
   // already in memory by the time we throw. Matches the pattern in
   // [[toctou-between-stat-and-read-leaks-raw-fs-errors]].
@@ -223,7 +230,12 @@ function loadPhasesWithDocument(absPath: string): { phases: Phases; doc: ReturnT
       { path: absPath },
     );
   }
-  return { phases: result.data, doc, raw };
+  return {
+    phases: result.data,
+    doc,
+    raw,
+    freshnessLine: computeFreshnessLine(result.data.source),
+  };
 }
 
 export async function runOrchestrateReconcile(
@@ -266,6 +278,8 @@ export async function runOrchestrateReconcile(
     writeJson(err, { ok: false, error: { code, message } });
     return { exitCode: 3 };
   }
+  // Freshness summary on stderr ahead of main output (FORGE-113 plan §0 Q1).
+  err.write(loaded.freshnessLine + '\n');
 
   let tracker: Tracker;
   let closeTracker: (() => Promise<void>) | undefined;
@@ -286,7 +300,7 @@ export async function runOrchestrateReconcile(
 
   try {
     if (parsed.direction === 'pull') {
-      return await runPull(parsed, loaded, phasesPath, tracker, out, err);
+      return await runPull(parsed, loaded, phasesPath, tracker, opts.cwd, out, err);
     }
     return await runPush(parsed, loaded, tracker, out, err);
   } finally {
@@ -310,6 +324,7 @@ async function runPull(
   loaded: { phases: Phases; doc: ReturnType<typeof parseDocument>; raw: string },
   phasesPath: string,
   tracker: Tracker,
+  cwd: string,
   out: NodeJS.WritableStream,
   err: NodeJS.WritableStream,
 ): Promise<OrchestrateReconcileResult> {
@@ -355,11 +370,24 @@ async function runPull(
   const applyOpts = { confirmPrune: args.confirmPrune };
   const mutationsDoc = applyPlanToDocument(loaded.doc, plan, applyOpts);
 
-  let wrote = false;
-  if (mutationsDoc > 0) {
-    writeAtomic(phasesPath, loaded.doc.toString());
-    wrote = true;
+  // Resolve + stamp the source stanza on every successful --pull. synced_at
+  // bumps even when the diff is empty: the semantic is "last successful sync
+  // attempt", not "last mutation". This means --pull always writes the file
+  // (single rewrite — minor thrash, big upside on honest staleness).
+  let nextSource: Source;
+  try {
+    nextSource = resolveSourceForPull(loaded, tracker.type, cwd);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    writeJson(err, {
+      ok: false,
+      error: { code: 'SOURCE_RESOLUTION_FAILED', message },
+    });
+    return { exitCode: 3 };
   }
+  setSourceOnDocument(loaded.doc, nextSource);
+
+  writeAtomic(phasesPath, loaded.doc.toString());
 
   writeJson(out, {
     ok: true,
@@ -367,12 +395,64 @@ async function runPull(
       direction: 'pull',
       dry_run: false,
       pull: plan,
-      applied: wrote,
+      applied: mutationsDoc > 0,
       mutations: mutationsDoc,
     },
   });
 
   return { exitCode: 0 };
+}
+
+// Pick a project_id for the source stanza, preferring (in order):
+//   1. The existing source.project_id (preserved across --pull runs)
+//   2. The legacy top-level `tracker_project_id` in the raw Document
+//      (v0.3.x migration path — schema-stripped but still present in YAML)
+// Throws if neither is found — fail loudly rather than fabricate an ID.
+function resolveSourceForPull(
+  loaded: { phases: Phases; doc: ReturnType<typeof parseDocument> },
+  trackerType: Source['tracker'],
+  cwd: string,
+): Source {
+  let project_id: string | undefined = loaded.phases.source?.project_id;
+  if (!project_id) {
+    const legacy = loaded.doc.get('tracker_project_id', true);
+    if (legacy && typeof legacy.toJSON === 'function') {
+      const value = legacy.toJSON() as unknown;
+      if (typeof value === 'string' && value.length > 0) project_id = value;
+    } else if (typeof legacy === 'string' && legacy.length > 0) {
+      project_id = legacy;
+    }
+  }
+  if (!project_id) {
+    throw new Error(
+      'phases.yaml has no source.project_id and no legacy tracker_project_id ' +
+        'to migrate from. Set source.project_id manually OR run /push-to-tracker ' +
+        'to bootstrap the upstream project binding.',
+    );
+  }
+  return {
+    tracker: trackerType,
+    project_id,
+    synced_at: new Date().toISOString(),
+    spec_revision: computeSpecRevision(cwd),
+  };
+}
+
+// Mutate `doc` to install (or replace) the `source` map node with the
+// supplied values. Preserves surrounding ordering/comments because we set
+// the keys individually via `setIn` rather than replacing the parent.
+function setSourceOnDocument(
+  doc: ReturnType<typeof parseDocument>,
+  source: Source,
+): void {
+  doc.setIn(['source', 'tracker'], source.tracker);
+  doc.setIn(['source', 'project_id'], source.project_id);
+  doc.setIn(['source', 'synced_at'], source.synced_at);
+  doc.setIn(['source', 'spec_revision'], source.spec_revision);
+  // Migration: remove the legacy top-level tracker_project_id once we've
+  // recorded the value inside source. Idempotent — `deleteIn` returns false
+  // when the path is already gone.
+  doc.deleteIn(['tracker_project_id']);
 }
 
 async function runPush(
