@@ -102,6 +102,18 @@ jobs:
       - run: node dist/bin/forge.cjs --version
       - run: node dist/bin/forge.cjs --help
 
+  pack:
+    name: pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run test:pack
+
   gitleaks:
     name: gitleaks
     runs-on: ubuntu-latest

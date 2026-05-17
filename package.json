@@ -23,6 +23,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
+    "test:pack": "node scripts/test-pack.mjs",
     "dev": "tsx watch src/bin/forge.ts"
   },
   "dependencies": {
