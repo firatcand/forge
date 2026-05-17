@@ -22,14 +22,37 @@ This rule exists because thrash on fixes is the most demoralising kind of engine
 
 ## 3. Confusion Protocol — clarify, don't guess
 
-When an architectural decision is ambiguous, all forge subagents stop and ask. They never default-pick. The format is:
+When an architectural decision is ambiguous, all forge subagents stop and ask. They never default-pick.
+
+**Every option must carry both a benefit and a concrete trade-off** — what this choice costs, makes harder, locks in, or trades away. The trade-off is what lets the user reason about the choice instead of rubber-stamping a recommendation.
+
+Format:
 
 > I see two viable approaches here:
-> 
-> A. [option A] — trade-off X
-> B. [option B] — trade-off Y
-> 
+>
+> A. [option A] — pro: [benefit]. trade-off: [concrete cost or downside, e.g. "locks us to vendor X", "doubles migration time", "requires a follow-up refactor in module Y"]
+> B. [option B] — pro: [benefit]. trade-off: [concrete cost or downside]
+>
 > Which do you want?
+
+**Escape hatch:** if the options are genuinely equivalent on cost and risk and differ only in style or naming, say so: *"No meaningful trade-off — this is a naming preference."* Do not invent contrast.
+
+### When a decision qualifies as a question
+
+`/plan-task` and `/implement` apply a severity filter. A decision becomes a `AskUserQuestion` call when **any** of these are true:
+
+- **decision_type:** architectural — touches public API, schema, dependency graph, file lifecycle, deprecation strategy, or naming of a shipped surface
+- **blast_radius:** module / project / external (affects other tasks, other adopters, or shipped code)
+- **reversibility:** medium-to-high — locks in a vendor, contract, migration path, or shipped behavior
+- **plan_branch:** the answer materially changes the next 3+ steps
+
+Silent auto-decision is only allowed when **all** of these hold: routine, local, fully reversible within this task, does not change the plan tree.
+
+### Anti-pattern: decision-bundling
+
+Burying 11 forks in a "Questions decided" table and asking the user to approve the whole plan collapses many decisions into one approval event. The user rubber-stamps. **Ask per fork, in batches of up to 4 per `AskUserQuestion` call, iteratively as research deepens.** The plan records *"Questions asked & answers applied"* — not *"decisions decided"*.
+
+Full guidance for forge skills that emit `AskUserQuestion`: see `skills/_shared/question-format.md`.
 
 This is borrowed directly from gstack. It exists because Claude defaulting to its preferred pattern silently is one of the most common ways code drifts from intent.
 

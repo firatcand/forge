@@ -20,11 +20,25 @@ subagent: learning-curator
 2. If multiple match, list and ask user to pick. If one, auto-pick.
 3. Set Linear issue status → "In Progress"
 4. Compute branch name: `feat/{LINEAR-ID}-{kebab-case-title}`
-5. Create git worktree, then hydrate gitignored project meta the worker needs:
+5. Create git worktree, write the task binding marker, then hydrate gitignored project meta the worker needs:
    ```bash
    PROJECT_NAME=$(basename "$(pwd)")
    WORKTREE_PATH="../${PROJECT_NAME}-worktrees/${LINEAR-ID}"
    git worktree add "${WORKTREE_PATH}" -b "${BRANCH_NAME}" main
+
+   # Write the worktree-task marker — binds this worktree to its task ID
+   # for the worktree-guard preflight in /implement, /ship, /qa, etc.
+   # Contract: skills/_shared/worktree-guard.md.
+   mkdir -p "${WORKTREE_PATH}/.forge"
+   cat > "${WORKTREE_PATH}/.forge/worktree-task.json" <<EOF
+{
+  "version": 1,
+  "taskId": "${LINEAR-ID}",
+  "branch": "${BRANCH_NAME}",
+  "createdAt": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "createdBy": "skills/pickup-task"
+}
+EOF
 
    # Hydrate gitignored project meta into the fresh worktree.
    #
