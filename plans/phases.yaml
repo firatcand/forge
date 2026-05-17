@@ -943,7 +943,7 @@ phases:
       - id: P2.5-T18
         tracker_issue_id: "FORGE-114"
         title: "Worker spec_revision stamping at claim + informational SPEC-diff notification on resume"
-        description: "Extend the claim record schema (src/orchestrator/state-machine.ts or wherever claim records live post-FORGE-78) with a `spec_revision` field stamped at claim creation. On worker subagent resume (when it picks up a previously-claimed task), the dispatch skill computes `git log --oneline -- spec/ HEAD ^<claim.spec_revision>`. If non-empty, prints to the worker prompt as an informational block: `SPEC changed since you claimed this ticket — 3 commits affecting spec/SPEC.md and spec/PRD.md. Recent: <one-line summaries>. Run \\\`git diff <claim.spec_revision> HEAD -- spec/\\\` to review.` This is informational, NOT gating — the worker proceeds regardless. NO contradiction check, NO --affects flag, NO halt."
+        description: "Extend the claim record schema (src/orchestrator/state-machine.ts or wherever claim records live post-FORGE-78) with a `spec_revision` field stamped at claim creation. On worker subagent resume (when it picks up a previously-claimed task), the dispatch skill computes `git log --oneline -- spec/ HEAD ^<claim.spec_revision>`. If non-empty, prints to the worker prompt as an informational block: `SPEC changed since you claimed this ticket — 3 commits affecting spec/SPEC.md and spec/PRD.md. Recent: <one-line summaries>. Run `git diff <claim.spec_revision> HEAD -- spec/` to review.` This is informational, NOT gating — the worker proceeds regardless. NO contradiction check, NO --affects flag, NO halt."
         type: backend
         priority: P0
         depends_on: [P2-T17]  # depends on lease/claim infra from FORGE-78

@@ -20,14 +20,16 @@ export const TASK_TYPES = [
   'integration',
   'content',
   'infra',
+  'skill',
+  'docs',
 ] as const;
 
 export const ESTIMATES = ['S', 'M', 'L', 'XL'] as const;
 
-export const PHASE_STATUSES = ['active', 'blocked', 'done'] as const;
+export const PHASE_STATUSES = ['active', 'blocked', 'done', 'paused'] as const;
 
 export const TaskSchema = z.object({
-  id: z.string().regex(/^P\d+-T\d+[a-z]?$/),
+  id: z.string().regex(/^P\d+(\.\d+)?-T\d+[a-z]?$/),
   tracker_issue_id: z.string().optional(),
   title: z.string().min(1),
   description: z.string().min(1),
@@ -38,10 +40,17 @@ export const TaskSchema = z.object({
   owner_type: z.enum(OWNER_TYPES),
   acceptance: z.array(z.string().min(1)).min(1),
   split_into: z.array(z.string().min(1)).optional(),
+  status: z.string().optional(),
+  deferred_at: z.string().optional(),
+  deferred_reason: z.string().optional(),
+  dropped_at: z.string().optional(),
+  dropped_reason: z.string().optional(),
+  paused_at: z.string().optional(),
+  paused_reason: z.string().optional(),
 });
 
 export const PhaseSchema = z.object({
-  id: z.string().regex(/^phase-\d+$/),
+  id: z.string().regex(/^phase-\d+(\.\d+)?$/),
   tracker_milestone_id: z.string().optional(),
   name: z.string().min(1),
   status: z.enum(PHASE_STATUSES),
