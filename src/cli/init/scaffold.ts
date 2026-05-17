@@ -61,34 +61,49 @@ const VITEST_CONFIG_EXTS = ['ts', 'js', 'mjs', 'cjs'] as const;
 const MAX_CONFIG_BYTES = 1_048_576;
 
 /**
- * Read a text file, returning null if it doesn't exist or exceeds MAX_CONFIG_BYTES.
+ * Read a text file, returning null when the file is unreadable for any reason:
+ *   - doesn't exist (ENOENT)
+ *   - is a directory rather than a file (EISDIR — possible if `cwd/.eslintignore`
+ *     etc. is a directory in the adopter's project, weird but legal)
+ *   - is a broken symlink or a symlink loop (ELOOP)
+ *   - we don't have permission to read it (EACCES)
+ *   - exceeds MAX_CONFIG_BYTES (defends against /dev/zero symlinks or generated
+ *     configs that would OOM/hang the init read)
+ *
+ * Errors from optional tooling probes shouldn't abort `forge init` — the worst
+ * case for an unreadable file is "no tooling-exclude entry was scaffolded for it",
+ * which the user can fix manually.
  *
  * Race-safe: a stat-then-read pattern would leak raw ENOENT if the file disappears
  * between the two syscalls (see docs/learnings/2026-Q2/toctou-between-stat-and-read-leaks-raw-fs-errors.md).
- * Here we read inside a try/catch and treat ENOENT as "doesn't exist", so concurrent
- * deletes during init don't crash the caller.
+ * We catch errors at both syscall boundaries.
  *
- * Size cap precedes the read — statSync is a single syscall and gives us the file
- * size without touching contents, so we can refuse oversized files before any large
- * allocation.
+ * The size cap fires before the read but is advisory under a TOCTOU window: a
+ * file growing past the cap between statSync and readFileSync would bypass it.
+ * Tightening this would require openSync+fstatSync+bounded-read; deferred —
+ * the threat model (local adversary racing forge init) isn't worth the complexity.
  */
 function safeReadConfig(filePath: string): string | null {
+  const isFsError = (e: unknown, code: string): boolean =>
+    e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === code;
+  const isUnreadable = (e: unknown): boolean =>
+    isFsError(e, 'ENOENT') ||
+    isFsError(e, 'EISDIR') ||
+    isFsError(e, 'ELOOP') ||
+    isFsError(e, 'EACCES');
+
   let size: number;
   try {
     size = statSync(filePath).size;
   } catch (e) {
-    if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
-    }
+    if (isUnreadable(e)) return null;
     throw e;
   }
   if (size > MAX_CONFIG_BYTES) return null;
   try {
     return readFileSync(filePath, 'utf8');
   } catch (e) {
-    if (e instanceof Error && 'code' in e && (e as NodeJS.ErrnoException).code === 'ENOENT') {
-      return null;
-    }
+    if (isUnreadable(e)) return null;
     throw e;
   }
 }

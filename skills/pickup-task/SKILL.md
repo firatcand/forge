@@ -25,6 +25,12 @@ subagent: learning-curator
    # Validate the ticket ID against the same rules as src/core/workspace.ts sanitizeIssueId.
    # The skill produces a filesystem path from LINEAR_ID, so we abort on anything
    # that could escape `.forge/worktrees/` or yield a malformed worktree dir.
+   # Force C locale around the regex test so [A-Za-z0-9._-] has deterministic
+   # ASCII semantics — under exotic locales the range could include locale-specific
+   # code points. `[[` is a bash builtin so VAR=val inline-prefix doesn't apply;
+   # we save/restore LC_ALL explicitly to keep the locale scope tight.
+   _forge_old_lc_all="${LC_ALL-}"
+   LC_ALL=C
    if [[ -z "${LINEAR_ID}" ]] || \
       [[ ${#LINEAR_ID} -gt 64 ]] || \
       [[ "${LINEAR_ID}" =~ [^A-Za-z0-9._-] ]] || \
@@ -35,6 +41,8 @@ subagent: learning-curator
      echo "ERROR: ticket id '${LINEAR_ID}' is not a valid sanitized id (see src/core/workspace.ts sanitizeIssueId)" >&2
      exit 1
    fi
+   if [ -n "${_forge_old_lc_all}" ]; then LC_ALL="${_forge_old_lc_all}"; else unset LC_ALL; fi
+   unset _forge_old_lc_all
 
    # Anchor on the main checkout root, not pwd or current-worktree toplevel.
    # If the user runs /pickup-task from inside an existing worktree,
