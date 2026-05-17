@@ -42,13 +42,11 @@ tmp/
 # Scratch / one-shot test scripts
 .tmp-*
 
-# Forge dogfooding (we use forge to build forge — keep our project specs local, out of npm + GitHub)
-/spec/BRIEF.md
-/spec/PRD.md
-/spec/SPEC.md
-/spec/DESIGN.md
-/spec/CONTEXT.md
+# Forge dogfooding
+# Spec files (spec/*.md, plans/phases.yaml) are tracked in git — they're the shared
+# source of truth across maintainers (team-mode-minimum-architecture.md 2026-05-17).
+# They're excluded from the published npm tarball via package.json#files allowlist
+# (verified by a CI npm-pack gate). DO NOT re-add spec files here.
 /plans/tasks/*.plan.md
-/plans/phases.yaml
 /docs/learnings/**/*.md
 /.forge/
