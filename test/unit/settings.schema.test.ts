@@ -79,7 +79,31 @@ test('AC3 — applies defaults when agents+design absent', () => {
   assert.equal(result.data.agents.on_persistent_failure, 'notify');
   assert.equal(result.data.agents.primary_host_cli, 'claude');
   assert.equal(result.data.agents.review_host_cli, 'codex');
+  assert.deepEqual(result.data.agents.preflight_globs, [
+    'src/index.ts',
+    'src/schemas/**',
+    'src/bin/**',
+    'src/cli/**',
+    'src/trackers/base.ts',
+    'src/cli/migrate.ts',
+    'spec/**',
+    'CRITICAL.md',
+    'CLAUDE.md',
+    'AGENTS.md',
+    'package.json',
+    'phases.yaml',
+  ]);
   assert.equal(result.data.design.mode, 'project_owned');
+});
+
+test('AC3.1 — preflight_globs can be overridden', () => {
+  const data = loadFixture('minimal.yaml');
+  type WithAgents = { agents?: { preflight_globs?: string[] } };
+  (data as WithAgents).agents = { preflight_globs: ['only/this/**'] };
+  const result = SettingsSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.agents.preflight_globs, ['only/this/**']);
 });
 
 test('AC3 — does NOT default version', () => {

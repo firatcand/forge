@@ -26,6 +26,7 @@ import { eventHandler } from './event.ts';
 import { completeHandler } from './complete.ts';
 import { cancelHandler } from './cancel.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
+import { guardrailCheckHandler } from './guardrail-check.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -156,6 +157,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['status', statusHandler],
   ['attach', attachHandler],
   ['spec-diff', specDiffHandler],
+  ['guardrail-check', guardrailCheckHandler],
   ['run', new Map<string, VerbHandler>([
     ['start', runStartHandler],
     ['list', runListHandler],
@@ -181,6 +183,7 @@ export const HELP_ORDER: readonly string[] = [
   'doctor',
   'attach',
   'spec-diff',
+  'guardrail-check',
   'run',
   'claim',
   'dispatch',

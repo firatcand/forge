@@ -83,6 +83,17 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     from_generation: z.number().int().min(0),
     to_generation: z.number().int().min(1),
   }),
+  z.object({
+    type: z.literal('guardrail_checked'),
+    ts: Ts,
+    // Repo-relative path the worker is about to write to.
+    path: z.string().min(1).max(1024),
+    // The glob from settings.yaml#agents.preflight_globs that matched, if any.
+    matched_glob: z.string().min(1).max(256).nullable(),
+    // Stable suggested decision-key for the question the worker should write.
+    // Null if the path did not match any guardrail.
+    suggested_decision_key: z.string().min(1).max(200).nullable(),
+  }),
 ]);
 
 export type AttemptEvent = z.infer<typeof AttemptEventSchema>;
