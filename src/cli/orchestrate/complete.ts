@@ -68,7 +68,50 @@ export async function runOrchestrateComplete(
     };
   }
 
-  // 2. Read lease for caller identity.
+  // 2a. Pre-check: each phase has a required prior state. Refuse loudly here
+  //     with INVALID_STATE_FOR_PHASE rather than letting writeTaskState throw
+  //     a generic ILLEGAL_TRANSITION later (Codex 2nd-pass). The state
+  //     machine table is: implement+ready_for_review fires from 'running',
+  //     review+ready_for_review fires from 'ready_for_review',
+  //     ship+ready_for_review fires from 'reviewed'.
+  if (verdict.data.verdict === 'ready_for_review') {
+    const requiredByPhase: Record<typeof opts.phase, string> = {
+      implement: 'running',
+      review: 'ready_for_review',
+      ship: 'reviewed',
+    };
+    let currentState;
+    try {
+      currentState = readTaskState(opts.forgeDir, opts.taskId).state;
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+            err instanceof Error ? err.message : String(err),
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    const required = requiredByPhase[opts.phase];
+    if (currentState !== required) {
+      return {
+        exitCode: emit(
+          fail(
+            'INVALID_STATE_FOR_PHASE',
+            `cannot complete --phase ${opts.phase} from state '${currentState}'; expected '${required}'.`,
+            false,
+            { current_state: currentState, required_state: required, phase: opts.phase },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
+  // 2b. Read lease for caller identity.
   let lease: Lease;
   try {
     lease = readLease(opts.forgeDir, opts.taskId);

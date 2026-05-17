@@ -51,6 +51,14 @@ export function resolveTrackerForCLI(forgeDir: string): TrackerLookupResult {
   if (!existsSync(settingsPath)) {
     // Bootstrap mode — projects without a tracker can still exercise the
     // local state machine. NoopTracker keeps claim/dispatch usable.
+    //
+    // Codex 2nd-pass: emit a visible warning so the silent fallback can't
+    // be mistaken for a real tracker claim. Suppressed in test/JSON paths
+    // by setting FORGE_NOOP_TRACKER=1 (which takes the explicit branch above).
+    process.stderr.write(
+      'warning: no .forge/settings.yaml found — claim/dispatch using NoopTracker (no tracker mutation). ' +
+        'Configure tracker.type in settings.yaml for production use, or set FORGE_NOOP_TRACKER=1 to silence.\n',
+    );
     return { ok: true, tracker: new NoopTracker() };
   }
   try {

@@ -17,7 +17,7 @@
 import path from 'node:path';
 
 import { ClaimArgsSchema, type ClaimArgs } from '../../schemas/cli-args.ts';
-import { acquire } from '../../orchestrator/leases.ts';
+import { acquire, release as releaseLease } from '../../orchestrator/leases.ts';
 import {
   writeTaskState,
   readTaskState,
@@ -186,16 +186,40 @@ export async function runOrchestrateClaim(
       generation: lease.generation,
     });
   } catch (err) {
-    // Best-effort rollback: tracker.releaseClaim + lease delete is complex;
-    // surface the failure so the user (or gc) can recover. The lease file is
-    // still owned by us so the next claim attempt will fail with LEASE_EXISTS.
+    // Codex 2nd-pass: rollback explicitly so the next claim doesn't see a
+    // dangling lease + tracker claim. Without this, the failure mode is
+    // "claim returns error envelope, but the next claim sees ALREADY_CLAIMED
+    // from tracker and LEASE_EXISTS locally". gc has a row for the missing-
+    // state case but assumes the lease is also gone. We undo what we can
+    // before reporting the failure.
+    const rollbackErrors: string[] = [];
+    try {
+      releaseLease({
+        forgeDir: opts.forgeDir,
+        taskId: opts.taskId,
+        caller: {
+          run_id: opts.runId,
+          claim_id: lease.claim_id,
+          generation: lease.generation,
+        },
+      });
+    } catch (rbErr) {
+      rollbackErrors.push(`lease release: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
+    }
+    try {
+      await t.releaseClaim(opts.taskId, opts.runId);
+    } catch (rbErr) {
+      rollbackErrors.push(`tracker release: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
+    }
     return {
       exitCode: emit(
         fail(
           err instanceof OrchestratorError ? err.code : 'IO_ERROR',
           err instanceof Error ? err.message : String(err),
           true,
-          { hint: 'lease + tracker claim acquired; state write failed — run forge orchestrate gc to reconcile' },
+          rollbackErrors.length > 0
+            ? { rolled_back: false, rollback_errors: rollbackErrors, hint: 'partial rollback failed — run forge orchestrate gc to reconcile' }
+            : { rolled_back: true, hint: 'state write failed; tracker claim + local lease rolled back; safe to retry' },
         ),
         { json: opts.json },
       ),

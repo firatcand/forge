@@ -108,7 +108,7 @@ test('complete with verdict=ready_for_review + phase=implement → state ready_f
   assert.ok(vv.verified_by);
 });
 
-test('complete with verdict=ready_for_review + phase=ship → state shipped', async (t) => {
+test('complete --phase ship from running refuses with INVALID_STATE_FOR_PHASE', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
   const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
@@ -120,13 +120,15 @@ test('complete with verdict=ready_for_review + phase=ship → state shipped', as
     forgeDir: ctx.forgeDir,
     json: true,
   });
-  assert.equal(result.exitCode, 0);
+  // Codex 2nd-pass: ship from 'running' is illegal per state machine; the
+  // verb now refuses upfront rather than letting writeTaskState throw a
+  // cryptic ILLEGAL_TRANSITION.
+  assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  // Phase=ship is supposed to map to 'shipped' but only from 'reviewed' state per
-  // the state machine table. Our verb still reports the intended next_state but the
-  // writeTaskState call will reject the illegal transition.
-  // Check at least the verdict file path is set; state might not have transitioned.
-  assert.ok(env.data.verdict_path);
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'INVALID_STATE_FOR_PHASE');
+  assert.equal(env.error.details.current_state, 'running');
+  assert.equal(env.error.details.required_state, 'reviewed');
 });
 
 test('complete with malformed verdict file fails INVALID_VERDICT', async (t) => {

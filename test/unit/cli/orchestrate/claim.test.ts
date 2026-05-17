@@ -154,6 +154,46 @@ test('claim rolls back tracker on lease conflict', async (t) => {
   assert.equal(trackerB.releases.length, 1);
 });
 
+test('claim rolls back tracker + lease when writeTaskState fails (Codex 2nd-pass)', async (t) => {
+  const stdout = captureStdout(t);
+  const { forgeDir, repoRoot } = tmpRoot();
+  // Pre-seed state.json with state='unclaimed' but state_version=3, so the
+  // claim verb's pre-flight passes (state is unclaimed) but the writeTaskState
+  // CAS will fail (expected state_version=0).
+  const { mkdirSync, writeFileSync } = await import('node:fs');
+  mkdirSync(join(forgeDir, 'orchestrator/tasks/FORGE-1'), { recursive: true });
+  const fakeRunId = uuidv7();
+  writeFileSync(
+    join(forgeDir, 'orchestrator/tasks/FORGE-1/state.json'),
+    JSON.stringify({
+      version: 1,
+      task_id: 'FORGE-1',
+      state: 'unclaimed',
+      state_version: 3,
+      attempt_count: 0,
+      current_attempt_id: null,
+      updated_at: new Date().toISOString(),
+      updated_by: { run_id: fakeRunId, claim_id: fakeRunId, generation: 0 },
+    }),
+    'utf8',
+  );
+  const tracker = new StubTracker();
+  const result = await runOrchestrateClaim(
+    { taskId: 'FORGE-1', runId: uuidv7(), forgeDir, json: true },
+    { tracker, specRevision: { revision: 'git:abc1234', source: 'git' }, repoRoot },
+  );
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'STATE_VERSION_CONFLICT');
+  // Rollback executed: tracker.claim followed by tracker.releaseClaim.
+  assert.equal(tracker.claims.length, 1);
+  assert.equal(tracker.releases.length, 1);
+  // Lease file removed (rollback succeeded).
+  const { existsSync } = await import('node:fs');
+  assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')));
+  assert.equal(env.error.details.rolled_back, true);
+});
+
 test('claim surfaces tracker exception as TRACKER_ERROR (retriable)', async (t) => {
   const stdout = captureStdout(t);
   const { forgeDir, repoRoot } = tmpRoot();
