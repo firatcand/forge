@@ -16,23 +16,23 @@ The natural Claude Code workflow is one task per session. With branches alone, y
 
 ```
 ~/repos/
-├── my-project/                          ← main checkout (on main branch)
-│   ├── .git/                            ← real .git directory
-│   ├── src/
-│   └── ...
-│
-└── my-project-worktrees/                ← sibling directory
-    ├── TLOG-103/                        ← worktree for issue TLOG-103
-    │   ├── .git                         ← FILE pointing to main .git
-    │   ├── src/
-    │   └── ...
-    │
-    └── TLOG-104/                        ← worktree for issue TLOG-104
-        ├── .git
-        └── ...
+└── my-project/                              ← main checkout (on main branch)
+    ├── .git/                                ← real .git directory
+    ├── src/
+    ├── ...
+    └── .forge/
+        └── worktrees/                       ← worktrees live inside the project (gitignored)
+            ├── TLOG-103/                    ← worktree for issue TLOG-103
+            │   ├── .git                     ← FILE pointing to main .git
+            │   ├── src/
+            │   └── ...
+            │
+            └── TLOG-104/                    ← worktree for issue TLOG-104
+                ├── .git
+                └── ...
 ```
 
-The `~/repos/{project}-worktrees/` directory is the convention. `/pickup-task` creates worktrees there automatically. You don't have to manage it manually.
+`.forge/worktrees/` is the canonical location. `/pickup-task` creates worktrees there automatically; the orchestrator uses the same path. `.forge/` is gitignored by `forge init`, so worktrees don't appear in `git status` of the main checkout. You don't have to manage it manually.
 
 ## Common commands
 
@@ -41,10 +41,10 @@ The `~/repos/{project}-worktrees/` directory is the convention. `/pickup-task` c
 git worktree list
 
 # Create a new worktree manually (forge does this for you via /pickup-task)
-git worktree add ../my-project-worktrees/TLOG-105 -b feat/TLOG-105-foo main
+git worktree add .forge/worktrees/TLOG-105 -b feat/TLOG-105-foo main
 
 # Remove a worktree (after PR merged + branch deleted)
-git worktree remove ../my-project-worktrees/TLOG-103
+git worktree remove .forge/worktrees/TLOG-103
 
 # Prune stale worktree refs (after manual deletes)
 git worktree prune
@@ -78,7 +78,7 @@ git worktree list
 git fetch --prune
 
 # Remove a stale worktree once its branch is merged + deleted on origin
-git worktree remove ../my-project-worktrees/TLOG-103
+git worktree remove .forge/worktrees/TLOG-103
 git branch -D feat/TLOG-103-foo   # only if fully merged
 ```
 
