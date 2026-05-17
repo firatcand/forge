@@ -67,7 +67,7 @@ Manual step required:
   3. Map to project: time-logger
   4. Enable: branch-name auto-link, PR-status sync
 
-✓ phases.yaml updated with tracker_project_id and per-task tracker_issue_id (plus legacy linear_* aliases through v0.3.x)
+✓ phases.yaml updated with `source` block (tracker, project_id, synced_at, spec_revision) and per-task tracker_issue_id (plus legacy linear_* aliases through v0.3.x)
 ```
 
 ### Walking the lifecycle

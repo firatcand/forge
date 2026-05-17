@@ -1,6 +1,10 @@
 project: "forge"
-tracker_project_id: "768871a9-7f95-4bd8-a5da-2ab1b290753a"
 gate_check_command: "npm run typecheck && npm run test && npm run build"
+source:
+  tracker: "linear"
+  project_id: "768871a9-7f95-4bd8-a5da-2ab1b290753a"
+  synced_at: "2026-05-17T22:17:11Z"
+  spec_revision: "8fa22260dfb272c0ba61a6b78288942fc1d0f418"
 
 phases:
   - id: phase-1
@@ -926,7 +930,7 @@ phases:
       - id: P2.5-T17
         tracker_issue_id: "FORGE-113"
         title: "phases.yaml source metadata stanza + freshness display on every read"
-        description: "Extend src/schemas/phases.ts with a `source` block (zod): { tracker: 'linear'|'github'|'notion', project_id: string, synced_at: ISO-8601, tracker_revision: string, spec_revision: string }. /reconcile --pull writes the stanza on every regeneration. Every CLI verb that reads phases.yaml (phases, status, pickup-task, doctor, ship) prints a one-line freshness summary to stderr before its main output: `phases.yaml: synced 47min ago against linear@rev_abc123 (SPEC@<spec-digest>)`. No auto-sync — just honest staleness."
+        description: "Extend src/schemas/phases.ts with a `source` block (zod): { tracker: 'linear'|'github'|'notion', project_id: string, synced_at: ISO-8601, spec_revision: string }. /reconcile --pull writes the stanza on every regeneration. Every CLI verb that reads phases.yaml (phases verb, sync-status-render bin, reconcile loader) prints a one-line freshness summary to stderr before its main output: `phases.yaml: synced 47min ago from linear (SPEC@a3c2d1f)`. No auto-sync — just honest staleness. Breaking: top-level tracker_project_id is removed; value moves into source.project_id. tracker_url stays at top level."
         type: backend
         priority: P0
         depends_on: [P2.5-T09]
@@ -934,8 +938,10 @@ phases:
         owner_type: backend-dev
         acceptance:
           - "PhasesYamlSchema includes optional `source` block validated by zod"
+          - "Top-level tracker_project_id removed from PhasesSchema; value moves into source.project_id"
           - "/reconcile --pull writes the source stanza atomically with the rest of phases.yaml"
           - "All CLI verbs that read phases.yaml print the freshness summary line on stderr"
+          - "When source block is absent, freshness line says: `phases.yaml: no source metadata (run forge orchestrate reconcile --pull to sync)`"
           - "Freshness summary format documented in spec/SPEC.md §phases.yaml schema"
           - "spec_revision = git sha of HEAD when SPEC.md was last touched, OR content digest if spec/SPEC.md is untracked (defensive)"
           - "Unit test: round-trip write/read preserves all source fields"

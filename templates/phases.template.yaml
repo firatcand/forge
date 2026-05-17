@@ -1,7 +1,15 @@
 project: "{{PROJECT_NAME}}"
-tracker_project_id: ""   # populated by /push-to-tracker
 tracker_url: ""          # populated by /push-to-tracker
 gate_check_command: "npm run e2e && npm run typecheck && npm run lint"
+
+# Source provenance: written by /reconcile --pull on every regeneration.
+# /push-to-tracker bootstraps source.project_id on first sync; do not
+# hand-edit. Absence prints "no source metadata" on every read.
+# source:
+#   tracker: linear|github|notion
+#   project_id: ""           # populated by /push-to-tracker
+#   synced_at: "<ISO-8601>"
+#   spec_revision: "<sha>"
 
 phases:
   - id: phase-1

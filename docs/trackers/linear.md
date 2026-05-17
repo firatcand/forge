@@ -128,8 +128,8 @@ Backlog ──→ Todo ──→ In Progress ──→ In Review ──→ Done
 
 After `/push-to-tracker` succeeds, `phases.yaml` gains:
 
-- `tracker_project_id` (top-level)
-- `tracker_url` (top-level)
+- top-level `tracker_url`
+- `source` block (`tracker`, `project_id`, `synced_at`, `spec_revision`) — kept fresh by `/reconcile --pull`
 - per-phase `tracker_milestone_id`
 - per-task `tracker_issue_id`
 

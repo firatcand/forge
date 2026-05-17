@@ -69,6 +69,10 @@ function mkScratchWorktree(opts: { phasesYaml: string; settingsYaml?: string }):
   const dir = mkdtempSync(join(tmpdir(), 'forge-reconcile-cli-'));
   mkdirSync(join(dir, 'plans'), { recursive: true });
   writeFileSync(join(dir, 'plans', 'phases.yaml'), opts.phasesYaml);
+  // computeSpecRevision (called from runPull) requires spec/SPEC.md to exist;
+  // without git, it falls back to a content digest.
+  mkdirSync(join(dir, 'spec'), { recursive: true });
+  writeFileSync(join(dir, 'spec', 'SPEC.md'), '# test SPEC\n');
   if (opts.settingsYaml) {
     mkdirSync(join(dir, '.forge'), { recursive: true });
     writeFileSync(join(dir, '.forge', 'settings.yaml'), opts.settingsYaml);
@@ -124,6 +128,11 @@ function fakeTracker(opts: {
 }
 
 const MINIMAL_PHASES = `project: forge
+source:
+  tracker: linear
+  project_id: test-project-uuid
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000abcd
 phases:
   - id: phase-1
     name: Phase 1
@@ -142,6 +151,12 @@ phases:
         owner_type: backend-dev
         acceptance: ['a']
 `;
+
+// Helper: strip the freshness summary line (always printed to stderr before
+// main output) so tests can JSON.parse the structured error envelope cleanly.
+function stripFreshness(stderr: string): string {
+  return stderr.replace(/^phases\.yaml: [^\n]*\n/, '');
+}
 
 test('runOrchestrateReconcile — INVALID_ARGS exits 3 (NOT 1, which is reserved for PRUNE_PENDING)', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
@@ -243,6 +258,100 @@ test('runOrchestrateReconcile — --pull --confirm-prune writes phases.yaml with
     assert.equal(payload.data.applied, true);
     const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
     assert.equal(after.includes('P1-T01'), false);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('runOrchestrateReconcile — --pull writes source stanza atomically (FORGE-113 AC #3)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--confirm-prune'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    // Source stanza is present with the four required fields.
+    assert.match(after, /^source:/m);
+    assert.match(after, /tracker:\s*linear/);
+    assert.match(after, /project_id:\s*test-project-uuid/);
+    assert.match(after, /synced_at:/);
+    assert.match(after, /spec_revision:/);
+    // synced_at was bumped — different from the fixture's frozen value.
+    const fixtureSynced = '2026-05-17T22:00:00Z';
+    const stampedSynced = after.match(/synced_at:\s*"?([^"\n]+)"?/)?.[1];
+    assert.ok(stampedSynced && stampedSynced !== fixtureSynced);
+    // spec_revision was recomputed — 40 hex chars (content digest fallback).
+    const stampedSpec = after.match(/spec_revision:\s*"?([0-9a-f]{40})"?/)?.[1];
+    assert.ok(stampedSpec, 'spec_revision should be a 40-hex string');
+    assert.notEqual(stampedSpec, 'deadbeefcafe000000000000000000000000abcd');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('runOrchestrateReconcile — --pull migrates legacy tracker_project_id into source (FORGE-113 AC #2)', async () => {
+  const legacyPhases = `project: forge
+tracker_project_id: legacy-project-id
+phases:
+  - id: phase-1
+    name: Phase 1
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: Local title
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const wt = mkScratchWorktree({ phasesYaml: legacyPhases });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--confirm-prune'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    // Legacy top-level key gone, value preserved inside source block.
+    assert.equal(/^tracker_project_id:/m.test(after), false);
+    assert.match(after, /project_id:\s*legacy-project-id/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('runOrchestrateReconcile — freshness line printed to stderr before main output', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    const stderr = err.chunks.join('');
+    assert.match(stderr, /^phases\.yaml: /);
   } finally {
     wt.cleanup();
   }
@@ -423,7 +532,7 @@ test('runOrchestrateReconcile — exits 4 when listActiveIssues throws', async (
       }),
     });
     assert.equal(result.exitCode, 4);
-    const payload = JSON.parse(err.chunks.join(''));
+    const payload = JSON.parse(stripFreshness(err.chunks.join('')));
     assert.equal(payload.ok, false);
     assert.equal(payload.error.code, 'AUTH');
   } finally {

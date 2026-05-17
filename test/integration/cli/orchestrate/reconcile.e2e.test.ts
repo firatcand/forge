@@ -46,6 +46,11 @@ function mkScratchWorktree(opts: { phasesYaml: string }): { dir: string; cleanup
   const dir = mkdtempSync(join(tmpdir(), 'forge-reconcile-e2e-'));
   mkdirSync(join(dir, 'plans'), { recursive: true });
   writeFileSync(join(dir, 'plans', 'phases.yaml'), opts.phasesYaml);
+  // computeSpecRevision (called from runPull) requires spec/SPEC.md to exist.
+  // Without git, falls back to content digest. Created here so every e2e
+  // fixture supports --pull's source-stanza stamping.
+  mkdirSync(join(dir, 'spec'), { recursive: true });
+  writeFileSync(join(dir, 'spec', 'SPEC.md'), '# e2e test SPEC\n');
   return {
     dir,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -103,6 +108,11 @@ function makeFakeTracker(initial: Issue[]): {
 
 const PHASES_FIXTURE = `# Top-level comment — must survive --pull writes
 project: forge
+source:
+  tracker: linear
+  project_id: e2e-project
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000abcd
 phases:
   - id: phase-1
     name: Phase 1

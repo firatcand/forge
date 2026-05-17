@@ -56,17 +56,28 @@ source:
   tracker: linear              # 'linear' | 'github' | 'notion'
   project_id: <tracker-project-id>
   synced_at: 2026-05-17T15:30:00Z
-  tracker_revision: <opaque tracker revision marker>
   spec_revision: <git sha of HEAD when SPEC last touched OR content digest if SPEC untracked>
 ```
 
 Every CLI verb that reads `phases.yaml` prints a one-line freshness summary to stderr before its main output:
 
 ```
-phases.yaml: synced 47min ago against linear@rev_abc123 (SPEC@<spec-digest>)
+phases.yaml: synced 47min ago from linear (SPEC@a3c2d1f)
 ```
 
+When the source block is absent (pre-FORGE-113 files; never-synced repos), the line instead says:
+
+```
+phases.yaml: no source metadata (run forge orchestrate reconcile --pull to sync)
+```
+
+When `synced_at` is older than 24h, the line is prefixed with `⚠ STALE — ` so the staleness is visually prominent (CLI exit code stays 0; the file is still usable).
+
 Not auto-sync; just honest staleness.
+
+**`tracker_revision` is intentionally absent.** v0.4 has no consumer for an upstream-equality token (no doctor drift-check, no `/reconcile --pull --check`). If a consumer appears, the right shape is a `Tracker.getCurrentRevision()` adapter method (each tracker mints a cheap provider-native revision: Linear `max(updatedAt)`, GitHub list ETag, Notion timestamp). A canonical-projection hash bolted onto reconcile would ship the schema field without the live-drift capability. Filed as a follow-up issue (FORGE-123 — `Add Tracker.getCurrentRevision() for live drift detection`) for when v0.5+ wants it.
+
+**Breaking change vs v0.3.x:** the top-level `tracker_project_id` field is removed from `PhasesSchema`; the value moves into `source.project_id`. `tracker_url` stays at the top level. Migration is automatic: the first `/reconcile --pull` after upgrade transplants the legacy key from the raw Document into `source.project_id` and deletes it. No adopter action required.
 
 ### SPEC changes — no contradiction gate in v0.4
 
@@ -254,6 +265,8 @@ export type Settings = z.infer<typeof SettingsSchema>;
 ```
 
 ### `phases.yaml` schema (zod)
+
+> **Note (2026-05-17):** the canonical schema lives in `src/schemas/phases.ts`; the snippet below predates the FORGE-96 task-lifecycle additions and the FORGE-113 `source` block. See §`phases.yaml` is a derived snapshot above for the `source` block schema and freshness summary semantics. Broader refresh is filed as a follow-up.
 
 ```ts
 export const TaskSchema = z.object({

@@ -28,6 +28,23 @@ export const ESTIMATES = ['S', 'M', 'L', 'XL'] as const;
 
 export const PHASE_STATUSES = ['active', 'blocked', 'done', 'paused'] as const;
 
+export const TRACKER_TYPES = ['linear', 'github', 'notion'] as const;
+
+// Provenance stanza written by /reconcile --pull when phases.yaml is
+// regenerated from upstream tracker state. Read by every CLI verb that
+// loads phases.yaml to print a one-line freshness summary to stderr.
+// `tracker_revision` was deliberately omitted in v0.4: equality-only
+// drift detection currently has no consumer; the cheap-rev adapter
+// method is filed as a follow-up if/when a consumer appears.
+export const SourceSchema = z
+  .object({
+    tracker: z.enum(TRACKER_TYPES),
+    project_id: z.string().min(1),
+    synced_at: z.string().datetime({ offset: true }),
+    spec_revision: z.string().min(1),
+  })
+  .strict();
+
 // Per-task lifecycle status overlay used by the orchestrator to filter
 // phases --ready and by reconciliation to keep phases.yaml ↔ tracker aligned.
 // 'active' is implicit when omitted; the explicit forms are how phases.yaml
@@ -83,9 +100,9 @@ const DONE = 2;
 export const PhasesSchema = z
   .object({
     project: z.string().min(1),
-    tracker_project_id: z.string().optional(),
     tracker_url: z.string().optional(),
     gate_check_command: z.string().optional(),
+    source: SourceSchema.optional(),
     phases: z.array(PhaseSchema).min(1),
   })
   .superRefine((data, ctx) => {
@@ -190,8 +207,12 @@ export const PhasesSchema = z
 export type Task = z.infer<typeof TaskSchema>;
 export type Phase = z.infer<typeof PhaseSchema>;
 export type Phases = z.infer<typeof PhasesSchema>;
+export type Source = z.infer<typeof SourceSchema>;
 export type OwnerType = (typeof OWNER_TYPES)[number];
 export type Priority = (typeof PRIORITIES)[number];
+// NOTE: `TrackerType` is canonically defined in src/trackers/types.ts.
+// Source.tracker is structurally `'linear' | 'github' | 'notion'`; the
+// trackers module's type alias remains the single canonical export.
 export type TaskType = (typeof TASK_TYPES)[number];
 export type Estimate = (typeof ESTIMATES)[number];
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];

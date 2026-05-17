@@ -33,7 +33,10 @@ export {
 export { SettingsError } from './errors.ts';
 export type { SettingsErrorCode } from './errors.ts';
 export { loadPhases } from './phases.ts';
+export type { LoadPhasesResult } from './phases.ts';
 export { PhasesError } from './errors.ts';
 export type { PhasesErrorCode } from './errors.ts';
-export type { Phases, Phase, Task } from '../schemas/phases.ts';
+export type { Phases, Phase, Task, Source } from '../schemas/phases.ts';
+export { computeFreshnessLine, formatRelativeAge } from './freshness.ts';
+export { computeSpecRevision, SpecRevisionError } from './spec-revision.ts';
 export { createSecretsManager } from './secrets.ts';

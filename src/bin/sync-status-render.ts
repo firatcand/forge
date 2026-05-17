@@ -28,7 +28,9 @@ async function main(): Promise<void> {
   }
   const mode: RenderMode = rest.includes('--json') ? 'json' : 'human';
 
-  const phases = loadPhases(phasesPath);
+  const loaded = loadPhases(phasesPath);
+  const phases = loaded.phases;
+  process.stderr.write(loaded.freshnessLine + '\n');
 
   const raw = await readStdin();
   if (!raw.trim()) fail('stdin is empty; expected JSON array of Issue objects');
