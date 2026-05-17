@@ -797,18 +797,18 @@ phases:
       - id: P2.5-T09
         tracker_issue_id: "FORGE-100"
         title: "/reconcile skill + forge orchestrate reconcile verb (bi-directional phases.yaml ↔ tracker)"
-        description: "skills/reconcile/SKILL.md + src/cli/orchestrate/reconcile.ts. Skill wraps verb with diff preview + per-conflict user confirmation per spec/SPEC.md §Skill ↔ verb contract. Verb: --pull reads tracker via listActiveIssues, detects added/removed/changed-fields vs phases.yaml, prompts user for each conflict, writes phases.yaml atomically; --push reverse using updateIssueBody. Conflict detection: same task edited in both places."
+        description: "skills/reconcile/SKILL.md + src/cli/orchestrate-reconcile.ts. Skill wraps verb with diff preview; verb owns state machine. Verb: --pull reads tracker via listActiveIssues, diffs added/removed/updated/unmanaged vs phases.yaml, writes phases.yaml atomically (yaml.parseDocument preserves comments); --push renders bodies from local task data and calls updateIssueBody best-effort. No conflict-resolution UI per spec/ORCHESTRATOR.md §CLI surface — team handles via git diff + re-run."
         type: skill
         priority: P0
         depends_on: [P2.5-T03]
         estimate: M
         owner_type: backend-dev
         acceptance:
-          - "skills/reconcile/SKILL.md + src/cli/orchestrate/reconcile.ts shipped"
+          - "skills/reconcile/SKILL.md + src/cli/orchestrate-reconcile.ts shipped"
           - "/reconcile --pull round-trip: tracker → phases.yaml → tracker preserves all fields without loss"
-          - "Conflict prompt fires when same task edited in both places"
-          - "Atomic phases.yaml write via tmp + rename"
-          - "Integration test with all 3 tracker adapters (Linear/GitHub/Notion)"
+          - "Diff preview shows added/removed/updated tasks; --pull prompts user via skill to confirm prune list before removing orphans (--confirm-prune flag)"
+          - "Atomic phases.yaml write via tmp + rename; YAML comments + field order preserved"
+          - "Integration tests cover the Tracker interface contract via a shared FakeTracker (per-adapter quirks covered by FORGE-94 tests; Notion --push gracefully surfaces NOT_IMPLEMENTED until FORGE-117)"
       - id: P2.5-T10
         tracker_issue_id: "FORGE-101"
         status: deferred-v0.5
