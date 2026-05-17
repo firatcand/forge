@@ -908,7 +908,7 @@ phases:
       # Tasks added 2026-05-17 (PM) per docs/plans/team-mode-minimum-architecture.md
       # ─────────────────────────────────────────────────────────────────────────────
       - id: P2.5-T16
-        tracker_issue_id: null  # to be created via /push-to-tracker
+        tracker_issue_id: "FORGE-112"
         title: "Untrack spec/* + plans/phases.yaml from forge's .gitignore; add CI npm-pack gate"
         description: "Remove the 7 'Forge dogfooding' entries from .gitignore (already done in this branch — verify). Verify package.json#files allowlist excludes spec/, plans/, .forge/, docs/. Add an npm script `test:pack` that runs `npm pack --dry-run --json` and asserts none of spec/**, plans/**, .forge/**, docs/** appear in the tarball file list. Wire `test:pack` into CI as a required check. Commit the (currently uncommitted) spec/* and plans/phases.yaml so forge's own dogfooding aligns with the team-mode architecture."
         type: backend
@@ -924,7 +924,7 @@ phases:
           - "CI workflow runs `npm run test:pack` as a required check"
           - "Local `npm pack --dry-run` confirms package size <1MB"
       - id: P2.5-T17
-        tracker_issue_id: null  # to be created via /push-to-tracker
+        tracker_issue_id: "FORGE-113"
         title: "phases.yaml source metadata stanza + freshness display on every read"
         description: "Extend src/schemas/phases.ts with a `source` block (zod): { tracker: 'linear'|'github'|'notion', project_id: string, synced_at: ISO-8601, tracker_revision: string, spec_revision: string }. /reconcile --pull writes the stanza on every regeneration. Every CLI verb that reads phases.yaml (phases, status, pickup-task, doctor, ship) prints a one-line freshness summary to stderr before its main output: `phases.yaml: synced 47min ago against linear@rev_abc123 (SPEC@<spec-digest>)`. No auto-sync — just honest staleness."
         type: backend
@@ -941,7 +941,7 @@ phases:
           - "Unit test: round-trip write/read preserves all source fields"
           - "Integration test: stale phases.yaml (>24h old) still works but prints the staleness duration prominently"
       - id: P2.5-T18
-        tracker_issue_id: null  # to be created via /push-to-tracker
+        tracker_issue_id: "FORGE-114"
         title: "Worker spec_revision stamping at claim + informational SPEC-diff notification on resume"
         description: "Extend the claim record schema (src/orchestrator/state-machine.ts or wherever claim records live post-FORGE-78) with a `spec_revision` field stamped at claim creation. On worker subagent resume (when it picks up a previously-claimed task), the dispatch skill computes `git log --oneline -- spec/ HEAD ^<claim.spec_revision>`. If non-empty, prints to the worker prompt as an informational block: `SPEC changed since you claimed this ticket — 3 commits affecting spec/SPEC.md and spec/PRD.md. Recent: <one-line summaries>. Run \\\`git diff <claim.spec_revision> HEAD -- spec/\\\` to review.` This is informational, NOT gating — the worker proceeds regardless. NO contradiction check, NO --affects flag, NO halt."
         type: backend
