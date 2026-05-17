@@ -7,6 +7,8 @@
 // no conflict-resolution UI. The verb writes phases.yaml or calls
 // updateIssueBody atomically; the skill confirms orphan prune before apply.
 
+import type { Document } from 'yaml';
+import { YAMLSeq, isMap, isSeq } from 'yaml';
 import type { Issue } from '../trackers/types.ts';
 import type { Phase, Phases, Task } from '../schemas/phases.ts';
 
@@ -243,6 +245,72 @@ export function diffPush(phases: Phases, issues: readonly Issue[]): PushPlan {
 
 export interface ApplyOptions {
   readonly confirmPrune: boolean;
+}
+
+// Mutates a yaml Document in place so comments + ordering are preserved.
+// The Document is expected to validate against PhasesSchema (caller's
+// responsibility). Returns the count of structural mutations applied so the
+// caller can decide whether to write the file.
+//
+// WHY: re-stringifying from the parsed `Phases` shape via yaml.stringify
+// strips ~100 comment lines from the live forge phases.yaml. Per
+// [[validator-narrower-than-preserver-causes-silent-corruption]] we navigate
+// the Document API instead.
+export function applyPlanToDocument(
+  doc: Document,
+  plan: PullPlan,
+  opts: ApplyOptions,
+): number {
+  let mutations = 0;
+  const phasesSeq = doc.get('phases');
+  if (!isSeq(phasesSeq)) return 0;
+
+  const updatedByTaskId = new Map(plan.updated.map((u) => [u.task_id, u]));
+  const removedTaskIds = opts.confirmPrune
+    ? new Set(plan.removed.map((r) => r.task_id))
+    : new Set<string>();
+
+  for (let pi = 0; pi < phasesSeq.items.length; pi++) {
+    const phaseNode = phasesSeq.items[pi];
+    if (!isMap(phaseNode)) continue;
+    const tasksNode = phaseNode.get('tasks');
+    if (!isSeq(tasksNode)) continue;
+
+    // Iterate backwards so splices don't shift remaining indices.
+    for (let ti = tasksNode.items.length - 1; ti >= 0; ti--) {
+      const taskNode = tasksNode.items[ti];
+      if (!isMap(taskNode)) continue;
+      const idScalar = taskNode.get('id');
+      const id = typeof idScalar === 'string' ? idScalar : null;
+      if (!id) continue;
+
+      if (removedTaskIds.has(id)) {
+        tasksNode.items.splice(ti, 1);
+        mutations++;
+        continue;
+      }
+
+      const update = updatedByTaskId.get(id);
+      if (!update) continue;
+
+      for (const change of update.changes) {
+        if (change.field === 'title') {
+          taskNode.set('title', String(change.to));
+          mutations++;
+        } else if (change.field === 'depends_on') {
+          const seq = new YAMLSeq();
+          seq.flow = true;
+          for (const dep of change.to as readonly string[]) {
+            seq.add(dep);
+          }
+          taskNode.set('depends_on', seq);
+          mutations++;
+        }
+      }
+    }
+  }
+
+  return mutations;
 }
 
 export function applyPullToPhases(

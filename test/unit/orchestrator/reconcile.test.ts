@@ -1,9 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { parseDocument } from 'yaml';
 import {
   diffPull,
   diffPush,
   applyPullToPhases,
+  applyPlanToDocument,
   renderTaskBody,
 } from '../../../src/orchestrator/reconcile.ts';
 import type { Phase, Phases, Task } from '../../../src/schemas/phases.ts';
@@ -306,6 +308,117 @@ test('applyPullToPhases — removed task IS pruned with confirmPrune', () => {
   const next = applyPullToPhases(phases, plan, { confirmPrune: true });
   assert.equal(next.phases[0]!.tasks.length, 1);
   assert.equal(next.phases[0]!.tasks[0]!.id, 'P1-T01');
+});
+
+// ---------------- applyPlanToDocument (preserves comments) ----------------
+
+const SAMPLE_YAML = `# top-level comment
+project: forge
+phases:
+  - id: phase-1
+    name: Phase 1
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      # task before
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: Old title
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+      - id: P1-T02
+        tracker_issue_id: tracker-gone
+        title: To be pruned
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+      # task after
+`;
+
+test('applyPlanToDocument — applies title update and preserves comments', () => {
+  const doc = parseDocument(SAMPLE_YAML);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [{ field: 'title' as const, from: 'Old title', to: 'New title' }],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  const out = doc.toString();
+  assert.match(out, /# top-level comment/);
+  assert.match(out, /# task before/);
+  assert.match(out, /# task after/);
+  assert.match(out, /title: New title/);
+});
+
+test('applyPlanToDocument — prunes orphan when confirmPrune=true', () => {
+  const doc = parseDocument(SAMPLE_YAML);
+  const plan = {
+    updated: [],
+    removed: [{ task_id: 'P1-T02', tracker_issue_id: 'tracker-gone' }],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: true });
+  assert.equal(n, 1);
+  const out = doc.toString();
+  assert.equal(out.includes('P1-T02'), false);
+  assert.match(out, /P1-T01/);
+});
+
+test('applyPlanToDocument — does NOT prune without confirmPrune', () => {
+  const doc = parseDocument(SAMPLE_YAML);
+  const plan = {
+    updated: [],
+    removed: [{ task_id: 'P1-T02', tracker_issue_id: 'tracker-gone' }],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 0);
+  assert.match(doc.toString(), /P1-T02/);
+});
+
+test('applyPlanToDocument — depends_on update writes flow-style array', () => {
+  const doc = parseDocument(SAMPLE_YAML);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: [] as readonly string[],
+            to: ['P1-T00'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  assert.match(doc.toString(), /depends_on:\s*\[\s*P1-T00\s*\]/);
 });
 
 test('applyPullToPhases — added entries are NOT auto-inserted', () => {
