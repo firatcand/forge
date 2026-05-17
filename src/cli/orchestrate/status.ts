@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { isNodeFsError } from '../orchestrator/questions/errors.ts';
+import { isNodeFsError } from '../../orchestrator/questions/errors.ts';
 
 // state.json cap — 1MB. This is larger than QUESTION_FILE_MAX_BYTES (64KB)
 // because state.json grows with worker count × tasks. Per ORCHESTRATOR.md

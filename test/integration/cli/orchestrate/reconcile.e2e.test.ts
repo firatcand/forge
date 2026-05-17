@@ -17,9 +17,9 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
-import { runOrchestrateReconcile } from '../../../src/cli/orchestrate-reconcile.ts';
-import type { Tracker } from '../../../src/trackers/base.ts';
-import type { Issue } from '../../../src/trackers/types.ts';
+import { runOrchestrateReconcile } from '../../../../src/cli/orchestrate/reconcile.ts';
+import type { Tracker } from '../../../../src/trackers/base.ts';
+import type { Issue } from '../../../../src/trackers/types.ts';
 
 interface JsonPayload {
   readonly ok: boolean;

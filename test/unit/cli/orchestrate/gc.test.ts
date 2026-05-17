@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { runOrchestrateGc } from '../../../src/cli/orchestrate-gc.ts';
+import { runOrchestrateGc } from '../../../../src/cli/orchestrate/gc.ts';
 
 function freshForgeDir(): string {
   return mkdtempSync(join(tmpdir(), 'forge-gc-'));

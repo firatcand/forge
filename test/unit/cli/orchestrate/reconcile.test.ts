@@ -7,10 +7,10 @@ import { Writable } from 'node:stream';
 import {
   parseReconcileArgv,
   runOrchestrateReconcile,
-} from '../../../src/cli/orchestrate-reconcile.ts';
-import type { Tracker } from '../../../src/trackers/base.ts';
-import type { Issue } from '../../../src/trackers/types.ts';
-import { TrackerError } from '../../../src/trackers/errors.ts';
+} from '../../../../src/cli/orchestrate/reconcile.ts';
+import type { Tracker } from '../../../../src/trackers/base.ts';
+import type { Issue } from '../../../../src/trackers/types.ts';
+import { TrackerError } from '../../../../src/trackers/errors.ts';
 
 // ---------------- argv parsing ----------------
 

@@ -12,27 +12,27 @@
 import { readFileSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseDocument } from 'yaml';
-import { writeAtomic } from '../core/fs-atomic.ts';
-import { loadSettings } from '../core/settings.ts';
-import { validateUnderRoot } from '../core/workspace.ts';
-import { PhasesSchema, type Phases } from '../schemas/phases.ts';
-import type { Logger, Tracker } from '../trackers/base.ts';
-import { GitHubTracker } from '../trackers/github.ts';
-import { LinearTracker } from '../trackers/linear.ts';
-import { NotionTracker } from '../trackers/notion.ts';
-import { createStdioMcpCall, type StdioMcpHandle } from '../trackers/notion-mcp-transport.ts';
+import { writeAtomic } from '../../core/fs-atomic.ts';
+import { loadSettings } from '../../core/settings.ts';
+import { validateUnderRoot } from '../../core/workspace.ts';
+import { PhasesSchema, type Phases } from '../../schemas/phases.ts';
+import type { Logger, Tracker } from '../../trackers/base.ts';
+import { GitHubTracker } from '../../trackers/github.ts';
+import { LinearTracker } from '../../trackers/linear.ts';
+import { NotionTracker } from '../../trackers/notion.ts';
+import { createStdioMcpCall, type StdioMcpHandle } from '../../trackers/notion-mcp-transport.ts';
 import {
   TrackerError,
   type TrackerErrorCode,
-} from '../trackers/errors.ts';
-import type { Settings } from '../schemas/settings.ts';
+} from '../../trackers/errors.ts';
+import type { Settings } from '../../schemas/settings.ts';
 import {
   applyPlanToDocument,
   diffPull,
   diffPush,
   type PullPlan,
   type PushPlan,
-} from '../orchestrator/reconcile.ts';
+} from '../../orchestrator/reconcile.ts';
 
 const PHASES_PATH_DEFAULT = 'plans/phases.yaml';
 const SETTINGS_PATH_DEFAULT = '.forge/settings.yaml';

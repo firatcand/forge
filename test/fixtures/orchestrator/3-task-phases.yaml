@@ -1,0 +1,38 @@
+project: forge-e2e-fixture
+phases:
+  - id: phase-1
+    name: e2e fixture
+    status: active
+    goal: exercise the v2 orchestrate CLI surface end-to-end
+    gate_criteria: [ships]
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: ETOE-1
+        title: Happy path task
+        description: Claim → dispatch → heartbeat → complete
+        type: backend
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        depends_on: []
+        acceptance: [happy-path-runs]
+      - id: P1-T02
+        tracker_issue_id: ETOE-2
+        title: Question-loop task
+        description: Claim → dispatch → heartbeat → question → cancel
+        type: backend
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        depends_on: []
+        acceptance: [question-loop-runs]
+      - id: P1-T03
+        tracker_issue_id: ETOE-3
+        title: Cancel-mid-flight task
+        description: Claim → dispatch → cancel
+        type: backend
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        depends_on: []
+        acceptance: [cancel-mid-flight]

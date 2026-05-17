@@ -7,8 +7,8 @@ import { PassThrough } from 'node:stream';
 import {
   serializeEvent,
   type NotificationEvent,
-} from '../../../src/orchestrator/events.ts';
-import { runOrchestrateAttach } from '../../../src/cli/orchestrate-attach.ts';
+} from '../../../../src/orchestrator/events.ts';
+import { runOrchestrateAttach } from '../../../../src/cli/orchestrate/attach.ts';
 
 function captureStreams(): {
   stdout: PassThrough;

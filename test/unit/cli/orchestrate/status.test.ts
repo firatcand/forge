@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { runOrchestrateStatus } from '../../../src/cli/orchestrate-status.ts';
+import { runOrchestrateStatus } from '../../../../src/cli/orchestrate/status.ts';
 
 function captureStreams(): {
   stdout: PassThrough;

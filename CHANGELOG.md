@@ -6,12 +6,26 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ### Added
 
+- **`forge orchestrate` v2 CLI verb suite** (FORGE-96 / P2.5-T05) — replaces the v0.2.x flat surface with the read-only / mutating split per spec/ORCHESTRATOR.md §CLI surface (rewritten 2026-05-17):
+  - **Read-only** (no lease, no tracker mutation): `phases [--ready --phase implement|review|ship --blocked-by --limit]`, `status`, `questions`, `doctor [--scope spec-code]`, `attach`, `spec-diff`, `run list [--active]`.
+  - **User-approved mutating**: `claim`, `dispatch`, `heartbeat`, `question` (worker writer; accepts `--decision-key`, `--question`, `--options-file`, optional `--drift-event-id`, `--routing-hint apply-decision|amend-roadmap`), `answer`, `event` (worker; `--type drift --data <json>`), `complete`, `cancel`, `gc`, `run start`.
+  - Every verb returns a stable JSON envelope on `--json`: `{ ok, data? | error: { code, message, retriable, details? } }`.
+  - Verb-table dispatcher (`Map<string, VerbHandler | Map<string, VerbHandler>>`) so `run start | list` routes correctly; `--help` walks the registry so the read/mutate classification table cannot drift from the implementation (guarded by a unit test).
+  - Centralized zod arg schemas at `src/schemas/cli-args.ts` (one per verb plus shared primitives: `TaskIdSchema`, UUIDv7 schemas for run/claim/attempt/question, `DecisionKeySchema`, `PhaseSchema`, `RoutingHintSchema`).
+  - All 6 pre-existing verb files migrated from flat `src/cli/orchestrate-*.ts` into `src/cli/orchestrate/{verb}.ts` via `git mv` so blame follows.
+- **`src/orchestrator/overlap.ts`** (FORGE-79 / P2-T19, absorbed into FORGE-96) — pure file-glob overlap classifier consumed by `phases --ready` to tag candidates as `no-overlap`/`soft-overlap`/`hard-overlap` against the active-attempts set. Tasks without declared `write_globs` default to worst-case-assume-overlap-on-hard-lock-only. `DEFAULT_HARD_LOCK_GLOBS` matches the spec list (`package.json`, lockfiles, `tsconfig.json`, `plans/phases.yaml`, `src/index.ts`, `migrations/**`, `prisma/schema.prisma`).
+- **`TaskSchema.status` + `TaskSchema.write_globs`** — optional fields on phases.yaml task entries (`TASK_STATUSES = active|paused|done|deferred-v0.5|dropped`) so the loader stops silently dropping production data and so the overlap library can read declared globs from the task graph.
+- **3-task e2e fixture + integration test** (`test/fixtures/orchestrator/3-task-phases.yaml`, `test/integration/cli/orchestrate/e2e.test.ts`) — spawns `dist/bin/forge.cjs` as a subprocess and drives the full v2 lifecycle (`run start` → `phases --ready` → `claim` → `dispatch` → `heartbeat` → `question` → `cancel | complete`) against three fixture tasks. `FORGE_NOOP_TRACKER=1` keeps the test hermetic.
 - **`/push-to-tracker` skill** — canonical, tracker-agnostic push. Reads `.forge/settings.yaml` `tracker.type` (linear | github | notion) and dispatches to the matching `Tracker` adapter (FORGE-23). Writes canonical `tracker_project_id` / `tracker_url` (top-level) and `tracker_issue_id` (per task) into `phases.yaml`.
 - **`tracker-syncer` subagent** — replaces `linear-syncer`. Documents per-tracker dispatch (Linear MCP / `GitHubTracker` / Notion MCP) over the shared `Tracker` interface from FORGE-14.
 - **`docs/trackers/` directory** — split out the Linear deep-dive (now `docs/trackers/linear.md`) and added an index `README.md` plus short stubs for `github.md` and `notion.md`.
 
 ### Removed
 
+- **`forge orchestrate next | suggest-next | session-check | intent-detect`** (FORGE-96) — dropped from the v2 surface per spec/ORCHESTRATOR.md §CLI surface (simplified 2026-05-17). No deprecation alias; sole-user decision. Replacements:
+  - Listing ready tasks → `forge orchestrate phases --ready`.
+  - Session re-grounding → `forge orchestrate status` (or the `/status-check` skill).
+  - "I had an idea" intent → user explicitly invokes `/amend-roadmap` (no automatic detection).
 - **Legacy `linear_*` keys in `plans/phases.yaml`** — `linear_project_id`, `linear_team_id`, per-phase `linear_milestone_id`, per-task `linear_id`, and top-level `github_repo` are gone from the schema. The canonical tracker-agnostic keys (`tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`) are now the only supported names. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives only in `.forge/settings.yaml::tracker.config`, no longer duplicated into `phases.yaml`. Originally scheduled for v0.4.0; accelerated because there are no external adopters with stored legacy keys.
 
 ### Deprecated

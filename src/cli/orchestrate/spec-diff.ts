@@ -9,13 +9,13 @@
 
 import { dirname } from 'node:path';
 import { readFileSync, statSync } from 'node:fs';
-import { isNodeFsError } from '../orchestrator/questions/errors.ts';
-import { leaseFilePath } from '../orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../schemas/lease.ts';
+import { isNodeFsError } from '../../orchestrator/questions/errors.ts';
+import { leaseFilePath } from '../../orchestrator/questions/paths.ts';
+import { LeaseSchema } from '../../schemas/lease.ts';
 import {
   computeSpecDiffSinceClaim,
   type SpecDiffNotification,
-} from '../orchestrator/spec-diff.ts';
+} from '../../orchestrator/spec-diff.ts';
 
 const LEASE_FILE_MAX_BYTES = 64 * 1024; // 64 KiB — leases are small
 

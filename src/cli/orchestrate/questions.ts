@@ -1,5 +1,5 @@
-import { listOpenQuestionsAcrossTree } from '../orchestrator/questions/index.ts';
-import { QuestionChannelError } from '../orchestrator/questions/errors.ts';
+import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/index.ts';
+import { QuestionChannelError } from '../../orchestrator/questions/errors.ts';
 
 export interface OrchestrateQuestionsOptions {
   readonly open: boolean;
