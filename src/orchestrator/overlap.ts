@@ -1,0 +1,250 @@
+// File-glob overlap detection (P2-T19 / FORGE-79, absorbed into FORGE-96).
+//
+// Pure library — no I/O, no event emission, no CLI surface.
+//
+// Classifies a candidate task against the set of currently-active task attempts
+// (i.e., attempts whose state is in {claimed, dispatched, running,
+// blocked_on_question, awaiting_respawn}) into one of three buckets:
+//
+//   - hard-overlap: at least one offending glob matches an entry in the
+//     `hardLockGlobs` allowlist (those files must NOT be touched concurrently).
+//   - soft-overlap: write_globs from candidate and at least one active attempt
+//     name the same path or directory subtree, but none of the offenders are
+//     in the hardLockGlobs set.
+//   - no-overlap:   write_globs are disjoint across candidate vs all actives.
+//
+// Tasks without declared `write_globs` default to worst-case-assume-overlap-on-
+// hard-lock-only: such tasks are treated as if they could touch any hard-lock
+// path, so their pair classification becomes hard-overlap only when paired
+// against a peer that DOES declare a hard-lock glob. Two such undeclared tasks
+// classify as no-overlap because neither names a specific intersection.
+
+export type TaskWriteGlobs = {
+  readonly taskId: string;
+  readonly writeGlobs: readonly string[]; // empty array == undeclared
+};
+
+export type OverlapClassification = 'no-overlap' | 'soft-overlap' | 'hard-overlap';
+
+export type OverlapResult = {
+  readonly classification: OverlapClassification;
+  readonly offendingGlobs: readonly string[];
+  readonly conflictingTaskIds: readonly string[];
+};
+
+export type ClassifyInput = {
+  readonly activeAttempts: readonly TaskWriteGlobs[];
+  readonly candidate: TaskWriteGlobs;
+  readonly hardLockGlobs?: readonly string[];
+};
+
+// Spec-default hard-lock list from ORCHESTRATOR.md §File-glob declarations.
+// Adopters may override via settings.agents.hard_lock_globs.
+export const DEFAULT_HARD_LOCK_GLOBS: readonly string[] = [
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'tsconfig.json',
+  'plans/phases.yaml',
+  'src/index.ts',
+  'migrations/**',
+  'prisma/schema.prisma',
+];
+
+// Compile a minimatch-style glob to a RegExp.
+//
+// Supports: literal characters, `?` (single non-`/` char), `*` (any run of
+// non-`/` chars), `**` (any run including `/`). Anchored to full-string match.
+//
+// Deliberately small: we own the input glob set, so we don't need brace
+// expansion / character classes / extglob. If a future setting demands more,
+// swap this for minimatch.
+function compileGlob(pattern: string): RegExp {
+  let src = '^';
+  for (let i = 0; i < pattern.length; i += 1) {
+    const ch = pattern[i] ?? '';
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        // ** — any run including /, optionally with trailing slash.
+        src += '.*';
+        i += 1;
+        // Eat an immediate `/` so `migrations/**/foo` matches `migrations/foo`.
+        if (pattern[i + 1] === '/') i += 1;
+      } else {
+        src += '[^/]*';
+      }
+    } else if (ch === '?') {
+      src += '[^/]';
+    } else if (/[.+^$|()[\]{}\\]/.test(ch)) {
+      src += `\\${ch}`;
+    } else {
+      src += ch;
+    }
+  }
+  src += '$';
+  return new RegExp(src);
+}
+
+// Two globs "intersect" if a hypothetical file path could match BOTH.
+// We approximate this with a cheap test: probe-match via short string
+// candidates generated from each glob's literal segments. This is sufficient
+// for the realistic forge inputs (file paths and shallow `**`) and avoids
+// pulling in a full glob-intersection library.
+//
+// Returns the set of `candidateGlobs` that intersect at least one entry in
+// `activeGlobs`.
+function findIntersections(
+  candidateGlobs: readonly string[],
+  activeGlobs: readonly string[],
+): string[] {
+  const out: string[] = [];
+  const compiledActive = activeGlobs.map((g) => ({ src: g, re: compileGlob(g) }));
+  for (const cg of candidateGlobs) {
+    const candidateRe = compileGlob(cg);
+    const probes = new Set<string>();
+    probes.add(materialize(cg));
+    for (const a of compiledActive) probes.add(materialize(a.src));
+    for (const probe of probes) {
+      if (candidateRe.test(probe)) {
+        for (const a of compiledActive) {
+          if (a.re.test(probe)) {
+            out.push(cg);
+            break;
+          }
+        }
+        if (out[out.length - 1] === cg) break;
+      }
+    }
+  }
+  return out;
+}
+
+// Returns the subset of `hardLocks` that the given `writeGlobs` would touch.
+// Distinct from findIntersections: instead of returning the input globs that
+// hit something, this returns the matched hard-lock patterns themselves —
+// which lets us check whether two attempts share a hard-lock category, not
+// just whether each independently hits one.
+function hardLockCategoriesHit(
+  writeGlobs: readonly string[],
+  hardLocks: readonly string[],
+): string[] {
+  if (writeGlobs.length === 0) return [];
+  const out: string[] = [];
+  const compiledHardLocks = hardLocks.map((h) => ({ src: h, re: compileGlob(h) }));
+  const compiledWrites = writeGlobs.map((w) => ({ src: w, re: compileGlob(w) }));
+  for (const hl of compiledHardLocks) {
+    const probes = new Set<string>([materialize(hl.src)]);
+    for (const w of compiledWrites) probes.add(materialize(w.src));
+    for (const probe of probes) {
+      if (hl.re.test(probe) && compiledWrites.some((w) => w.re.test(probe))) {
+        out.push(hl.src);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Replace `**` with a placeholder path segment so the glob becomes a concrete
+// file path probe.
+function materialize(pattern: string): string {
+  return pattern
+    .replace(/\*\*\/?/g, 'a/b/')
+    .replace(/\*/g, 'x')
+    .replace(/\?/g, 'y')
+    // Collapse trailing slashes from `**/` expansions.
+    .replace(/\/+$/, '/x.ts');
+}
+
+function dedupe(values: readonly string[]): string[] {
+  return Array.from(new Set(values));
+}
+
+export function classifyOverlap(input: ClassifyInput): OverlapResult {
+  const hardLocks = input.hardLockGlobs ?? DEFAULT_HARD_LOCK_GLOBS;
+  const candidate = input.candidate;
+
+  // First pass: hard-overlap. Two attempts conflict on hard-locks when they
+  // BOTH hit the same hard-lock pattern. Undeclared write_globs means
+  // worst-case-assume: that side could hit any hard-lock.
+  const candidateHardCats = new Set(hardLockCategoriesHit(candidate.writeGlobs, hardLocks));
+  const candidateUndeclared = candidate.writeGlobs.length === 0;
+  const offendingActives: string[] = [];
+  const hardOffendingGlobs: string[] = [];
+  for (const active of input.activeAttempts) {
+    const activeHardCats = new Set(hardLockCategoriesHit(active.writeGlobs, hardLocks));
+    const activeUndeclared = active.writeGlobs.length === 0;
+    let shared: string[] = [];
+    if (candidateUndeclared && activeUndeclared) {
+      // Worst-case-assume on both sides cancels out per spec footnote: only
+      // hard-locks count, but neither side specifies one. No hard-overlap.
+      shared = [];
+    } else if (candidateUndeclared) {
+      // Candidate could hit anything; if active hits any hard-lock, treat
+      // as worst-case collision on that category.
+      shared = [...activeHardCats];
+    } else if (activeUndeclared) {
+      shared = [...candidateHardCats];
+    } else {
+      // Both declared: intersect their hard-lock categories.
+      shared = [...candidateHardCats].filter((c) => activeHardCats.has(c));
+    }
+    if (shared.length > 0) {
+      offendingActives.push(active.taskId);
+      for (const g of shared) hardOffendingGlobs.push(g);
+    }
+  }
+  if (offendingActives.length > 0) {
+    return {
+      classification: 'hard-overlap',
+      offendingGlobs: dedupe(hardOffendingGlobs),
+      conflictingTaskIds: dedupe(offendingActives),
+    };
+  }
+
+  // Second pass: soft-overlap = candidate write_globs intersect any active's
+  // write_globs (not in the hard-lock set).
+  // Undeclared on either side does NOT trigger soft-overlap (only hard above).
+  if (candidate.writeGlobs.length === 0) {
+    return { classification: 'no-overlap', offendingGlobs: [], conflictingTaskIds: [] };
+  }
+  const softOffending: string[] = [];
+  const softTaskIds: string[] = [];
+  for (const active of input.activeAttempts) {
+    if (active.writeGlobs.length === 0) continue;
+    const inter = findIntersections(candidate.writeGlobs, active.writeGlobs);
+    if (inter.length > 0) {
+      softOffending.push(...inter);
+      softTaskIds.push(active.taskId);
+    }
+  }
+  if (softOffending.length > 0) {
+    return {
+      classification: 'soft-overlap',
+      offendingGlobs: dedupe(softOffending),
+      conflictingTaskIds: dedupe(softTaskIds),
+    };
+  }
+
+  return { classification: 'no-overlap', offendingGlobs: [], conflictingTaskIds: [] };
+}
+
+// Cheap heuristic: two globs overlap if their materialized probe paths match
+// each other's compiled regex.
+function globsOverlap(a: string, b: string): boolean {
+  if (a === b) return true;
+  const reA = compileGlob(a);
+  const reB = compileGlob(b);
+  const probes = [materialize(a), materialize(b)];
+  return probes.some((p) => reA.test(p) && reB.test(p));
+}
+
+// Exported for unit-test introspection.
+export const __overlapInternals = {
+  compileGlob,
+  materialize,
+  globsOverlap,
+  findIntersections,
+  hardLockCategoriesHit,
+};
