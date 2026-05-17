@@ -75,7 +75,7 @@ When `synced_at` is older than 24h, the line is prefixed with `⚠ STALE — ` s
 
 Not auto-sync; just honest staleness.
 
-**`tracker_revision` is intentionally absent.** v0.4 has no consumer for an upstream-equality token (no doctor drift-check, no `/reconcile --pull --check`). If a consumer appears, the right shape is a `Tracker.getCurrentRevision()` adapter method (each tracker mints a cheap provider-native revision: Linear `max(updatedAt)`, GitHub list ETag, Notion timestamp). A canonical-projection hash bolted onto reconcile would ship the schema field without the live-drift capability. Filed as a follow-up issue (FORGE-118 — `Add Tracker.getCurrentRevision() for live drift detection`) for when v0.5+ wants it.
+**`tracker_revision` is intentionally absent.** v0.4 has no consumer for an upstream-equality token (no doctor drift-check, no `/reconcile --pull --check`). If a consumer appears, the right shape is a `Tracker.getCurrentRevision()` adapter method (each tracker mints a cheap provider-native revision: Linear `max(updatedAt)`, GitHub list ETag, Notion timestamp). A canonical-projection hash bolted onto reconcile would ship the schema field without the live-drift capability. Filed as a follow-up issue (FORGE-123 — `Add Tracker.getCurrentRevision() for live drift detection`) for when v0.5+ wants it.
 
 **Breaking change vs v0.3.x:** the top-level `tracker_project_id` field is removed from `PhasesSchema`; the value moves into `source.project_id`. `tracker_url` stays at the top level. Migration is automatic: the first `/reconcile --pull` after upgrade transplants the legacy key from the raw Document into `source.project_id` and deletes it. No adopter action required.
 
