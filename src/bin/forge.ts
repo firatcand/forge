@@ -8,6 +8,7 @@ import { runOrchestrateAttach } from '../cli/orchestrate-attach.ts';
 import { runOrchestrateGc } from '../cli/orchestrate-gc.ts';
 import { runOrchestrateQuestions } from '../cli/orchestrate-questions.ts';
 import { runOrchestrateSpecDiff } from '../cli/orchestrate-spec-diff.ts';
+import { runOrchestrateReconcile } from '../cli/orchestrate-reconcile.ts';
 import { runOrchestrateStatus } from '../cli/orchestrate-status.ts';
 
 type PackageJson = { version: string };
@@ -159,7 +160,7 @@ function dispatchOrchestrate(rest: readonly string[]): void {
   const sub = rest[0];
   if (!sub) {
     console.error(
-      'Usage: forge orchestrate <questions|answer|status|attach|gc|spec-diff> [...]',
+      'Usage: forge orchestrate <questions|answer|status|attach|gc|spec-diff|reconcile> [...]',
     );
     process.exit(1);
   }
@@ -223,8 +224,18 @@ function dispatchOrchestrate(rest: readonly string[]): void {
     })();
     return;
   }
+  if (sub === 'reconcile') {
+    void (async () => {
+      const result = await runOrchestrateReconcile({
+        cwd: process.cwd(),
+        argv: subArgs,
+      });
+      process.exit(result.exitCode);
+    })();
+    return;
+  }
   console.error(
-    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach|gc|spec-diff.`,
+    `forge orchestrate: unknown subcommand '${sub}'. Use questions|answer|status|attach|gc|spec-diff|reconcile.`,
   );
   process.exit(1);
 }

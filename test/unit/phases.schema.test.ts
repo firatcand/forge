@@ -359,6 +359,66 @@ test('id regex — accepts split-task suffix (e.g. P2-T07a)', () => {
   assert.equal(result.success, true);
 });
 
+test('id regex — accepts decimal phase task id (e.g. P2.5-T01)', () => {
+  const result = TaskSchema.safeParse(baseTask({ id: 'P2.5-T01' }));
+  assert.equal(result.success, true);
+});
+
+test('id regex — accepts decimal phase id (e.g. phase-2.5)', () => {
+  const result = PhaseSchema.safeParse({
+    id: 'phase-2.5',
+    name: 'Phase 2.5',
+    status: 'active',
+    goal: 'g',
+    gate_criteria: ['g1'],
+    tasks: [baseTask({ id: 'P2.5-T01' })],
+  });
+  assert.equal(result.success, true);
+});
+
+test('FORGE-100 — TaskSchema accepts optional status + lifecycle metadata', () => {
+  const task = baseTask({
+    status: 'deferred-v0.5',
+    deferred_at: '2026-05-17',
+    deferred_reason: 'Team-mode minimum architecture pivot',
+  });
+  const result = TaskSchema.safeParse(task);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.status, 'deferred-v0.5');
+  assert.equal(result.data.deferred_at, '2026-05-17');
+});
+
+test('FORGE-100 — TaskSchema accepts dropped + paused lifecycle fields', () => {
+  const dropped = TaskSchema.safeParse(
+    baseTask({ status: 'dropped', dropped_at: '2026-05-17', dropped_reason: 'no longer needed' }),
+  );
+  assert.equal(dropped.success, true);
+  const paused = TaskSchema.safeParse(
+    baseTask({ status: 'paused', paused_at: '2026-05-17', paused_reason: 'blocked on infra' }),
+  );
+  assert.equal(paused.success, true);
+});
+
+test('FORGE-100 — PHASE_STATUSES accepts "paused"', () => {
+  const result = PhaseSchema.safeParse({
+    id: 'phase-1',
+    name: 'P',
+    status: 'paused',
+    goal: 'g',
+    gate_criteria: ['g1'],
+    tasks: [baseTask()],
+  });
+  assert.equal(result.success, true);
+});
+
+test('FORGE-100 — TASK_TYPES includes "skill" and "docs"', () => {
+  for (const t of ['skill', 'docs'] as const) {
+    const result = TaskSchema.safeParse(baseTask({ type: t }));
+    assert.equal(result.success, true, `expected ${t} to be accepted`);
+  }
+});
+
 test('barrel — PhasesSchema reachable through src/index.ts', () => {
   const result = PhasesSchemaViaBarrel.safeParse(loadFixture('valid-minimal.yaml'));
   assert.equal(result.success, true);
@@ -378,7 +438,7 @@ test('types — z.infer surface compiles via satisfies', () => {
     phases: Array<{
       id: string;
       name: string;
-      status: 'active' | 'blocked' | 'done';
+      status: 'active' | 'blocked' | 'done' | 'paused';
       goal: string;
       gate_criteria: string[];
       tasks: Array<{
