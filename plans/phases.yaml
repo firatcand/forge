@@ -958,6 +958,43 @@ phases:
           - "Unit test: stamps spec_revision correctly across new claim, resumed claim, and re-attempt"
           - "Integration test: fixture project with 2 spec commits between claim and resume → notification fires; with 0 commits → no notification"
           - "EXPLICITLY OUT OF SCOPE: any contradiction check, halt, --affects flag, drift event, or PR-policy enforcement (per team-mode-minimum-architecture.md §2.3)"
+      - id: P2.5-T19
+        tracker_issue_id: "FORGE-115"
+        title: "Standardize worktree location on .forge/worktrees/; align /pickup-task with orchestrator"
+        description: "Forge today has two worktree-location conventions: `/pickup-task` skill uses `../${PROJECT}-worktrees/${TICKET}/` (sibling, outside repo) while the orchestrator uses `.forge/worktrees/<sanitized-id>/` (inside repo). The split is accidental — `/pickup-task` predates the orchestrator design. Standardize on `.forge/worktrees/<sanitized-id>/` for consistency with the orchestrator, self-containment (rm project → cleanup), project-relative paths, and the already-pressure-tested orchestrator design (`.forge/` is already gitignored; the worktree checkout contains only tracked files so no recursion). Update `/pickup-task` SKILL.md to create at `.forge/worktrees/<id>/` using the same `sanitizeIssueId` rules as `src/core/workspace.ts`. Extend `forge init` to scaffold tooling-exclude entries (`.eslintignore`, `.prettierignore`, tsconfig `exclude`, vitest `exclude`) so `.forge/worktrees/**` doesn't get double-processed by detected tools (detect-and-skip — no-op if tool absent). Document the convention in `spec/SPEC.md` §Module layout as the single canonical location. CHANGELOG: behavior-change note for v0.3.x adopters (existing sibling worktrees can be `git worktree move`d or removed)."
+        type: backend
+        priority: P1
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "/pickup-task skill creates worktrees at .forge/worktrees/<sanitized-id>/"
+          - "forge init writes tooling-exclude entries for detected tools (eslint, prettier, tsconfig, vitest)"
+          - "Sandbox-config snippet in BACKLOG.md item 'ergonomic enhancements' updated to reference new path"
+          - "spec/SPEC.md §Module layout documents .forge/worktrees/ as the single canonical location"
+          - "CHANGELOG entry under 'Behavior change' notes the path migration"
+          - "No code path in forge still references ../*-worktrees/ (grep across src/, skills/, templates/, docs/)"
+          - "forge doctor (if it touches worktree paths) reads from .forge/worktrees/ only"
+      - id: P2.5-T20
+        tracker_issue_id: "FORGE-116"
+        title: "/wrap-up skill — end-of-task housekeeping (merged PR → prune worktree, branch, ff main, reconcile)"
+        description: "After a PR merges, forge has no end-to-end housekeeping flow — the user manually verifies merge, removes worktree, deletes branch, fast-forwards main, and hopes /reconcile catches the state update. The engines exist (`forge orchestrate gc`, `/reconcile`) but no thin user-facing skill composes them. Add `/wrap-up` skill (Option A from the trade-off matrix: skill = UX + confirmation; verbs = engine). Flow: (1) detect task scope from current worktree branch, or list shipped-but-not-cleaned tasks if invoked from main; (2) verify PR merged via `gh pr view --json state,mergedAt`, abort if not; (3) run `forge orchestrate reconcile --pull` to sync tracker → phases.yaml; (4) show preview of cleanup plan (worktree, branch, main delta); (5) on user confirmation: `forge orchestrate gc --remove-worktree --task <id>` + `git branch -d <branch>` + `git switch main && git pull --ff-only` (refuse if local main is dirty); (6) report one-line summary. `/wrap-up --all` mode batches all shipped-but-not-cleaned tasks with a single confirmation. Suggest-don't-force throughout: always asks before mutating."
+        type: integration
+        priority: P1
+        depends_on: [P2.5-T09, P2-T09]
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "/wrap-up skill installed at skills/wrap-up/SKILL.md"
+          - "Skill auto-detects task ID from current worktree's branch when run from a worktree"
+          - "Skill aborts with clear message if PR is not merged (does not delete anything)"
+          - "Skill calls forge orchestrate reconcile --pull to sync phases.yaml from tracker before cleanup"
+          - "Skill shows preview + asks confirmation before any destructive action"
+          - "On approval: removes worktree via forge orchestrate gc --remove-worktree, deletes local branch, fast-forwards main"
+          - "Refuses to fast-forward if local main has uncommitted changes; surfaces the diff"
+          - "/wrap-up --all mode handles batch cleanup with a single confirmation"
+          - "Skill is host-portable (works under Claude Code; Codex/Gemini variants are a future-task)"
+          - "Integration test: dispatch task → mock-merge PR → run /wrap-up → verify worktree gone, branch deleted, main fast-forwarded, tracker state Done"
 
   - id: phase-3
     tracker_milestone_id: "9f147eda-4ec3-4ada-b77b-230e6a516d46"
