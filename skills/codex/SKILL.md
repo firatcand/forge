@@ -34,7 +34,7 @@ codex resume                     # resume previous session
 codex --help                     # list current subcommands (the surface changes)
 ```
 
-**Avoid:** `--skip-git-repo-check` and `--sandbox read-only` — combined they have caused indefinite hangs in this environment (43min, 0% CPU). Default invocation works.
+**Required: redirect stdin from `/dev/null`.** `codex exec` (verified on 0.130.0; per the `exec --help` text: *"If stdin is piped and a prompt is also provided, stdin is appended as a `<stdin>` block"*) performs a blocking stdin read before processing the prompt argument. Any caller that leaves stdin open hangs indefinitely at 0% CPU after printing `Reading additional input from stdin...`. Always pass `</dev/null` in shell or `stdin: 'ignore'` in a Node spawn. See `plans/tasks/FORGE-88.investigation.md` for the diagnosis. The reproduced hang was stdin-rooted; no separate hang specific to `--skip-git-repo-check` / `--sandbox read-only` was confirmed in this round, so the prior warning here was misleading more than it was actively wrong. If you observe a new 0% CPU hang with stdin already closed, log a fresh investigation rather than blaming this commit.
 
 ## Standard pattern (background + file redirect)
 
@@ -42,7 +42,7 @@ codex --help                     # list current subcommands (the surface changes
 cd /path/to/worktree && codex exec --color never "$(cat <<'EOF'
 <prompt body>
 EOF
-)" > /tmp/codex-<task-id>-review.txt 2>&1 &
+)" </dev/null > /tmp/codex-<task-id>-review.txt 2>&1 &
 echo "Started codex PID $!"
 disown
 ```

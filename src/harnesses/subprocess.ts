@@ -93,6 +93,16 @@ export const spawnSubprocess: SpawnSubprocess = async (command, args, opts) => {
       cwd: opts.cwd,
       timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxBuffer: MAX_STDOUT_BYTES,
+      // FORGE-135: codex-cli 0.130.0 (and gemini in some versions) performs a
+      // blocking stdin read before processing the prompt argument — see
+      // `codex exec --help`: "If stdin is piped and a prompt is also provided,
+      // stdin is appended as a <stdin> block." execa's default `stdin: 'pipe'`
+      // leaves the parent end open with no writer, so the child blocks forever
+      // at 0% CPU on the initial read. No caller pipes a payload into the
+      // subprocess today; forcing `'ignore'` (→ /dev/null) gives an immediate
+      // EOF and is correct for every host. If a future caller needs to pass a
+      // diff via stdin, add a `SpawnOpts.stdinPayload` field at that time.
+      stdin: 'ignore',
       // /review N2: NodeJS.ProcessEnv values are `string | undefined`,
       // but SpawnOpts.env is `Readonly<Record<string, string>>` — no
       // `undefined` values can flow in, so the runtime shape is correct.
