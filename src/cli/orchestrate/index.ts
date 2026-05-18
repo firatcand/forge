@@ -28,6 +28,7 @@ import { cancelHandler } from './cancel.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
+import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -162,6 +163,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['attach', attachHandler],
   ['spec-diff', specDiffHandler],
   ['guardrail-check', guardrailCheckHandler],
+  ['render-worker-prompt', renderWorkerPromptHandler],
   ['run', new Map<string, VerbHandler>([
     ['start', runStartHandler],
     ['list', runListHandler],
@@ -189,6 +191,7 @@ export const HELP_ORDER: readonly string[] = [
   'attach',
   'spec-diff',
   'guardrail-check',
+  'render-worker-prompt',
   'run',
   'ensure-worktree',
   'claim',
