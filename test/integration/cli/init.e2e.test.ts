@@ -2,16 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { execa } from 'execa';
 import { parse as yamlParse } from 'yaml';
 import { SettingsSchema } from '../../../src/schemas/index.ts';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, '..', '..', '..');
-const entry = resolve(repoRoot, 'src/bin/forge.ts');
-const tsxBin = resolve(repoRoot, 'node_modules/.bin/tsx');
+import { tsxBin, forgeBinEntry as entry } from '../../helpers/spawn-tsx.ts';
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), 'forge-init-e2e-'));

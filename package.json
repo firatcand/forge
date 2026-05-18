@@ -24,6 +24,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "test:pack": "node scripts/test-pack.mjs",
+    "lint:test-helpers": "node scripts/lint-test-helpers.mjs",
     "dev": "tsx watch src/bin/forge.ts"
   },
   "dependencies": {

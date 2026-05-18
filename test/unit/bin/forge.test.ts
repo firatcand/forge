@@ -2,12 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
+import { tsxBin, forgeBinEntry as entry, repoRoot } from '../../helpers/spawn-tsx.ts';
 
-const here = fileURLToPath(new URL('.', import.meta.url));
-const repoRoot = resolve(here, '..', '..', '..');
-const entry = resolve(repoRoot, 'src/bin/forge.ts');
 const pkgPath = resolve(repoRoot, 'package.json');
 
 type PackageJson = { version: string };
@@ -63,7 +60,6 @@ test('forge init is dispatched to runInit (fails loudly without answers in non-i
   const tmp = mkdtempSync(join(tmpdir(), 'forge-bin-init-'));
   mkdirSync(join(tmp, '.git'), { recursive: true });
   writeFileSync(join(tmp, 'package.json'), JSON.stringify({ name: 'consumer' }));
-  const tsxBin = resolve(repoRoot, 'node_modules/.bin/tsx');
   const result = await execa(tsxBin, [entry, 'init'], {
     cwd: tmp,
     reject: false,
