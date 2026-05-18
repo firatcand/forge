@@ -763,6 +763,8 @@ Naming convention: `<YYYY-MM-DD>-<kebab-slug>.md`. The slug becomes the identifi
 
 ### ADR template (`templates/adr.template.md`)
 
+> Canonical scaffold: [`templates/adr.template.md`](../templates/adr.template.md). The block below is mirrored for inline reference; both must stay in sync (enforced by `test/unit/adr-template.test.ts`).
+
 ```markdown
 ---
 slug: <kebab-slug>           # auto-filled from filename by /update-spec --draft
