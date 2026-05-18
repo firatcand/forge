@@ -496,6 +496,25 @@ Edge case: if the prior attempt was cancelled mid-edit and the worktree is in an
 
 **Durability contract.** `fsync(fd)` before `link` protects readers from torn writes under crash-free I/O. It is **not** a power-loss-durability guarantee for the placement: after `link(tmp, target)` returns, a sudden host crash before the parent directory's dirent is persisted can lose the placement. We deliberately do not `fsync` the parent directory on every write — the CLI reconciles state from the tracker + filesystem on every `gc` pass, so a lost placement degrades to "the gc reports a divergence and offers a resolution," not data corruption. Adopters with stricter durability requirements should mount `.forge/` on a journaled filesystem (ext4 `data=journal`, ZFS, APFS with `sync` mount). See `docs/learnings/2026-Q2/link-vs-rename-for-never-overwrite-invariant.md`.
 
+## Hydration
+
+When `forge orchestrate ensure-worktree` creates a new worktree, it populates the worktree's filesystem from two distinct sources. The split is load-bearing — conflating them produces silent HEAD/working-tree divergence on tracked files (see FORGE-136).
+
+| File class | Source | Mechanism |
+|---|---|---|
+| **Tracked files** (anything reported by `git ls-files` — `CLAUDE.md`, `CRITICAL.md`, `spec/*.md`, `plans/phases.yaml`, `src/**`, `test/**`, `package.json`, …) | `base` ref (default `origin/main`) | `git worktree add -b <branch> <path> <base>` |
+| **Gitignored project meta** in the hydration roots (`plans/tasks/*.plan.md`, `docs/learnings/**`, `.forge/settings.yaml`, and any untracked `spec/*.md`) | Local main checkout's **working tree** | Filesystem copy in `workspace.create()` after a `git ls-files` filter drops tracked entries from the plan |
+
+**Rationale.** Tracked files belong to git: they have a HEAD and any deviation from HEAD is a real modification a worker is expected to commit. The hydration loop must NEVER touch them — `git worktree add` already places the correct content from `base`, and overwriting that content from main's filesystem creates a spurious diff whenever `base` resolves to a different revision than local main (e.g., `base=origin/main` while local main lags). The pre-FORGE-136 code copied `CLAUDE.md`, `CRITICAL.md`, `spec/*.md`, and `plans/*` from main's working tree on top of the `git worktree add` checkout, manifesting as phantom modifications immediately after worktree creation when local main and `base` resolved to different revisions for those files.
+
+**Hydration roots.** The plan walks `spec/`, `plans/`, `docs/learnings/`, and the single file `.forge/settings.yaml`. Within each root, ANY entry reported by `git ls-files` is filtered out at plan time — only genuinely gitignored files survive into the copy phase. The walk still runs (so the symlink-rejection defense fires on every candidate), but tracked entries never reach `copyFileSync`.
+
+**Gitignored project meta** does not live in git, so a fresh worktree's working tree would otherwise be empty for `plans/tasks/*.plan.md`, `docs/learnings/**`, and `.forge/settings.yaml`. These are the user's authoritative in-flight work — workers need them to read pending plans, accumulated learnings, and current settings — so hydration copies them from main's working tree filesystem at the moment of worktree creation. Re-hydration is not supported; on `forge orchestrate ensure-worktree` against an existing marker the verb returns `{created: false}` and leaves the worktree untouched.
+
+**Symlinks are rejected.** `workspace.create()` `lstat`s every source before copying and throws `SYMLINK_REJECTED` if any entry under the hydration roots is a symbolic link. This defends against a hostile or misconfigured main checkout pointing `.forge/settings.yaml` (or any other hydration candidate) at `/etc/passwd`.
+
+**Manifest.** Every hydrated file is recorded in `<worktree>/.forge/copied-from-main.json`. `cleanup()` uses this manifest to allow-list files for removal on `gc` — only files originally hydrated are eligible for cleanup; any other gitignored file produced by the worker triggers `GITIGNORED_LOSS` and refuses cleanup without `--force`.
+
 ## Event types
 
 Three distinct event streams:

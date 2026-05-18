@@ -214,22 +214,6 @@ function planSpecMarkdownCopy(srcRoot: string, destRoot: string): CopyPlanItem[]
   return items;
 }
 
-function planSingleFile(srcRoot: string, destRoot: string, name: string): CopyPlanItem[] {
-  const src = path.join(srcRoot, name);
-  if (!existsSync(src)) return [];
-  let st;
-  try {
-    st = lstatSync(src);
-  } catch {
-    return [];
-  }
-  if (st.isSymbolicLink()) {
-    rejectIfSymlink(src);
-  }
-  if (!st.isFile()) return [];
-  return [{ source: src, destination: path.join(destRoot, name), relative: name }];
-}
-
 function planForgeSettings(srcRoot: string, destRoot: string): CopyPlanItem[] {
   const rel = path.join('.forge', 'settings.yaml');
   const src = path.join(srcRoot, rel);
@@ -255,6 +239,25 @@ function executeCopyPlan(items: CopyPlanItem[]): string[] {
     copied.push(item.relative);
   }
   return copied;
+}
+
+// Returns the set of paths tracked by git in `mainWorktree`, expressed as
+// POSIX-style paths relative to the worktree root (the same form `path.join()`
+// produces on Linux/macOS — the verb is not yet Windows-portable, see SPEC).
+// Used to filter out tracked files from the hydration plan: `git worktree add`
+// already places tracked files from `base`, so re-copying them from main's
+// working tree creates a HEAD/working-tree divergence whenever `base` and
+// local main resolve to different revisions for those files (FORGE-136).
+async function getTrackedPaths(mainWorktree: string): Promise<Set<string>> {
+  try {
+    const { stdout } = await execa('git', ['ls-files'], {
+      cwd: mainWorktree,
+      reject: true,
+    });
+    return new Set(stdout.split('\n').filter((line) => line.length > 0));
+  } catch (err) {
+    throw wrapExecaError('git ls-files', err, { mainWorktree });
+  }
 }
 
 export interface CreateOptions {
@@ -327,7 +330,14 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
       });
     }
 
-    const plan: CopyPlanItem[] = [
+    // Hydration covers gitignored project meta only. Tracked files (CLAUDE.md,
+    // CRITICAL.md, spec/SPEC.md, plans/phases.yaml, etc.) are placed by
+    // `git worktree add` from `base`; copying them again from main's working
+    // tree creates a HEAD/working-tree divergence when local main and `base`
+    // resolve to different revisions for those files (FORGE-136). The plan
+    // walks all hydration roots (so the symlink-rejection defense fires on
+    // every candidate), then a `git ls-files` filter drops tracked entries.
+    const rawPlan: CopyPlanItem[] = [
       ...planSpecMarkdownCopy(mainWorktree, target),
       ...planCopyRecursive(path.join(mainWorktree, 'plans'), path.join(target, 'plans'), 'plans'),
       ...planCopyRecursive(
@@ -335,10 +345,10 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
         path.join(target, 'docs', 'learnings'),
         path.join('docs', 'learnings'),
       ),
-      ...planSingleFile(mainWorktree, target, 'CLAUDE.md'),
-      ...planSingleFile(mainWorktree, target, 'CRITICAL.md'),
       ...planForgeSettings(mainWorktree, target),
     ];
+    const tracked = await getTrackedPaths(mainWorktree);
+    const plan = rawPlan.filter((item) => !tracked.has(item.relative));
     copiedFiles = executeCopyPlan(plan);
 
     const manifestDir = path.join(target, '.forge');

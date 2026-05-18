@@ -268,19 +268,29 @@ test('create — spawns a worktree with default branch and copyMeta manifest', a
   const repoDir = tmpdir('create-repo');
   try {
     await initRepo(repoDir);
+    // Tracked files — these are committed and placed by `git worktree add`.
+    // Hydration must NOT touch them (FORGE-136).
     writeFileSync(path.join(repoDir, 'CLAUDE.md'), '# claude\n');
     writeFileSync(path.join(repoDir, 'CRITICAL.md'), '# critical\n');
     mkdirSync(path.join(repoDir, 'spec'));
     writeFileSync(path.join(repoDir, 'spec', 'SPEC.md'), '# spec\n');
     writeFileSync(path.join(repoDir, 'spec', '.gitkeep'), '');
     mkdirSync(path.join(repoDir, 'plans', 'tasks'), { recursive: true });
-    writeFileSync(path.join(repoDir, 'plans', 'tasks', 'FD-1.plan.md'), '# plan\n');
+    writeFileSync(path.join(repoDir, 'plans', 'tasks', '.gitkeep'), '');
     mkdirSync(path.join(repoDir, 'docs', 'learnings'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'docs', 'learnings', '.gitkeep'), '');
+    // Gitignore the paths that mirror forge's real gitignored hydration set.
+    writeFileSync(
+      path.join(repoDir, '.gitignore'),
+      '/plans/tasks/*.plan.md\n/docs/learnings/**\n/.forge/\n',
+    );
+    await execa('git', ['add', '.'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'meta'], { cwd: repoDir, reject: true });
+    // Gitignored project meta — only these should appear in the hydration manifest.
+    writeFileSync(path.join(repoDir, 'plans', 'tasks', 'FD-1.plan.md'), '# plan\n');
     writeFileSync(path.join(repoDir, 'docs', 'learnings', 'l1.md'), '# learning\n');
     mkdirSync(path.join(repoDir, '.forge'));
     writeFileSync(path.join(repoDir, '.forge', 'settings.yaml'), 'version: 1\n');
-    await execa('git', ['add', '.'], { cwd: repoDir, reject: true });
-    await execa('git', ['commit', '-m', 'meta'], { cwd: repoDir, reject: true });
 
     const root = path.join(repoDir, '.forge', 'worktrees');
     mkdirSync(root, { recursive: true });
@@ -295,14 +305,18 @@ test('create — spawns a worktree with default branch and copyMeta manifest', a
     assert.equal(manifest.version, 1);
     assert.equal(manifest.sourceMainWorktree, repoDir);
     assert.ok(Array.isArray(manifest.files));
-    assert.ok(manifest.files.includes(path.join('spec', 'SPEC.md')));
+    // Only gitignored entries should be hydrated.
     assert.ok(manifest.files.includes(path.join('plans', 'tasks', 'FD-1.plan.md')));
     assert.ok(manifest.files.includes(path.join('docs', 'learnings', 'l1.md')));
-    assert.ok(manifest.files.includes('CLAUDE.md'));
-    assert.ok(manifest.files.includes('CRITICAL.md'));
     assert.ok(manifest.files.includes(path.join('.forge', 'settings.yaml')));
+    // Tracked files are placed by `git worktree add` from `base`; hydration
+    // skips them to avoid HEAD/working-tree divergence (FORGE-136).
+    assert.ok(!manifest.files.includes('CLAUDE.md'));
+    assert.ok(!manifest.files.includes('CRITICAL.md'));
+    assert.ok(!manifest.files.includes(path.join('spec', 'SPEC.md')));
     assert.ok(!manifest.files.some((f: string) => f.endsWith('.gitkeep')));
 
+    // Tracked files present in worktree via `git worktree add`, not via hydration.
     assert.ok(existsSync(path.join(result.path, 'spec', 'SPEC.md')));
     assert.ok(existsSync(path.join(result.path, 'CLAUDE.md')));
 
@@ -461,10 +475,14 @@ test('create — refuses to follow a symlinked file in main worktree', async () 
   const repoDir = tmpdir('create-symlink-file');
   try {
     await initRepo(repoDir);
-    // create a symlink at CLAUDE.md pointing somewhere outside the repo
+    // Symlink a hydrated single-file path (.forge/settings.yaml) at an outside target.
+    // Pre-FORGE-136 this test used CLAUDE.md, but CLAUDE.md is now placed by
+    // `git worktree add` rather than hydrated — only gitignored single-file paths
+    // (.forge/settings.yaml) still flow through the hydration loop's symlink check.
     const linkTarget = path.join(os.tmpdir(), `forge-symlink-target-${Date.now()}`);
     writeFileSync(linkTarget, 'hostile\n');
-    symlinkSync(linkTarget, path.join(repoDir, 'CLAUDE.md'));
+    mkdirSync(path.join(repoDir, '.forge'));
+    symlinkSync(linkTarget, path.join(repoDir, '.forge', 'settings.yaml'));
 
     const root = path.join(repoDir, '.forge', 'worktrees');
     mkdirSync(root, { recursive: true });
@@ -475,7 +493,10 @@ test('create — refuses to follow a symlinked file in main worktree', async () 
     } catch (err) {
       assert.ok(err instanceof WorkspaceError);
       assert.equal((err as WorkspaceError).code, 'SYMLINK_REJECTED');
-      assert.equal((err as WorkspaceError).details.path, path.join(repoDir, 'CLAUDE.md'));
+      assert.equal(
+        (err as WorkspaceError).details.path,
+        path.join(repoDir, '.forge', 'settings.yaml'),
+      );
     }
     rmrf(linkTarget);
   } finally {
@@ -672,6 +693,130 @@ test('cleanup — deletes branch when deleteBranch is true', async () => {
     const { stdout } = await execa('git', ['branch', '--list', 'feat/FD-12'], { cwd: repoDir });
     assert.equal(stdout.trim(), '');
   } finally {
+    rmrf(repoDir);
+  }
+});
+
+// FORGE-136 — Regression: when `base` and main's working tree are at different
+// revisions, tracked files in the new worktree must be coherent against HEAD
+// (clean `git diff`), while gitignored project meta must still hydrate from
+// main's working tree. The pre-fix code over-hydrated tracked files from
+// main, producing a spurious diff vs the worktree's HEAD (placed by
+// `git worktree add` from `base`).
+test('create — tracked files reflect base, gitignored files reflect main (FORGE-136)', async () => {
+  const repoDir = tmpdir('create-forge136');
+  try {
+    await initRepo(repoDir);
+
+    // Gitignore project-meta paths that mirror forge's real hydration set.
+    writeFileSync(
+      path.join(repoDir, '.gitignore'),
+      '/plans/tasks/*.plan.md\n/docs/learnings/**\n/.forge/\n',
+    );
+
+    // Commit 1 — `base`: tracked files with OLD content + structural dirs.
+    writeFileSync(path.join(repoDir, 'CLAUDE.md'), '# claude — old\n');
+    writeFileSync(path.join(repoDir, 'CRITICAL.md'), '# critical — old\n');
+    mkdirSync(path.join(repoDir, 'spec'));
+    writeFileSync(path.join(repoDir, 'spec', 'SPEC.md'), '# spec — old\n');
+    mkdirSync(path.join(repoDir, 'plans', 'tasks'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'plans', 'tasks', '.gitkeep'), '');
+    mkdirSync(path.join(repoDir, 'docs', 'learnings'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'docs', 'learnings', '.gitkeep'), '');
+    await execa('git', ['add', '.'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'old tracked content'], { cwd: repoDir, reject: true });
+    const { stdout: oldShaRaw } = await execa('git', ['rev-parse', 'HEAD'], {
+      cwd: repoDir,
+      reject: true,
+    });
+    const baseSha = oldShaRaw.trim();
+
+    // Commit 2 — main: bump tracked content. Simulates origin/main pulled ahead.
+    writeFileSync(path.join(repoDir, 'CLAUDE.md'), '# claude — NEW\n');
+    writeFileSync(path.join(repoDir, 'CRITICAL.md'), '# critical — NEW\n');
+    writeFileSync(path.join(repoDir, 'spec', 'SPEC.md'), '# spec — NEW\n');
+    await execa('git', ['add', '.'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'new tracked content'], { cwd: repoDir, reject: true });
+
+    // Drop in untracked gitignored meta — the hydration set in real adopters.
+    writeFileSync(path.join(repoDir, 'plans', 'tasks', 'FD-1.plan.md'), '# plan — NEW\n');
+    writeFileSync(path.join(repoDir, 'docs', 'learnings', 'l1.md'), '# learning — NEW\n');
+    mkdirSync(path.join(repoDir, '.forge'));
+    writeFileSync(path.join(repoDir, '.forge', 'settings.yaml'), 'host: NEW\n');
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    // Spawn a worktree pinned to the OLD commit. Pre-fix: hydration would
+    // overwrite OLD CLAUDE.md/CRITICAL.md/spec/SPEC.md with NEW versions,
+    // producing a working-tree-vs-HEAD diff. Post-fix: tracked files stay
+    // at base; gitignored meta hydrates from main.
+    const result = await create('FD-FORGE-136', { root, base: baseSha, mainWorktree: repoDir });
+
+    // Tracked files must reflect `base`, NOT main's working tree.
+    assert.equal(
+      readFileSync(path.join(result.path, 'CLAUDE.md'), 'utf8'),
+      '# claude — old\n',
+      'CLAUDE.md (tracked) must reflect base ref',
+    );
+    assert.equal(
+      readFileSync(path.join(result.path, 'CRITICAL.md'), 'utf8'),
+      '# critical — old\n',
+      'CRITICAL.md (tracked) must reflect base ref',
+    );
+    assert.equal(
+      readFileSync(path.join(result.path, 'spec', 'SPEC.md'), 'utf8'),
+      '# spec — old\n',
+      'spec/SPEC.md (tracked) must reflect base ref',
+    );
+
+    // `git status` in the worktree must be clean for tracked paths.
+    const { stdout: statusOut } = await execa(
+      'git',
+      ['status', '--porcelain', '--', 'CLAUDE.md', 'CRITICAL.md', 'spec/SPEC.md'],
+      { cwd: result.path, reject: true },
+    );
+    assert.equal(
+      statusOut.trim(),
+      '',
+      `tracked-file diff after hydration (regression): ${statusOut}`,
+    );
+
+    // Gitignored project meta DOES reflect main's working tree.
+    assert.equal(
+      readFileSync(path.join(result.path, 'plans', 'tasks', 'FD-1.plan.md'), 'utf8'),
+      '# plan — NEW\n',
+      'gitignored plans/tasks/*.plan.md must reflect main working tree',
+    );
+    assert.equal(
+      readFileSync(path.join(result.path, 'docs', 'learnings', 'l1.md'), 'utf8'),
+      '# learning — NEW\n',
+      'gitignored docs/learnings/** must reflect main working tree',
+    );
+    assert.equal(
+      readFileSync(path.join(result.path, '.forge', 'settings.yaml'), 'utf8'),
+      'host: NEW\n',
+      'gitignored .forge/settings.yaml must reflect main working tree',
+    );
+
+    // Manifest reflects what hydration actually copied — gitignored only.
+    const manifest = JSON.parse(readFileSync(result.manifestPath!, 'utf8'));
+    assert.ok(!manifest.files.includes('CLAUDE.md'));
+    assert.ok(!manifest.files.includes('CRITICAL.md'));
+    assert.ok(!manifest.files.includes(path.join('spec', 'SPEC.md')));
+    assert.ok(manifest.files.includes(path.join('plans', 'tasks', 'FD-1.plan.md')));
+    assert.ok(manifest.files.includes(path.join('docs', 'learnings', 'l1.md')));
+    assert.ok(manifest.files.includes(path.join('.forge', 'settings.yaml')));
+  } finally {
+    try {
+      await execa(
+        'git',
+        ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-FORGE-136')],
+        { cwd: repoDir },
+      );
+    } catch {
+      // ignore
+    }
     rmrf(repoDir);
   }
 });
