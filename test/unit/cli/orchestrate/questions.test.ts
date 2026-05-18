@@ -188,3 +188,132 @@ test('orchestrate questions surfaces corrupt files via stderr but still lists va
     rmSync(forgeDir, { recursive: true, force: true });
   }
 });
+
+// ── --json + --run filter tests (FORGE-98) ──────────────────────────────────
+
+// Build a question with a caller-chosen run_id. The default makeQuestion()
+// hard-codes 'r1', which can't exercise the per-run filter.
+function makeQuestionWithRun(id: string, runId: string, taskId = 'FORGE-20'): Question {
+  return QuestionSchemaWithRecommendationCheck.parse({
+    version: 1,
+    question_id: id,
+    run_id: runId,
+    task_id: taskId,
+    agent_id: 'agent-a',
+    decision_key: `key:${id}`,
+    attempt: 1,
+    max_attempts: 3,
+    created_at: '2026-05-18T01:00:00.000Z',
+    expires_at: '2026-05-18T01:30:00.000Z',
+    status: 'open',
+    question: `What about ${id}?`,
+    context: '',
+    options: [
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+    ],
+    recommended_option_id: 'a',
+    classification: {
+      decision_type: 'architectural',
+      category: 'public_api',
+      reversibility: 'medium',
+      blast_radius: 'module',
+      default_action: 'ask',
+      reason: 'r',
+    },
+  });
+}
+
+// Synthetic UUIDv7s (version nibble = 7, variant nibble = 8/9/a/b).
+const RUN_A = '01900000-0000-7000-8000-00000000000a';
+const RUN_B = '01900000-0000-7000-8000-00000000000b';
+
+test('orchestrate questions --open --json emits envelope JSON with full questions array', () => {
+  const forgeDir = freshForgeDir();
+  const { stdout, stderr, out } = captureStreams();
+  try {
+    writeQ(forgeDir, makeQuestionWithRun('q1', RUN_A));
+    writeQ(forgeDir, makeQuestionWithRun('q2', RUN_A));
+    const result = runOrchestrateQuestions({ open: true, forgeDir, json: true, stdout, stderr });
+    assert.equal(result.exitCode, 0);
+
+    const payload = JSON.parse(out().trim());
+    assert.equal(payload.ok, true);
+    assert.ok(Array.isArray(payload.data.questions));
+    assert.equal(payload.data.questions.length, 2);
+    // Each entry preserves the canonical Question fields the skill needs.
+    for (const q of payload.data.questions) {
+      assert.ok(q.question_id);
+      assert.ok(q.run_id);
+      assert.ok(q.task_id);
+      assert.ok(q.decision_key);
+      assert.ok(Array.isArray(q.options));
+      assert.ok(q.classification);
+    }
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+test('orchestrate questions --open --json --run <id> filters to matching run_id', () => {
+  const forgeDir = freshForgeDir();
+  const { stdout, stderr, out } = captureStreams();
+  try {
+    writeQ(forgeDir, makeQuestionWithRun('q-a-1', RUN_A));
+    writeQ(forgeDir, makeQuestionWithRun('q-a-2', RUN_A));
+    writeQ(forgeDir, makeQuestionWithRun('q-b-1', RUN_B));
+    const result = runOrchestrateQuestions({
+      open: true,
+      forgeDir,
+      json: true,
+      runId: RUN_A,
+      stdout,
+      stderr,
+    });
+    assert.equal(result.exitCode, 0);
+
+    const payload = JSON.parse(out().trim());
+    assert.equal(payload.ok, true);
+    assert.equal(payload.data.questions.length, 2);
+    for (const q of payload.data.questions) {
+      assert.equal(q.run_id, RUN_A);
+    }
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+test('orchestrate questions --json without --open returns USAGE envelope (exit 1)', () => {
+  const forgeDir = freshForgeDir();
+  const { stdout, stderr, out } = captureStreams();
+  try {
+    const result = runOrchestrateQuestions({ open: false, forgeDir, json: true, stdout, stderr });
+    assert.equal(result.exitCode, 1);
+    const payload = JSON.parse(out().trim());
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'USAGE');
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+test('orchestrate questions --open --run <bad> rejects malformed run_id', () => {
+  const forgeDir = freshForgeDir();
+  const { stdout, stderr, out } = captureStreams();
+  try {
+    const result = runOrchestrateQuestions({
+      open: true,
+      forgeDir,
+      json: true,
+      runId: 'not-a-uuid',
+      stdout,
+      stderr,
+    });
+    assert.equal(result.exitCode, 1);
+    const payload = JSON.parse(out().trim());
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'INVALID_ARGS');
+  } finally {
+    rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
