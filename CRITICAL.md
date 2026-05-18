@@ -27,6 +27,13 @@ src/core/secrets.ts
 # CLI / init flow — touches user files, executes subprocesses.
 src/cli/init/**
 
+# Harness adapters (FORGE-88) — spawn primary worker / review subprocesses.
+# Claude path is the subscription-billing surface (must NOT spawn `claude` CLI);
+# Codex + Gemini paths spawn subprocesses with worktree cwd and parse stdout
+# into a verdict. Same review reasoning as tracker adapters: subprocess
+# boundary, structured-output parsing, security-sensitive defaults.
+src/harnesses/**
+
 # ─── adopter-template defaults (kept for reference; not applicable to forge core) ─
 
 src/lib/auth/**
