@@ -144,9 +144,11 @@ Every command is idempotent within its band, validates inputs with zod before to
 ### Read-only verbs
 
 ```
-forge orchestrate doctor [--scope spec-code|adr-drafts|apply-journal|all] [--json]
-    # Read-only drift diagnostics per SPEC §Precedence rules (simplified for ephemeral ADRs).
-    # Scopes: spec-code (SPEC symbols not in src/), adr-drafts (stale drafts), apply-journal (pending journals).
+forge orchestrate doctor [--scope spec-code|all] [--json]
+    # Read-only drift diagnostics (v0.4: file-path checks across spec files vs src/).
+    # Scopes: spec-code (default), all (alias for spec-code in v0.4; reserved for v0.5).
+    # Deprecated: --scope adr-drafts and --scope apply-journal (rejected with INVALID_ARGS; deferred to v0.5 per SPEC §21).
+    # Honors settings.doctor.spec_code_check_enabled (default true).
     # Exit codes: 0 clean, 1 warnings, 2 drift detected.
 
 forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]
@@ -742,7 +744,7 @@ Forge cannot mechanically intercept the host's file-write tools (no PreToolUse h
 | `src/bin/**` | CLI entry shape |
 | `src/cli/**` | CLI command surface |
 | `src/trackers/base.ts` | Tracker interface |
-| `src/cli/migrate.ts` | Migration logic — adopter-facing, irreversible side effects |
+| The migrate command (planned for v0.5; see P3-T02) | Migration logic — adopter-facing, irreversible side effects |
 | `spec/**` | Specifications |
 | `CRITICAL.md`, `CLAUDE.md`, `AGENTS.md` | Project-wide rules |
 | `package.json` (deps + bin fields) | Distribution surface |
@@ -827,8 +829,12 @@ phases:
       - id: FORGE-31
         title: Event payload schema
         write_globs:
-          - src/schemas/events.ts
-          - test/schemas/events.test.ts
+          # Illustrative paths under app/ rather than src/ so this example
+          # doesn't trip the doctor file-path drift check on the live forge
+          # repo. Adopters writing real `phases.yaml` should use their actual
+          # source roots (typically src/...).
+          - app/schemas/events.ts
+          - app/schemas/events.test.ts
         # ... existing fields
 ```
 
@@ -837,7 +843,7 @@ phases:
 | Overlap class | Behavior |
 |---|---|
 | No overlap | Dispatch both freely |
-| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write src/utils/foo.ts — merge conflicts possible"` |
+| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write app/utils/foo.ts — merge conflicts possible"` |
 | Hard overlap (any guardrail glob from preflight list) | **Block dispatch.** The task that came second in `phases.yaml` waits until the first completes. |
 | Either task declares a known-global file (`package.json`, lockfiles, migration directories) | Block: serialize them. |
 
@@ -1001,9 +1007,9 @@ With `--dry-run`: returns the list of would-affect worktrees as JSON without wri
 
 This complements (does not replace) worker-side drift detection. The guard bounds discovery latency to `heartbeat_interval_ms` instead of relying on worker read patterns.
 
-### 3. Doctor checks
+### 3. Doctor checks (v0.4)
 
-`forge orchestrate doctor` (read-only) enforces SPEC §ADR layer doctor checks (simplified for ephemeral model): stale draft warning, pending apply-journal warning, SPEC↔code drift. NO SPEC↔ADR check (ADRs are ephemeral so there's never a drift between an "accepted ADR" and SPEC — the apply skill deletes the ADR when SPEC is updated).
+`forge orchestrate doctor` (read-only) enforces SPEC↔code drift only in v0.4 — for each TypeScript path under `src/` mentioned in `spec/SPEC.md`, `spec/PRD.md`, or `spec/ORCHESTRATOR.md`, doctor asserts the file exists under `repoRoot`. Stale ADR drafts and pending apply-journal scopes are deferred to v0.5 (see SPEC §21). Honors `settings.doctor.spec_code_check_enabled` (default `true`). Exit codes: 0 clean, 1 warnings, 2 drift detected. See SPEC §Doctor enforcement (v0.4) for the canonical contract.
 
 ### Files the orchestrator does NOT own
 
@@ -1054,7 +1060,7 @@ agents:
     - src/bin/**
     - src/cli/**
     - src/trackers/base.ts
-    - src/cli/migrate.ts
+    # The migrate command (planned for v0.5; see P3-T02) joins this list once it ships.
     - spec/**
     - CRITICAL.md
     - CLAUDE.md

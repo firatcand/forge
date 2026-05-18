@@ -68,8 +68,14 @@ export const PhasesArgsSchema = z.object({
 });
 export type PhasesArgs = z.infer<typeof PhasesArgsSchema>;
 
+// scope: v0.4 ships only 'spec-code' (file-path drift). 'all' is reserved as
+// an alias for 'spec-code' until v0.5 adds further check types. The dropped
+// values 'adr-drafts' and 'apply-journal' were scoped out of v0.4 per
+// spec/SPEC.md §21 (architectural pivot 2026-05-17 PM); doctor.ts pre-parses
+// for those legacy values and emits a custom INVALID_ARGS pointing adopters
+// at v0.5 before Zod's generic enum error fires.
 export const DoctorArgsSchema = z.object({
-  scope: z.enum(['spec-code', 'adr-drafts', 'apply-journal', 'all']).default('spec-code'),
+  scope: z.enum(['spec-code', 'all']).default('spec-code'),
   forgeDir: ForgeDirField,
   json: JsonFlag,
   repoRoot: z.string().min(1).optional(),
