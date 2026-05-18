@@ -120,11 +120,14 @@ const AgentsSchema = z
   })
   // .refine() before .default({}) — the collision check must see the
   // resolved object after inner defaults expand.
+  // /review I5: explicit `path` on refinement issues so tools that format
+  // `{path}: {message}` show the offending field, not a bare message.
   .refine(
     (d) => d.review_host_cli === null || d.review_host_cli !== d.primary_host_cli,
     {
       message:
         'review_host_cli must differ from primary_host_cli (or be null to disable second-opinion review)',
+      path: ['review_host_cli'],
     },
   )
   // FORGE-88: gemini harness is experimental — gate on FORGE_GEMINI_EXPERIMENTAL=1.
@@ -137,10 +140,15 @@ const AgentsSchema = z
       if (!usesGemini) return true;
       return process.env.FORGE_GEMINI_EXPERIMENTAL === '1';
     },
-    {
+    (d) => ({
       message:
         'gemini harness is experimental. Set FORGE_GEMINI_EXPERIMENTAL=1 to opt in. The gemini CLI is pre-1.0 and its headless surface may change.',
-    },
+      // Attach the issue to whichever field selected gemini (or
+      // primary_host_cli if both did) so the error path locates the fix.
+      path: [
+        d.primary_host_cli === 'gemini' ? 'primary_host_cli' : 'review_host_cli',
+      ],
+    }),
   )
   .default({});
 

@@ -68,14 +68,32 @@ test('ClaudeHarness.runReview throws NOT_SUPPORTED with actionable message', asy
   );
 });
 
-test('ClaudeHarness.healthCheck returns in-session', async () => {
-  const h = new ClaudeHarness({ spawnSubagent: async () => stubHandle });
+// /review N3: healthCheck reports CC-session status via env detection.
+test('ClaudeHarness.healthCheck returns ok:true when CLAUDE_CODE env is set', async () => {
+  const h = new ClaudeHarness({
+    spawnSubagent: async () => stubHandle,
+    env: { CLAUDE_CODE: '1' },
+  });
   const r = await h.healthCheck();
   assert.equal(r.ok, true);
   assert.equal(r.version, 'in-session');
 });
 
+test('ClaudeHarness.healthCheck returns ok:false with hint when CLAUDE_CODE env is unset', async () => {
+  const h = new ClaudeHarness({
+    spawnSubagent: async () => stubHandle,
+    env: {},
+  });
+  const r = await h.healthCheck();
+  assert.equal(r.ok, false);
+  assert.match(r.message ?? '', /Claude Code session/);
+  assert.match(r.message ?? '', /primary_host_cli/);
+});
+
 test('ClaudeHarness.detectVersion returns in-session', async () => {
-  const h = new ClaudeHarness({ spawnSubagent: async () => stubHandle });
+  const h = new ClaudeHarness({
+    spawnSubagent: async () => stubHandle,
+    env: { CLAUDE_CODE: '1' },
+  });
   assert.equal(await h.detectVersion(), 'in-session');
 });

@@ -82,6 +82,10 @@ export class CodexHarness implements IHarness {
     }
   }
 
+  // /review N1: detectVersion uses process.cwd() because `codex --version`
+  // does not depend on the working directory. Dispatch / review calls use
+  // opts.cwd because their behaviour DOES depend on cwd (sandbox pin,
+  // workspace-local config). The asymmetry is intentional.
   async detectVersion(): Promise<string> {
     const result = await this.#spawn(CODEX_BIN, ['--version'], {
       cwd: process.cwd(),
@@ -92,11 +96,11 @@ export class CodexHarness implements IHarness {
   }
 }
 
-type SafeResult =
+export type SafeResult =
   | { ok: true; value: SpawnResult }
   | { ok: false; error: unknown };
 
-async function safe(p: Promise<SpawnResult>): Promise<SafeResult> {
+export async function safe(p: Promise<SpawnResult>): Promise<SafeResult> {
   try {
     return { ok: true, value: await p };
   } catch (error) {

@@ -30,7 +30,12 @@ function makeHarnesses(): { name: string; harness: IHarness }[] {
   return [
     {
       name: 'claude',
-      harness: new ClaudeHarness({ spawnSubagent: async () => stubHandle }),
+      harness: new ClaudeHarness({
+        spawnSubagent: async () => stubHandle,
+        // /review N3: ClaudeHarness.healthCheck now requires CLAUDE_CODE in
+        // the harness's env to return ok:true. Inject it for conformance.
+        env: { CLAUDE_CODE: '1' },
+      }),
     },
     { name: 'codex', harness: new CodexHarness({ spawnSubprocess: okSpawn }) },
     {
@@ -61,22 +66,22 @@ for (const { name, harness } of makeHarnesses()) {
     assert.equal(typeof handle.wait, 'function');
   });
 
-  test(`${name}: wait() resolves to a SubagentResult shape`, async () => {
+  // /review I6: the stubs in makeHarnesses() are all configured to succeed,
+  // so the happy-path verdict MUST be 'completed'. Asserting equality (not
+  // set membership) catches a harness that miscategorises a successful exit
+  // as anything else — set-membership only catches TS-level enum violations.
+  test(`${name}: wait() resolves to 'completed' for a successful stubbed dispatch`, async () => {
     const handle = await harness.dispatchSubagent('prompt', dispatchOpts);
     const r = await handle.wait();
-    assert.ok(
-      ['completed', 'blocked', 'stolen', 'timeout', 'spawn_error'].includes(
-        r.verdict,
-      ),
-      `unexpected verdict: ${r.verdict}`,
-    );
+    assert.equal(r.verdict, 'completed', `${name} should report completed on stubbed success`);
     assert.equal(typeof r.exitCode, 'number');
     assert.equal(typeof r.durationMs, 'number');
   });
 
-  test(`${name}: healthCheck returns a HealthResult shape`, async () => {
+  test(`${name}: healthCheck returns a HealthResult shape with ok=true on stubbed success`, async () => {
     const r = await harness.healthCheck();
     assert.equal(typeof r.ok, 'boolean');
+    assert.equal(r.ok, true, `${name} stubs are success-shaped; healthCheck must reflect that`);
   });
 
   test(`${name}: detectVersion returns a non-empty string`, async () => {
@@ -95,8 +100,15 @@ test('claude: runReview throws NOT_SUPPORTED (conformance rule)', async () => {
   );
 });
 
-test('createHarness("claude") throws without spawnSubagent', () => {
-  assert.throws(() => createHarness('claude'));
+// /review B2: createHarness must throw a typed HarnessError, not a plain Error.
+test('createHarness("claude") throws HarnessError(CALLBACK_MISSING) without spawnSubagent', () => {
+  assert.throws(
+    () => createHarness('claude'),
+    (err: unknown) =>
+      isHarnessError(err) &&
+      err.code === 'CALLBACK_MISSING' &&
+      err.host === 'claude',
+  );
 });
 
 test('createHarness("codex") returns CodexHarness wired with custom spawn', async () => {

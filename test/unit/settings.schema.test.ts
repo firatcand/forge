@@ -40,6 +40,11 @@ test('AC2 — rejects review_host_cli == primary_host_cli', () => {
     collisionIssue,
     `Expected refinement message, got: ${JSON.stringify(result.error.issues)}`,
   );
+  // /review I5: zod issue path locates the offending field (review_host_cli).
+  assert.ok(
+    collisionIssue.path.includes('review_host_cli'),
+    `expected issue.path to include 'review_host_cli'; got: ${JSON.stringify(collisionIssue.path)}`,
+  );
 });
 
 test('AC2 — accepts review_host_cli === null even when names would collide', () => {
@@ -387,6 +392,11 @@ test('FORGE-88 — primary_host_cli=gemini rejected without FORGE_GEMINI_EXPERIM
       i.message.includes('FORGE_GEMINI_EXPERIMENTAL=1'),
     );
     assert.ok(issue, `expected gemini gate message; got: ${JSON.stringify(result.error.issues)}`);
+    // /review I5: zod issue path locates the offending field for tooling.
+    assert.ok(
+      issue.path.includes('primary_host_cli'),
+      `expected issue.path to include 'primary_host_cli'; got: ${JSON.stringify(issue.path)}`,
+    );
   } finally {
     if (prior !== undefined) process.env.FORGE_GEMINI_EXPERIMENTAL = prior;
   }

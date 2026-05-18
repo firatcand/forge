@@ -10,14 +10,11 @@ import {
 import {
   spawnSubprocess,
   type SpawnSubprocess,
-  type SpawnResult,
 } from './subprocess.ts';
 import { parseHarnessVerdict } from './verdict-parser.ts';
-import { classifyDispatch } from './codex.ts';
+import { classifyDispatch, safe } from './codex.ts';
 
 const GEMINI_BIN = 'gemini';
-const NPX_BIN = 'npx';
-const NPX_PACKAGE = '@google/gemini-cli';
 const HEALTH_TIMEOUT_MS = 10_000;
 const EXPERIMENTAL_ENV = 'FORGE_GEMINI_EXPERIMENTAL';
 
@@ -26,15 +23,9 @@ export interface GeminiHarnessOpts {
   readonly env?: NodeJS.ProcessEnv;
 }
 
-interface ResolvedBinary {
-  readonly command: string;
-  readonly leadingArgs: readonly string[];
-}
-
 export class GeminiHarness implements IHarness {
   readonly host = 'gemini' as const;
   readonly #spawn: SpawnSubprocess;
-  #binary: ResolvedBinary | undefined;
 
   constructor(opts: GeminiHarnessOpts = {}) {
     const env = opts.env ?? process.env;
@@ -52,10 +43,9 @@ export class GeminiHarness implements IHarness {
     renderedPrompt: string,
     opts: DispatchOpts,
   ): Promise<SubagentHandle> {
-    const bin = await this.#resolveBinary();
     const pending = this.#spawn(
-      bin.command,
-      [...bin.leadingArgs, '-p', renderedPrompt, '--approval-mode=yolo'],
+      GEMINI_BIN,
+      ['-p', renderedPrompt, '--approval-mode=yolo'],
       {
         cwd: opts.cwd,
         timeoutMs: opts.timeoutMs,
@@ -76,11 +66,10 @@ export class GeminiHarness implements IHarness {
     reviewPrompt: string,
     opts: DispatchOpts,
   ): Promise<ReviewVerdict> {
-    const bin = await this.#resolveBinary();
     const prompt = `${reviewPrompt}\n\n## Diff\n\n${diff}`;
     const result = await this.#spawn(
-      bin.command,
-      [...bin.leadingArgs, '-p', prompt, '--approval-mode=yolo'],
+      GEMINI_BIN,
+      ['-p', prompt, '--approval-mode=yolo'],
       {
         cwd: opts.cwd,
         timeoutMs: opts.timeoutMs,
@@ -103,44 +92,26 @@ export class GeminiHarness implements IHarness {
     }
   }
 
+  // /review N1: detectVersion uses process.cwd() because `gemini --version`
+  // does not depend on the working directory (no config-file resolution).
+  // Other spawn calls use opts.cwd because their behaviour DOES depend on
+  // cwd (file reads, sandbox pin). The asymmetry is intentional, not drift.
   async detectVersion(): Promise<string> {
-    const bin = await this.#resolveBinary();
-    const result = await this.#spawn(
-      bin.command,
-      [...bin.leadingArgs, '--version'],
-      { cwd: process.cwd(), timeoutMs: HEALTH_TIMEOUT_MS, host: 'gemini' },
-    );
+    const result = await this.#spawn(GEMINI_BIN, ['--version'], {
+      cwd: process.cwd(),
+      timeoutMs: HEALTH_TIMEOUT_MS,
+      host: 'gemini',
+    });
     return result.stdout.trim();
   }
-
-  async #resolveBinary(): Promise<ResolvedBinary> {
-    if (this.#binary) return this.#binary;
-    try {
-      await this.#spawn(GEMINI_BIN, ['--version'], {
-        cwd: process.cwd(),
-        timeoutMs: HEALTH_TIMEOUT_MS,
-        host: 'gemini',
-      });
-      this.#binary = { command: GEMINI_BIN, leadingArgs: [] };
-    } catch (err) {
-      if (isHarnessError(err) && err.code === 'BINARY_NOT_FOUND') {
-        this.#binary = { command: NPX_BIN, leadingArgs: [NPX_PACKAGE] };
-      } else {
-        throw err;
-      }
-    }
-    return this.#binary;
-  }
 }
 
-type SafeResult =
-  | { ok: true; value: SpawnResult }
-  | { ok: false; error: unknown };
-
-async function safe(p: Promise<SpawnResult>): Promise<SafeResult> {
-  try {
-    return { ok: true, value: await p };
-  } catch (error) {
-    return { ok: false, error };
-  }
-}
+// /review I4: the `npx @google/gemini-cli` auto-fallback was removed.
+// Auto-fetching a pre-1.0 package from npm at runtime on every dispatch
+// was a supply-chain surface — a malicious or breaking publish would
+// land in adopter sessions without any pinning. Adopters who want a
+// non-PATH install can alias themselves:
+//   alias gemini='npx -y @google/gemini-cli@<pinned-version>'
+// or install globally: `npm i -g @google/gemini-cli`. If `gemini` is
+// not on PATH, dispatchSubagent / runReview / healthCheck surface
+// BINARY_NOT_FOUND with an actionable install hint from spawnSubprocess.

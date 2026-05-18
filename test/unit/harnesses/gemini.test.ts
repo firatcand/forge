@@ -21,19 +21,6 @@ function recordingSpawn(
   return { spawn, calls };
 }
 
-function enoentThenOk(okResult: SpawnResult): SpawnSubprocess {
-  let first = true;
-  return async (cmd) => {
-    if (first) {
-      first = false;
-      if (cmd === 'gemini') {
-        throw new HarnessError('BINARY_NOT_FOUND', 'gemini', 'gemini missing');
-      }
-    }
-    return okResult;
-  };
-}
-
 const dispatchOpts = {
   cwd: '/tmp/wt',
   taskId: 'FORGE-88',
@@ -67,59 +54,36 @@ test('GeminiHarness ctor succeeds with FORGE_GEMINI_EXPERIMENTAL=1', () => {
   assert.equal(h.host, 'gemini');
 });
 
-test('GeminiHarness resolves binary to "gemini" when on PATH', async () => {
-  const { spawn, calls } = recordingSpawn([
-    { stdout: '0.5.0', stderr: '', exitCode: 0, durationMs: 1 },
-    { stdout: '', stderr: '', exitCode: 0, durationMs: 1 },
-  ]);
+// /review I4: GeminiHarness no longer falls back to `npx @google/gemini-cli`.
+// `gemini` is invoked directly; BINARY_NOT_FOUND from spawnSubprocess
+// surfaces with an actionable install hint.
+test('GeminiHarness.dispatchSubagent spawns `gemini -p <prompt> --approval-mode=yolo`', async () => {
+  const { spawn, calls } = recordingSpawn([ok]);
   const h = new GeminiHarness({ env: ENABLED_ENV, spawnSubprocess: spawn });
   const handle = await h.dispatchSubagent('do work', dispatchOpts);
   await handle.wait();
-  assert.equal(calls[0].cmd, 'gemini'); // probe
-  assert.equal(calls[1].cmd, 'gemini'); // dispatch uses cached binary
-  assert.deepEqual(calls[1].args, [
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].cmd, 'gemini');
+  assert.deepEqual(calls[0].args, [
     '-p',
     'do work',
     '--approval-mode=yolo',
   ]);
 });
 
-test('GeminiHarness falls back to npx when gemini binary not on PATH', async () => {
-  let probeDone = false;
-  let dispatchCmd = '';
-  let dispatchArgs: readonly string[] = [];
-  const spawn: SpawnSubprocess = async (cmd, args) => {
-    if (!probeDone) {
-      probeDone = true;
-      throw new HarnessError('BINARY_NOT_FOUND', 'gemini', 'no gemini');
-    }
-    dispatchCmd = cmd;
-    dispatchArgs = args;
-    return { stdout: '', stderr: '', exitCode: 0, durationMs: 1 };
+test('GeminiHarness surfaces BINARY_NOT_FOUND fail-fast when gemini missing', async () => {
+  const spawn: SpawnSubprocess = async () => {
+    throw new HarnessError(
+      'BINARY_NOT_FOUND',
+      'gemini',
+      'gemini not found on PATH. Install the gemini CLI or remove gemini from .forge/settings.yaml.',
+    );
   };
   const h = new GeminiHarness({ env: ENABLED_ENV, spawnSubprocess: spawn });
-  const handle = await h.dispatchSubagent('do work', dispatchOpts);
-  await handle.wait();
-  assert.equal(dispatchCmd, 'npx');
-  assert.deepEqual(dispatchArgs, [
-    '@google/gemini-cli',
-    '-p',
-    'do work',
-    '--approval-mode=yolo',
-  ]);
-});
-
-test('GeminiHarness caches resolved binary across calls', async () => {
-  let probes = 0;
-  const spawn: SpawnSubprocess = async (cmd, args) => {
-    if (args[0] === '--version' && cmd === 'gemini') probes++;
-    return { stdout: '0.5.0', stderr: '', exitCode: 0, durationMs: 1 };
-  };
-  const h = new GeminiHarness({ env: ENABLED_ENV, spawnSubprocess: spawn });
-  await h.dispatchSubagent('a', dispatchOpts);
-  await h.dispatchSubagent('b', dispatchOpts);
-  await h.dispatchSubagent('c', dispatchOpts);
-  assert.equal(probes, 1);
+  const handle = await h.dispatchSubagent('p', dispatchOpts);
+  const result = await handle.wait();
+  // dispatchSubagent classifies BINARY_NOT_FOUND as spawn_error verdict.
+  assert.equal(result.verdict, 'spawn_error');
 });
 
 test('GeminiHarness.runReview parses verdict via shared parser', async () => {
@@ -130,7 +94,6 @@ test('GeminiHarness.runReview parses verdict via shared parser', async () => {
     host: 'gemini',
   });
   const { spawn } = recordingSpawn([
-    { stdout: '0.5.0', stderr: '', exitCode: 0, durationMs: 1 },
     {
       stdout: `\`\`\`json\n${verdict}\n\`\`\``,
       stderr: '',

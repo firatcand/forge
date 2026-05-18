@@ -75,3 +75,69 @@ test('spawnSubprocess passes env additively', async () => {
   );
   assert.equal(result.stdout, 'present');
 });
+
+// /review H1: AI subprocesses must NOT inherit parent secrets.
+test('spawnSubprocess strips sensitive env vars when opts.env is undefined', async () => {
+  const prior = process.env.FORGE_FAKE_SECRET;
+  process.env.FORGE_FAKE_SECRET = 'should-not-leak';
+  try {
+    const result = await spawnSubprocess(
+      NODE,
+      [
+        '-e',
+        'process.stdout.write(process.env.FORGE_FAKE_SECRET ? "leaked" : "safe")',
+      ],
+      { cwd: tmpdir(), host: HOST },
+    );
+    assert.equal(result.stdout, 'safe');
+  } finally {
+    if (prior === undefined) delete process.env.FORGE_FAKE_SECRET;
+    else process.env.FORGE_FAKE_SECRET = prior;
+  }
+});
+
+test('spawnSubprocess keeps PATH/HOME in the safe baseline', async () => {
+  const result = await spawnSubprocess(
+    NODE,
+    [
+      '-e',
+      'process.stdout.write([process.env.HOME ? "h" : "", process.env.PATH ? "p" : ""].join(""))',
+    ],
+    { cwd: tmpdir(), host: HOST },
+  );
+  assert.equal(result.stdout, 'hp');
+});
+
+// /review I2: cwd must be absolute.
+test('spawnSubprocess rejects a relative cwd with actionable error', async () => {
+  await assert.rejects(
+    () =>
+      spawnSubprocess(NODE, ['--version'], {
+        cwd: './relative',
+        host: HOST,
+      }),
+    (err: unknown) =>
+      isHarnessError(err) &&
+      err.code === 'SPAWN_FAILED' &&
+      /cwd must be an absolute path/.test(err.message),
+  );
+});
+
+// /review I3: HarnessError.details holds an excerpt of the last arg, not the full
+// rendered prompt — prevents leaking subprocess context to PR descriptions / logs.
+test('spawnSubprocess truncates args_excerpt at 200 bytes on failure', async () => {
+  const longPrompt = 'A'.repeat(5000);
+  await assert.rejects(
+    () =>
+      spawnSubprocess(
+        NODE,
+        ['-e', `console.log(${JSON.stringify(longPrompt)}); process.exit(2)`],
+        { cwd: tmpdir(), host: HOST },
+      ),
+    (err: unknown) => {
+      if (!isHarnessError(err) || err.code !== 'NON_ZERO_EXIT') return false;
+      const excerpt = err.details.args_excerpt;
+      return typeof excerpt === 'string' && excerpt.length <= 200;
+    },
+  );
+});
