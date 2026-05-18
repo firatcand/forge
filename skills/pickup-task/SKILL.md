@@ -1,6 +1,6 @@
 ---
 name: pickup-task
-description: Claim the next available task from Linear (or local phases.yaml), create a git worktree, and inject relevant learnings.
+description: Claim the next ready task from the configured tracker (Linear / GitHub Issues / Notion), create a git worktree, and inject relevant learnings.
 tools: Read, Edit, Bash(*), Bash(git*), Bash(gh*)
 subagent: learning-curator
 ---
@@ -16,11 +16,11 @@ subagent: learning-curator
 
 ## Steps
 
-1. **Query the tracker — never `plans/phases.yaml` — for status.** Use the Tracker interface (`mcp__linear-server__list_issues` for Linear, `gh issue list` for GitHub, `ntn` for Notion) to find active issues in the current cycle that are:
+1. **Query the tracker — never `plans/phases.yaml` — for status or dependencies.** Use the Tracker interface (`mcp__linear-server__list_issues` for Linear, `gh issue list` for GitHub, `ntn` for Notion) to find active issues in the current cycle that are:
    - Status: Todo (or Backlog with no blockers)
    - All `blocked_by` issues are Done — verify via `relations.blockedBy` (issue prose like `Depends on: forge#N` is unreliable)
 
-   **Do NOT** grep `plans/phases.yaml` for `status:` fields. They are a frozen cache and drift the moment any tracker issue changes state. `phases.yaml` is consulted ONLY for dependency-graph shape (`depends_on`, ACs, IDs), never for `status` / `completedAt`.
+   `phases.yaml` is a local execution snapshot derived from the tracker — every status, dependency, or blocker field in it can be stale. The tracker is authoritative for all execution metadata; see your project `CLAUDE.md` §Source of truth.
 2. If multiple match, list and ask user to pick. If one, auto-pick.
 3. Set Linear issue status → "In Progress"
 4. Compute branch name: `feat/{LINEAR-ID}-{kebab-case-title}`

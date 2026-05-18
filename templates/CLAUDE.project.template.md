@@ -40,13 +40,13 @@ Forge projects are multi-artifact. Each artifact OWNS specific fields. When two 
 |----------|------|
 | `spec/SPEC.md` | Architecture, constraints, non-functional requirements. Durable design-time truth. |
 | `spec/PRD.md` | Product behavior, user-facing acceptance criteria. |
-| `plans/phases.yaml` | Dependency graph (cached snapshot of the tracker). **Status fields are stale** until `/reconcile --pull` runs. |
+| `plans/phases.yaml` | Local execution snapshot (derived from tracker; do not hand-edit). **Status and dependency fields drift between `/reconcile --pull` runs and must be confirmed against the tracker.** |
 | Tracker body (Linear / GitHub / Notion) | Live execution truth: status, assignee, sequencing, blockers, ownership. |
 | Source code | Implementation. |
 
-**Rule for AI agents:** any "is this task done?" / "what's the active queue?" / "what's ready to pick up?" question MUST be answered by querying the tracker directly — `mcp__linear-server__get_issue` / `list_issues` for Linear, `gh issue view/list` for GitHub, `ntn` for Notion. Never grep `plans/phases.yaml` for status. The dependency graph (`depends_on`, ACs, IDs) IS authoritative in `phases.yaml`; status fields (`status`, `completedAt`) are NOT.
+**Rule for AI agents:** any "is this task done?" / "what's the active queue?" / "what's ready to pick up?" question MUST be answered by querying the tracker directly — `mcp__linear-server__get_issue` / `list_issues` for Linear, `gh issue view/list` for GitHub, `ntn` for Notion. Never grep `plans/phases.yaml` for status or for the dependency graph. `phases.yaml` is a local cache of both; only the tracker is authoritative.
 
-**Tiebreaker** (only when artifacts actually collide on the same field, not different fields of the same decision): user explicit instruction > `spec/SPEC.md` > `spec/PRD.md` > `plans/phases.yaml` > tracker body > prior attempt logs.
+Ask **"whose field is this?"** rather than "which artifact ranks higher?" When a worker encounters apparent conflict, the resolution is whichever artifact owns the field in question (architecture → SPEC; status/sequencing → tracker; implementation → source). There is no linear precedence chain — the 6-level ordering used pre-2026-05-17 was replaced by this matrix.
 
 ## Skill ↔ verb contract
 
