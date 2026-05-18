@@ -105,6 +105,14 @@ If the freshness line says **synced > 24h ago**, treat phases.yaml as advisory a
 - Do not invoke commands that escape the worktree (e.g. `cd /`, `git -C <other-repo>`).
 <!-- /host -->
 
+<!-- host: gemini -->
+# Working directory rules
+
+- The orchestrator spawned `gemini` with cwd pinned to `{{WORKTREE_PATH}}` (Node `spawn({ cwd })`); your shell-tool calls inherit it.
+- Treat `process.cwd()` as the worktree root. Use relative paths within it.
+- Do not invoke commands that escape the worktree (e.g. `cd /`, `git -C <other-repo>`).
+<!-- /host -->
+
 # Heartbeat protocol
 
 Every ~5 minutes of active work:

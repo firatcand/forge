@@ -32,11 +32,13 @@ function baseVerdict(
 function baseReviewVerdict(
   overrides: Partial<Record<string, unknown>> = {},
 ): Record<string, unknown> {
+  // FORGE-88: ReviewVerdictSchema.host narrowed to {codex, gemini}.
+  // Claude is excluded as a reviewer per the different-lineage rule.
   return {
     version: 1,
     verdict: 'pass',
     findings: [],
-    host: 'claude',
+    host: 'codex',
     ...overrides,
   };
 }
@@ -156,10 +158,21 @@ test('schemas/verdict: ReviewVerdictSchema rejects unknown host', () => {
 });
 
 test('schemas/verdict: ReviewVerdictSchema accepts all valid host values', () => {
-  for (const host of ['claude', 'codex', 'cursor', 'gemini'] as const) {
+  // FORGE-88: review-only hosts are codex and gemini.
+  for (const host of ['codex', 'gemini'] as const) {
     const result = ReviewVerdictSchema.safeParse(baseReviewVerdict({ host }));
     assert.equal(result.success, true, `host=${host} should be valid`);
   }
+});
+
+test('schemas/verdict: ReviewVerdictSchema rejects claude as a review host (FORGE-88)', () => {
+  const result = ReviewVerdictSchema.safeParse(baseReviewVerdict({ host: 'claude' }));
+  assert.equal(result.success, false);
+});
+
+test('schemas/verdict: ReviewVerdictSchema rejects cursor as a review host (FORGE-88)', () => {
+  const result = ReviewVerdictSchema.safeParse(baseReviewVerdict({ host: 'cursor' }));
+  assert.equal(result.success, false);
 });
 
 test('schemas/verdict: ReviewVerdictSchema rejects finding with empty path', () => {

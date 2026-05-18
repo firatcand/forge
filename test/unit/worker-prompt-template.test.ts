@@ -104,11 +104,15 @@ test('template: every {{TOKEN}} in the template is in the allowlist', () => {
   }
 });
 
-test('template: host blocks balance (claude and codex pair open/close)', () => {
+test('template: host blocks balance (claude, codex, gemini all pair open/close)', () => {
+  // FORGE-88: gemini joined the supported host list.
   const openCount = (template.match(/<!--\s*host:\s*[a-z]+\s*-->/g) ?? []).length;
   const closeCount = (template.match(/<!--\s*\/host\s*-->/g) ?? []).length;
   assert.equal(openCount, closeCount, 'unbalanced host markers');
-  assert.ok(openCount >= 2, 'expected at least one claude + one codex host block');
+  assert.ok(openCount >= 3, 'expected at least one claude + codex + gemini host block');
+  for (const host of ['claude', 'codex', 'gemini']) {
+    assert.match(template, new RegExp(`<!--\\s*host:\\s*${host}\\s*-->`));
+  }
 });
 
 test('template: worked examples agree with the authority-by-field matrix', () => {
@@ -187,7 +191,7 @@ test('template: end-to-end render against a realistic context succeeds', () => {
   assert.match(out, /templates\/worker-prompt\.template\.md exists/);
 });
 
-test('template: end-to-end render for codex host strips claude block', () => {
+test('template: end-to-end render for codex host strips claude and gemini blocks', () => {
   const ctx: WorkerPromptContext = {
     taskId: 'FORGE-97',
     attemptId: 'a',
@@ -204,4 +208,30 @@ test('template: end-to-end render for codex host strips claude block', () => {
   const out = renderWorkerPrompt(template, ctx);
   assert.match(out, /Codex's sandbox already pins/);
   assert.doesNotMatch(out, /All Bash commands must be prefixed with `cd/);
+  assert.doesNotMatch(out, /orchestrator spawned `gemini`/);
+});
+
+test('template: end-to-end render for gemini host strips claude and codex blocks (FORGE-88)', () => {
+  const ctx: WorkerPromptContext = {
+    taskId: 'FORGE-88',
+    attemptId: 'a',
+    runId: 'r',
+    worktreePath: '/Users/me/repos/forge/.forge/worktrees/FORGE-88',
+    phase: 'IMPLEMENT',
+    taskDescription: '...',
+    acceptanceCriteria: ['x'],
+    conventions: '',
+    host: 'gemini',
+    priorAttempts: [],
+    answeredQuestions: [],
+  };
+  const out = renderWorkerPrompt(template, ctx);
+  // Gemini block survived — references gemini-spawn semantics + process.cwd().
+  assert.match(out, /orchestrator spawned `gemini`/);
+  assert.match(out, /process\.cwd\(\)/);
+  // WORKTREE_PATH substitution worked inside the gemini block.
+  assert.match(out, /\/Users\/me\/repos\/forge\/\.forge\/worktrees\/FORGE-88/);
+  // Sibling host blocks removed.
+  assert.doesNotMatch(out, /All Bash commands must be prefixed with `cd/);
+  assert.doesNotMatch(out, /Codex's sandbox already pins/);
 });

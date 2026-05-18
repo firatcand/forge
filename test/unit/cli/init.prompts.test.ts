@@ -228,6 +228,9 @@ test('collectAnswers — review_host_cli === primary re-prompts then succeeds', 
     __resetForTests();
     __setNumberConfirmForTests(null);
   });
+  // FORGE-88: primary=codex, review=codex is the new collision case
+  // (claude is no longer a valid review host). On re-prompt, picking
+  // 'none' yields null and clears the refinement.
   __setPromptModuleForTests(
     scriptedPromptModule([
       { match: /Project name/, value: 'app' },
@@ -237,15 +240,15 @@ test('collectAnswers — review_host_cli === primary re-prompts then succeeds', 
       { match: /database_id/, value: 'db1' },
       { match: /secret manager/, value: 'env_file' },
       { match: /Env file path/, value: './.env.local' },
-      { match: /Primary host CLI/, value: 'claude' },
-      { match: /Review host CLI/, value: 'claude' }, // collision — should re-prompt
-      { match: /Review host CLI/, value: 'codex' },
+      { match: /Primary host CLI/, value: 'codex' },
+      { match: /Review host CLI/, value: 'codex' }, // collision — should re-prompt
+      { match: /Review host CLI/, value: 'none' },
     ]),
   );
   __setNumberConfirmForTests(scriptedNumberConfirm([5, 5]));
   const answers = await collectAnswers({ cwd: '/tmp/d' });
-  assert.equal(answers.agents.primary_host_cli, 'claude');
-  assert.equal(answers.agents.review_host_cli, 'codex');
+  assert.equal(answers.agents.primary_host_cli, 'codex');
+  assert.equal(answers.agents.review_host_cli, null);
 });
 
 test('collectAnswers — review_host_cli "none" yields null', async (t) => {

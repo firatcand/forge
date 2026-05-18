@@ -143,3 +143,31 @@ Each test archives its fixture page via `notion-update-page { archived: true }` 
 
 - `createProject` (notion-create-database) is **not** exercised in the integration test because it leaves a permanent database behind on each run and requires `FORGE_NOTION_PARENT_PAGE_ID`. Unit-tested instead.
 - The race-tiebreak claim path is not reproducible against live Notion (needs two concurrent processes); unit-tested with the `version_conflict` recheck path only.
+
+---
+
+## Harness adapters (`harnesses/codex.test.ts`, `harnesses/gemini.test.ts`) — FORGE-88
+
+Smoke tests that prove the harness adapter wires up against a real CLI binary — catches subprocess-arg bugs and binary-detection issues that the DI-stubbed conformance suite (`test/unit/harnesses/conformance.test.ts`) cannot.
+
+These smokes are intentionally minimal — they probe `healthCheck()` and `detectVersion()` only. **Real `dispatchSubagent()` / `runReview()` calls spend tokens and are not part of the smoke** — the mocked conformance suite covers the dispatch lifecycle.
+
+### Codex smoke
+
+```bash
+FORGE_E2E_CODEX=1 npm test
+```
+
+Requires `codex` CLI installed and authenticated.
+
+### Gemini smoke
+
+```bash
+FORGE_E2E_GEMINI=1 FORGE_GEMINI_EXPERIMENTAL=1 npm test
+```
+
+Requires `gemini` on PATH or `npx @google/gemini-cli` resolvable, plus active gemini-cli auth. `FORGE_GEMINI_EXPERIMENTAL=1` is mandatory for any GeminiHarness construction (pre-1.0 CLI surface).
+
+### Why this matters
+
+Mocked conformance proves the IHarness *contract* — same lifecycle assertions against all three harnesses with stubbed subprocess output. The real-CLI smoke proves the *adapter* — the binary name, flag shape, and stdout parsing actually match what's installed. Both layers are required; neither subsumes the other.
