@@ -1040,6 +1040,31 @@ All under `.forge/` to keep blast radius scoped. `.forge/` is gitignored by defa
 
 ---
 
+## Learnings store
+
+`docs/learnings/{quarter}/{slug}.md` is forge's compound-learning corpus — short markdown records ("what we expected / what happened / why / next time") written by `/learn`, indexed by quarter, and re-injected as context by `/pickup-task` and `learning-curator`. The store is the load-bearing artifact behind ETHOS principle 5 (Compound Learning).
+
+**Canonical location.** The single source of truth is the **main checkout's** `docs/learnings/` tree, addressed by absolute path `${MAIN_ROOT}/docs/learnings/` where `MAIN_ROOT = dirname(git rev-parse --git-common-dir)`. `git rev-parse --git-common-dir` resolves to the main checkout's `.git` directory from anywhere inside the repo — main or any worktree — so this idiom works uniformly. The same idiom anchors `/pickup-task`'s hydration step (see `skills/pickup-task/SKILL.md` lines 47–53).
+
+**Worktree semantics.** `docs/learnings/` is **gitignored** under the forge-dogfood publish-hygiene rule (we use forge to build forge but don't ship internal product docs in the published npm package). Because the path is gitignored, `git worktree add` does not auto-populate it. Consumers and producers handle this asymmetrically:
+
+- **Consumers (read).** `/pickup-task` hydrates a fresh worktree's `docs/learnings/` by `cp -r` from `${MAIN_ROOT}/docs/learnings/` at creation time, so `learning-curator` and any other reader sees the full corpus locally.
+- **Producers (write).** `/learn` always writes the canonical record to `${MAIN_ROOT}/docs/learnings/{quarter}/{slug}.md` first, then mirrors the same content to the current worktree's path when `pwd -P != MAIN_ROOT`. Main-first ordering means a botched mirror write still leaves the canonical record intact. When `/learn` runs from the main checkout the two paths collapse to a single write.
+
+The worktree's hydrated copy is a snapshot — it is allowed to drift from `${MAIN_ROOT}` during a long-lived worktree session, and the next `/pickup-task` re-hydrates fresh from main. The mirror write exists only so that same-session reads (`Read ./docs/learnings/...` from inside the worktree) succeed without round-tripping through the canonical path.
+
+**Why not move out of the repo root.** Relocating `docs/learnings/` outside the repo (e.g. `~/.forge/projects/<slug>/learnings/`) would make it worktree-orthogonal by construction. That's a larger refactor (every skill that touches the dir must be updated, plus a migration for existing adopters) and is tracked separately. The dual-write contract is the minimal, fully-reversible fix that satisfies the canonical-store invariant without that surface area.
+
+**Collision policy.** A write to a canonical path that already exists must refuse, not overwrite. Two learnings with the same slug indicate either a slug-derivation collision (which should be fixed by changing the title) or an intent to update an existing learning (which should be done via `Edit`, not `Write`).
+
+**Cross-references.**
+- Producer contract: `skills/learn/SKILL.md`
+- Consumer contract: `skills/pickup-task/SKILL.md`
+- Root-cause origin: `docs/learnings/2026-Q2/worktrees-blind-to-gitignored-context.md`
+- Hydration runbook: `docs/learnings/2026-Q2/worktree-hydration-runbook.md`
+
+---
+
 ## Security model
 
 ### What forge handles vs delegates
