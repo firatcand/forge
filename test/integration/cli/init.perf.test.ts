@@ -2,14 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { execa } from 'execa';
-
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, '..', '..', '..');
-const entry = resolve(repoRoot, 'src/bin/forge.ts');
-const tsxBin = resolve(repoRoot, 'node_modules/.bin/tsx');
+import { tsxBin, forgeBinEntry as entry } from '../../helpers/spawn-tsx.ts';
 
 const VALID_ANSWERS = {
   project: { name: 'perf-app' },
