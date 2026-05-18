@@ -355,7 +355,7 @@ export interface Tracker {
   updateState(issueId: string, state: IssueState): Promise<void>;
   comment(issueId: string, body: string): Promise<void>;
 
-  // Body mutation (added 2026-05-17 for /apply-decision + /reconcile propagation)
+  // Body mutation (added 2026-05-17 for /reconcile propagation; /apply-decision is v0.5 — see §21)
   // Replaces the entire issue body. Adapter implementations must preserve the
   // trailing forgeTaskId footer added by createIssue() so the round-trip mapping
   // (tracker → forgeTaskId) keeps working. Caller is responsible for assembling
@@ -463,17 +463,14 @@ src/
       claim.ts                // (renamed from next.ts; deprecated alias removed per user 2026-05-17 — sole user) claims a specific task via tracker CAS
       dispatch.ts             // register new worker attempt; refuses without valid claim_id
       heartbeat.ts            // renew lease
-      question.ts             // worker writes question; accepts --drift-event-id + --routing-hint
+      question.ts             // worker writes question
       answer.ts               // supervisor answers question
-      event.ts                // append to attempt event log; supports --type drift
+      event.ts                // append to attempt event log
       complete.ts             // finalize attempt with verdict
       cancel.ts               // cancel + flag cleanup
       gc.ts                   // reconciliation pass
       run.ts                  // run start/list
-      apply-decision.ts       // (added 2026-05-17) CLI verb wrapping /update-spec --apply skill's mutations; reads journal, propagates accepted ADR to SPEC + PRD + phases.yaml + tracker bodies; invokes worktree-drift-guard; deletes ADR on success
-      amend-roadmap.ts        // (added 2026-05-17) create new task atomically across phases.yaml + tracker
       reconcile.ts            // (added 2026-05-17) bi-directional phases.yaml ↔ tracker sync
-      worktree-drift-guard.ts // (added 2026-05-17) flags active worktrees affected by /update-spec --apply or /amend-roadmap change; writes drift events + worker questions; --dry-run for preview (Codex I1)
     migrate.ts                // `forge migrate` for v0.2.1 → v-next
     doctor.ts                 // existing (top-level wrapper; delegates to orchestrate/doctor.ts)
     install.ts                // existing
@@ -487,13 +484,11 @@ src/
   orchestrator/
     state-machine.ts          // task / attempt / run state transitions (CLI-owned)
     leases.ts                 // claim, heartbeat, steal-after-expiry
-    events.ts                 // attempt event log writers; notification stream writer; DriftEvent type
+    events.ts                 // attempt event log writers; notification stream writer
     gc.ts                     // deterministic reconciliation (see ORCHESTRATOR.md)
     overlap.ts                // write_globs overlap detection + hard-locked globals
     verdicts.ts               // CLI-verified verdict computation (tests, lint, diff, conflicts)
-    adr.ts                    // (added 2026-05-17) ephemeral ADR reader/writer; frontmatter validator; apply-journal writer; DELETES ADR on successful apply
-    precedence.ts             // (added 2026-05-17) compute artifact precedence (6 levels: user > spec > prd > phases > tracker > attempt); emit drift events
-    drift.ts                  // (added 2026-05-17) doctor checks: SPEC↔code, stale ADR drafts, pending apply journals
+    drift.ts                  // (added 2026-05-17) doctor checks: SPEC↔code file-path drift (v0.4); stale ADR drafts + pending apply journals deferred to v0.5
   trackers/
     base.ts                   // Tracker interface + shared types (now includes updateIssueBody)
     linear.ts                 // LinearTracker via @linear/sdk
@@ -509,20 +504,20 @@ src/
     settings.ts               // SettingsSchema (zod) — extended with codex/decisions/doctor blocks
     phases.ts                 // PhasesSchema (zod)
     tracker.ts                // CreateIssuePayload etc. (zod for runtime checks)
-    adr.ts                    // (added 2026-05-17) AdrFrontmatterSchema (zod) — ephemeral, no supersedes
-    apply-journal.ts          // (added 2026-05-17) ApplyJournalSchema (zod) for /update-spec --apply resumability
   utils/
     paths.ts                  // sanitizeIssueId, validateUnderRoot
     yaml.ts                   // load + dump w/ comment preservation
     git.ts                    // execa-wrapped git ops (worktree add/remove)
 templates/
-  adr.template.md             // (added 2026-05-17) ephemeral ADR scaffold used by /update-spec --draft
+  adr.template.md             // (added 2026-05-17) ephemeral ADR scaffold (v0.4 prep — FORGE-92; ADR feature itself is v0.5)
 
 test/
   unit/                       // *.test.ts; node:test + tsx
   integration/                // CLI harness via execa, scratch tmpdir
   e2e/                        // examples/ as fixture projects
 ```
+
+**v0.5 module additions** (`apply-decision.ts`, `amend-roadmap.ts`, `worktree-drift-guard.ts` under `src/cli/orchestrate/`; `adr.ts` + `precedence.ts` under `src/orchestrator/`; `adr.ts` + `apply-journal.ts` under `src/schemas/`) are removed from the v0.4 module surface per §21 Amendments. They will reappear in this layout when their owning tickets ship — FORGE-93 (`/update-spec --draft|--apply`), FORGE-95 (`apply-decision` verb), FORGE-101 (`/amend-roadmap`). The `templates/adr.template.md` scaffold above ships as v0.4 prep under FORGE-92; the ADR feature itself remains v0.5.
 
 ### Worktree location convention
 
@@ -627,7 +622,7 @@ on /forge orchestrate:
      if no: exit with one-line summary
 ```
 
-**Worker prompt content (simplified — ephemeral ADRs):** `worker_prompt(...)` includes task description (from phases.yaml), acceptance criteria, project conventions (CLAUDE.md), and the §Precedence rules block. **No ADR hydration** — ADRs are ephemeral and SPEC already reflects all accepted decisions. Workers read `spec/SPEC.md` for current architecture.
+**Worker prompt content (v0.4):** `worker_prompt(...)` includes task description (from phases.yaml), acceptance criteria, project conventions (CLAUDE.md), and the §Authority by field matrix (line 34). **No ADR hydration** — ADRs are a v0.5 feature; in v0.4 SPEC reflects all accepted architectural decisions directly. Workers read `spec/SPEC.md` for current architecture.
 
 `handle_return` interprets the subagent's terminal output:
 
@@ -755,6 +750,8 @@ To intervene on active work:
 
 ## ADR layer (ephemeral — added 2026-05-17, simplified)
 
+> **Deferred to v0.5.** Only the template scaffold (`templates/adr.template.md`) ships in v0.4 (FORGE-92) as preparation; the lifecycle, Zod schema, and `/update-spec --apply` journal described below are v0.5 features. In v0.4, architectural decisions are propagated to SPEC via standard `git commit && git push` (see §SPEC changes — no contradiction gate in v0.4). See §21 Amendments for the rationale.
+
 Architectural Decision Records (ADRs) are **ephemeral staging artifacts** for in-flight decisions. They live in `spec/decisions/` only while drafted and pending review. After `/update-spec --apply <slug>` propagates the decision to SPEC + PRD + phases + tracker, the ADR file is **DELETED**; rationale lives in the propagation commit message body.
 
 **Why ephemeral, not append-only:** SPEC is the sole durable source of truth. Permanent ADR archives accumulate over time, add token-budget concerns for any agent reading them, and create a "two-source" problem. Git history (`git log -- spec/SPEC.md`) preserves rationale; commit messages on `/update-spec --apply` carry full Context + Decision + Alternatives + Consequences.
@@ -872,49 +869,23 @@ The stale-draft and pending-apply-journal scopes documented here belong to the v
 
 ---
 
-## Precedence rules (added 2026-05-17, simplified — ephemeral ADRs)
+## Precedence rules (superseded 2026-05-17 PM — see §Authority by field)
 
-This section operationalizes [PRD §Precedence rules](./PRD.md#precedence-rules-binding-contract--added-2026-05-17). Refer there for the binding ordering and policy. This section defines the TypeScript types and the resolver function.
+> **Superseded by §Authority by field (line 34).** v0.4 workers resolve apparent conflicts by consulting a static authority-by-concern matrix, not a runtime precedence resolver. This section is retained as a documentation anchor for v0.5; the DriftEvent type and the worker-drift-detection contract below are deferred-to-v0.5 stubs.
 
-**ADRs are NOT in the precedence chain.** They are ephemeral staging artifacts (see §ADR layer); SPEC is the sole durable architectural source of truth. Once `/update-spec --apply` runs, the ADR is deleted and its content lives in SPEC + the apply-commit message body.
+**ADRs are NOT in the precedence chain.** They are ephemeral staging artifacts (see §ADR layer, deferred to v0.5); SPEC is the sole durable architectural source of truth. Once the v0.5 `/update-spec --apply` flow ships, an accepted ADR is deleted and its content lives in SPEC + the apply-commit message body.
 
-### Drift event type
+### Drift event type (deferred to v0.5)
 
-```ts
-// src/orchestrator/events.ts (extended)
-
-export type ArtifactKind =
-  | 'user'        // current-session user instruction
-  | 'spec'        // spec/SPEC.md
-  | 'prd'         // spec/PRD.md
-  | 'phases'      // plans/phases.yaml
-  | 'tracker'     // tracker issue body (projection of phases.yaml)
-  | 'attempt';    // older attempt notes
-
-export type DriftEvent = {
-  version: 1;
-  kind: 'drift';
-  from_artifact: ArtifactKind;  // the LOWER-precedence artifact whose content the worker would have to violate to honor `to_artifact`
-  to_artifact: ArtifactKind;    // the HIGHER-precedence artifact the worker is honoring
-  from_ref: string;             // e.g., "plans/phases.yaml#FORGE-91:acceptance[3]"
-  to_ref: string;               // e.g., "spec/SPEC.md#cli-surface"
-  detail: string;               // free text explaining the contradiction
-  detected_by: 'worker' | 'doctor' | 'update-spec-apply' | 'reconcile';
-  task_id?: string;
-  attempt_id?: string;
-  ts: string;                   // ISO 8601
-};
-```
-
-Drift events are written to `.forge/orchestrator/tasks/<task_id>/attempts/<attempt_id>/events.jsonl` (worker-emitted) or to `.forge/orchestrator/global/drift-events.jsonl` (doctor/update-spec-apply/reconcile-emitted).
+Workers in v0.4 do not emit drift events. The DriftEvent type and event-routing storage (events.jsonl per-attempt + drift-events.jsonl global) will be defined when the v0.5 `/update-spec --apply` skill (FORGE-93) and `apply-decision` verb (FORGE-95) ship. See git history (`git log -- spec/SPEC.md`) for the pre-pivot type definition.
 
 ### Precedence resolver
 
 > Precedence resolver removed per 2026-05-17 PM pivot. See §Authority by field (line 34) for the v0.4 behavior — workers ask "whose field is this?" against a static authority-by-concern matrix rather than walking a runtime precedence-resolver function. The v0.5 closed-loop drift workflow may reintroduce a similar engine; tracked under the deferred ADR / `/update-spec --apply` tickets.
 
-### When worker detects drift
+### When worker detects drift (deferred to v0.5)
 
-Worker MUST emit a drift event and pause the attempt with state `blocked_on_question` rather than silently fixing. See PRD §Precedence rules for the routing decision (`/apply-decision` | `/amend-roadmap` | manual resolution).
+In v0.4, workers consult §Authority by field (line 34) when artifacts disagree and proceed accordingly — they do not emit drift events or pause to `blocked_on_question` purely for drift. The `blocked_on_question` task state remains available for any worker question (see Flow 3 `handle_return` semantics — it is the general "ask the supervisor" channel, not drift-specific).
 
 ### Doctor enforcement (v0.4)
 
@@ -936,12 +907,12 @@ Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026
 | Trigger point (inside skill) | Suggested invocation |
 |---|---|
 | `/plan-task` exits with a plan | `/codex review-plan` |
-| `/update-spec --draft` writes a draft ADR | `/codex review-decision` |
+| `/update-spec --draft` writes a draft ADR *(v0.5)* | `/codex review-decision` |
 | `/ship` pre-PR finalize | `/codex review-impl` |
 
 Each suggestion is a printed line at skill end: `"💡 Suggested next: /codex review-decision (run with FORGE_AUTO_CODEX=0 to disable)"`. User types or skips. No automatic execution.
 
-Bounded by `codex.auto_codex_token_cap` in settings.yaml (default 50000 tokens/session). When budget exceeded, remaining auto-codex suggestions are skipped with a one-line warning. Env vars: `FORGE_AUTO_CODEX=0` disables; `FORGE_AUTO_CODEX_TOKEN_CAP=<n>` overrides settings.
+Bounded by `codex.auto_codex_token_cap` in settings.yaml (RESERVED — default 50000 tokens/session; budget enforcement deferred to v0.5). Env var `FORGE_AUTO_CODEX=0` disables suggestions entirely.
 
 ### Why no host hooks
 
@@ -949,7 +920,7 @@ The original Feature 7 design installed Claude Code SessionStart/Stop/UserPrompt
 
 1. **One-session-one-task workflow doesn't need it.** User opens Claude Code → picks up task via `/pickup-task` → ships task → closes session. The existing skill-end nudges + explicit `/status-check` cover re-grounding.
 2. **Host hooks add platform fragility.** Claude Code hook shape/semantics change across versions; maintaining parity with Codex CLI hooks is moving target.
-3. **The closed-loop drift workflow (Features 5+6) doesn't depend on host hooks.** Workers detect drift via §Precedence rules and emit events; `/update-spec --apply` invokes `worktree-drift-guard` directly.
+3. **The (deferred-to-v0.5) closed-loop drift workflow doesn't depend on host hooks.** When that workflow ships, workers will detect drift via the v0.5 precedence engine and emit events; `/update-spec --apply` will invoke `worktree-drift-guard` directly. The v0.4 worker lifecycle has no analogous host-hook coupling either.
 
 If host-hook re-grounding becomes valuable later (e.g., for team workflows), it can be added as a separate feature without changing the v0.4 core.
 
@@ -961,17 +932,19 @@ Forge ships two parallel surfaces: **skills** (user-invoked via slash commands i
 
 | Layer | Owns | Examples |
 |---|---|---|
-| **Skills** | UX, conversation, prompts, diff previews, user confirmation, multi-step orchestration | `/forge`, `/draft-prd`, `/pickup-task`, `/update-spec`, `/amend-roadmap`, `/reconcile`, `/ship` |
-| **CLI verbs** | Deterministic state machine, atomic operations, machine-parseable I/O, no human prompts | `forge orchestrate claim`, `dispatch`, `heartbeat`, `complete`, `apply-decision`, `worktree-drift-guard` |
+| **Skills** | UX, conversation, prompts, diff previews, user confirmation, multi-step orchestration | `/forge`, `/draft-prd`, `/pickup-task`, `/reconcile`, `/ship`; `/update-spec` *(v0.5)*, `/amend-roadmap` *(v0.5)* |
+| **CLI verbs** | Deterministic state machine, atomic operations, machine-parseable I/O, no human prompts | `forge orchestrate claim`, `dispatch`, `heartbeat`, `complete`, `reconcile`; `apply-decision` *(v0.5)*; `worktree-drift-guard` *(dropped 2026-05-17)* |
 
 ### The pattern
 
-When a user invokes `/update-spec --apply <slug>`:
+When a user invokes `/reconcile --pull` (v0.4 canonical example):
 
-1. **Skill (interaction layer)** reads the draft ADR, computes the propagation diff, shows it to the user, gets per-artifact confirmation
-2. **Skill calls** `forge orchestrate apply-decision --adr <slug> --confirmed-artifacts <list> --json`
-3. **CLI verb (state machine)** executes the atomic writes, records the journal, returns `{ok, data}` envelope
-4. **Skill** parses the JSON, prints success or surfaces failures with retry guidance
+1. **Skill (interaction layer)** runs `forge orchestrate reconcile --pull --dry-run --json`, renders the added/removed/updated/unmanaged diff, asks the user to approve (with `--confirm-prune` if removals are non-empty)
+2. **Skill calls** `forge orchestrate reconcile --pull --confirmed --json` (or `--confirm-prune`)
+3. **CLI verb (state machine)** rewrites `plans/phases.yaml` atomically from the tracker, returns `{ok, data}` envelope with the freshness summary
+4. **Skill** parses the JSON, prints the summary, or surfaces failures with retry guidance
+
+> The v0.5 canonical example is `/update-spec --apply <slug>` — it stresses the same skill ↔ verb seam with stronger multi-artifact journaling. See §ADR layer (deferred to v0.5) for the design intent.
 
 Skills are the CONVERSATION; verbs are the COMPUTATION. Skills can change without breaking the verb contract; verbs can be called directly (by scripts, by other skills) without going through a skill.
 
@@ -984,7 +957,7 @@ Skills are the CONVERSATION; verbs are the COMPUTATION. Skills can change withou
 
 ### Read-only vs mutate boundary stays at the verb layer
 
-Skills can be either; their classification follows the verbs they wrap. `/status-check` wraps only read-only verbs (`status`, `questions`, `phases`, `doctor`) and is itself read-only. `/update-spec --apply` wraps mutate verbs and requires user confirmation per artifact.
+Skills can be either; their classification follows the verbs they wrap. `/status-check` wraps only read-only verbs (`status`, `questions`, `phases`, `doctor`) and is itself read-only. `/reconcile --pull` wraps mutate verbs (atomic phases.yaml rewrite) and requires user confirmation when the diff includes removals.
 
 ---
 
@@ -1086,6 +1059,7 @@ Forge consumes:
 | `FORGE_PRIMARY_HOST_CLI` | no | Override `agents.primary_host_cli` from settings | from settings.yaml |
 | `FORGE_REVIEW_HOST_CLI` | no | Override `agents.review_host_cli`; set to `none` to disable second-opinion | from settings.yaml |
 | `FORGE_SETTINGS_PATH` | no | Override `.forge/settings.yaml` location | `./.forge/settings.yaml` |
+| `FORGE_AUTO_CODEX` | no | Set to `0` to disable the in-skill `/codex` review suggestions emitted by `/plan-task`, `/ship`, etc. | unset (suggestions on) |
 
 Tracker / secret-manager adapters consume their own conventional vars (e.g. `ANTHROPIC_API_KEY` if `secrets.manager: env_file`, `OP_SERVICE_ACCOUNT_TOKEN` for 1Password). These are documented per-adapter in `docs/adapters/`.
 
