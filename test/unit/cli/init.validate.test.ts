@@ -197,14 +197,14 @@ test('validateTooling: MCP probe skipped when primary host is not claude', async
   const exec = mockExec({
     'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
     'codex --version': { exitCode: 0 },
-    'cursor --version': { exitCode: 0 },
+    'gemini --version': { exitCode: 0 },
   });
   const answers = baseAnswers({
     agents: {
       max_concurrent: 1,
       retry_attempts: 0,
       primary_host_cli: 'codex',
-      review_host_cli: 'cursor',
+      review_host_cli: 'gemini',
     },
   });
   const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });

@@ -81,11 +81,17 @@ const AgentsSchema = z
     on_persistent_failure: z
       .enum(['notify', 'block_task', 'move_to_next'])
       .default('notify'),
+    // FORGE-88: primary harnesses are claude / codex / gemini. `cursor` was
+    // never wired up to a runtime adapter and is dropped without a back-compat
+    // shim (CLAUDE.md "no backwards-compat shims" convention).
     primary_host_cli: z
-      .enum(['claude', 'codex', 'cursor', 'gemini'])
+      .enum(['claude', 'codex', 'gemini'])
       .default('claude'),
+    // FORGE-88: review hosts are codex / gemini. Claude is excluded as a
+    // reviewer — second-opinion review requires a different model lineage
+    // than the primary worker. `null` disables second-opinion review entirely.
     review_host_cli: z
-      .enum(['claude', 'codex', 'cursor', 'gemini'])
+      .enum(['codex', 'gemini'])
       .nullable()
       .default('codex'),
     // Paths a worker must call `forge orchestrate guardrail-check` against
@@ -119,6 +125,21 @@ const AgentsSchema = z
     {
       message:
         'review_host_cli must differ from primary_host_cli (or be null to disable second-opinion review)',
+    },
+  )
+  // FORGE-88: gemini harness is experimental — gate on FORGE_GEMINI_EXPERIMENTAL=1.
+  // Read process.env at parse time, not at module load, so test harnesses can
+  // toggle the env around safeParse() calls.
+  .refine(
+    (d) => {
+      const usesGemini =
+        d.primary_host_cli === 'gemini' || d.review_host_cli === 'gemini';
+      if (!usesGemini) return true;
+      return process.env.FORGE_GEMINI_EXPERIMENTAL === '1';
+    },
+    {
+      message:
+        'gemini harness is experimental. Set FORGE_GEMINI_EXPERIMENTAL=1 to opt in. The gemini CLI is pre-1.0 and its headless surface may change.',
     },
   )
   .default({});

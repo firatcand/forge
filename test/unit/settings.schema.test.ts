@@ -334,6 +334,99 @@ test('regression — invalid primary_host_cli enum value rejected', () => {
   assert.equal(result.success, false);
 });
 
+// FORGE-88: enum tightening — cursor no longer accepted anywhere; claude
+// no longer accepted as a review_host_cli; gemini gated on env var.
+
+test('FORGE-88 — primary_host_cli=cursor rejected (no longer supported)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'cursor' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-88 — review_host_cli=cursor rejected (no longer supported)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'claude', review_host_cli: 'cursor' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-88 — review_host_cli=claude rejected (different-lineage rule)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'codex', review_host_cli: 'claude' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-88 — primary_host_cli=gemini rejected without FORGE_GEMINI_EXPERIMENTAL=1', () => {
+  const prior = process.env.FORGE_GEMINI_EXPERIMENTAL;
+  delete process.env.FORGE_GEMINI_EXPERIMENTAL;
+  try {
+    const result = SettingsSchema.safeParse({
+      version: 1,
+      project: { name: 'x' },
+      tracker: { type: 'linear', config: { team_id: 'T' } },
+      secrets: { manager: 'env_file' },
+      agents: { primary_host_cli: 'gemini', review_host_cli: 'codex' },
+    });
+    assert.equal(result.success, false);
+    if (result.success) return;
+    const issue = result.error.issues.find((i) =>
+      i.message.includes('FORGE_GEMINI_EXPERIMENTAL=1'),
+    );
+    assert.ok(issue, `expected gemini gate message; got: ${JSON.stringify(result.error.issues)}`);
+  } finally {
+    if (prior !== undefined) process.env.FORGE_GEMINI_EXPERIMENTAL = prior;
+  }
+});
+
+test('FORGE-88 — primary_host_cli=gemini accepted with FORGE_GEMINI_EXPERIMENTAL=1', () => {
+  const prior = process.env.FORGE_GEMINI_EXPERIMENTAL;
+  process.env.FORGE_GEMINI_EXPERIMENTAL = '1';
+  try {
+    const result = SettingsSchema.safeParse({
+      version: 1,
+      project: { name: 'x' },
+      tracker: { type: 'linear', config: { team_id: 'T' } },
+      secrets: { manager: 'env_file' },
+      agents: { primary_host_cli: 'gemini', review_host_cli: 'codex' },
+    });
+    assert.equal(result.success, true);
+  } finally {
+    if (prior === undefined) delete process.env.FORGE_GEMINI_EXPERIMENTAL;
+    else process.env.FORGE_GEMINI_EXPERIMENTAL = prior;
+  }
+});
+
+test('FORGE-88 — review_host_cli=gemini also gated on FORGE_GEMINI_EXPERIMENTAL=1', () => {
+  const prior = process.env.FORGE_GEMINI_EXPERIMENTAL;
+  delete process.env.FORGE_GEMINI_EXPERIMENTAL;
+  try {
+    const result = SettingsSchema.safeParse({
+      version: 1,
+      project: { name: 'x' },
+      tracker: { type: 'linear', config: { team_id: 'T' } },
+      secrets: { manager: 'env_file' },
+      agents: { primary_host_cli: 'codex', review_host_cli: 'gemini' },
+    });
+    assert.equal(result.success, false);
+  } finally {
+    if (prior !== undefined) process.env.FORGE_GEMINI_EXPERIMENTAL = prior;
+  }
+});
+
 test('regression — github tracker missing config.repo rejected', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
@@ -388,8 +481,8 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
       poll_interval_ms: number;
       worktree_root: string;
       on_persistent_failure: 'notify' | 'block_task' | 'move_to_next';
-      primary_host_cli: 'claude' | 'codex' | 'cursor' | 'gemini';
-      review_host_cli: 'claude' | 'codex' | 'cursor' | 'gemini' | null;
+      primary_host_cli: 'claude' | 'codex' | 'gemini';
+      review_host_cli: 'codex' | 'gemini' | null;
     };
     design: {
       mode: 'project_owned' | 'reference_external';

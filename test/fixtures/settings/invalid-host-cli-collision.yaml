@@ -8,5 +8,9 @@ tracker:
 secrets:
   manager: env_file
 agents:
-  primary_host_cli: claude
-  review_host_cli: claude
+  # FORGE-88: collision fixture uses codex/codex — both are valid enum members
+  # under the post-FORGE-88 schema (claude is no longer a review_host_cli
+  # value), so this fixture proves the refinement-level collision check, not
+  # the enum-level value check.
+  primary_host_cli: codex
+  review_host_cli: codex

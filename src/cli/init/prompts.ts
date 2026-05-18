@@ -91,14 +91,17 @@ const SecretsSchema = z.discriminatedUnion('manager', [
   SecretsInfisical,
 ]);
 
-const HostCliEnum = z.enum(['claude', 'codex', 'cursor', 'gemini']);
+// FORGE-88: primary/review enums diverge. Primary may be any of the three
+// supported harnesses; review excludes claude (different-model-lineage rule).
+const PrimaryHostCliEnum = z.enum(['claude', 'codex', 'gemini']);
+const ReviewHostCliEnum = z.enum(['codex', 'gemini']);
 
 const AgentsAnswersSchema = z
   .object({
     max_concurrent: z.number().int().min(1).max(50),
     retry_attempts: z.number().int().min(0).max(100),
-    primary_host_cli: HostCliEnum,
-    review_host_cli: HostCliEnum.nullable(),
+    primary_host_cli: PrimaryHostCliEnum,
+    review_host_cli: ReviewHostCliEnum.nullable(),
   })
   .refine(
     (d) => d.review_host_cli === null || d.review_host_cli !== d.primary_host_cli,
@@ -167,7 +170,21 @@ function validateInt(min: number, max: number, label: string) {
   };
 }
 
-const HOST_CLI_CHOICES = ['claude', 'codex', 'cursor', 'gemini'] as const;
+// FORGE-88: primary may include gemini, but only when FORGE_GEMINI_EXPERIMENTAL=1.
+// We compute the list at call-time so the env-gate change is visible without
+// restarting the process; tests can toggle the env var around collectAnswers().
+function primaryHostCliChoices(): readonly ('claude' | 'codex' | 'gemini')[] {
+  const base = ['claude', 'codex'] as const;
+  return process.env.FORGE_GEMINI_EXPERIMENTAL === '1'
+    ? [...base, 'gemini']
+    : base;
+}
+function reviewHostCliChoices(): readonly ('codex' | 'gemini')[] {
+  const base = ['codex'] as const;
+  return process.env.FORGE_GEMINI_EXPERIMENTAL === '1'
+    ? [...base, 'gemini']
+    : base;
+}
 const SECRET_MGR_CHOICES = [
   'env_file',
   '1password',
@@ -305,22 +322,27 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     validate: validateInt(0, 100, 'retry_attempts'),
   });
 
-  // 8. primary host cli
+  // 8. primary host cli (FORGE-88: gemini gated on FORGE_GEMINI_EXPERIMENTAL=1)
   const primaryHostCli = (await loggerPrompt('Primary host CLI (writes code)?', {
-    choices: HOST_CLI_CHOICES as unknown as readonly string[],
+    choices: primaryHostCliChoices() as unknown as readonly string[],
     default: 'claude',
-  })) as 'claude' | 'codex' | 'cursor' | 'gemini';
+  })) as 'claude' | 'codex' | 'gemini';
 
   // 9. review host cli — re-prompt on collision
-  const reviewChoices = [...HOST_CLI_CHOICES, 'none'] as const;
-  let reviewHostCli: 'claude' | 'codex' | 'cursor' | 'gemini' | null;
+  const reviewChoices = [...reviewHostCliChoices(), 'none'] as const;
+  // Pick the first non-colliding option as default; falls back to 'none'
+  // when primary occupies the only available review slot (e.g. primary=codex
+  // without the gemini gate → review choices is just ['codex','none']).
+  const defaultReview =
+    (reviewChoices as readonly string[]).find((c) => c !== primaryHostCli) ?? 'none';
+  let reviewHostCli: 'codex' | 'gemini' | null;
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const reviewChoice = (await loggerPrompt('Review host CLI (second-opinion)?', {
       choices: reviewChoices as unknown as readonly string[],
-      default: primaryHostCli === 'codex' ? 'claude' : 'codex',
+      default: defaultReview,
     })) as string;
-    const value = reviewChoice === 'none' ? null : (reviewChoice as 'claude' | 'codex' | 'cursor' | 'gemini');
+    const value = reviewChoice === 'none' ? null : (reviewChoice as 'codex' | 'gemini');
     const candidate = AgentsAnswersSchema.safeParse({
       max_concurrent: maxConcurrent,
       retry_attempts: retryAttempts,

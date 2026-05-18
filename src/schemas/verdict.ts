@@ -35,7 +35,9 @@ export const ReviewVerdictSchema = z.object({
       message: z.string().min(1).max(2_000),
     }),
   ),
-  host: z.enum(['claude', 'codex', 'cursor', 'gemini']),
+  // FORGE-88: review verdicts come from codex or gemini. Claude is excluded
+  // as a reviewer (different-lineage rule); cursor was never wired up.
+  host: z.enum(['codex', 'gemini']),
 });
 
 export type ReviewVerdict = z.infer<typeof ReviewVerdictSchema>;

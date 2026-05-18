@@ -41,10 +41,11 @@ export interface ValidateOptions {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-const HOST_CLI_INSTALL: Record<'claude' | 'codex' | 'cursor' | 'gemini', string> = {
+// FORGE-88: HOST_CLI_INSTALL covers the three live primary harnesses.
+// `cursor` removed (never wired to a runtime adapter).
+const HOST_CLI_INSTALL: Record<'claude' | 'codex' | 'gemini', string> = {
   claude: 'https://docs.claude.com/claude-code',
   codex: 'https://github.com/openai/codex',
-  cursor: 'https://cursor.sh/',
   gemini: 'https://github.com/google-gemini/gemini-cli',
 };
 
@@ -108,7 +109,7 @@ async function probeGit(exec: ExecaLike, timeoutMs: number): Promise<ProbeResult
 
 async function probeHostCli(
   key: string,
-  cli: 'claude' | 'codex' | 'cursor' | 'gemini',
+  cli: 'claude' | 'codex' | 'gemini',
   label: string,
   exec: ExecaLike,
   timeoutMs: number,
