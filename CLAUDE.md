@@ -33,6 +33,12 @@
 7. Plan Mode Mandatory — no multi-file changes without /plan-task
 8. 12-Factor Env Discipline — never commit secrets
 
+## Decision records (v0.5 — not active in v0.4)
+
+In-flight architectural decisions are drafted as **ephemeral ADRs** in `spec/decisions/<YYYY-MM-DD>-<kebab-slug>.md` using the scaffold at `templates/adr.template.md`. The `/update-spec --apply <slug>` skill propagates an accepted ADR to SPEC + PRD + `phases.yaml` + tracker bodies, then **deletes the ADR file**; rationale lives in the propagation commit message. SPEC remains the sole durable source of truth — no permanent ADR archive.
+
+Not active in v0.4. The `/update-spec` skill, `apply-decision` CLI verb, and `spec/decisions/` directory all land in v0.5 (see FORGE-93, FORGE-95, FORGE-101).
+
 ## Critical paths
 <!-- Files matching these patterns trigger /codex auto-review on /ship -->
 See CRITICAL.md
