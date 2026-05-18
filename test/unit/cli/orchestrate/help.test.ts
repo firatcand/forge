@@ -18,6 +18,7 @@ const EXPECTED_BANDS: ReadonlyArray<readonly [string, 'read' | 'mutate']> = [
   ['doctor', 'read'],
   ['attach', 'read'],
   ['spec-diff', 'read'],
+  ['ensure-worktree', 'mutate'],
   ['claim', 'mutate'],
   ['dispatch', 'mutate'],
   ['heartbeat', 'mutate'],

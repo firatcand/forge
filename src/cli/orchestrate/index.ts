@@ -27,6 +27,7 @@ import { completeHandler } from './complete.ts';
 import { cancelHandler } from './cancel.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
+import { ensureWorktreeHandler } from './ensure-worktree.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -166,6 +167,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
     ['list', runListHandler],
   ])],
   // Mutating band.
+  ['ensure-worktree', ensureWorktreeHandler],
   ['claim', claimHandler],
   ['dispatch', dispatchHandler],
   ['heartbeat', heartbeatHandler],
@@ -188,6 +190,7 @@ export const HELP_ORDER: readonly string[] = [
   'spec-diff',
   'guardrail-check',
   'run',
+  'ensure-worktree',
   'claim',
   'dispatch',
   'heartbeat',
