@@ -123,6 +123,24 @@ test('spawnSubprocess rejects a relative cwd with actionable error', async () =>
   );
 });
 
+// FORGE-135: child stdin must be /dev/null (immediate EOF), not an open pipe.
+// codex-cli 0.130.0 (and some gemini versions) reads stdin before processing
+// the prompt argument; an inherited open pipe causes an indefinite 0% CPU hang.
+// We assert the *behaviour* (child sees EOF on stdin) rather than the execa
+// option name, so the test survives any future refactor of how we close stdin.
+test('spawnSubprocess hands the child an already-closed stdin (immediate EOF)', async () => {
+  const result = await spawnSubprocess(
+    NODE,
+    [
+      '-e',
+      'let n=0;process.stdin.on("data",c=>n+=c.length).on("end",()=>process.stdout.write(`eof:${n}`))',
+    ],
+    { cwd: tmpdir(), host: HOST, timeoutMs: 5_000 },
+  );
+  assert.equal(result.stdout, 'eof:0');
+  assert.equal(result.exitCode, 0);
+});
+
 // /review I3: HarnessError.details holds an excerpt of the last arg, not the full
 // rendered prompt — prevents leaking subprocess context to PR descriptions / logs.
 test('spawnSubprocess truncates args_excerpt at 200 bytes on failure', async () => {
