@@ -1,4 +1,4 @@
-import { test, before } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdtempSync,
@@ -10,13 +10,15 @@ import {
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, resolve } from 'node:path';
+
+import { tsxBin, forgeBinEntry as entry, repoRoot } from '../../../helpers/spawn-tsx.ts';
 
 // Integration test for the /forge orchestrate dispatch skill flow (FORGE-98).
 //
-// Spawns dist/bin/forge.cjs as a subprocess to drive what the SKILL.md does
-// at runtime:
+// Spawns src/bin/forge.ts via tsx (FORGE-122 helper) so the test always runs
+// against current source — no stale-dist false-pass risk (Codex review-impl #5).
+// Drives what the SKILL.md does at runtime:
 //   1. run start              → mint run_id
 //   2. phases --ready --run --json → list tasks
 //   3. ensure-worktree (NEW)  → idempotent worktree + hydrate
@@ -31,20 +33,8 @@ import { fileURLToPath } from 'node:url';
 // FORGE_NOOP_TRACKER=1 forces NoopTracker on every claim call so the test
 // is hermetic (no Linear/GitHub/Notion dependencies).
 
-const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(here, '..', '..', '..', '..');
-const distBin = resolve(repoRoot, 'dist', 'bin', 'forge.cjs');
 const fixturePath = resolve(repoRoot, 'test', 'fixtures', 'orchestrator', '3-task-phases.yaml');
 const templateSrc = resolve(repoRoot, 'templates', 'worker-prompt.template.md');
-
-before(() => {
-  if (!existsSync(distBin)) {
-    const build = spawnSync('npm', ['run', 'build'], { cwd: repoRoot, stdio: 'inherit' });
-    if (build.status !== 0) {
-      throw new Error(`npm run build failed (status ${build.status})`);
-    }
-  }
-});
 
 function runVerb(args: readonly string[], cwd: string, extraEnv: Record<string, string> = {}): {
   envelope: Record<string, unknown>;
@@ -57,7 +47,11 @@ function runVerb(args: readonly string[], cwd: string, extraEnv: Record<string, 
     FORGE_NOOP_TRACKER: '1',
     ...extraEnv,
   };
-  const res = spawnSync('node', [distBin, ...args, '--json'], { cwd, env, encoding: 'utf8' });
+  // Run against source via tsx (FORGE-122 spawn-tsx helper). Avoids the
+  // stale-dist false-pass that bit Codex review-impl #5 — tests would
+  // silently pass against an out-of-date dist binary if the rebuild
+  // condition (only-if-missing) wasn't triggered.
+  const res = spawnSync(tsxBin, [entry, ...args, '--json'], { cwd, env, encoding: 'utf8' });
   const stdout = String(res.stdout ?? '').trim();
   const stderr = String(res.stderr ?? '');
   let envelope: Record<string, unknown> = {};

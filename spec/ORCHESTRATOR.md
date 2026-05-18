@@ -759,7 +759,7 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 ### Phase 1 — IMPLEMENT (primary host)
 
 - Dispatch skill calls `forge orchestrate phases --ready` (read-only) to surface ready tasks for user approval, then `forge orchestrate claim` once user picks.
-- Dispatch skill creates worktree at `.forge/worktrees/<sanitized-task-id>` via `git worktree add` (idempotent: skip if exists).
+- Dispatch skill calls `forge orchestrate ensure-worktree` to materialize `.forge/worktrees/<sanitized-task-id>` (idempotent: existing marker with matching task_id → no-op; CLI is the sole writer of `.forge/worktrees/**` per §80-98).
 - Dispatch skill calls `forge orchestrate dispatch` to register the attempt.
 - Subagent runs with worker prompt + task context.
 - On completion: subagent writes verdict.json, calls `forge orchestrate complete`, returns to parent.
