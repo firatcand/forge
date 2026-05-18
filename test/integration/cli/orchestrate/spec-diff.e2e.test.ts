@@ -7,18 +7,12 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { execa, execaSync } from 'execa';
 import { acquire } from '../../../../src/orchestrator/leases.ts';
 import { runOrchestrateSpecDiff } from '../../../../src/cli/orchestrate/spec-diff.ts';
 import { computeSpecRevisionSync } from '../../../../src/orchestrator/spec-diff.ts';
-
-const here = dirname(fileURLToPath(import.meta.url));
-// Walk: test/integration/cli/orchestrate/ → test/integration/cli/ → test/integration/ → test/ → <repo>
-const repoRoot = resolve(here, '..', '..', '..', '..');
-const entry = resolve(repoRoot, 'src/bin/forge.ts');
-const tsxBin = resolve(repoRoot, 'node_modules/.bin/tsx');
+import { tsxBin, forgeBinEntry as entry } from '../../../helpers/spawn-tsx.ts';
 
 function mkTmp(): string {
   return mkdtempSync(join(tmpdir(), 'forge-spec-diff-e2e-'));

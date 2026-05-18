@@ -95,7 +95,7 @@ Workers, skills, and the CLI have different write authority. The contract:
 | `.forge/orchestrator/runs/<r>/notifications.jsonl` | ❌ | ❌ | ✅ (notification stream is CLI-emitted) |
 | `.forge/orchestrator/index/questions.json` | ❌ | ❌ | ✅ (global question index — see "Answer lookup" below) |
 | `.forge/logs/orchestrate.jsonl` | — (no direct path) | — | ✅ (every CLI invocation appends) |
-| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ | ✅ create/remove on dispatch/gc |
+| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ (use `forge orchestrate ensure-worktree` instead — FORGE-98) | ✅ create via `ensure-worktree`, remove via `gc` |
 
 **Principles:**
 - All writes go through atomic helpers (tmp+link+unlink, never `rename`) regardless of writer.
@@ -144,9 +144,11 @@ Every command is idempotent within its band, validates inputs with zod before to
 ### Read-only verbs
 
 ```
-forge orchestrate doctor [--scope spec-code|adr-drafts|apply-journal|all] [--json]
-    # Read-only drift diagnostics per SPEC §Precedence rules (simplified for ephemeral ADRs).
-    # Scopes: spec-code (SPEC symbols not in src/), adr-drafts (stale drafts), apply-journal (pending journals).
+forge orchestrate doctor [--scope spec-code|all] [--json]
+    # Read-only drift diagnostics (v0.4: file-path checks across spec files vs src/).
+    # Scopes: spec-code (default), all (alias for spec-code in v0.4; reserved for v0.5).
+    # Deprecated: --scope adr-drafts and --scope apply-journal (rejected with INVALID_ARGS; deferred to v0.5 per SPEC §21).
+    # Honors settings.doctor.spec_code_check_enabled (default true).
     # Exit codes: 0 clean, 1 warnings, 2 drift detected.
 
 forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]
@@ -163,11 +165,32 @@ forge orchestrate phases [--ready] [--phase implement|review|ship] \
 
 forge orchestrate attach --run <run-id> [--type <event-types>] [--json]
     # Tail .forge/orchestrator/runs/<run-id>/notifications.jsonl. Read-only (consumer side).
+
+forge orchestrate render-worker-prompt --task <task-id> --attempt <attempt-id> \
+    [--repo-root <path>] [--json]
+    # (FORGE-98) Render the worker prompt for a dispatched attempt. Read-only —
+    # sources WorkerPromptContext from attempt manifest.json, plans/phases.yaml
+    # (description + acceptance), CLAUDE.md or AGENTS.md (conventions),
+    # .forge/settings.yaml (host), and walks attempts/* for prior attempts +
+    # answered questions. Returns the rendered prompt string in the envelope
+    # so the dispatch skill can inject it into the host's Task tool when
+    # spawning the worker subagent. dispatch.ts does NOT render or spawn.
 ```
 
 ### User-approved mutating verbs
 
 ```
+forge orchestrate ensure-worktree --task <task-id> [--base <branch>] [--branch <name>] \
+    [--repo-root <path>] [--json]
+    # (FORGE-98) Idempotent worktree create + hydrate at .forge/worktrees/<sanitized-task>/.
+    # Honors the write-surface contract — CLI is the sole writer of .forge/worktrees/.
+    # Wrapper around src/core/workspace.ts#create with idempotence:
+    #   - existing marker with matching task_id → no-op exit 0, returns {created:false}
+    #   - existing marker with different task_id → exit 1 with WORKTREE_CONFLICT
+    #   - path exists without a marker → exit 1 (refuses to overwrite manual dirs)
+    # Used by both /pickup-task and /forge orchestrate so worktree creation
+    # lives behind one authoritative code path.
+
 forge orchestrate claim <task-id> --run <run-id> [--json]
     # (Renamed from the mutating half of `next`.) Atomically claims task via tracker CAS + local lease.
     # Refuses if task is not in `unclaimed` state or lease is held by another active claim.
@@ -247,10 +270,12 @@ forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-ru
 |---|---|---|
 | `doctor` | read | n/a |
 | `status` | read | n/a |
-| `questions` | read | n/a |
+| `questions` | read | n/a (now accepts `--run <id>` filter — FORGE-98) |
 | `phases` | read | n/a |
 | `attach` | read | n/a |
+| `render-worker-prompt` | read | n/a (FORGE-98 — read-only prompt synthesis for dispatch skill) |
 | `run list` | read | n/a |
+| `ensure-worktree` | mutate | Per-task: inherited from the `/forge orchestrate` or `/pickup-task` skill's user approval (FORGE-98) |
 | `claim` | mutate | Per-task: user picked from `phases --ready` output |
 | `dispatch` | mutate | Inherits from prior `claim` |
 | `heartbeat` | mutate | Inherits from prior `dispatch` |
@@ -719,7 +744,7 @@ Forge cannot mechanically intercept the host's file-write tools (no PreToolUse h
 | `src/bin/**` | CLI entry shape |
 | `src/cli/**` | CLI command surface |
 | `src/trackers/base.ts` | Tracker interface |
-| `src/cli/migrate.ts` | Migration logic — adopter-facing, irreversible side effects |
+| The migrate command (planned for v0.5; see P3-T02) | Migration logic — adopter-facing, irreversible side effects |
 | `spec/**` | Specifications |
 | `CRITICAL.md`, `CLAUDE.md`, `AGENTS.md` | Project-wide rules |
 | `package.json` (deps + bin fields) | Distribution surface |
@@ -736,7 +761,7 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 ### Phase 1 — IMPLEMENT (primary host)
 
 - Dispatch skill calls `forge orchestrate phases --ready` (read-only) to surface ready tasks for user approval, then `forge orchestrate claim` once user picks.
-- Dispatch skill creates worktree at `.forge/worktrees/<sanitized-task-id>` via `git worktree add` (idempotent: skip if exists).
+- Dispatch skill calls `forge orchestrate ensure-worktree` to materialize `.forge/worktrees/<sanitized-task-id>` (idempotent: existing marker with matching task_id → no-op; CLI is the sole writer of `.forge/worktrees/**` per §80-98).
 - Dispatch skill calls `forge orchestrate dispatch` to register the attempt.
 - Subagent runs with worker prompt + task context.
 - On completion: subagent writes verdict.json, calls `forge orchestrate complete`, returns to parent.
@@ -804,8 +829,12 @@ phases:
       - id: FORGE-31
         title: Event payload schema
         write_globs:
-          - src/schemas/events.ts
-          - test/schemas/events.test.ts
+          # Illustrative paths under app/ rather than src/ so this example
+          # doesn't trip the doctor file-path drift check on the live forge
+          # repo. Adopters writing real `phases.yaml` should use their actual
+          # source roots (typically src/...).
+          - app/schemas/events.ts
+          - app/schemas/events.test.ts
         # ... existing fields
 ```
 
@@ -814,7 +843,7 @@ phases:
 | Overlap class | Behavior |
 |---|---|
 | No overlap | Dispatch both freely |
-| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write src/utils/foo.ts — merge conflicts possible"` |
+| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write app/utils/foo.ts — merge conflicts possible"` |
 | Hard overlap (any guardrail glob from preflight list) | **Block dispatch.** The task that came second in `phases.yaml` waits until the first completes. |
 | Either task declares a known-global file (`package.json`, lockfiles, migration directories) | Block: serialize them. |
 
@@ -978,9 +1007,9 @@ With `--dry-run`: returns the list of would-affect worktrees as JSON without wri
 
 This complements (does not replace) worker-side drift detection. The guard bounds discovery latency to `heartbeat_interval_ms` instead of relying on worker read patterns.
 
-### 3. Doctor checks
+### 3. Doctor checks (v0.4)
 
-`forge orchestrate doctor` (read-only) enforces SPEC §ADR layer doctor checks (simplified for ephemeral model): stale draft warning, pending apply-journal warning, SPEC↔code drift. NO SPEC↔ADR check (ADRs are ephemeral so there's never a drift between an "accepted ADR" and SPEC — the apply skill deletes the ADR when SPEC is updated).
+`forge orchestrate doctor` (read-only) enforces SPEC↔code drift only in v0.4 — for each TypeScript path under `src/` mentioned in `spec/SPEC.md`, `spec/PRD.md`, or `spec/ORCHESTRATOR.md`, doctor asserts the file exists under `repoRoot`. Stale ADR drafts and pending apply-journal scopes are deferred to v0.5 (see SPEC §21). Honors `settings.doctor.spec_code_check_enabled` (default `true`). Exit codes: 0 clean, 1 warnings, 2 drift detected. See SPEC §Doctor enforcement (v0.4) for the canonical contract.
 
 ### Files the orchestrator does NOT own
 
@@ -1031,7 +1060,7 @@ agents:
     - src/bin/**
     - src/cli/**
     - src/trackers/base.ts
-    - src/cli/migrate.ts
+    # The migrate command (planned for v0.5; see P3-T02) joins this list once it ships.
     - spec/**
     - CRITICAL.md
     - CLAUDE.md

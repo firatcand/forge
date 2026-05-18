@@ -27,6 +27,8 @@ import { completeHandler } from './complete.ts';
 import { cancelHandler } from './cancel.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
+import { ensureWorktreeHandler } from './ensure-worktree.ts';
+import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -48,12 +50,15 @@ export type VerbRegistry = Map<string, VerbHandler | Map<string, VerbHandler>>;
 
 const questionsHandler: VerbHandler = {
   band: 'read',
-  synopsis: 'List open or all worker questions across attempts.',
+  synopsis: 'List open worker questions (--json + --run <id> for skill consumption).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
+    const runId = parseFlag(rest, 'run') ?? parseFlag(rest, 'run-id');
     const result = runOrchestrateQuestions({
       open: hasFlag(rest, 'open'),
       forgeDir,
+      json: hasFlag(rest, 'json'),
+      ...(runId ? { runId } : {}),
     });
     return { exitCode: result.exitCode };
   },
@@ -158,11 +163,13 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['attach', attachHandler],
   ['spec-diff', specDiffHandler],
   ['guardrail-check', guardrailCheckHandler],
+  ['render-worker-prompt', renderWorkerPromptHandler],
   ['run', new Map<string, VerbHandler>([
     ['start', runStartHandler],
     ['list', runListHandler],
   ])],
   // Mutating band.
+  ['ensure-worktree', ensureWorktreeHandler],
   ['claim', claimHandler],
   ['dispatch', dispatchHandler],
   ['heartbeat', heartbeatHandler],
@@ -184,7 +191,9 @@ export const HELP_ORDER: readonly string[] = [
   'attach',
   'spec-diff',
   'guardrail-check',
+  'render-worker-prompt',
   'run',
+  'ensure-worktree',
   'claim',
   'dispatch',
   'heartbeat',

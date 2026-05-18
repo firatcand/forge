@@ -68,8 +68,14 @@ export const PhasesArgsSchema = z.object({
 });
 export type PhasesArgs = z.infer<typeof PhasesArgsSchema>;
 
+// scope: v0.4 ships only 'spec-code' (file-path drift). 'all' is reserved as
+// an alias for 'spec-code' until v0.5 adds further check types. The dropped
+// values 'adr-drafts' and 'apply-journal' were scoped out of v0.4 per
+// spec/SPEC.md §21 (architectural pivot 2026-05-17 PM); doctor.ts pre-parses
+// for those legacy values and emits a custom INVALID_ARGS pointing adopters
+// at v0.5 before Zod's generic enum error fires.
 export const DoctorArgsSchema = z.object({
-  scope: z.enum(['spec-code', 'adr-drafts', 'apply-journal', 'all']).default('spec-code'),
+  scope: z.enum(['spec-code', 'all']).default('spec-code'),
   forgeDir: ForgeDirField,
   json: JsonFlag,
   repoRoot: z.string().min(1).optional(),
@@ -157,3 +163,49 @@ export const CancelArgsSchema = z.object({
   json: JsonFlag,
 });
 export type CancelArgs = z.infer<typeof CancelArgsSchema>;
+
+// `forge orchestrate questions` — list worker questions.
+// `--open` filters to status='open'; `--run <id>` further filters to a single
+// run (required by the dispatch skill so /forge orchestrate doesn't surface
+// questions from sibling concurrent runs).
+export const QuestionsArgsSchema = z.object({
+  open: z.boolean().default(false),
+  runId: RunIdSchema.optional(),
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type QuestionsArgs = z.infer<typeof QuestionsArgsSchema>;
+
+// `forge orchestrate ensure-worktree` — idempotent worktree create+hydrate.
+// Owns `.forge/worktrees/<id>/` per ORCHESTRATOR.md §80-98 (CLI-only).
+// Wrapper around src/core/workspace.ts#create with idempotence: existing
+// worktree with matching marker → no-op; conflicting marker → error.
+export const EnsureWorktreeArgsSchema = z.object({
+  taskId: TaskIdSchema,
+  // base branch to fork the worktree from; defaults to origin/main inside the
+  // verb (mirrors src/core/workspace.ts#create default).
+  base: z.string().min(1).optional(),
+  // optional branch name override; defaults to `feat/<task_id>` inside create().
+  branch: z.string().min(1).optional(),
+  // Repo root containing .git. If omitted, verb resolves from cwd via
+  // git rev-parse --git-common-dir. Used as the worktree manager's root.
+  repoRoot: z.string().min(1).optional(),
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type EnsureWorktreeArgs = z.infer<typeof EnsureWorktreeArgsSchema>;
+
+// `forge orchestrate render-worker-prompt` — render the worker prompt for a
+// given task+attempt. Read-only: sources WorkerPromptContext from manifest.json
+// (run/worktree/phase), plans/phases.yaml (description/acceptance), CLAUDE.md
+// or AGENTS.md (conventions), settings.yaml (host), and walks
+// .forge/orchestrator/tasks/<t>/attempts/* for prior attempts + answered Qs.
+export const RenderWorkerPromptArgsSchema = z.object({
+  taskId: TaskIdSchema,
+  attemptId: AttemptIdSchema,
+  forgeDir: ForgeDirField,
+  // Optional repo-root override; defaults to <cwd> via git rev-parse.
+  repoRoot: z.string().min(1).optional(),
+  json: JsonFlag,
+});
+export type RenderWorkerPromptArgs = z.infer<typeof RenderWorkerPromptArgsSchema>;
