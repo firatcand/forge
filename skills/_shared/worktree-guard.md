@@ -67,3 +67,21 @@ Some users `cd` into a manually-created branch directory (no `/pickup-task` invo
 ## Stale-marker mitigation
 
 A marker can point at a deleted or reused worktree if state isn't kept fresh. The guard checks `git rev-parse --show-toplevel` first — if `TOPLEVEL` doesn't match the marker's recorded path, the snippet still allows the operation (the marker is informational, not authoritative for path). Authority comes from git's own worktree resolution.
+
+## Inverse rule: inspecting a worktree from outside
+
+The guard above refuses **mutation from main**. The symmetric trap is **observational drift**: a supervisor or sibling session runs `cd .forge/worktrees/<ID> && git log` to peek at progress. Bash sessions persist cwd across commands, so every subsequent call — including `/pickup-task`, `/forge orchestrate dispatch`, or any `Edit` — resolves against the wrong root. The forward guard above never fires, because the polluted session now genuinely IS inside a worktree.
+
+**Rule:** from any session NOT pinned to a worktree by `/pickup-task`, never `cd .forge/worktrees/<ID>` for inspection. Use `git -C <worktree-path> <cmd>` for read-only observation.
+
+```bash
+# Wrong — poisons cwd for every later command in this session
+cd .forge/worktrees/FORGE-88 && git log --oneline -5
+
+# Right — pinned to one command, cwd unchanged
+git -C .forge/worktrees/FORGE-88 log --oneline -5
+```
+
+The single legitimate exception is the `/pickup-task` session-pin transition: when `forge orchestrate ensure-worktree` succeeds inside `/pickup-task`, the session SHOULD `cd` into the new worktree exactly once and continue all subsequent work from there. That is not observational drift; it is the documented transition.
+
+This rule applies equally to humans typing in a shell and to AI agents running Bash tools.

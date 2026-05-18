@@ -6,6 +6,8 @@ tools: Read, Bash
 
 # /sync-status
 
+> **Status queries always hit the tracker. `plans/phases.yaml` is a stale cache.** See your project `CLAUDE.md` §Source of truth.
+
 Read-only diagnostic that answers two questions:
 
 1. **Is any active phase ready for `/phase-gate`?** For each `status: active` phase in `plans/phases.yaml`, check whether every task's `tracker_issue_id` is absent from the tracker's active set. If so, suggest running `/phase-gate <phase-id>` — never auto-advance.

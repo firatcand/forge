@@ -72,6 +72,9 @@ npm test
 for f in skills/*/SKILL.md agents/*.md; do
   head -1 "$f" | grep -q '^---$' || echo "MISSING FRONTMATTER: $f"
 done
+
+# Guard: removed orchestrate verbs must not reappear (see CLAUDE.md §Skill ↔ verb contract).
+! git grep -nE 'forge orchestrate (next|suggest-next|session-check|intent-detect)\b' -- src skills templates docs || (echo "FORBIDDEN: removed orchestrate verb reference" >&2; false)
 ```
 
 All must pass cleanly.
