@@ -1,9 +1,21 @@
 import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/index.ts';
 import { QuestionChannelError } from '../../orchestrator/questions/errors.ts';
+import { QuestionsArgsSchema, type QuestionsArgs } from '../../schemas/cli-args.ts';
+import { fail, ok, type Envelope } from '../envelope.ts';
+
+// Local emit replacement that honors the injected stdout stream (required by
+// test fixtures using PassThrough). The shared `emit()` helper writes directly
+// to process.stdout/stderr, which the test harnesses can't capture.
+function writeEnvelope(envelope: Envelope, out: NodeJS.WritableStream): number {
+  out.write(`${JSON.stringify(envelope)}\n`);
+  return envelope.ok ? 0 : 1;
+}
 
 export interface OrchestrateQuestionsOptions {
   readonly open: boolean;
   readonly forgeDir: string;
+  readonly runId?: string;
+  readonly json?: boolean;
   // Injectable streams so tests can capture output deterministically without
   // mocking console.* globally. Defaults to process.stdout / process.stderr.
   readonly stdout?: NodeJS.WritableStream;
@@ -31,12 +43,54 @@ export function runOrchestrateQuestions(
 ): OrchestrateQuestionsResult {
   const out = opts.stdout ?? process.stdout;
   const err = opts.stderr ?? process.stderr;
+  const json = opts.json === true;
+
+  // --json with --open: validate args via zod (catches malformed runId early).
+  // Without --json, preserve the historical "Usage:" line on missing --open
+  // so existing callers (text mode) don't see a JSON envelope unexpectedly.
   if (!opts.open) {
+    if (json) {
+      const args: QuestionsArgs = {
+        open: false,
+        forgeDir: opts.forgeDir,
+        json: true,
+        ...(opts.runId ? { runId: opts.runId } : {}),
+      };
+      // Will fail because open=false has no semantics for listing.
+      const parsed = QuestionsArgsSchema.safeParse(args);
+      if (!parsed.success) {
+        return {
+          exitCode: writeEnvelope(fail('INVALID_ARGS', parsed.error.message, false), out),
+        };
+      }
+      return {
+        exitCode: writeEnvelope(
+          fail('USAGE', 'forge orchestrate questions requires --open', false),
+          out,
+        ),
+      };
+    }
     err.write(
-      'Usage: forge orchestrate questions --open [--forge-dir <path>]\n',
+      'Usage: forge orchestrate questions --open [--run <run_id>] [--json] [--forge-dir <path>]\n',
     );
     return { exitCode: 1 };
   }
+
+  // --open present: validate full args.
+  if (json) {
+    const parsed = QuestionsArgsSchema.safeParse({
+      open: true,
+      forgeDir: opts.forgeDir,
+      json: true,
+      ...(opts.runId ? { runId: opts.runId } : {}),
+    });
+    if (!parsed.success) {
+      return {
+        exitCode: writeEnvelope(fail('INVALID_ARGS', parsed.error.message, false), out),
+      };
+    }
+  }
+
   let questions;
   try {
     questions = listOpenQuestionsAcrossTree({
@@ -52,15 +106,30 @@ export function runOrchestrateQuestions(
         : e instanceof Error
           ? e.message
           : String(e);
+    if (json) {
+      return { exitCode: writeEnvelope(fail('QUESTION_CHANNEL_ERROR', msg, false), out) };
+    }
     err.write(`forge orchestrate questions: ${msg}\n`);
     return { exitCode: 1 };
   }
-  if (questions.length === 0) {
+
+  // Run-scoped filter — Codex #9. Without this, /forge orchestrate would
+  // surface and answer questions from sibling concurrent runs that share
+  // the same .forge/orchestrator/ tree.
+  const filtered = opts.runId
+    ? questions.filter((q) => q.run_id === opts.runId)
+    : questions;
+
+  if (json) {
+    return { exitCode: writeEnvelope(ok({ questions: filtered }), out) };
+  }
+
+  if (filtered.length === 0) {
     out.write('No open questions.\n');
     return { exitCode: 0 };
   }
   const blocks: string[] = [];
-  for (const q of questions) {
+  for (const q of filtered) {
     const lines = [
       `[${q.question_id}] ${q.task_id} — ${q.decision_key}`,
       `Q: ${q.question}`,

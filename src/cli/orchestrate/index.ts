@@ -48,12 +48,15 @@ export type VerbRegistry = Map<string, VerbHandler | Map<string, VerbHandler>>;
 
 const questionsHandler: VerbHandler = {
   band: 'read',
-  synopsis: 'List open or all worker questions across attempts.',
+  synopsis: 'List open worker questions (--json + --run <id> for skill consumption).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
+    const runId = parseFlag(rest, 'run') ?? parseFlag(rest, 'run-id');
     const result = runOrchestrateQuestions({
       open: hasFlag(rest, 'open'),
       forgeDir,
+      json: hasFlag(rest, 'json'),
+      ...(runId ? { runId } : {}),
     });
     return { exitCode: result.exitCode };
   },
