@@ -48,5 +48,6 @@ tmp/
 # They're excluded from the published npm tarball via package.json#files allowlist
 # (verified by a CI npm-pack gate). DO NOT re-add spec files here.
 /plans/tasks/*.plan.md
+/plans/tasks/*.investigation.md
 /docs/learnings/**
 /.forge/
