@@ -8,7 +8,7 @@
 // See plans/tasks/FORGE-122.plan.md (this rule must not be weakened by
 // excluding files — and no test file may include the forbidden literal
 // even in a comment, since the grep matches anywhere in source).
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,11 +17,16 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
 const testRoot = join(repoRoot, 'test');
 
+// withFileTypes returns a Dirent that classifies the entry from the directory
+// listing directly — does not follow symlinks. A symlinked directory under
+// test/ would have isSymbolicLink() = true and isDirectory() = false, so the
+// walk stays scoped to real directories under test/. (Codex impl review.)
 function walk(dir, found = []) {
-  for (const entry of readdirSync(dir)) {
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) walk(full, found);
-    else if (entry.endsWith('.ts')) found.push(full);
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isSymbolicLink()) continue;
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walk(full, found);
+    else if (entry.isFile() && entry.name.endsWith('.ts')) found.push(full);
   }
   return found;
 }
