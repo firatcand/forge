@@ -69,10 +69,12 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
     return { exitCode: emit(ok(emptyReport), { json: opts.json }) };
   }
 
-  // (4) Repo-root resolution stays in the CLI layer — the fallback to
-  // process.cwd() makes it env-dependent, which would leak into drift.ts
-  // if extracted. drift.ts receives a pre-resolved absolute path.
-  const repoRoot = opts.repoRoot ?? resolveCwdFromForgeDir(opts.forgeDir);
+  // (4) Repo-root resolution stays in the CLI layer (env-dependent fallback).
+  // RepoRoot convention mirrors guardrail-check.ts:146 / spec-diff.ts: dirname(forgeDir).
+  // The regex-based resolver that shipped in the FORGE-96 scaffold would
+  // silently fall through to process.cwd() if forgeDir contained '.forge'
+  // mid-path (e.g. /tmp/my.forgedir); path.dirname has no such edge case.
+  const repoRoot = opts.repoRoot ?? path.dirname(opts.forgeDir);
 
   // (5) Pure drift detection.
   const result = detectSpecCodeDrift({ repoRoot });
@@ -98,11 +100,6 @@ function readSpecCodeCheckEnabled(forgeDir: string): boolean {
     // The schema default for spec_code_check_enabled is true.
     return true;
   }
-}
-
-function resolveCwdFromForgeDir(forgeDir: string): string {
-  // forgeDir defaults to <cwd>/.forge — strip the trailing segment.
-  return forgeDir.replace(/[/\\]\.forge\/?$/, '') || process.cwd();
 }
 
 export const doctorHandler: VerbHandler = {

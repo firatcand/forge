@@ -21,6 +21,24 @@ function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   return buf;
 }
 
+// Manual restore — for tests that capture stdout across multiple invocations
+// and need separate buffers per call. Returns { buf, restore } so each call
+// site can isolate its capture window from sibling calls in the same test.
+function captureStdoutOnce(): { buf: string[]; restore: () => void } {
+  const buf: string[] = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: unknown) => {
+    buf.push(String(chunk));
+    return true;
+  }) as typeof process.stdout.write;
+  return {
+    buf,
+    restore: () => {
+      process.stdout.write = orig;
+    },
+  };
+}
+
 function makeRepoWithSpec(specBody: string, srcFiles: string[]): { repo: string; forgeDir: string } {
   const repo = mkdtempSync(join(tmpdir(), 'forge-doctor-'));
   mkdirSync(join(repo, 'spec'), { recursive: true });
@@ -102,29 +120,37 @@ test('doctor --scope spec-code exits 2 when SPEC mentions a missing src path', a
 });
 
 test('doctor --scope all returns identical envelope data to --scope spec-code', async (t) => {
-  const stdoutA = captureStdout(t);
   const { repo, forgeDir } = makeRepoWithSpec(
     'See `src/cli/init.ts`.\n',
     ['src/cli/init.ts'],
   );
+
+  // Each call gets its OWN capture buffer so test indexing isn't coupled to
+  // stdout-write ordering across calls. If runOrchestrateDoctor ever emits
+  // an extra line before the JSON envelope, the previous shared-buffer
+  // pattern (reading `buf[buf.length - 1]` twice) would silently read the
+  // wrong call's output.
+  const bufAll = captureStdoutOnce();
   const resultAll = await runOrchestrateDoctor({
     scope: 'all',
     forgeDir,
     json: true,
     repoRoot: repo,
   });
+  bufAll.restore();
   assert.equal(resultAll.exitCode, 0);
-  const envAll = JSON.parse(stdoutA[stdoutA.length - 1] ?? '');
+  const envAll = JSON.parse(bufAll.buf[bufAll.buf.length - 1] ?? '');
 
-  // Same input, --scope spec-code — must produce identical `data` envelope.
+  const bufSpec = captureStdoutOnce();
   const resultSpec = await runOrchestrateDoctor({
     scope: 'spec-code',
     forgeDir,
     json: true,
     repoRoot: repo,
   });
+  bufSpec.restore();
   assert.equal(resultSpec.exitCode, 0);
-  const envSpec = JSON.parse(stdoutA[stdoutA.length - 1] ?? '');
+  const envSpec = JSON.parse(bufSpec.buf[bufSpec.buf.length - 1] ?? '');
 
   assert.deepEqual(envAll.data, envSpec.data);
 });
