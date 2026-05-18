@@ -6,6 +6,8 @@ tools: Read, Bash(*)
 
 # /forge orchestrate
 
+> **Status queries always hit the tracker. `plans/phases.yaml` is a stale cache.** See your project `CLAUDE.md` §Source of truth.
+
 The user-facing dispatch loop for forge's orchestrator. Drives one **round**
 per invocation:
 

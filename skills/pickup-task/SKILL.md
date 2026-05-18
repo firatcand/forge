@@ -7,6 +7,8 @@ subagent: learning-curator
 
 # /pickup-task
 
+> **Status queries always hit the tracker. `plans/phases.yaml` is a stale cache.** See your project `CLAUDE.md` §Source of truth.
+
 ## Args
 
 - `[phase]` — default: current active phase
@@ -14,9 +16,11 @@ subagent: learning-curator
 
 ## Steps
 
-1. Query the configured tracker (via the Tracker interface) for active issues in the current cycle that are:
-   - Status: Todo
-   - All `blocked_by` issues are Done
+1. **Query the tracker — never `plans/phases.yaml` — for status.** Use the Tracker interface (`mcp__linear-server__list_issues` for Linear, `gh issue list` for GitHub, `ntn` for Notion) to find active issues in the current cycle that are:
+   - Status: Todo (or Backlog with no blockers)
+   - All `blocked_by` issues are Done — verify via `relations.blockedBy` (issue prose like `Depends on: forge#N` is unreliable)
+
+   **Do NOT** grep `plans/phases.yaml` for `status:` fields. They are a frozen cache and drift the moment any tracker issue changes state. `phases.yaml` is consulted ONLY for dependency-graph shape (`depends_on`, ACs, IDs), never for `status` / `completedAt`.
 2. If multiple match, list and ask user to pick. If one, auto-pick.
 3. Set Linear issue status → "In Progress"
 4. Compute branch name: `feat/{LINEAR-ID}-{kebab-case-title}`
