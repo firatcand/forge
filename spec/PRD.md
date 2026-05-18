@@ -574,13 +574,10 @@ The worker MUST NOT silently "fix" the discrepancy. It:
 
 ### Doctor enforcement
 
-`forge orchestrate doctor` checks:
+v0.4 contract: `forge orchestrate doctor` is a read-only diagnostic that checks SPEC↔code drift only — for each TypeScript path under `src/` mentioned in `spec/SPEC.md`, `spec/PRD.md`, or `spec/ORCHESTRATOR.md`, doctor asserts the file exists under `repoRoot`. Honors `settings.doctor.spec_code_check_enabled` (default `true`).
 
-- SPEC↔code: SPEC references to symbols (file paths, exported names) grep to ≥1 hit in `src/`
-- phases.yaml↔tracker (read-only flag): each phases.yaml task with a `tracker_issue_id` is reachable; status drift is reported but not fixed (use `/reconcile` for fix)
-- Stale ADR draft: `spec/decisions/` contains a draft older than `doctor.stale_draft_threshold_days` (default 7) — warning, not error
-- Pending `--apply` journal: `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json` exists with `pending`/`failed` entries — warning to run `--resume`
+Scopes: `--scope spec-code` (default), `--scope all` (alias for `spec-code` until v0.5). Legacy `--scope adr-drafts` and `--scope apply-journal` were dropped per SPEC §21 and now return INVALID_ARGS.
 
-Exit codes: 0 = clean, 1 = warnings, 2 = drift detected.
+Exit codes: 0 = clean, 1 = warnings (e.g. required `spec/SPEC.md` is missing), 2 = drift detected.
 
-**Note: no SPEC↔ADR check** because ADRs are ephemeral; SPEC IS the truth post-apply, and pre-apply the ADR is just a staging proposal not a binding decision.
+The broader doctor scopes — stale ADR draft warnings, pending `--apply` journal warnings, phases.yaml↔tracker drift — are deferred to v0.5 alongside the ADR template (P2.5-T01) and apply-decision verb (P2.5-T04). When those land, this section will document the additional checks.

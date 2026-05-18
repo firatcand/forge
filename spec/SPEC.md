@@ -217,7 +217,8 @@ export const SettingsSchema = z.object({
       // Preflight + overlap detection — see ORCHESTRATOR.md "Worker prompt template" and "File-glob declarations"
       preflight_globs: z.array(z.string()).default([
         'src/index.ts', 'src/schemas/**', 'src/bin/**', 'src/cli/**',
-        'src/trackers/base.ts', 'src/cli/migrate.ts', 'spec/**',
+        'src/trackers/base.ts', 'spec/**',
+        // The migrate command (v0.5; see P3-T02) joins this list once it ships.
         'CRITICAL.md', 'CLAUDE.md', 'AGENTS.md', 'package.json', 'phases.yaml',
       ]),
       hard_lock_globs: z.array(z.string()).default([
@@ -798,7 +799,7 @@ affected_phases_tasks: []    # phases.yaml task IDs whose ACs change
 {briefly — options A, B, C with rejection reasons}
 ```
 
-### Zod schema (`src/schemas/adr.ts`)
+### Zod schema (planned for v0.5; see P2.5-T01 / FORGE-92 — schema file lands with that ticket)
 
 ```ts
 import { z } from 'zod';
@@ -865,14 +866,9 @@ Workflow:
 4. `--resume` skips entries with `status: applied`; retries `pending` and `failed`
 5. `--dry-run` shows the diff per artifact without writing journal or mutations
 
-### Doctor checks for ADR layer (simplified — ephemeral model)
+### Doctor checks for ADR layer (deferred to v0.5)
 
-`forge orchestrate doctor` enforces:
-
-- **Stale draft warning:** any ADR file in `spec/decisions/` (excluding templates) older than `decisions.stale_draft_threshold_days` triggers a warning (exit 1)
-- **Pending apply journal:** any `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json` with entries in `pending` or `failed` triggers a warning to run `/update-spec --apply <slug> --resume` (exit 1)
-- **No SPEC↔ADR check** (was a check under the append-only model; under ephemeral, SPEC IS the truth post-apply and ADR is gone)
-- **SPEC↔code check** (preserved from earlier doctor): SPEC references to symbols grep to ≥1 hit in `src/` (exit 2 on drift)
+The stale-draft and pending-apply-journal scopes documented here belong to the v0.5 closed-loop drift workflow, not v0.4. See SPEC §21 for the architectural amendment; the v0.4 contract lives in §Doctor enforcement (v0.4) below. When the ADR template (P2.5-T01 / FORGE-92) and `apply-decision` verb (P2.5-T04 / FORGE-95) ship, this section will be revived to document the additional doctor scopes that build on those features.
 
 ---
 
@@ -914,51 +910,22 @@ Drift events are written to `.forge/orchestrator/tasks/<task_id>/attempts/<attem
 
 ### Precedence resolver
 
-```ts
-// src/orchestrator/precedence.ts
-
-export const PRECEDENCE_ORDER: ArtifactKind[] = [
-  'user', 'spec', 'prd', 'phases', 'tracker', 'attempt'
-];
-
-export type ArtifactClaim = {
-  kind: ArtifactKind;
-  ref: string;
-  content: string;
-};
-
-export type AuthorityResolution = {
-  winner: ArtifactClaim;
-  losers: ArtifactClaim[];
-  drift_events: DriftEvent[];
-};
-
-/**
- * Given multiple artifacts claiming authority on the same question, returns
- * the highest-precedence one and emits drift events for each loser whose
- * content contradicts the winner.
- *
- * Caller is responsible for routing drift events to:
- *  - tasks/<id>/attempts/<id>/events.jsonl (when invoked from worker)
- *  - global/drift-events.jsonl (when invoked from doctor/apply-decision/reconcile)
- */
-export function resolveAuthority(
-  claims: ArtifactClaim[],
-  context: { detected_by: DriftEvent['detected_by']; task_id?: string; attempt_id?: string }
-): AuthorityResolution;
-```
+> Precedence resolver removed per 2026-05-17 PM pivot. See §Authority by field (line 34) for the v0.4 behavior — workers ask "whose field is this?" against a static authority-by-concern matrix rather than walking a runtime precedence-resolver function. The v0.5 closed-loop drift workflow may reintroduce a similar engine; tracked under the deferred ADR / `/update-spec --apply` tickets.
 
 ### When worker detects drift
 
 Worker MUST emit a drift event and pause the attempt with state `blocked_on_question` rather than silently fixing. See PRD §Precedence rules for the routing decision (`/apply-decision` | `/amend-roadmap` | manual resolution).
 
-### Doctor enforcement
+### Doctor enforcement (v0.4)
 
-`forge orchestrate doctor` reads all artifacts, runs `resolveAuthority()` for each cross-artifact claim it can detect, and exits:
+`forge orchestrate doctor` is a read-only drift diagnostic. v0.4 scope: file-path drift only — for each TypeScript path under `src/` mentioned in `spec/SPEC.md`, `spec/PRD.md`, or `spec/ORCHESTRATOR.md` (regex: `/\b(src\/[A-Za-z0-9_\-./]+\.ts)\b/g`), assert the file exists under `repoRoot`.
 
-- 0 = clean (no drift events emitted)
-- 1 = warnings (advisory)
-- 2 = drift detected (SPEC references symbols missing from `src/`; phases.yaml task IDs not in tracker)
+- **Scopes**: `--scope spec-code` (default), `--scope all` (alias for `spec-code` until v0.5 adds further check types)
+- **Deprecated scopes**: `--scope adr-drafts` and `--scope apply-journal` (rejected with INVALID_ARGS — both deferred to v0.5; see SPEC §21)
+- **Exit codes**: 0 clean, 1 warnings (e.g. required `spec/SPEC.md` is missing), 2 drift detected
+- **Settings**: honors `settings.doctor.spec_code_check_enabled` (default `true`). When `false`, doctor short-circuits with an empty drift report and exits 0
+- **Implementation**: `src/cli/orchestrate/doctor.ts` (CLI handler) delegates to the pure `detectSpecCodeDrift()` in `src/orchestrator/drift.ts`
+- **Exported-name / symbol grep deferred to v0.5** — false-positive rate against backtick-fenced prose was deemed too high for v0.4
 
 ---
 
@@ -1231,7 +1198,7 @@ The codebase migrates from JS to TS in this order, each landing as its own PR fo
 5. **PR-5 — LinearTracker + NotionTracker.**
 6. **PR-6 — Init flow (`src/cli/init.ts`):** Replaces inquirer prompts in old `bin/forge.js`.
 7. **PR-7 — Orchestrator (dispatcher, worker, retry, signals).**
-8. **PR-8 — Migrate command (`src/cli/migrate.ts`).**
+8. **PR-8 — Migrate command (planned for v0.5; see P3-T02).**
 9. **PR-9 — Polish: doctor extension, performance tests, docs, CHANGELOG.**
 
 Each PR is decomposable and parallelizable in `phases.yaml`. PR-2 through PR-5 can run in parallel after PR-1.
