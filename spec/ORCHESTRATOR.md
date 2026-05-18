@@ -95,7 +95,7 @@ Workers, skills, and the CLI have different write authority. The contract:
 | `.forge/orchestrator/runs/<r>/notifications.jsonl` | ❌ | ❌ | ✅ (notification stream is CLI-emitted) |
 | `.forge/orchestrator/index/questions.json` | ❌ | ❌ | ✅ (global question index — see "Answer lookup" below) |
 | `.forge/logs/orchestrate.jsonl` | — (no direct path) | — | ✅ (every CLI invocation appends) |
-| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ | ✅ create/remove on dispatch/gc |
+| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ (use `forge orchestrate ensure-worktree` instead — FORGE-98) | ✅ create via `ensure-worktree`, remove via `gc` |
 
 **Principles:**
 - All writes go through atomic helpers (tmp+link+unlink, never `rename`) regardless of writer.
@@ -163,11 +163,32 @@ forge orchestrate phases [--ready] [--phase implement|review|ship] \
 
 forge orchestrate attach --run <run-id> [--type <event-types>] [--json]
     # Tail .forge/orchestrator/runs/<run-id>/notifications.jsonl. Read-only (consumer side).
+
+forge orchestrate render-worker-prompt --task <task-id> --attempt <attempt-id> \
+    [--repo-root <path>] [--json]
+    # (FORGE-98) Render the worker prompt for a dispatched attempt. Read-only —
+    # sources WorkerPromptContext from attempt manifest.json, plans/phases.yaml
+    # (description + acceptance), CLAUDE.md or AGENTS.md (conventions),
+    # .forge/settings.yaml (host), and walks attempts/* for prior attempts +
+    # answered questions. Returns the rendered prompt string in the envelope
+    # so the dispatch skill can inject it into the host's Task tool when
+    # spawning the worker subagent. dispatch.ts does NOT render or spawn.
 ```
 
 ### User-approved mutating verbs
 
 ```
+forge orchestrate ensure-worktree --task <task-id> [--base <branch>] [--branch <name>] \
+    [--repo-root <path>] [--json]
+    # (FORGE-98) Idempotent worktree create + hydrate at .forge/worktrees/<sanitized-task>/.
+    # Honors the write-surface contract — CLI is the sole writer of .forge/worktrees/.
+    # Wrapper around src/core/workspace.ts#create with idempotence:
+    #   - existing marker with matching task_id → no-op exit 0, returns {created:false}
+    #   - existing marker with different task_id → exit 1 with WORKTREE_CONFLICT
+    #   - path exists without a marker → exit 1 (refuses to overwrite manual dirs)
+    # Used by both /pickup-task and /forge orchestrate so worktree creation
+    # lives behind one authoritative code path.
+
 forge orchestrate claim <task-id> --run <run-id> [--json]
     # (Renamed from the mutating half of `next`.) Atomically claims task via tracker CAS + local lease.
     # Refuses if task is not in `unclaimed` state or lease is held by another active claim.
@@ -247,10 +268,12 @@ forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-ru
 |---|---|---|
 | `doctor` | read | n/a |
 | `status` | read | n/a |
-| `questions` | read | n/a |
+| `questions` | read | n/a (now accepts `--run <id>` filter — FORGE-98) |
 | `phases` | read | n/a |
 | `attach` | read | n/a |
+| `render-worker-prompt` | read | n/a (FORGE-98 — read-only prompt synthesis for dispatch skill) |
 | `run list` | read | n/a |
+| `ensure-worktree` | mutate | Per-task: inherited from the `/forge orchestrate` or `/pickup-task` skill's user approval (FORGE-98) |
 | `claim` | mutate | Per-task: user picked from `phases --ready` output |
 | `dispatch` | mutate | Inherits from prior `claim` |
 | `heartbeat` | mutate | Inherits from prior `dispatch` |

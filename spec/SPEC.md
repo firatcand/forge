@@ -564,59 +564,66 @@ Rationale:
 7. Print next-steps banner: `claude` then `/forge`
 8. **Total elapsed time target: <30 s including validation**
 
-### Flow 2 — `/forge orchestrate` dispatch loop (skill-driven, present→approve→claim) — rewritten 2026-05-17
+### Flow 2 — `/forge orchestrate` dispatch loop (skill-driven, present→approve→claim) — rewritten 2026-05-17, revised 2026-05-18 (FORGE-98)
 
 There is **no long-running orchestrator process**. The `/forge orchestrate` skill runs inside the user's Claude Code or Codex main session and drives work via the `forge orchestrate <verb>` CLI. State lives on disk; the CLI is the source of truth.
 
 **Binding principle (suggest-don't-force):** the skill calls `phases --ready` (read-only) first and presents ready tasks to the user for explicit approval; only after approval does it call `claim` and `dispatch`. No verb in this flow may straddle the read/mutate boundary. `dispatch` refuses without a valid `claim_id` from a prior user-approved `claim`.
 
+**Loop shape — per-round, not long-running (FORGE-98):** one invocation = one full round (list → approve → dispatch selected → poll & answer open questions → ask "continue?"). The skill exits after each round; the user re-invokes `/forge orchestrate` for the next round. This keeps the user's main session unblocked between rounds and respects the suggest-don't-force ethos. **Cap-respect** (`active_subagents < subagent_cap_per_main`) is the user's per-round judgment in v0.4; deferred to v0.5 if a programmatic enforcement is needed.
+
+**Ordering — ensure-worktree before claim (FORGE-98 / Codex #4):** if worktree creation fails after `claim` succeeds, the task is left in `claimed` state with a live lease and no attempt — a leak that only `gc` can reconcile. Running `ensure-worktree` first means a worktree failure simply skips the task before any state is mutated.
+
 Pseudocode for the dispatch skill (host-agnostic; the skill source compiles to host-native syntax in Phase 3):
 
 ```
 on /forge orchestrate:
-  1. ensure run: run_id = forge orchestrate run start --name "<user-readable>" --json
+  1. run_id = forge orchestrate run start --name "<user-readable>" --json
      // run start is a mutation, allowed because invocation of /forge orchestrate = explicit user approval to begin a run
 
-  2. while active_subagents < subagent_cap_per_main:
-       # Read-only: list ready tasks (deps shipped + merged + no worktree overlap)
-       result = forge orchestrate phases --ready --run <run_id> --limit <cap - active> --json
-       break if result.data.tasks.length == 0
+  2. # Read-only: list ready tasks (deps shipped + merged + no worktree overlap)
+     result = forge orchestrate phases --ready --run <run_id> --limit N --json
+     if result.data.tasks.length == 0: exit "No ready tasks."
 
-       # Present to user — show task id, title, why-ready, overlap rationale
-       present_to_user(result.data.tasks)
-       user_selection = await user_input  // one of: task_id | "all" | "skip" | "stop"
-       break if user_selection == "stop"
-       continue if user_selection == "skip"
+     # Present to user — show task id, title, why-ready, overlap rationale
+     present_to_user(result.data.tasks)
+     user_selection = await user_input  // one of: task_id | "all" | "skip" | "stop"
+     if user_selection == "stop": exit
+     if user_selection == "skip": jump to step 3
+     selected = (user_selection == "all") ? result.data.tasks : [find_by_id(user_selection)]
 
-       selected = (user_selection == "all") ? result.data.tasks : [find_by_id(user_selection)]
+     # Mutations only after user approval
+     for task in selected:
+       # Order matters — see "Ordering" above. CLI owns worktrees per ORCHESTRATOR.md §80-98.
+       wt = forge orchestrate ensure-worktree --task <task.id> --json
+       continue if wt.error  // worktree failure: skip; no state mutated
 
-       # Mutations only after user approval
-       for task in selected:
-         claim_result = forge orchestrate claim <task.id> --run <run_id> --json
-         continue if claim_result.error == "version_conflict"  // tracker race; another main won
+       claim_result = forge orchestrate claim <task.id> --run <run_id> --json
+       continue if claim_result.error  // tracker race; another main won — worktree stays (idempotent)
 
-         worktree = ensure_worktree(task.id)
-         attempt = forge orchestrate dispatch <task.id> --claim <claim_result.data.claim_id> --run <run_id> --worktree <path> --json
-         dispatch_subagent({
-           prompt: worker_prompt(task, attempt, worktree, prior_attempts),
-           cwd_hint: worktree,
-         })  // Task tool (Claude) or native subagent spawn (Codex); returns on completion or block
-         handle_return(task, attempt, subagent_result)
+       attempt = forge orchestrate dispatch <task.id> --claim <claim_result.data.claim_id> --run <run_id> --worktree <wt.data.worktree_path> --json
 
-  3. poll forge orchestrate questions --open --run <run_id> --json:
-       for each open question:
-         render question to user (decision_key, question, context, options, recommended_option_id, routing_hint?, drift_event_id?)
-         # routing_hint set when worker emitted a drift event per §Precedence rules — supervisor routes through
-         # /update-spec --draft + --apply or /amend-roadmap instead of answering directly
-         if question.routing_hint:
-           suggest_routing(question.routing_hint)  // e.g., "this is an architectural shift — run /update-spec --draft to formalize"
-         answer = await user input
-         forge orchestrate answer <question_id> --answer "<answer>"
-         // task transitions to awaiting_respawn; next loop iteration picks it up
+       # Render prompt via dedicated read-only verb (FORGE-98 / Codex #2)
+       rendered = forge orchestrate render-worker-prompt --task <task.id> --attempt <attempt.attempt_id> --json
+       continue if rendered.error  // render failure: skill prints `forge orchestrate cancel <task.id>` as recovery hint
 
-  4. when all tasks in this run are terminal:
-       surface "All tasks shipped (or terminal). Run complete." with status table
-       offer to start new run if more ready tasks exist (back to step 2 with user approval)
+       dispatch_subagent({
+         prompt: rendered.data.prompt,
+         cwd_hint: wt.data.worktree_path,
+         subagent_type: host_native_for(rendered.data.host),
+       })  // Task tool (Claude) or native subagent spawn (Codex); returns on completion or block
+       handle_return(task, attempt, subagent_result)
+
+  3. # Run-scoped question poll (FORGE-98 / Codex #9 — --run filter prevents cross-run leakage)
+     open = forge orchestrate questions --open --run <run_id> --json
+     for each question in open.data.questions:
+         render to user (decision_key, question, context, options, recommended_option_id)
+         answer = await user input  // user picks one of question.options[].id
+         forge orchestrate answer <question.question_id> --option <chosen_option_id>
+
+  4. ask user: "Continue with another round?" (yes / no)
+     if yes: jump to step 2
+     if no: exit with one-line summary
 ```
 
 **Worker prompt content (simplified — ephemeral ADRs):** `worker_prompt(...)` includes task description (from phases.yaml), acceptance criteria, project conventions (CLAUDE.md), and the §Precedence rules block. **No ADR hydration** — ADRs are ephemeral and SPEC already reflects all accepted decisions. Workers read `spec/SPEC.md` for current architecture.
