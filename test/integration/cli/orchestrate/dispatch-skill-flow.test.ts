@@ -210,7 +210,9 @@ test('dispatch-skill-flow: question round — workers write, skill polls --run -
   // Dispatch ETOE-1 under runA, ETOE-2 under runB. Both will write questions
   // tagged with their respective run_ids; the skill's --run filter must
   // surface only runA's question when called with --run runA.
-  async function dispatchAndQuestion(taskId: string, runId: string): Promise<string> {
+  // `runVerb` is spawnSync-backed, so all work here is synchronous — the
+  // helper is non-async on purpose, no promise wrapping or await needed.
+  function dispatchAndQuestion(taskId: string, runId: string): string {
     let r = runVerb(
       ['orchestrate', 'ensure-worktree', '--task', taskId, '--base', 'main', '--forge-dir', forgeDir],
       work,
@@ -247,8 +249,11 @@ test('dispatch-skill-flow: question round — workers write, skill polls --run -
     return (r.envelope.data as { question_id: string }).question_id;
   }
 
-  const qIdA = dispatchAndQuestion('ETOE-1', runA) as unknown as string;
-  const qIdB = dispatchAndQuestion('ETOE-2', runB) as unknown as string;
+  // We don't actually need the returned IDs — the verb writes them to disk
+  // and the questions --open call below rediscovers them. Just drive the
+  // side effects.
+  dispatchAndQuestion('ETOE-1', runA);
+  dispatchAndQuestion('ETOE-2', runB);
 
   // Sanity: without --run filter, both questions are visible.
   res = runVerb(['orchestrate', 'questions', '--open', '--forge-dir', forgeDir], work);
@@ -266,9 +271,6 @@ test('dispatch-skill-flow: question round — workers write, skill polls --run -
   assert.equal(onlyA.questions.length, 1, 'filter must trim to runA only');
   assert.equal(onlyA.questions[0]?.run_id, runA);
   // Skill would now AskUserQuestion(this), then call `answer`.
-  // Suppress unused-vars: qIdA/qIdB are the same IDs the verb just returned.
-  void qIdA;
-  void qIdB;
   const targetQid = onlyA.questions[0]!.question_id;
   const targetOption = onlyA.questions[0]!['options' as keyof typeof onlyA.questions[0]] as unknown as Array<{ id: string }>;
   const optionId = targetOption[0]!.id;

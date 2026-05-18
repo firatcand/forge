@@ -1,27 +1,16 @@
 // `forge orchestrate render-worker-prompt` — render the worker prompt for a
-// dispatched attempt. Read-only: gathers WorkerPromptContext from filesystem
-// state (manifest + phases.yaml + CLAUDE.md + settings.yaml + attempt history)
-// and returns the rendered prompt string in a JSON envelope.
-//
-// The dispatch skill calls this AFTER claim+dispatch, then injects the
-// returned prompt into the host's Task tool when spawning the worker subagent.
-//
-// Sources per FORGE-98 plan §Renderer context sources:
-//   - taskId, attemptId         ← CLI flags
-//   - runId, worktreePath, phase ← attempts/<attempt>/manifest.json
-//   - taskDescription, AC       ← plans/phases.yaml (matched by tracker_issue_id)
-//   - conventions               ← CLAUDE.md (preferred) or AGENTS.md (fallback)
-//   - host                      ← .forge/settings.yaml#primary_host_cli
-//   - priorAttempts             ← walk attempts/* excluding current
-//   - answeredQuestions         ← walk attempts/*/answers/*.json
-//
-// All sources are read-only — no state mutation. Errors surface specific codes
-// so the skill can show actionable recovery hints.
+// dispatched attempt. Read-only. Sources WorkerPromptContext from:
+//   - attempts/<attempt>/manifest.json      → runId, worktreePath, phase
+//   - plans/phases.yaml (tracker_issue_id)  → taskDescription, acceptance
+//   - CLAUDE.md or AGENTS.md                → conventions
+//   - .forge/settings.yaml                  → host
+//   - attempts/*                            → prior attempts + answered Qs
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 
 import {
+  PhaseSchema,
   RenderWorkerPromptArgsSchema,
   type RenderWorkerPromptArgs,
 } from '../../schemas/cli-args.ts';
@@ -66,10 +55,19 @@ function readManifest(forgeDir: string, taskId: string, attemptId: string): Mani
     if (
       typeof parsed.attempt_id !== 'string' ||
       typeof parsed.run_id !== 'string' ||
-      typeof parsed.phase !== 'string' ||
       typeof parsed.worktree_path !== 'string'
     ) {
       throw new RenderError('MANIFEST_INVALID', `manifest at ${p} missing required fields`);
+    }
+    // PhaseSchema rejects anything outside the enum so a stale/corrupted
+    // manifest with `phase: "complete"` (or any other freeform string)
+    // surfaces a clear error here rather than silently casting in the
+    // ctx.phase line below.
+    if (!PhaseSchema.safeParse(parsed.phase).success) {
+      throw new RenderError(
+        'MANIFEST_INVALID',
+        `manifest at ${p} has invalid phase value '${String(parsed.phase)}' (expected implement|review|ship)`,
+      );
     }
     return parsed;
   } catch (err) {

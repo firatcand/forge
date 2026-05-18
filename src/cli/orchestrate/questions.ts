@@ -1,6 +1,6 @@
 import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/index.ts';
 import { QuestionChannelError } from '../../orchestrator/questions/errors.ts';
-import { QuestionsArgsSchema, type QuestionsArgs } from '../../schemas/cli-args.ts';
+import { QuestionsArgsSchema } from '../../schemas/cli-args.ts';
 import { fail, ok, type Envelope } from '../envelope.ts';
 
 // Local emit replacement that honors the injected stdout stream (required by
@@ -45,24 +45,27 @@ export function runOrchestrateQuestions(
   const err = opts.stderr ?? process.stderr;
   const json = opts.json === true;
 
-  // --json with --open: validate args via zod (catches malformed runId early).
-  // Without --json, preserve the historical "Usage:" line on missing --open
-  // so existing callers (text mode) don't see a JSON envelope unexpectedly.
+  // Validate inputs once at the entry. Schema rejects malformed runId
+  // regardless of --open; the USAGE error only fires for the truly-missing
+  // --open case. Text mode preserves the historical stderr "Usage:" line.
+  const parsed = QuestionsArgsSchema.safeParse({
+    open: opts.open,
+    forgeDir: opts.forgeDir,
+    json,
+    ...(opts.runId ? { runId: opts.runId } : {}),
+  });
+  if (!parsed.success) {
+    if (json) {
+      return {
+        exitCode: writeEnvelope(fail('INVALID_ARGS', parsed.error.message, false), out),
+      };
+    }
+    err.write(`forge orchestrate questions: ${parsed.error.message}\n`);
+    return { exitCode: 1 };
+  }
+
   if (!opts.open) {
     if (json) {
-      const args: QuestionsArgs = {
-        open: false,
-        forgeDir: opts.forgeDir,
-        json: true,
-        ...(opts.runId ? { runId: opts.runId } : {}),
-      };
-      // Will fail because open=false has no semantics for listing.
-      const parsed = QuestionsArgsSchema.safeParse(args);
-      if (!parsed.success) {
-        return {
-          exitCode: writeEnvelope(fail('INVALID_ARGS', parsed.error.message, false), out),
-        };
-      }
       return {
         exitCode: writeEnvelope(
           fail('USAGE', 'forge orchestrate questions requires --open', false),
@@ -74,21 +77,6 @@ export function runOrchestrateQuestions(
       'Usage: forge orchestrate questions --open [--run <run_id>] [--json] [--forge-dir <path>]\n',
     );
     return { exitCode: 1 };
-  }
-
-  // --open present: validate full args.
-  if (json) {
-    const parsed = QuestionsArgsSchema.safeParse({
-      open: true,
-      forgeDir: opts.forgeDir,
-      json: true,
-      ...(opts.runId ? { runId: opts.runId } : {}),
-    });
-    if (!parsed.success) {
-      return {
-        exitCode: writeEnvelope(fail('INVALID_ARGS', parsed.error.message, false), out),
-      };
-    }
   }
 
   let questions;

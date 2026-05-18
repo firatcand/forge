@@ -1,13 +1,5 @@
 // `forge orchestrate ensure-worktree` — idempotent worktree create + hydrate.
-//
-// Owns `.forge/worktrees/<task_id>/` per ORCHESTRATOR.md §80-98: only the CLI
-// may create/remove worktrees. Both /pickup-task and /forge orchestrate call
-// this verb instead of running `git worktree add` from skill markdown
-// (Codex 2nd-pass #5 — architectural authority lives in CLI).
-//
-// Idempotence: if `.forge/worktrees/<task_id>/.forge/worktree-task.json`
-// exists with matching task_id, no-op exit 0. With a conflicting task_id
-// (someone else's worktree at the same path), exit 1 WORKTREE_CONFLICT.
+// Owns `.forge/worktrees/<task_id>/` per ORCHESTRATOR.md §80-98.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -171,8 +163,15 @@ export async function runOrchestrateEnsureWorktree(
   } catch (err) {
     const code = err instanceof WorkspaceError ? err.code : 'IO_ERROR';
     const message = err instanceof Error ? err.message : String(err);
+    // Retriable flag per WorkspaceErrorCode semantics:
+    //   - GIT_FAILURE  → stale index.lock, FS race, transient git plumbing — retry-safe
+    //   - GITIGNORED_LOSS, NOT_FOUND, SYMLINK_REJECTED → environment/config — not retriable
+    //   - validation codes (EMPTY, INVALID_CHAR, PATH_TRAVERSAL, etc.) → input-side, not retriable
+    //   - non-WorkspaceError → unknown; conservatively mark retriable
+    const retriable =
+      err instanceof WorkspaceError ? err.code === 'GIT_FAILURE' : true;
     return {
-      exitCode: emit(fail(code, message, /* retriable */ false), { json: opts.json }),
+      exitCode: emit(fail(code, message, retriable), { json: opts.json }),
     };
   }
 
