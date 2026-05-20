@@ -6,13 +6,69 @@
 
 ## Amendments (2026-05-17 PM — team-mode minimum architecture, supersedes morning amendment in part)
 
-Surgical reset driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode-minimum-architecture.md). After four rounds of Codex stress-tests against a 5-person-team scenario, the user pulled the morning's closed-loop redesign back to a minimum-viable shape for v0.4.
+Driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode-minimum-architecture.md). After four rounds of Codex stress-tests against a 5-person-team scenario, the user pulled the morning's closed-loop redesign back to a minimum-viable shape for v0.4. SPEC.md §21 and CONTEXT.md carry parallel amendment blocks; [CLAUDE.md §Source of truth](../CLAUDE.md) carries the canonical authority matrix.
+
+**Sections in this PRD that are now partially or fully superseded (read this amendment before trusting them):**
+
+| Section | Status |
+|---|---|
+| §Feature 5 — Drift workflow + ephemeral ADRs (lines ~302-358) | **Deferred to v0.5 opt-in** — only `templates/adr.template.md` ships in v0.4 (FORGE-92); full lifecycle lands in v0.5 (FORGE-93, FORGE-95) |
+| §Feature 6 — Mid-flight roadmap mutation (lines ~361-410) | **Deferred to v0.5 opt-in** — only `/reconcile` ships in v0.4 (FORGE-100); `/amend-roadmap` lands in v0.5 (FORGE-101); `worktree-drift-guard` is dropped (FORGE-103 canceled) |
+| §Acceptance criteria — Closed-loop drift contract bullet (line ~428) | **Deferred to v0.5** with the drift workflow |
+| §Acceptance criteria — Precedence enforcement bullet (line ~430) | **Superseded** — replaced with authority-by-field (see below); no worker drift events in v0.4 |
+| §Acceptance criteria — Resumable apply bullet (line ~431) | **Deferred to v0.5** with the `/update-spec --apply` journal |
+| §Locked architectural decisions — Decision 10 (artifact precedence) | **Superseded** — replaced with authority-by-field (see below and CLAUDE.md) |
+| §Locked architectural decisions — Decision 11 (ephemeral ADRs) | **Deferred to v0.5** — only template scaffold ships in v0.4 (FORGE-92) |
+| §Precedence rules (lines ~540-573, 6-level chain) | **Superseded 2026-05-17 PM** — see §Authority by field below |
+| Flow B `npx @firatcand/forge doctor [reports drift: @inherit pattern detected]` (line ~504) | **Rewritten** — v0.4 doctor scope is SPEC↔code only |
+
+**Sections that stay as written:**
+
+| Section | Status |
+|---|---|
+| §Problem, §Target user, §Per-feature breakdown (Features 1-4) | Unchanged |
+| §Feature 3 init flow | Unchanged structurally; small annotation on `templates/adr.template.md` mention |
+| §Feature 4 settings.yaml example | Unchanged structurally; comment line added above `decisions:` block (v0.5-only) |
+| §Acceptance criteria (overall v-next), §Explicit non-goals | Unchanged except for the annotated bullets above |
+| §Constraints, §User flows (cross-feature) | Unchanged except for Flow B doctor line |
+| §Locked architectural decisions 1-9 | Unchanged |
+| §Doctor enforcement (cleaned in FORGE-99) | Unchanged |
+
+### Authority by field (replaces the 6-level precedence chain)
+
+The 6-level linear precedence rule (`user > SPEC > PRD > phases > tracker > attempts`) is replaced with a matrix of ownership by concern. Authoritative version lives in [CLAUDE.md §Source of truth](../CLAUDE.md) and [SPEC §21](SPEC.md); short form:
+
+| Artifact | Owns |
+|---|---|
+| `spec/SPEC.md` | Architecture, constraints, non-functional requirements |
+| `spec/PRD.md` | Product behavior, user-facing acceptance criteria |
+| `plans/phases.yaml` | Local execution snapshot (derived from tracker; do not hand-edit) |
+| Tracker issue body | Execution metadata: assignee, status, sequencing, live coordination |
+| Source code | Implementation |
+
+**Workers ask "whose field is this?" not "which artifact ranks higher?"** No drift event, no `/update-spec --apply` propagation, no forge-mediated escalation in v0.4. SPEC changes flow through standard git (`git commit && git push`). Other engineers `git pull` and adapt their in-flight work.
+
+### Out of scope for v0.4 (re-listed for clarity)
+
+- `/update-spec --draft` and `/update-spec --apply` skills
+- `forge orchestrate apply-decision` verb + apply-journal
+- `/amend-roadmap` skill + verb
+- `forge orchestrate worktree-drift-guard` verb (FORGE-103 canceled — dropped, not deferred)
+- Drift events, drift-routed questions, `QuestionIndex.drift_event_id`, `QuestionIndex.routing_hint`
+- Section ownership tags (`<!-- forge:section affects=... -->`)
+- Active worktree file-glob registry as architectural-safety gate
+- `forge spec-push --affects` flag
+- Forge-enforced PR review policy
+
+The ADR template scaffold (`templates/adr.template.md`) does ship in v0.4 (FORGE-92) as preparation for the v0.5 lifecycle.
+
+### Rationale (preserved from the original PM amendment prose)
 
 **What changes vs the morning amendment below:**
 
-- **Feature 5 (Drift workflow + ephemeral ADRs)** — **deferred to v0.5 opt-in.** No `/update-spec --draft`, no `/update-spec --apply`, no `apply-decision` verb, no `templates/adr.template.md` in v0.4. SPEC changes flow through standard git (`git commit && git push`). Other engineers `git pull` and adapt their in-flight work. Forge does not mediate.
+- **Feature 5 (Drift workflow + ephemeral ADRs)** — **deferred to v0.5 opt-in.** No `/update-spec --draft`, no `/update-spec --apply`, no `apply-decision` verb in v0.4. SPEC changes flow through standard git (`git commit && git push`). Other engineers `git pull` and adapt their in-flight work. Forge does not mediate.
 - **Feature 6 (Mid-flight roadmap mutation)** — **deferred to v0.5 opt-in.** No `/amend-roadmap`, no `worktree-drift-guard`. v0.4 uses direct tracker edit + `/reconcile --pull` for scope changes.
-- **§Precedence rules** — the 6-level linear chain is replaced with **authority-by-field**: SPEC owns architecture, PRD owns product behavior, tracker owns execution scope, phases.yaml is a derived snapshot. No single precedence chain; ownership is per-concern.
+- **§Precedence rules** — the 6-level linear chain is replaced with **authority-by-field** (see table above).
 - **No contradiction gate** on SPEC pushes. The morning's `/update-spec --apply` propagation and the briefly-considered `forge spec-push --affects` flag are both dropped. Forge provides mechanism (scaffold + dispatch + sync), not policy (review rituals, conflict resolution, PR enforcement). Team coordination is the team's responsibility.
 - **`phases.yaml` becomes a derived snapshot** regenerated by `/reconcile --pull` from the tracker. Source-of-truth for execution scope is the tracker. phases.yaml carries a source metadata stanza (`tracker`, `synced_at`, `tracker_revision`, `spec_revision`); every command that reads it displays a freshness summary.
 - **Spec files untracked from forge's own `.gitignore`** — they were git-ignored to keep them out of the published npm package. The correct control is `package.json#files` allowlist + a CI `npm pack` gate, not gitignore. Spec files are now committed and part of the shared source of truth across maintainers.
@@ -191,7 +247,7 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - GitHub Issues → checks for `gh` CLI authenticated
    - Notion → asks for API key, validates
    - Coding agents → checks for `claude --version`, `codex --version`, etc.
-4. CLI scaffolds project files using `templates/` (BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`, plus `templates/adr.template.md` for `/update-spec --draft`)
+4. CLI scaffolds project files using `templates/` (BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`, plus `templates/adr.template.md` *— template ships in v0.4 for v0.5 prep; the `/update-spec --draft` skill itself is deferred to v0.5, see Feature 5*)
 5. CLI writes `.forge/settings.yaml` with all answers
 6. CLI prints clear next-step instructions: *"Run `claude` and then `/forge` to start the discovery interview. Run `/status-check` any time to see project state."*
 
@@ -262,9 +318,10 @@ design:
 codex:
   auto_codex_enabled: true          # auto-suggest /codex at /plan-task exit, ADR draft, pre-/ship
   auto_codex_token_cap: 50000       # max tokens per session for auto-codex (0 disables)
+# decisions: — v0.5 only (no v0.4 consumer; block reserved in schema for forward compatibility)
 decisions:
-  decision_dir: ./spec/decisions    # where draft ADRs live (ephemeral; deleted on --apply)
-  stale_draft_threshold_days: 7     # doctor warns about drafts older than this
+  decision_dir: ./spec/decisions    # where draft ADRs live (ephemeral; deleted on --apply) [v0.5]
+  stale_draft_threshold_days: 7     # doctor warns about drafts older than this [v0.5]
 doctor:
   spec_code_check_enabled: true     # grep SPEC for symbols, check src/ for hits
 ```
@@ -299,9 +356,11 @@ doctor:
 
 ---
 
-### Feature 5: Drift workflow + ephemeral ADRs (added 2026-05-17, simplified)
+### Feature 5: Drift workflow + ephemeral ADRs (added 2026-05-17 — deferred to v0.5)
 
-**What it does**
+> **Deferred to v0.5.** — Feature 5 (drift workflow + ephemeral ADRs) does not ship in v0.4. Only the template scaffold at `templates/adr.template.md` ships in v0.4 (FORGE-92) as preparation. The `/update-spec --draft` and `--apply` skills, the `apply-decision` verb, the apply-journal, and `worktree-drift-guard` all land in v0.5 (FORGE-93, FORGE-95, FORGE-101). The full feature description below is preserved as v0.5 design reference. See §Amendments (PM) above and SPEC §21 for the rationale.
+
+**What it does (v0.5 design intent)**
 Surfaces, formalizes, and propagates mid-flight architectural decisions so all artifacts stay in sync. `spec/decisions/` is a **staging area** for in-flight decisions, NOT a permanent record. Three coordinated primitives, collapsed into a single user-facing skill:
 
 - **`/update-spec --draft`** — opens a new ADR draft at `spec/decisions/<date>-<slug>.md` (MADR-shaped frontmatter for structure). User reviews + optionally consults Codex via auto-suggested `/codex review-decision`. User marks `status: accepted` in frontmatter when ready.
@@ -358,14 +417,16 @@ Surfaces, formalizes, and propagates mid-flight architectural decisions so all a
 
 ---
 
-### Feature 6: Mid-flight roadmap mutation (added 2026-05-17)
+### Feature 6: Mid-flight roadmap mutation (added 2026-05-17 — deferred to v0.5 except /reconcile)
 
-**What it does**
+> **Deferred to v0.5.** — Feature 6 (/amend-roadmap + worktree-drift-guard) does not ship in v0.4. `/reconcile` DOES ship in v0.4 via FORGE-100 (it's part of the v0.4 surface, just specced here alongside the v0.5 primitives). `/amend-roadmap` lands in v0.5 (FORGE-101). `worktree-drift-guard` is dropped — FORGE-103 was canceled per the §21 pivot. The full feature description below is preserved as v0.5 design reference. See §Amendments (PM) above and SPEC §21 for the rationale.
+
+**What it does (v0.5 design intent; /reconcile already lives in v0.4)**
 First-class skills to mutate the roadmap mid-build without violating the artifact-precedence contract:
 
-- **`/amend-roadmap`** — create new tasks mid-flight; updates phases.yaml AND pushes to tracker with dependency edges in one atomic step (rolls back both on failure)
-- **`/reconcile`** (replaces `/sync-status --write` from earlier drafts) — bi-directional sync between phases.yaml and tracker; resolves divergence with conflict detection; `--pull` reads tracker → phases.yaml, `--push` reverse
-- **Worktree drift guard** (`forge orchestrate worktree-drift-guard`) — when SPEC/phases changes affect an active task's worktree, flag for rebase or restart; preserves worktree state under `.forge/orchestrator/legacy/` on restart; `--dry-run` available for preview (Codex I1)
+- **`/amend-roadmap`** *(v0.5)* — create new tasks mid-flight; updates phases.yaml AND pushes to tracker with dependency edges in one atomic step (rolls back both on failure)
+- **`/reconcile`** *(v0.4 — FORGE-100)* (replaces `/sync-status --write` from earlier drafts) — bi-directional sync between phases.yaml and tracker; resolves divergence with conflict detection; `--pull` reads tracker → phases.yaml, `--push` reverse
+- **Worktree drift guard** *(dropped — FORGE-103 canceled)* (`forge orchestrate worktree-drift-guard`) — when SPEC/phases changes affect an active task's worktree, flag for rebase or restart; preserves worktree state under `.forge/orchestrator/legacy/` on restart; `--dry-run` available for preview (Codex I1)
 
 **User flow**
 
@@ -425,10 +486,10 @@ End-to-end criteria that prove v-next ships:
   - `npx @firatcand/forge --version` runs in <500ms
   - No new top-level npm dependencies beyond what's in v0.2.1 (lightweight discipline)
   - All four features covered by tests in `examples/` end-to-end harness
-- [ ] **Closed-loop drift contract (added 2026-05-17):** Mid-flight architectural change drafted via `/update-spec --draft`, accepted, applied via `/update-spec --apply <slug>` propagates to SPEC + PRD + phases.yaml + tracker bodies atomically; ADR file is deleted; rationale lands in commit message body. `forge orchestrate doctor` returns 0 after.
+- [ ] **Closed-loop drift contract (added 2026-05-17 — *deferred to v0.5*, see §Amendments PM):** Mid-flight architectural change drafted via `/update-spec --draft`, accepted, applied via `/update-spec --apply <slug>` propagates to SPEC + PRD + phases.yaml + tracker bodies atomically; ADR file is deleted; rationale lands in commit message body. `forge orchestrate doctor` returns 0 after. *(v0.4: SPEC changes flow through standard git; doctor scope is SPEC↔code only.)*
 - [ ] **Suggest-don't-force (added 2026-05-17, simplified):** No CLI verb silently claims, dispatches, or mutates roadmap. All mutation flows through user-approved skills. Read-only verbs (`status`, `questions`, `doctor`, `phases`, `attach`) emit no side effects beyond their own log line.
-- [ ] **Precedence enforcement (added 2026-05-17):** When SPEC/PRD/phases.yaml/tracker disagree, workers emit drift events instead of silently fixing. Resolved through `/update-spec --apply` (architectural) or `/amend-roadmap` (scope) or `/reconcile` (sync). See §Precedence rules.
-- [ ] **Resumable apply (added 2026-05-17 per Codex C2):** `/update-spec --apply <slug>` is resumable via `--resume`; partial tracker push failures don't destroy local edits; journal at `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`.
+- [ ] **Authority by field (replaces "precedence enforcement" — superseded 2026-05-17 PM):** When two artifacts disagree, workers ask "whose field is this?" and follow ownership-by-concern (SPEC owns architecture; PRD owns product behavior; tracker owns execution state; phases.yaml is a derived snapshot). No drift events, no automated propagation in v0.4. See §Amendments PM above and [CLAUDE.md §Source of truth](../CLAUDE.md).
+- [ ] **Resumable apply (added 2026-05-17 per Codex C2 — *deferred to v0.5*):** `/update-spec --apply <slug>` is resumable via `--resume`; partial tracker push failures don't destroy local edits; journal at `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`. *(v0.4 has no apply verb; deferred to v0.5 with the rest of the drift workflow.)*
 
 ## Explicit non-goals (v-next)
 
@@ -501,8 +562,8 @@ claude                                 [normal Claude Code launch]
 ### Flow B: Existing forge v0.2.1 project upgrading to v-next
 ```
 npm install @firatcand/forge@latest
-npx @firatcand/forge doctor             [reports drift: @inherit pattern detected]
-npx @firatcand/forge migrate            [proposes DESIGN.md conversion, alias for /push-to-tracker]
+npx @firatcand/forge doctor             [reports SPEC↔code drift if any — v0.4 doctor scope]
+npx @firatcand/forge migrate            [proposes DESIGN.md conversion (@inherit pattern → project-owned), alias for /push-to-tracker]
 # review diff, accept
 forge orchestrate                       [resume work in new orchestrator]
 ```
@@ -532,12 +593,18 @@ claude
 7. **Migration for v0.2.1 users:** `forge migrate` does best-effort auto-convert with diff preview. Detects `@inherit` lines in existing DESIGN.md and proposes project-owned replacement; provides `/push-to-linear` → `/push-to-tracker` deprecation alias for one minor version.
 8. **Tracker adapter interface:** Responsibilities listed in Feature 1 (`listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `createIssue`, `createProject`, `setBlockedBy`). Formal typed interface signatures defer to /draft-spec. Extended 2026-05-17 with `updateIssueBody(id, body)` for `/update-spec --apply` and `/reconcile` propagation.
 9. **Suggest-don't-force (added 2026-05-17, simplified):** Skills present ready work via skill-end nudges and `/pickup-task`; user always approves before any state mutation. CLI verbs are split into read-only (`status`, `questions`, `doctor`, `phases`, `attach`) and user-approved mutate (everything else). No verb may straddle the boundary. No session-start hooks installed (sole-user workflow doesn't need automated re-grounding; explicit `/status-check` covers it).
-10. **Artifact precedence (added 2026-05-17, simplified):** When two artifacts disagree, agents follow: user instruction > SPEC > PRD > phases.yaml > tracker body > older attempts. Tracker body is a **projection** of phases.yaml, not equal authority. Workers MUST emit drift events rather than silently fix higher-precedence artifacts. See §Precedence rules. Ephemeral ADRs are NOT in the precedence chain (they're transient staging artifacts; SPEC IS truth post-apply).
-11. **Ephemeral ADRs (added 2026-05-17):** Architectural decisions are formalized via `/update-spec --draft` (writes a staging file to `spec/decisions/`), reviewed (optionally with `/codex review-decision`), accepted (user flips frontmatter), then propagated to SPEC + PRD + phases + tracker via `/update-spec --apply <slug>`. The propagation DELETES the ADR file on success; the rationale (Context + Decision + Alternatives + Consequences) goes into the apply-commit's message body. SPEC is the sole durable source of truth; `git log -- spec/SPEC.md` is the rationale history.
+10. ~~**Artifact precedence (added 2026-05-17, simplified):** When two artifacts disagree, agents follow: user instruction > SPEC > PRD > phases.yaml > tracker body > older attempts.~~ **Superseded 2026-05-17 PM** — replaced with **authority by field** (see §Amendments PM above and [CLAUDE.md §Source of truth](../CLAUDE.md)). Each artifact owns specific concerns; there is no linear ranking. The original 6-level prose below remains as reasoning trail, NOT as binding rule.
+
+    *Original superseded text:* When two artifacts disagree, agents follow: user instruction > SPEC > PRD > phases.yaml > tracker body > older attempts. Tracker body is a **projection** of phases.yaml, not equal authority. Workers MUST emit drift events rather than silently fix higher-precedence artifacts. See §Precedence rules. Ephemeral ADRs are NOT in the precedence chain (they're transient staging artifacts; SPEC IS truth post-apply).
+11. **Ephemeral ADRs (added 2026-05-17 — *deferred to v0.5*):** Only `templates/adr.template.md` ships in v0.4 (FORGE-92) as preparation. The full lifecycle described below — `/update-spec --draft`, optional `/codex review-decision`, `--apply` propagation, ADR-file-deleted-on-success, commit-message-as-rationale — lands in v0.5 (FORGE-93, FORGE-95). In v0.4, architectural decisions are propagated to SPEC via standard `git commit && git push`; the rationale history lives in `git log -- spec/SPEC.md`.
+
+    *v0.5 design intent (preserved as reference):* Architectural decisions are formalized via `/update-spec --draft` (writes a staging file to `spec/decisions/`), reviewed (optionally with `/codex review-decision`), accepted (user flips frontmatter), then propagated to SPEC + PRD + phases + tracker via `/update-spec --apply <slug>`. The propagation DELETES the ADR file on success; the rationale (Context + Decision + Alternatives + Consequences) goes into the apply-commit's message body. SPEC is the sole durable source of truth; `git log -- spec/SPEC.md` is the rationale history.
 
 ---
 
-## Precedence rules (binding contract — added 2026-05-17)
+## Precedence rules (superseded 2026-05-17 PM — see §Authority by field in §Amendments above)
+
+> **Superseded 2026-05-17 PM.** — the 6-level precedence chain described in this section is no longer the v0.4 contract. v0.4 uses **authority by field** (see §Amendments PM at the top of this file and [CLAUDE.md §Source of truth](../CLAUDE.md)). The original prose is preserved as reasoning trail. The mutation-paths table and drift-event flow describe v0.5 design intent that lands with FORGE-93/95.
 
 When two artifacts disagree, agents and skills MUST follow this order:
 
