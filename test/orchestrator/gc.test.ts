@@ -703,6 +703,7 @@ test('gc: GcPlanRow union is exhaustively handled by a switch (compile-time chec
       expectedClaimId: 'c',
       expectedGeneration: 0,
       expectedOwnerRunId: 'r',
+      expectedExpiresAt: '2026-01-01T00:00:00.000Z',
       expectedPath: '/p',
       requireTerminalState: true,
       reason: 'gc:row-14:terminal-state',

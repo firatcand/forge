@@ -935,12 +935,20 @@ export interface AdminReleaseByIdentityOptions {
   expectedClaimId: string;
   expectedGeneration: number;
   expectedOwnerRunId: string;
+  // The lease's expires_at AT SNAPSHOT TIME. heartbeat() preserves
+  // (claim_id, generation, owner_run_id) — only expires_at and
+  // last_heartbeat_at change — so without this field a heartbeat firing
+  // between snapshot and unlink would silently bypass identity detection and
+  // we'd unlink a live, freshly-renewed lease. (Codex 3rd-pass BLOCK 1.)
+  expectedExpiresAt: string;
   // Exact file path. For row 14 this is the canonical lease path; for row 13 a
   // non-canonical duplicate (e.g., `lease.json.<bak>`) — the function will read
   // and unlink whatever file lives at this path.
   expectedPath: string;
   // When true (row 14), also re-read state.json at the canonical state path
-  // and confirm state ∈ TERMINAL_TASK_STATES before unlink.
+  // and confirm state ∈ TERMINAL_TASK_STATES before unlink. State is re-read
+  // IMMEDIATELY before unlink to minimise the state-check → unlink TOCTOU
+  // window. (Codex 3rd-pass BLOCK 1.)
   requireTerminalState: boolean;
   reason: AdminReleaseReason;
 }
@@ -970,24 +978,31 @@ export function adminReleaseLeaseByIdentity(
     return;
   }
 
-  // 2. Identity check — all three identity fields must match.
+  // 2. Identity check — all FOUR fields must match. expires_at catches
+  //    heartbeat-renewals that preserve (claim_id, generation, owner_run_id)
+  //    but change expires_at. Without this check, a heartbeat firing between
+  //    snapshot and unlink would slip through identity validation and we'd
+  //    unlink an actively-renewed lease. (Codex 3rd-pass BLOCK 1.)
   if (
     storedLease.claim_id !== opts.expectedClaimId ||
     storedLease.generation !== opts.expectedGeneration ||
-    storedLease.owner_run_id !== opts.expectedOwnerRunId
+    storedLease.owner_run_id !== opts.expectedOwnerRunId ||
+    storedLease.expires_at !== opts.expectedExpiresAt
   ) {
     throw new OrchestratorError(
       'LEASE_IDENTITY_MISMATCH',
-      `Lease at ${expectedPath} for task ${taskId} does not match expected identity`,
+      `Lease at ${expectedPath} for task ${taskId} does not match expected identity (possible concurrent heartbeat)`,
       {
         taskId,
         path: expectedPath,
         expected_claim_id: opts.expectedClaimId,
         expected_generation: opts.expectedGeneration,
         expected_owner_run_id: opts.expectedOwnerRunId,
+        expected_expires_at: opts.expectedExpiresAt,
         stored_claim_id: storedLease.claim_id,
         stored_generation: storedLease.generation,
         stored_owner_run_id: storedLease.owner_run_id,
+        stored_expires_at: storedLease.expires_at,
         reason,
       },
     );
@@ -1050,7 +1065,75 @@ export function adminReleaseLeaseByIdentity(
     }
   }
 
-  // 4. Unlink. ENOENT is benign (idempotent re-run after partial failure).
+  // 4. Verify-before-unlink: re-read the lease ONE more time immediately
+  //    before unlink. This is defense-in-depth on top of the identity check
+  //    at step 2 — if a heartbeat refreshed the lease between step 2 and now,
+  //    expires_at will have advanced. We cannot fully close the unlink-then-
+  //    re-link race (would need flock or equivalent), but this check
+  //    eliminates the most common observable window. Same shape as the
+  //    "Fix 1 (steal verify-before-write)" pattern in steal() above.
+  //    (Codex 3rd-pass BLOCK 1.)
+  const finalLease = readLeaseFile(taskId, expectedPath);
+  if (finalLease === null) {
+    return; // raced with another unlinker — benign
+  }
+  if (
+    finalLease.claim_id !== opts.expectedClaimId ||
+    finalLease.generation !== opts.expectedGeneration ||
+    finalLease.owner_run_id !== opts.expectedOwnerRunId ||
+    finalLease.expires_at !== opts.expectedExpiresAt
+  ) {
+    throw new OrchestratorError(
+      'LEASE_IDENTITY_MISMATCH',
+      `Lease at ${expectedPath} for task ${taskId} was modified between identity check and unlink (concurrent heartbeat)`,
+      {
+        taskId,
+        path: expectedPath,
+        reason,
+        detail: 'verify-before-unlink check failed',
+      },
+    );
+  }
+
+  // 4b. For row 14: re-read state.json IMMEDIATELY before unlink and re-
+  //     confirm terminal state. complete.ts can transition state from a
+  //     terminal value back to 'running' (e.g., on changes_requested) so a
+  //     stale terminal check is not safe. (Codex 3rd-pass BLOCK 1 — row 14
+  //     state-check-to-unlink window.)
+  if (requireTerminalState) {
+    const statePath = stateFilePath(forgeDir, taskId);
+    let stateRaw: string;
+    try {
+      stateRaw = fs.readFileSync(statePath, 'utf8');
+    } catch (err) {
+      if (isNodeFsError(err) && err.code === 'ENOENT') {
+        throw new OrchestratorError(
+          'LEASE_STATE_NOT_TERMINAL',
+          `State for task ${taskId} disappeared between snapshot and unlink`,
+          { taskId, reason },
+        );
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to re-read state.json for task ${taskId} during admin release`,
+        { taskId, cause: err, reason },
+      );
+    }
+    const stateParsed = TaskStateSchema.safeParse(JSON.parse(stateRaw));
+    if (!stateParsed.success || !isTerminalTaskState(stateParsed.data.state)) {
+      throw new OrchestratorError(
+        'LEASE_STATE_NOT_TERMINAL',
+        `Refusing admin release: task ${taskId} state '${stateParsed.success ? stateParsed.data.state : 'invalid'}' is not terminal (re-check before unlink)`,
+        {
+          taskId,
+          current_state: stateParsed.success ? stateParsed.data.state : null,
+          reason,
+        },
+      );
+    }
+  }
+
+  // 5. Unlink. ENOENT is benign (idempotent re-run after partial failure).
   try {
     fs.unlinkSync(expectedPath);
   } catch (err) {
@@ -1064,7 +1147,7 @@ export function adminReleaseLeaseByIdentity(
     );
   }
 
-  // 5. Record the admin release in claim-history.jsonl with the reason. This
+  // 6. Record the admin release in claim-history.jsonl with the reason. This
   //    is the audit trail — any unexpected admin_released event in a production
   //    run is a bug to investigate.
   appendClaimHistory(forgeDir, taskId, {

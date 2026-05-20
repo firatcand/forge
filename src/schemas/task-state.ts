@@ -43,10 +43,18 @@ export const TaskStateSchema = z
       generation: z.number().int().min(0),
     }),
   })
+  // Asymmetric invariant: failure_reason MUST imply state === 'failed', but
+  // we do NOT require state === 'failed' to carry a failure_reason. This is
+  // the migration-safe choice (Codex 3rd-pass CONSIDER 3): adopter state.json
+  // files written by callers that pre-date the failure_reason discriminator
+  // (e.g., a manual `running:retries_exhausted → failed` transition without
+  // a producer) continue to parse. New callers that want decision-key vs
+  // retries-exhausted vs fatal differentiation set failure_reason; readers
+  // that need it can default to 'fatal' when absent on a failed state.
   .refine(
-    (s) => (s.failure_reason !== undefined) === (s.state === 'failed'),
+    (s) => s.failure_reason === undefined || s.state === 'failed',
     {
-      message: "failure_reason must be present iff state === 'failed'",
+      message: "failure_reason is only permitted when state === 'failed'",
       path: ['failure_reason'],
     },
   );

@@ -689,6 +689,7 @@ test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + ter
     expectedClaimId: lease.claim_id,
     expectedGeneration: lease.generation,
     expectedOwnerRunId: lease.owner_run_id,
+    expectedExpiresAt: lease.expires_at,
     expectedPath: leaseFilePath(fd, 'TASK-R14'),
     requireTerminalState: true,
     reason: 'gc:row-14:terminal-state',
@@ -729,6 +730,7 @@ test('adminReleaseLeaseByIdentity: row-13 happy path — matching identity at no
     expectedClaimId: 'claim-OLD',
     expectedGeneration: 0,
     expectedOwnerRunId: 'run-OLD',
+    expectedExpiresAt: dupLease.expires_at,
     expectedPath: dupPath,
     requireTerminalState: false, // row 13 doesn't gate on terminal state
     reason: 'gc:row-13:duplicate',
@@ -754,6 +756,7 @@ test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on claim_id mismatch 
         expectedClaimId: 'claim-wrong',
         expectedGeneration: lease.generation,
         expectedOwnerRunId: lease.owner_run_id,
+        expectedExpiresAt: lease.expires_at,
         expectedPath: leaseFilePath(fd, 'TASK-MM-C'),
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
@@ -777,6 +780,7 @@ test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on generation mismatc
         expectedClaimId: lease.claim_id,
         expectedGeneration: lease.generation + 1,
         expectedOwnerRunId: lease.owner_run_id,
+        expectedExpiresAt: lease.expires_at,
         expectedPath: leaseFilePath(fd, 'TASK-MM-G'),
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
@@ -800,6 +804,7 @@ test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on owner_run_id misma
         expectedClaimId: lease.claim_id,
         expectedGeneration: lease.generation,
         expectedOwnerRunId: 'run-different',
+        expectedExpiresAt: lease.expires_at,
         expectedPath: leaseFilePath(fd, 'TASK-MM-R'),
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
@@ -823,6 +828,7 @@ test('adminReleaseLeaseByIdentity: LEASE_STATE_NOT_TERMINAL when row-14 sees run
         expectedClaimId: lease.claim_id,
         expectedGeneration: lease.generation,
         expectedOwnerRunId: lease.owner_run_id,
+        expectedExpiresAt: lease.expires_at,
         expectedPath: leaseFilePath(fd, 'TASK-NT'),
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
@@ -846,6 +852,7 @@ test('adminReleaseLeaseByIdentity: LEASE_STATE_NOT_TERMINAL when state.json abse
         expectedClaimId: lease.claim_id,
         expectedGeneration: lease.generation,
         expectedOwnerRunId: lease.owner_run_id,
+        expectedExpiresAt: lease.expires_at,
         expectedPath: leaseFilePath(fd, 'TASK-NS'),
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
@@ -868,6 +875,7 @@ test('adminReleaseLeaseByIdentity: idempotent on already-gone lease file — no 
     expectedClaimId: 'claim-X',
     expectedGeneration: 0,
     expectedOwnerRunId: 'run-X',
+    expectedExpiresAt: '2026-01-01T00:00:00.000Z',
     expectedPath: fakePath,
     requireTerminalState: false,
     reason: 'gc:row-13:duplicate',
@@ -875,6 +883,50 @@ test('adminReleaseLeaseByIdentity: idempotent on already-gone lease file — no 
 
   // No history file should have been created.
   assert.equal(existsSync(claimHistoryFilePath(fd, 'TASK-GONE')), false);
+});
+
+test('adminReleaseLeaseByIdentity: expectedExpiresAt catches heartbeat-renewal between snapshot and unlink (Codex 3rd-pass BLOCK 1)', () => {
+  const fd = forgeDir('admin-release-heartbeat-race');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-HB', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-HB', { state: 'shipped' });
+  // Simulate a heartbeat firing between snapshot and admin-release:
+  // heartbeat preserves (claim_id, generation, owner_run_id) but advances
+  // expires_at. The new identity check MUST detect this and refuse to unlink.
+  const refreshed = heartbeat({
+    forgeDir: fd,
+    taskId: 'TASK-HB',
+    caller: {
+      run_id: lease.owner_run_id,
+      claim_id: lease.claim_id,
+      generation: lease.generation,
+    },
+  });
+  assert.equal(refreshed.claim_id, lease.claim_id);
+  assert.equal(refreshed.generation, lease.generation);
+  assert.equal(refreshed.owner_run_id, lease.owner_run_id);
+  assert.notEqual(refreshed.expires_at, lease.expires_at, 'heartbeat must have changed expires_at');
+
+  // Caller still has the SNAPSHOT-time expires_at (pre-heartbeat). The function
+  // MUST refuse via LEASE_IDENTITY_MISMATCH because the on-disk expires_at no
+  // longer matches.
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-HB',
+        expectedClaimId: lease.claim_id,
+        expectedGeneration: lease.generation,
+        expectedOwnerRunId: lease.owner_run_id,
+        expectedExpiresAt: lease.expires_at, // pre-heartbeat snapshot value
+        expectedPath: leaseFilePath(fd, 'TASK-HB'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+  );
+  // Lease file remains — heartbeat was not collateral damage.
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-HB')), true, 'lease must remain after race detection');
 });
 
 test('adminReleaseLeaseByIdentity: row-13 with requireTerminalState=false skips state check entirely', () => {
@@ -895,6 +947,7 @@ test('adminReleaseLeaseByIdentity: row-13 with requireTerminalState=false skips 
     expectedClaimId: 'claim-DUP',
     expectedGeneration: 0,
     expectedOwnerRunId: 'run-DUP',
+    expectedExpiresAt: dupLease.expires_at,
     expectedPath: dupPath,
     requireTerminalState: false,
     reason: 'gc:row-13:duplicate',

@@ -83,6 +83,14 @@ export interface OrchestrateGcResult {
   // On --dry-run: rows from the plan (no mutations applied).
   // On apply: rows that were successfully executed.
   readonly reconcilerRows?: readonly GcPlanRow[];
+  // Rows whose action paths are deferred to a follow-up PR (mark_terminal,
+  // mark_abandoned, mark_unclaimed, reverify_verdict, prune_branch). Planner
+  // detected them; executor reported via stderr but did not mutate.
+  // Programmatic callers use this field to distinguish "no divergence found"
+  // (reconcilerRows: [], reconcilerDeferred: []) from "all detected rows
+  // need follow-up infrastructure" (reconcilerRows: [], reconcilerDeferred:
+  // [...]). (Codex 3rd-pass CONSIDER 4.)
+  readonly reconcilerDeferred?: readonly GcPlanRow[];
   // Reconciler rows that failed during apply, with the error message.
   readonly reconcilerErrors?: readonly { row: GcPlanRow; message: string }[];
 }
@@ -263,15 +271,15 @@ export function runOrchestrateGc(
   // doesn't strand other rows. Deferred-action rows (executor not yet wired)
   // are NOT errors — they emit a stderr warning and `applied: false`.
   const applied: GcPlanRow[] = [];
+  const deferred: GcPlanRow[] = [];
   const errors: { row: GcPlanRow; message: string }[] = [];
-  let deferredCount = 0;
   for (const row of plan.rows) {
     try {
       const outcome = executeRow(row, opts.forgeDir, out, err);
       if (outcome.applied) {
         applied.push(row);
       } else {
-        deferredCount += 1;
+        deferred.push(row);
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -283,14 +291,15 @@ export function runOrchestrateGc(
   }
 
   const summary =
-    deferredCount > 0
-      ? `gc: applied ${applied.length}/${plan.rows.length} divergence rows (${deferredCount} deferred — see warnings).\n`
+    deferred.length > 0
+      ? `gc: applied ${applied.length}/${plan.rows.length} divergence rows (${deferred.length} deferred — see warnings).\n`
       : `gc: applied ${applied.length}/${plan.rows.length} divergence rows.\n`;
   out.write(summary);
   return {
     exitCode: errors.length > 0 ? 1 : 0,
     migrated: migratedReport,
     reconcilerRows: applied,
+    reconcilerDeferred: deferred,
     reconcilerErrors: errors,
   };
 }
@@ -319,8 +328,12 @@ export function detectCheapDivergences(
   let snapshot: OrchestratorSnapshot;
   try {
     snapshot = buildSnapshot(forgeDir, now, 'cheap');
-  } catch {
-    // Best-effort — any I/O failure here is non-fatal; the host verb continues.
+  } catch (e) {
+    // Best-effort — but DON'T fail silently. A corrupt .forge/orchestrator tree
+    // is exactly the case operators need to know about; the host verb itself
+    // continues regardless. (Codex 3rd-pass IMPROVEMENT 5.)
+    const msg = e instanceof Error ? e.message : String(e);
+    err.write(`[gc] auto-detect failed (continuing): ${msg}\n`);
     return;
   }
   const plan = planGc(snapshot);
@@ -590,6 +603,7 @@ function executeRow(
         expectedClaimId: row.payload.expectedClaimId,
         expectedGeneration: row.payload.expectedGeneration,
         expectedOwnerRunId: row.payload.expectedOwnerRunId,
+        expectedExpiresAt: row.payload.expectedExpiresAt,
         expectedPath: row.payload.expectedPath,
         requireTerminalState: row.payload.requireTerminalState,
         reason: reasonMap[row.payload.reason],

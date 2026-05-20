@@ -44,19 +44,24 @@ function baseAttemptState(
 }
 
 // schemas/task-state: TaskStateSchema accepts each state value.
-// 'failed' requires a failure_reason discriminator (FORGE-22 refinement).
+// failure_reason is OPTIONAL on state='failed' (migration-safe — Codex 3rd-pass CONSIDER 3).
 for (const state of TASK_STATES) {
   test(`schemas/task-state: TaskStateSchema accepts state="${state}"`, () => {
-    const overrides: Record<string, unknown> = { state };
-    if (state === 'failed') overrides.failure_reason = 'retries_exhausted';
-    const result = TaskStateSchema.safeParse(baseTaskState(overrides));
+    const result = TaskStateSchema.safeParse(baseTaskState({ state }));
     assert.equal(result.success, true, `state=${state} should parse`);
   });
 }
 
-test('schemas/task-state: failure_reason invariant — state=failed without failure_reason → rejected', () => {
+test('schemas/task-state: state=failed WITHOUT failure_reason is accepted (migration-safe)', () => {
   const result = TaskStateSchema.safeParse(baseTaskState({ state: 'failed' }));
-  assert.equal(result.success, false);
+  assert.equal(result.success, true);
+});
+
+test('schemas/task-state: state=failed WITH failure_reason is accepted', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'failed', failure_reason: 'retries_exhausted' }),
+  );
+  assert.equal(result.success, true);
 });
 
 test('schemas/task-state: failure_reason invariant — failure_reason without state=failed → rejected', () => {

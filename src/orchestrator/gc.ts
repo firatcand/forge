@@ -97,6 +97,10 @@ export type GcPlanRow =
         readonly expectedClaimId: string;
         readonly expectedGeneration: number;
         readonly expectedOwnerRunId: string;
+        // Lease expires_at at SNAPSHOT TIME — caller passes this so the
+        // executor can detect a heartbeat-renewal that preserved the 3
+        // identity fields but advanced expires_at. (Codex 3rd-pass BLOCK 1.)
+        readonly expectedExpiresAt: string;
         readonly expectedPath: string;
         readonly requireTerminalState: boolean;
         readonly reason: 'gc:row-13:duplicate' | 'gc:row-14:terminal-state';
@@ -242,8 +246,13 @@ function detectRow1(s: OrchestratorSnapshot): GcPlanRow[] {
 }
 
 // Row 2: running | no claim or claim by different run_id
-// Cheap variant: only fires when lease is expired beyond steal_grace_ms.
-// Full variant: also fires on tracker-side stale-claim divergence (additional rows).
+// Cheap variant (this PR): only fires on lease expired beyond steal_grace_ms.
+// Full variant (DEFERRED): also fires on tracker-side stale-claim divergence
+// (tracker shows no claim, or claim by different run_id while local lease is
+// still active). The CLI snapshot currently passes an empty trackerIssues map
+// (see buildSnapshot in src/cli/orchestrate/gc.ts), so this sub-case is
+// dormant — tracker integration follow-up activates it. (Codex 3rd-pass
+// CONSIDER 6.)
 function detectRow2(s: OrchestratorSnapshot): GcPlanRow[] {
   const graceMs = s.stealGraceMs ?? STEAL_GRACE_MS_DEFAULT;
   const nowMs = s.now.getTime();
@@ -543,12 +552,27 @@ function detectRow12(s: OrchestratorSnapshot): GcPlanRow[] {
 // Row 13: multiple leases for same task — release older generations.
 // Uses adminReleaseLeaseByIdentity at the executor side (planner emits one row
 // per non-canonical / older-generation lease file).
+//
+// Tie-breaker: when two leases share a generation (corruption — shouldn't
+// happen given the monotonic-generation claim flow), prefer the CANONICAL file
+// as authoritative. Without this, readdirSync's order could put the canonical
+// lease in the "to release" set. (Codex 3rd-pass BLOCK 2.)
 function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
   const rows: GcPlanRow[] = [];
   for (const [taskId, task] of s.tasks) {
     if (task.leases.length < 2) continue;
-    // Most recent generation is authoritative; older ones get released.
-    const sorted = [...task.leases].sort((a, b) => b.lease.generation - a.lease.generation);
+    const sorted = [...task.leases].sort((a, b) => {
+      if (b.lease.generation !== a.lease.generation) {
+        return b.lease.generation - a.lease.generation;
+      }
+      // Tie on generation: canonical lease wins (kept), non-canonical released.
+      if (a.isCanonical && !b.isCanonical) return -1;
+      if (!a.isCanonical && b.isCanonical) return 1;
+      // Both canonical or both non-canonical on tie — fall back to path order
+      // (deterministic). The executor's identity check protects against
+      // unlinking the wrong file under all-same-generation pathologies.
+      return a.path.localeCompare(b.path);
+    });
     const [, ...older] = sorted;
     for (const stale of older) {
       rows.push({
@@ -560,6 +584,7 @@ function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
           expectedClaimId: stale.lease.claim_id,
           expectedGeneration: stale.lease.generation,
           expectedOwnerRunId: stale.lease.owner_run_id,
+          expectedExpiresAt: stale.lease.expires_at,
           expectedPath: stale.path,
           requireTerminalState: false,
           reason: 'gc:row-13:duplicate',
@@ -586,6 +611,7 @@ function detectRow14(s: OrchestratorSnapshot): GcPlanRow[] {
         expectedClaimId: canonical.lease.claim_id,
         expectedGeneration: canonical.lease.generation,
         expectedOwnerRunId: canonical.lease.owner_run_id,
+        expectedExpiresAt: canonical.lease.expires_at,
         expectedPath: canonical.path,
         requireTerminalState: true,
         reason: 'gc:row-14:terminal-state',
