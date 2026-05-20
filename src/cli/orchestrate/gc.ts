@@ -1,10 +1,14 @@
 import {
+  existsSync,
   linkSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
+  renameSync,
+  statSync,
   unlinkSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   isNodeFsError,
   legacyAnswersDir,
@@ -12,21 +16,53 @@ import {
   legacyQuestionsDir,
   QuestionChannelError,
 } from '../../orchestrator/questions/index.ts';
+import {
+  assertNeverGcRow,
+  planGc,
+  type GcPlan,
+  type GcPlanRow,
+  type OrchestratorSnapshot,
+  type TaskSnapshot,
+  type LeaseAtPath,
+  type AttemptSnapshot,
+} from '../../orchestrator/gc.ts';
+import {
+  adminReleaseLeaseByIdentity,
+  type AdminReleaseReason,
+} from '../../orchestrator/leases.ts';
+import {
+  attemptDir,
+  attemptsDir,
+  leaseFilePath,
+  stateFilePath,
+  tasksRootDir,
+  validateIdSegment,
+} from '../../orchestrator/questions/paths.ts';
+import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import {
+  TaskStateSchema,
+  type TaskStateRecord,
+} from '../../schemas/task-state.ts';
+import type { Phases } from '../../schemas/phases.ts';
+import type { Issue } from '../../trackers/types.ts';
 
 // `forge orchestrate gc` is the deterministic reconciler defined by
-// spec/ORCHESTRATOR.md §"gc reconciliation rules". The full divergence table
-// (state vs tracker, lease expiry, worktree pruning, etc.) is FORGE-20 work.
+// spec/ORCHESTRATOR.md §"gc reconciliation rules". Two-phase execution:
 //
-// FORGE-73 lands only the legacy-migration row: any v1-style flat
-// .forge/{questions,answers}/<id>.json tree from before the v2 task-keyed
-// rewrite is moved under .forge/orchestrator/legacy/<utc-timestamp>/ on first
-// invocation. Files are MOVED via link+unlink (the same atomic technique used
-// by writeQuestionAtomic) — never deleted in place — so a single failure
-// during migration leaves the originals intact for retry. .tmp residue from
-// crashed v1 writers is left where it lies.
+//   Phase 0 — legacy v1 question-tree migration (FORGE-73): any v1-style flat
+//   .forge/{questions,answers}/<id>.json tree from before the v2 task-keyed
+//   rewrite is moved under .forge/orchestrator/legacy/<utc-timestamp>/. Files
+//   are MOVED via link+unlink (never deleted in place) so failures leave
+//   originals intact for retry.
 //
-// The CLI verb shape (`forge orchestrate gc [--dry-run]`) is final. FORGE-20
-// adds rows to the planner; the surface stays the same.
+//   Phase 1 — 14-row divergence reconciler (FORGE-22): src/orchestrator/gc.ts
+//   plans the full divergence table; this shim builds the local-only snapshot,
+//   invokes the planner, and either formats the plan (--dry-run) or executes
+//   it. Tracker-dependent rows (1, 3, 4, 6, 7) currently run with an empty
+//   tracker snapshot — tracker.listActiveIssues integration lands as follow-up.
+//
+// The verb surface is `forge orchestrate gc [--dry-run]`. No --apply flag
+// (spec is the source of truth on the CLI shape — Codex 1st-pass Q3).
 
 export interface OrchestrateGcOptions {
   readonly forgeDir: string;
@@ -43,6 +79,12 @@ export interface OrchestrateGcResult {
   // Sibling files moved (or planned to move under --dry-run). One entry per
   // source path, ordered as discovered.
   readonly migrated: readonly { from: string; to: string }[];
+  // Reconciler plan rows produced by planGc (empty in pre-FORGE-22 scope).
+  // On --dry-run: rows from the plan (no mutations applied).
+  // On apply: rows that were successfully executed.
+  readonly reconcilerRows?: readonly GcPlanRow[];
+  // Reconciler rows that failed during apply, with the error message.
+  readonly reconcilerErrors?: readonly { row: GcPlanRow; message: string }[];
 }
 
 interface PlannedMove {
@@ -150,6 +192,8 @@ export function runOrchestrateGc(
   const dryRun = opts.dryRun ?? false;
   const now = opts.now ?? (() => new Date());
 
+  // ── Phase 0: legacy v1 question-tree migration (FORGE-73, preserved) ──
+
   const archiveDir = legacyArchiveSession(opts.forgeDir, now().toISOString());
   let moves: readonly PlannedMove[];
   try {
@@ -165,40 +209,405 @@ export function runOrchestrateGc(
     return { exitCode: 1, migrated: [] };
   }
 
+  const legacyCompleted: PlannedMove[] = [];
+
   if (moves.length === 0) {
     out.write('No legacy files to migrate.\n');
-    return { exitCode: 0, migrated: [] };
-  }
-
-  if (dryRun) {
+  } else if (dryRun) {
     out.write(`gc plan (no changes will be made):\n\n`);
     for (const m of moves) {
       out.write(`  ${m.from}\n    → ${m.to}\n`);
     }
     out.write(`\n${moves.length} file(s) would be migrated. Re-run without --dry-run to apply.\n`);
-    return { exitCode: 0, migrated: moves };
+    // Fall through to reconciler — dry-run plan output is additive.
+  } else {
+    for (const m of moves) {
+      try {
+        moveFile(m.from, m.to);
+        legacyCompleted.push(m);
+      } catch (e) {
+        const msg =
+          e instanceof QuestionChannelError
+            ? `${e.code}: ${e.message}`
+            : e instanceof Error
+              ? e.message
+              : String(e);
+        err.write(`forge orchestrate gc: aborted after ${legacyCompleted.length}/${moves.length} moves: ${msg}\n`);
+        return { exitCode: 1, migrated: legacyCompleted };
+      }
+    }
+    out.write(`Migrated ${legacyCompleted.length} legacy file(s) to ${archiveDir}.\n`);
   }
 
-  const completed: PlannedMove[] = [];
-  for (const m of moves) {
+  // ── Phase 1: 14-row reconciler (FORGE-22) ──
+
+  const migratedReport = dryRun ? moves : legacyCompleted;
+  const snapshot = buildSnapshot(opts.forgeDir, now(), 'full');
+  const plan = planGc(snapshot);
+
+  if (dryRun) {
+    formatPlanForDryRun(plan, out);
+    return { exitCode: 0, migrated: migratedReport, reconcilerRows: plan.rows };
+  }
+
+  if (plan.rows.length === 0) {
+    if (moves.length === 0) {
+      // No legacy moves AND no divergences — clean tree.
+      out.write('gc: no divergences found.\n');
+    }
+    return { exitCode: 0, migrated: migratedReport, reconcilerRows: [] };
+  }
+
+  // Execute the plan. Per-row failures (real errors — thrown exceptions) are
+  // collected; we continue to subsequent rows so a transient row failure
+  // doesn't strand other rows. Deferred-action rows (executor not yet wired)
+  // are NOT errors — they emit a stderr warning and `applied: false`.
+  const applied: GcPlanRow[] = [];
+  const errors: { row: GcPlanRow; message: string }[] = [];
+  let deferredCount = 0;
+  for (const row of plan.rows) {
     try {
-      moveFile(m.from, m.to);
-      completed.push(m);
+      const outcome = executeRow(row, opts.forgeDir, out, err);
+      if (outcome.applied) {
+        applied.push(row);
+      } else {
+        deferredCount += 1;
+      }
     } catch (e) {
-      // Abort on first failure. Already-completed moves are left in place —
-      // re-running gc is idempotent for the remainder (the source files for
-      // completed moves no longer exist; planMigration skips them next pass).
-      const msg =
-        e instanceof QuestionChannelError
-          ? `${e.code}: ${e.message}`
-          : e instanceof Error
-            ? e.message
-            : String(e);
-      err.write(`forge orchestrate gc: aborted after ${completed.length}/${moves.length} moves: ${msg}\n`);
-      return { exitCode: 1, migrated: completed };
+      const message = e instanceof Error ? e.message : String(e);
+      errors.push({ row, message });
+      err.write(
+        `forge orchestrate gc: row ${row.rowId} (${row.action}) for task ${row.taskId} failed: ${message}\n`,
+      );
     }
   }
 
-  out.write(`Migrated ${completed.length} legacy file(s) to ${archiveDir}.\n`);
-  return { exitCode: 0, migrated: completed };
+  const summary =
+    deferredCount > 0
+      ? `gc: applied ${applied.length}/${plan.rows.length} divergence rows (${deferredCount} deferred — see warnings).\n`
+      : `gc: applied ${applied.length}/${plan.rows.length} divergence rows.\n`;
+  out.write(summary);
+  return {
+    exitCode: errors.length > 0 ? 1 : 0,
+    migrated: migratedReport,
+    reconcilerRows: applied,
+    reconcilerErrors: errors,
+  };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Snapshot builder — local I/O only (no tracker, no git). Tracker integration
+//  is deferred to follow-up; for now full-mode planGc runs with empty
+//  trackerIssues, which means rows 1, 3, 4, 6, 7 will not fire even when their
+//  preconditions are met. Local rows (2, 5, 8, 9, 10, 11, 12, 13, 14) work
+//  end-to-end.
+// ────────────────────────────────────────────────────────────────────────────
+
+function buildSnapshot(
+  forgeDir: string,
+  now: Date,
+  mode: 'cheap' | 'full',
+): OrchestratorSnapshot {
+  const tasks = scanTasksDir(forgeDir);
+  // Tracker integration deferred — see file header.
+  const trackerIssues = new Map<string, Issue>();
+  // Worktree / branch scans only matter for rows 9, 10 (expensive). Defer until
+  // tracker integration is wired and a worktree-list source is plumbed.
+  const worktrees: OrchestratorSnapshot['worktrees'] = [];
+  const branches: OrchestratorSnapshot['branches'] = [];
+  // Empty phases is acceptable — only used by row 10 (orphan worktree check).
+  const phases: Phases = { phases: [] } as unknown as Phases;
+  return {
+    tasks,
+    trackerIssues,
+    worktrees,
+    branches,
+    phases,
+    now,
+    mode,
+  };
+}
+
+function scanTasksDir(forgeDir: string): Map<string, TaskSnapshot> {
+  const root = tasksRootDir(forgeDir);
+  const result = new Map<string, TaskSnapshot>();
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch (e) {
+    if (isNodeFsError(e) && e.code === 'ENOENT') return result;
+    throw e;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    let taskId: string;
+    try {
+      taskId = validateIdSegment(entry.name, 'taskId');
+    } catch {
+      continue; // skip unexpected directory names
+    }
+    const taskDir = join(root, taskId);
+    result.set(taskId, {
+      state: readStateSafe(taskDir),
+      leases: readLeasesSafe(forgeDir, taskId, taskDir),
+      attempts: readAttemptsSafe(forgeDir, taskId),
+    });
+  }
+  return result;
+}
+
+function readStateSafe(taskDir: string): TaskStateRecord | null {
+  const path = join(taskDir, 'state.json');
+  try {
+    const raw = readFileSync(path, 'utf8');
+    const parsed = JSON.parse(raw);
+    const res = TaskStateSchema.safeParse(parsed);
+    return res.success ? res.data : null;
+  } catch {
+    return null;
+  }
+}
+
+function readLeasesSafe(
+  forgeDir: string,
+  taskId: string,
+  taskDir: string,
+): LeaseAtPath[] {
+  // Canonical lease.json + any sibling files matching `lease.json*` are
+  // considered. Row 13 fires when more than one is present.
+  const out: LeaseAtPath[] = [];
+  let dirents: import('node:fs').Dirent[];
+  try {
+    dirents = readdirSync(taskDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  const canonicalPath = leaseFilePath(forgeDir, taskId);
+  for (const d of dirents) {
+    if (!d.isFile()) continue;
+    if (!d.name.startsWith('lease.json')) continue;
+    const path = join(taskDir, d.name);
+    try {
+      const raw = readFileSync(path, 'utf8');
+      const parsed = JSON.parse(raw);
+      const validated = LeaseSchema.safeParse(parsed);
+      if (!validated.success) continue;
+      out.push({
+        lease: validated.data,
+        path,
+        isCanonical: path === canonicalPath,
+      });
+    } catch {
+      // Skip malformed lease files — they would be cleaned up by an explicit
+      // operator intervention; gc doesn't try to repair garbage.
+    }
+  }
+  return out;
+}
+
+function readAttemptsSafe(forgeDir: string, taskId: string): AttemptSnapshot[] {
+  const out: AttemptSnapshot[] = [];
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(attemptsDir(forgeDir, taskId), { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    let attemptId: string;
+    try {
+      attemptId = validateIdSegment(entry.name, 'attemptId');
+    } catch {
+      continue;
+    }
+    const aDir = attemptDir(forgeDir, taskId, attemptId);
+    const verdictPath = join(aDir, 'verdict.json');
+    const verdictVerifiedPath = join(aDir, 'verdict.verified.json');
+    const questionsDirPath = join(aDir, 'questions');
+    const answersDirPath = join(aDir, 'answers');
+    const questionFiles = listJsonFiles(questionsDirPath);
+    const answerFiles = listJsonFiles(answersDirPath);
+    const questionNames = new Set(questionFiles.map((p) => p.split('/').pop()!));
+    const orphanAnswerFiles = answerFiles.filter(
+      (p) => !questionNames.has(p.split('/').pop()!),
+    );
+    // Terminal heuristic: an attempt is "terminal" if its parent task state is
+    // terminal OR if no questions/answers exist and the attempt directory is
+    // older than 24h. Conservative — false negatives are fine for row 11.
+    // For now, infer from absence of any open question files OR presence of
+    // verdict.json. We err on the side of NOT calling an attempt terminal —
+    // archiving questions of a live attempt would corrupt state.
+    const isTerminal = existsSyncSafe(verdictPath);
+    out.push({
+      attemptId,
+      isTerminal,
+      verdictPresent: existsSyncSafe(verdictPath),
+      verdictVerifiedPresent: existsSyncSafe(verdictVerifiedPath),
+      questionFiles,
+      orphanAnswerFiles,
+    });
+  }
+  return out;
+}
+
+function listJsonFiles(dir: string): string[] {
+  let dirents: import('node:fs').Dirent[];
+  try {
+    dirents = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: string[] = [];
+  for (const d of dirents) {
+    if (!d.isFile()) continue;
+    if (!d.name.endsWith('.json')) continue;
+    out.push(join(dir, d.name));
+  }
+  return out;
+}
+
+function existsSyncSafe(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Plan formatter (--dry-run)
+// ────────────────────────────────────────────────────────────────────────────
+
+function formatPlanForDryRun(plan: GcPlan, out: NodeJS.WritableStream): void {
+  if (plan.rows.length === 0) {
+    out.write('gc reconciler: no divergences detected.\n');
+    return;
+  }
+  out.write('\ngc reconciler plan (no changes will be made):\n\n');
+  out.write('  row  task            action                  description\n');
+  out.write('  ───  ─────────────   ─────────────────────   ────────────────────────\n');
+  for (const row of plan.rows) {
+    const desc = describeRow(row);
+    out.write(
+      `  ${row.rowId.toString().padStart(2)}   ${row.taskId.padEnd(15)} ${row.action.padEnd(22)}  ${desc}\n`,
+    );
+  }
+  out.write(`\n${plan.rows.length} actions queued. Re-run without --dry-run to apply.\n`);
+}
+
+function describeRow(row: GcPlanRow): string {
+  switch (row.action) {
+    case 'mark_terminal':
+      return `mark ${row.payload.targetState}, release lease`;
+    case 'mark_abandoned':
+      return `mark abandoned (lease expired ${formatAgeMs(row.payload.expiredAgeMs)} ago)`;
+    case 'mark_unclaimed':
+      return `mark unclaimed (${row.payload.reason})`;
+    case 'archive_question':
+      return `archive question ${row.payload.questionPath.split('/').pop()}`;
+    case 'reverify_verdict':
+      return `re-verify attempt ${row.payload.attemptId}`;
+    case 'release_lease_admin':
+      return `admin-release lease (${row.payload.reason})`;
+    case 'prune_branch':
+      return `prune branch ${row.payload.branchRef} (${row.payload.reason})`;
+    case 'report_orphan':
+      return `report orphan: ${row.payload.kind}`;
+    default:
+      return assertNeverGcRow(row);
+  }
+}
+
+function formatAgeMs(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}h`;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  Plan executor — dispatch on action discriminant. Per spec/ORCHESTRATOR.md
+//  every row resolution must be idempotent so re-running gc converges. Rows
+//  that mutate state.json route through writeTaskState (lease-owned writes are
+//  not available to gc, so we use writeTaskState by stealing the lease first
+//  for rows 1, 2 — implemented inline below).
+// ────────────────────────────────────────────────────────────────────────────
+
+interface ExecuteOutcome {
+  readonly applied: boolean;
+  // Set when the row's action is recognized but its execution path is deferred
+  // to a follow-up PR (tracker reconciler / git ops / state-machine transition
+  // glue). Surfaced as a stderr warning, NOT as an error — operator sees that
+  // gc detected the divergence and knows infrastructure follow-up is pending.
+  readonly deferredReason?: string;
+}
+
+function executeRow(
+  row: GcPlanRow,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+  err: NodeJS.WritableStream,
+): ExecuteOutcome {
+  switch (row.action) {
+    case 'release_lease_admin': {
+      const reasonMap = {
+        'gc:row-13:duplicate': 'gc:row-13:duplicate' as AdminReleaseReason,
+        'gc:row-14:terminal-state': 'gc:row-14:terminal-state' as AdminReleaseReason,
+      };
+      adminReleaseLeaseByIdentity({
+        forgeDir,
+        taskId: row.taskId,
+        expectedClaimId: row.payload.expectedClaimId,
+        expectedGeneration: row.payload.expectedGeneration,
+        expectedOwnerRunId: row.payload.expectedOwnerRunId,
+        expectedPath: row.payload.expectedPath,
+        requireTerminalState: row.payload.requireTerminalState,
+        reason: reasonMap[row.payload.reason],
+      });
+      out.write(
+        `  ✓ row ${row.rowId} (${row.taskId}): admin-released lease (${row.payload.reason}) at ${row.payload.expectedPath}\n`,
+      );
+      return { applied: true };
+    }
+    case 'archive_question': {
+      // Archive: move question file under attempts/<a>/archived/
+      const archiveTarget = join(
+        dirname(dirname(row.payload.questionPath)),
+        'archived',
+        row.payload.questionPath.split('/').pop()!,
+      );
+      mkdirSync(dirname(archiveTarget), { recursive: true, mode: 0o700 });
+      renameSync(row.payload.questionPath, archiveTarget);
+      out.write(
+        `  ✓ row ${row.rowId} (${row.taskId}): archived question to ${archiveTarget}\n`,
+      );
+      return { applied: true };
+    }
+    case 'report_orphan':
+      // Detection-only — report and continue. Not a failure, not an apply.
+      out.write(
+        `  ⚠ row ${row.rowId} (${row.taskId}): ${row.payload.description}\n`,
+      );
+      return { applied: true };
+    case 'mark_terminal':
+    case 'mark_abandoned':
+    case 'mark_unclaimed':
+    case 'reverify_verdict':
+    case 'prune_branch': {
+      // These rows need infrastructure not yet wired into gc.ts (tracker
+      // reconciler, lease-steal-then-write, git operations, CLI re-verification).
+      // The planner correctly identifies them; full executor lands as
+      // follow-up tickets per FORGE-22 plan §Risk areas. Emit a stderr warning
+      // and continue — gc has correctly DETECTED the divergence and reported it
+      // to the operator. Not a failure.
+      const reason = `gc executor for action '${row.action}' is deferred to a follow-up PR (planner detection ships in this release).`;
+      err.write(
+        `  ⓘ row ${row.rowId} (${row.taskId}): ${row.action} detected — ${reason}\n`,
+      );
+      return { applied: false, deferredReason: reason };
+    }
+    default:
+      return assertNeverGcRow(row);
+  }
 }

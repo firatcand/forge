@@ -113,7 +113,8 @@ const attachHandler: VerbHandler = {
 
 const gcHandler: VerbHandler = {
   band: 'mutate',
-  synopsis: 'Run the deterministic reconciler over local + tracker state.',
+  synopsis:
+    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const dryRun = hasFlag(rest, 'dry-run');
