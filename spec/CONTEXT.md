@@ -38,13 +38,15 @@ The morning's linear precedence rule (`user > SPEC > PRD > phases > tracker > at
 
 | Artifact | Owns |
 |---|---|
-| `spec/SPEC.md` | Architecture, constraints, non-functional requirements |
-| `spec/PRD.md` | Product behavior, user-facing acceptance criteria |
-| `plans/phases.yaml` | Local execution snapshot (derived from tracker; do not hand-edit) |
-| Tracker issue body | Execution metadata: assignee, status, sequencing, live coordination |
-| Source code | Implementation |
+| `spec/SPEC.md` | Architecture, constraints, non-functional requirements. Durable design-time truth. |
+| `spec/PRD.md` | Product behavior, user-facing acceptance criteria. |
+| `plans/phases.yaml` | Local execution snapshot (derived from tracker; do not hand-edit). **Status and dependency fields drift between `/reconcile --pull` runs and must be confirmed against the tracker.** |
+| Tracker issue body | **Live execution truth:** status, assignee, sequencing, blockers, ownership. |
+| Source code | Implementation. |
 
 **Workers ask "whose field is this?" not "which artifact ranks higher?"** No drift event, no `/update-spec --apply` propagation, no forge-mediated escalation in v0.4. SPEC changes flow through standard git (`git commit && git push`).
+
+**For status / readiness / dependency / blocker questions: always query the tracker directly** (`mcp__linear-server__get_issue`, `gh issue view`, `ntn`) — never grep `plans/phases.yaml`, which is a stale cache between `/reconcile --pull` runs. This rule lives canonically in [CLAUDE.md §Source of truth](../CLAUDE.md).
 
 ### Out of scope for v0.4 (re-listed for clarity)
 
