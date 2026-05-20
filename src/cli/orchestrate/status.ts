@@ -1,6 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isNodeFsError } from '../../orchestrator/questions/errors.ts';
+import { detectCheapDivergences } from './gc.ts';
 
 // state.json cap — 1MB. This is larger than QUESTION_FILE_MAX_BYTES (64KB)
 // because state.json grows with worker count × tasks. Per ORCHESTRATOR.md
@@ -81,6 +82,9 @@ export function runOrchestrateStatus(
   const out = opts.stdout ?? process.stdout;
   const err = opts.stderr ?? process.stderr;
   const orchestratorDir = join(opts.forgeDir, 'orchestrator');
+
+  // Cheap auto-gc detect-and-warn (FORGE-22). Detect-only; warnings to stderr.
+  detectCheapDivergences(opts.forgeDir, err, new Date());
 
   let runId = opts.runId;
   if (!runId) {

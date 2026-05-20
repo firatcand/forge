@@ -79,12 +79,15 @@ export type OrchestratorErrorCode =
   | 'LEASE_STOLEN'          // caller's (claim_id, generation) does not match stored lease
   | 'LEASE_NOT_EXPIRED'     // steal attempted before expiry + grace period elapsed
   | 'LEASE_NOT_FOUND'       // lease.json absent when expected (e.g. heartbeat with no prior acquire)
+  | 'LEASE_IDENTITY_MISMATCH'   // adminReleaseLeaseByIdentity: on-disk lease differs from expected identity
+  | 'LEASE_STATE_NOT_TERMINAL'  // adminReleaseLeaseByIdentity row-14 guard: task state was not terminal at unlink time
   | 'ILLEGAL_TRANSITION'    // state machine rejected the requested (from, trigger, to) triple
   | 'STATE_NOT_FOUND'       // state.json absent for a given task_id
   | 'STATE_VERSION_CONFLICT' // new state_version !== current state_version + 1
   | 'SCHEMA_INVALID'        // zod parse failed or JSON is malformed
   | 'INVALID_ID'            // task_id / attempt_id failed segment validation
   | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries
+  | 'DECISION_KEY_EXHAUSTED' // worker question-channel budget for a decision_key hit; do not retry
   | 'IO_ERROR';             // unexpected filesystem error
 
 export interface OrchestratorErrorDetails {
