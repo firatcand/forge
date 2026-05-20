@@ -821,7 +821,7 @@ Note: no `id`, `supersedes`, or `superseded_by` fields. Ephemeral ADRs don't nee
 
 ### Lifecycle
 
-1. **proposed** — `/update-spec --draft` writes the file. User reviews + (optionally) runs `/codex review-decision`. User edits the draft to incorporate feedback.
+1. **proposed** — `/update-spec --draft` writes the file. User reviews + (optionally) runs `/second-opinion review-decision`. User edits the draft to incorporate feedback.
 2. **accepted** — User manually flips frontmatter `status: proposed → accepted` when ready to propagate. (No automated state machine; the workflow is suggest-not-enforce.)
 3. **rejected** — User flips to `status: rejected` if they decide not to proceed; `forge orchestrate doctor` will warn after `decisions.stale_draft_threshold_days` (default 7) that a rejected ADR should be deleted manually.
 
@@ -906,11 +906,11 @@ Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026
 
 | Trigger point (inside skill) | Suggested invocation |
 |---|---|
-| `/plan-task` exits with a plan | `/codex review-plan` |
-| `/update-spec --draft` writes a draft ADR *(v0.5)* | `/codex review-decision` |
-| `/ship` pre-PR finalize | `/codex review-impl` |
+| `/plan-task` exits with a plan | `/second-opinion review-plan` |
+| `/update-spec --draft` writes a draft ADR *(v0.5)* | `/second-opinion review-decision` |
+| `/ship` pre-PR finalize | `/second-opinion review-impl` |
 
-Each suggestion is a printed line at skill end: `"💡 Suggested next: /codex review-decision (run with FORGE_AUTO_CODEX=0 to disable)"`. User types or skips. No automatic execution.
+Each suggestion is a printed line at skill end: `"💡 Suggested next: /second-opinion review-decision (run with FORGE_AUTO_CODEX=0 to disable)"`. User types or skips. No automatic execution. The `forge codex-suggest` CLI verb, `codex.auto_codex_enabled` settings field, and `FORGE_AUTO_CODEX` env var keep their `codex`-prefixed names in v0.4 (rename deferred to v0.5 per FORGE-89 plan §7 to avoid a settings-schema migration).
 
 Bounded by `codex.auto_codex_token_cap` in settings.yaml (RESERVED — default 50000 tokens/session; budget enforcement deferred to v0.5). Env var `FORGE_AUTO_CODEX=0` disables suggestions entirely.
 
@@ -1040,9 +1040,11 @@ The worktree's hydrated copy is a snapshot — it is allowed to drift from `${MA
 
 ### Multi-host review (generalizes ETHOS principle 6)
 
-ETHOS principle 6 ("Multi-model Second Opinion — Codex CLI on critical paths") **upgrades to**: every orchestrator-shipped task gets a review from the secondary host (`review_host_cli`), not just CRITICAL.md paths. The existing `/codex` skill becomes a special case where `review_host_cli == 'codex'`.
+ETHOS principle 6 ("Multi-model Second Opinion on critical paths") **upgrades to**: every orchestrator-shipped task gets a review from the secondary host (`agents.review_host_cli` ∈ {codex, gemini}), not just CRITICAL.md paths. The canonical interactive surface is the host-agnostic `/second-opinion` skill (FORGE-89 / P2-T21), which dispatches via `forge orchestrate second-opinion` → `IHarness.runReview` on the configured adapter. Claude is excluded as a reviewer (different-model-lineage rule); `cursor` was never wired up and is dropped.
 
-For interactive (non-orchestrator) work, `/codex` keeps its existing CRITICAL.md-only behaviour for backward compat. The new universal-review behaviour only triggers in the orchestrator's REVIEW phase (Flow 3b).
+For interactive (non-orchestrator) work, `/second-opinion` is auto-triggered on CRITICAL.md hits by `/ship` (block-severity findings halt PR creation) and by `/review` (advisory — folded into severity bucketing, gated on `review_host_cli !== null`). The universal-review behaviour in the orchestrator's REVIEW phase (Flow 3b) uses the same verb and the same verdict envelope, so interactive and orchestrated paths share one code path.
+
+The old `skills/codex/` slug is kept as a description-only deprecation alias in v0.4.x and removed in v0.5.0.
 
 `/ship` enforces both: the in-host `/review` skill must have been run, and (when orchestrator-driven) the REVIEW phase verdict file must show `pass`.
 
@@ -1059,7 +1061,7 @@ Forge consumes:
 | `FORGE_PRIMARY_HOST_CLI` | no | Override `agents.primary_host_cli` from settings | from settings.yaml |
 | `FORGE_REVIEW_HOST_CLI` | no | Override `agents.review_host_cli`; set to `none` to disable second-opinion | from settings.yaml |
 | `FORGE_SETTINGS_PATH` | no | Override `.forge/settings.yaml` location | `./.forge/settings.yaml` |
-| `FORGE_AUTO_CODEX` | no | Set to `0` to disable the in-skill `/codex` review suggestions emitted by `/plan-task`, `/ship`, etc. | unset (suggestions on) |
+| `FORGE_AUTO_CODEX` | no | Set to `0` to disable the in-skill `/second-opinion` review suggestions emitted by `/plan-task`, `/ship`, etc. (Env var keeps its `CODEX`-suffixed name in v0.4 — see FORGE-89 plan §7 for v0.5 rename.) | unset (suggestions on) |
 
 Tracker / secret-manager adapters consume their own conventional vars (e.g. `ANTHROPIC_API_KEY` if `secrets.manager: env_file`, `OP_SERVICE_ACCOUNT_TOKEN` for 1Password). These are documented per-adapter in `docs/adapters/`.
 

@@ -1,11 +1,11 @@
-# Files requiring multi-model review (/codex auto-triggers on /ship)
+# Files requiring multi-model review (/second-opinion auto-triggers on /ship)
 #
 # Edit this list to match your project's critical paths.
 #
 # Note (forge-internal): this list still includes adopter-template defaults
 # from the scaffold (auth/billing/prisma/supabase). Those don't exist in
 # this repo and are kept as a reference for adopter projects. The forge-
-# internal critical paths below are what /codex actually triggers on.
+# internal critical paths below are what /second-opinion actually triggers on.
 
 # ─── forge internal critical paths ───────────────────────────────────────────
 
