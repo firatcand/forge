@@ -22,6 +22,7 @@ import { PhasesArgsSchema, type PhasesArgs } from '../../schemas/cli-args.ts';
 import type { VerbHandler } from './index.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { detectCheapDivergences } from './gc.ts';
 
 // States that block another claim of the same task; an attempt in any of
 // these states is "active" for overlap purposes.
@@ -125,6 +126,12 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
       exitCode: emit(ok({ tasks: limited }), { json: opts.json }),
     };
   }
+
+  // Cheap auto-gc detect-and-warn (FORGE-22). Fires only on --ready path so
+  // the dump form stays minimal. Writes warnings to stderr (matching the
+  // freshness-line precedent above); never mutates state. JSON stdout is
+  // unaffected.
+  detectCheapDivergences(opts.forgeDir, process.stderr, new Date());
 
   // --ready filter pipeline.
   const doneTaskIds = new Set<string>();

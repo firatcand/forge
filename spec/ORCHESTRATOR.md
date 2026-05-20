@@ -598,7 +598,7 @@ interface Tracker {
 
 ## gc reconciliation rules
 
-`forge orchestrate gc` is the deterministic reconciler. Every CLI invocation may *trigger* a gc pass; an explicit `forge orchestrate gc` runs one synchronously with `--dry-run` support. The rules below are exhaustive — every state divergence has a defined resolution.
+`forge orchestrate gc` is the deterministic reconciler. Every read-band CLI invocation may *detect* divergences from the cheap-row subset and emit warnings to stderr; only an explicit `forge orchestrate gc` *mutates* state. `forge orchestrate gc --dry-run` plans without changing anything. The rules below are exhaustive — every state divergence has a defined resolution.
 
 ### Divergence table
 
@@ -637,7 +637,7 @@ gc plan (no changes will be made):
 
 ### Auto-gc
 
-A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate phases --ready` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
+A lightweight reconcile **detects** the cheap rows (lease expiry, blocked_on_question state-file checks, verdict-file integrity, question/answer orphans, duplicate or terminal-state leases) on every `forge orchestrate phases --ready` and `forge orchestrate status` invocation; warnings go to stderr with the form `[gc] <task>: row <N> (<action>) — run \`forge orchestrate gc\` to apply`. Read-band verbs **never mutate** — operator runs `forge orchestrate gc` to apply. Tracker-dependent rows (state alignment vs. tracker) and expensive operations (branch/worktree scans) only run in explicit `gc`.
 
 ## Worker prompt template
 

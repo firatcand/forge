@@ -43,13 +43,49 @@ function baseAttemptState(
   };
 }
 
-// schemas/task-state: TaskStateSchema accepts each state value
+// schemas/task-state: TaskStateSchema accepts each state value.
+// failure_reason is OPTIONAL on state='failed' (migration-safe — Codex 3rd-pass CONSIDER 3).
 for (const state of TASK_STATES) {
   test(`schemas/task-state: TaskStateSchema accepts state="${state}"`, () => {
     const result = TaskStateSchema.safeParse(baseTaskState({ state }));
     assert.equal(result.success, true, `state=${state} should parse`);
   });
 }
+
+test('schemas/task-state: state=failed WITHOUT failure_reason is accepted (migration-safe)', () => {
+  const result = TaskStateSchema.safeParse(baseTaskState({ state: 'failed' }));
+  assert.equal(result.success, true);
+});
+
+test('schemas/task-state: state=failed WITH failure_reason is accepted', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'failed', failure_reason: 'retries_exhausted' }),
+  );
+  assert.equal(result.success, true);
+});
+
+test('schemas/task-state: failure_reason invariant — failure_reason without state=failed → rejected', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'running', failure_reason: 'fatal' }),
+  );
+  assert.equal(result.success, false);
+});
+
+test('schemas/task-state: failure_reason accepts decision_key_budget / retries_exhausted / fatal', () => {
+  for (const reason of ['decision_key_budget', 'retries_exhausted', 'fatal'] as const) {
+    const result = TaskStateSchema.safeParse(
+      baseTaskState({ state: 'failed', failure_reason: reason }),
+    );
+    assert.equal(result.success, true, `failure_reason=${reason} should parse`);
+  }
+});
+
+test('schemas/task-state: failure_reason rejects unknown value', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'failed', failure_reason: 'something_else' }),
+  );
+  assert.equal(result.success, false);
+});
 
 test('schemas/task-state: TaskStateSchema accepts current_attempt_id as non-null string', () => {
   const result = TaskStateSchema.safeParse(
