@@ -7,9 +7,16 @@
 // createHarness(review_host_cli).runReview(...), emits a JSON envelope with
 // the ReviewVerdict.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
+
+// Caps for caller-supplied input files. Codex/gemini context windows are
+// the harder limit downstream, but these caps catch obvious mistakes before
+// burning a subprocess invocation. Precedent: MAX_STDOUT_BYTES in
+// src/harnesses/subprocess.ts caps output; same shape for input.
+export const MAX_DIFF_BYTES = 1_000_000;   // 1MB — typical diffs are <50KB
+export const MAX_PROMPT_BYTES = 200_000;   // 200KB — six-piece briefs are <10KB
 
 import {
   SecondOpinionArgsSchema,
@@ -109,40 +116,19 @@ export async function runOrchestrateSecondOpinion(
   }
 
   // Read diff + prompt files. Two separate reads so the failing input is
-  // identified in the error envelope.
-  let diff: string;
-  try {
-    diff = readFileSync(opts.diffPath, 'utf8');
-  } catch (err) {
-    return {
-      exitCode: emit(
-        fail(
-          'MISSING_INPUT',
-          `failed to read diff at ${opts.diffPath}: ${err instanceof Error ? err.message : String(err)}`,
-          false,
-          { diffPath: opts.diffPath },
-        ),
-        { json: opts.json },
-      ),
-    };
+  // identified in the error envelope. Size check via stat() BEFORE readFileSync
+  // so a 1GB file doesn't get pulled into memory just to be rejected.
+  const diffResult = readBoundedFile(opts.diffPath, MAX_DIFF_BYTES, 'diff');
+  if ('error' in diffResult) {
+    return { exitCode: emit(diffResult.error, { json: opts.json }) };
   }
+  const diff = diffResult.content;
 
-  let prompt: string;
-  try {
-    prompt = readFileSync(opts.promptPath, 'utf8');
-  } catch (err) {
-    return {
-      exitCode: emit(
-        fail(
-          'MISSING_INPUT',
-          `failed to read prompt at ${opts.promptPath}: ${err instanceof Error ? err.message : String(err)}`,
-          false,
-          { promptPath: opts.promptPath },
-        ),
-        { json: opts.json },
-      ),
-    };
+  const promptResult = readBoundedFile(opts.promptPath, MAX_PROMPT_BYTES, 'prompt');
+  if ('error' in promptResult) {
+    return { exitCode: emit(promptResult.error, { json: opts.json }) };
   }
+  const prompt = promptResult.content;
 
   // Build the harness. Tests inject a factory; production uses createHarness.
   const factory = deps.factory ?? defaultFactory;
@@ -216,6 +202,51 @@ export async function runOrchestrateSecondOpinion(
       { json: opts.json },
     ),
   };
+}
+
+// Read a caller-supplied input file with an upfront size check via stat().
+// Returns either `{ content }` on success or `{ error: Envelope }` so the
+// caller can early-return through emit() without duplicating envelope plumbing.
+function readBoundedFile(
+  filePath: string,
+  maxBytes: number,
+  kind: 'diff' | 'prompt',
+): { content: string } | { error: ReturnType<typeof fail> } {
+  let size: number;
+  try {
+    size = statSync(filePath).size;
+  } catch (err) {
+    return {
+      error: fail(
+        'MISSING_INPUT',
+        `failed to stat ${kind} at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        false,
+        { [`${kind}Path`]: filePath },
+      ),
+    };
+  }
+  if (size > maxBytes) {
+    return {
+      error: fail(
+        kind === 'diff' ? 'DIFF_TOO_LARGE' : 'PROMPT_TOO_LARGE',
+        `${kind} at ${filePath} is ${size} bytes; max is ${maxBytes}. Narrow the input or split into multiple reviews.`,
+        false,
+        { [`${kind}Path`]: filePath, size, max: maxBytes },
+      ),
+    };
+  }
+  try {
+    return { content: readFileSync(filePath, 'utf8') };
+  } catch (err) {
+    return {
+      error: fail(
+        'MISSING_INPUT',
+        `failed to read ${kind} at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+        false,
+        { [`${kind}Path`]: filePath },
+      ),
+    };
+  }
 }
 
 export const secondOpinionHandler: VerbHandler = {

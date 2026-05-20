@@ -29,11 +29,10 @@ function freshProject(reviewHost: 'codex' | 'gemini'): {
   const forgeDir = join(cwd, '.forge');
   mkdirSync(forgeDir, { recursive: true });
 
-  // primary_host_cli must differ from review_host_cli per the
-  // SettingsSchema refinement. We pick the OTHER of the two reviewers as
-  // primary so we never collide. (Note: claude is also valid but excluding
-  // it here keeps both yamls structurally similar.)
-  const primary = reviewHost === 'codex' ? 'claude' : 'claude';
+  // primary_host_cli must differ from review_host_cli per the SettingsSchema
+  // refinement. claude is non-reviewable so it can't collide with either
+  // reviewer — pin it as primary for both cases.
+  const primary = 'claude';
   const yaml = `version: 1
 project:
   name: 2op-integration
@@ -149,9 +148,12 @@ test('AC #8 — codex and gemini variants produce equivalent verdict envelopes f
   const codexEnv = lastEnvelope(codexLines);
   assert.equal(codexEnv.ok, true);
 
-  // Reset stdout for the second variant.
-
   // ── Gemini variant ──
+  // The second captureStdout(t) call replaces process.stdout.write with a new
+  // monkey-patch that pushes into geminiLines. The first patch is dropped on
+  // assignment, so the codex run's lines are frozen by then. Both t.after
+  // restores set process.stdout.write back to the same `orig` reference;
+  // idempotent, no double-restore concerns.
   const geminiCtx = freshProject('gemini');
   const { lines: geminiLines } = captureStdout(t);
   t.after(geminiCtx.cleanup);

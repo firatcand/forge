@@ -34,8 +34,13 @@ The skill never spawns `codex exec` or `gemini` directly. Dispatch goes through 
 
 ```bash
 TASK=FORGE-XX   # current task ID
-DIFF=/tmp/forge-${TASK}-diff.txt
-PROMPT=/tmp/forge-${TASK}-prompt.txt
+# mktemp generates unguessable filenames (mode 0600 by default on macOS/Linux)
+# so the diff/prompt content isn't readable by other local users while the
+# review runs. Skip /tmp/forge-${TASK}-*.txt — that's a predictable name that
+# any local process can race for.
+DIFF=$(mktemp -t "forge-${TASK}-diff.XXXXXXXXXX")
+PROMPT=$(mktemp -t "forge-${TASK}-prompt.XXXXXXXXXX")
+VERDICT=$(mktemp -t "forge-${TASK}-verdict.XXXXXXXXXX")
 
 git diff origin/main...HEAD > "$DIFF"
 
@@ -48,7 +53,11 @@ forge orchestrate second-opinion \
   --diff "$DIFF" \
   --prompt "$PROMPT" \
   --json \
-  > /tmp/forge-${TASK}-verdict.json
+  > "$VERDICT"
+
+# Clean up after reading the verdict — diff/prompt may contain committed
+# secrets or local file paths you don't want sitting in /tmp.
+rm -f "$DIFF" "$PROMPT" "$VERDICT"
 ```
 
 The verb emits a JSON envelope on stdout:
