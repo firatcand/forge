@@ -43,13 +43,44 @@ function baseAttemptState(
   };
 }
 
-// schemas/task-state: TaskStateSchema accepts each state value
+// schemas/task-state: TaskStateSchema accepts each state value.
+// 'failed' requires a failure_reason discriminator (FORGE-22 refinement).
 for (const state of TASK_STATES) {
   test(`schemas/task-state: TaskStateSchema accepts state="${state}"`, () => {
-    const result = TaskStateSchema.safeParse(baseTaskState({ state }));
+    const overrides: Record<string, unknown> = { state };
+    if (state === 'failed') overrides.failure_reason = 'retries_exhausted';
+    const result = TaskStateSchema.safeParse(baseTaskState(overrides));
     assert.equal(result.success, true, `state=${state} should parse`);
   });
 }
+
+test('schemas/task-state: failure_reason invariant — state=failed without failure_reason → rejected', () => {
+  const result = TaskStateSchema.safeParse(baseTaskState({ state: 'failed' }));
+  assert.equal(result.success, false);
+});
+
+test('schemas/task-state: failure_reason invariant — failure_reason without state=failed → rejected', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'running', failure_reason: 'fatal' }),
+  );
+  assert.equal(result.success, false);
+});
+
+test('schemas/task-state: failure_reason accepts decision_key_budget / retries_exhausted / fatal', () => {
+  for (const reason of ['decision_key_budget', 'retries_exhausted', 'fatal'] as const) {
+    const result = TaskStateSchema.safeParse(
+      baseTaskState({ state: 'failed', failure_reason: reason }),
+    );
+    assert.equal(result.success, true, `failure_reason=${reason} should parse`);
+  }
+});
+
+test('schemas/task-state: failure_reason rejects unknown value', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'failed', failure_reason: 'something_else' }),
+  );
+  assert.equal(result.success, false);
+});
 
 test('schemas/task-state: TaskStateSchema accepts current_attempt_id as non-null string', () => {
   const result = TaskStateSchema.safeParse(

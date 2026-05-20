@@ -9,10 +9,15 @@ import {
   steal,
   release,
   assertLeaseOwnership,
+  adminReleaseLeaseByIdentity,
   __leasesFsForTesting,
 } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
-import { leaseFilePath, claimHistoryFilePath } from '../../src/orchestrator/questions/paths.ts';
+import {
+  leaseFilePath,
+  claimHistoryFilePath,
+  stateFilePath,
+} from '../../src/orchestrator/questions/paths.ts';
 import { LeaseSchema, STEAL_GRACE_MS_DEFAULT } from '../../src/schemas/lease.ts';
 
 let tmpDir: string;
@@ -644,4 +649,256 @@ test('leases: steal re-stamps spec_revision (new claim = new revision)', () => {
   assert.equal(original.spec_revision, 'git:2222222222222222222222222222222222222222');
   assert.equal(stolen.spec_revision, 'git:3333333333333333333333333333333333333333');
   assert.equal(stolen.generation, original.generation + 1);
+});
+
+// ---- adminReleaseLeaseByIdentity (gc-only, identity-gated) ----
+
+function writeStateJson(
+  fd: string,
+  taskId: string,
+  overrides: Record<string, unknown> = {},
+): void {
+  const dir = join(fd, 'orchestrator', 'tasks', taskId);
+  mkdirSync(dir, { recursive: true });
+  const base = {
+    version: 1,
+    task_id: taskId,
+    state: 'shipped',
+    state_version: 0,
+    attempt_count: 1,
+    current_attempt_id: null,
+    updated_at: new Date().toISOString(),
+    updated_by: {
+      run_id: 'run-X',
+      claim_id: 'claim-X',
+      generation: 0,
+    },
+    ...overrides,
+  };
+  writeFileSync(stateFilePath(fd, taskId), JSON.stringify(base));
+}
+
+test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + terminal state → unlink + history event', () => {
+  const fd = forgeDir('admin-release-r14');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-R14', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-R14', { state: 'shipped' });
+
+  adminReleaseLeaseByIdentity({
+    forgeDir: fd,
+    taskId: 'TASK-R14',
+    expectedClaimId: lease.claim_id,
+    expectedGeneration: lease.generation,
+    expectedOwnerRunId: lease.owner_run_id,
+    expectedPath: leaseFilePath(fd, 'TASK-R14'),
+    requireTerminalState: true,
+    reason: 'gc:row-14:terminal-state',
+  });
+
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-R14')), false, 'lease should be unlinked');
+  const history = readFileSync(claimHistoryFilePath(fd, 'TASK-R14'), 'utf8');
+  const lines = history.trim().split('\n').filter(Boolean);
+  const lastEvent = JSON.parse(lines[lines.length - 1]);
+  assert.equal(lastEvent.event, 'admin_released');
+  assert.equal(lastEvent.reason, 'gc:row-14:terminal-state');
+  assert.equal(lastEvent.claim_id, lease.claim_id);
+  assert.equal(lastEvent.generation, lease.generation);
+});
+
+test('adminReleaseLeaseByIdentity: row-13 happy path — matching identity at non-canonical path → unlinks that path, leaves canonical untouched', () => {
+  const fd = forgeDir('admin-release-r13');
+  const canonical = acquire({ forgeDir: fd, taskId: 'TASK-R13', runId: 'run-canonical' });
+  // Simulate corruption: a duplicate lease file at a non-canonical path with older identity.
+  const dupPath = leaseFilePath(fd, 'TASK-R13') + '.bak';
+  const dupLease = {
+    version: 1,
+    claim_id: 'claim-OLD',
+    task_id: 'TASK-R13',
+    attempt_id: null,
+    owner_run_id: 'run-OLD',
+    acquired_at: new Date(Date.now() - 60_000).toISOString(),
+    expires_at: new Date(Date.now() - 30_000).toISOString(),
+    last_heartbeat_at: new Date(Date.now() - 60_000).toISOString(),
+    generation: 0,
+    spec_revision: 'git:0000000000000000000000000000000000000000',
+  };
+  writeFileSync(dupPath, JSON.stringify(dupLease));
+
+  adminReleaseLeaseByIdentity({
+    forgeDir: fd,
+    taskId: 'TASK-R13',
+    expectedClaimId: 'claim-OLD',
+    expectedGeneration: 0,
+    expectedOwnerRunId: 'run-OLD',
+    expectedPath: dupPath,
+    requireTerminalState: false, // row 13 doesn't gate on terminal state
+    reason: 'gc:row-13:duplicate',
+  });
+
+  assert.equal(existsSync(dupPath), false, 'duplicate lease should be unlinked');
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-R13')), true, 'canonical lease must remain untouched');
+  // Canonical lease is unchanged
+  const canonicalRaw = readFileSync(leaseFilePath(fd, 'TASK-R13'), 'utf8');
+  assert.equal(JSON.parse(canonicalRaw).claim_id, canonical.claim_id);
+});
+
+test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on claim_id mismatch — lease file untouched', () => {
+  const fd = forgeDir('admin-release-mismatch-claim');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-MM-C', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-MM-C', { state: 'shipped' });
+
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-MM-C',
+        expectedClaimId: 'claim-wrong',
+        expectedGeneration: lease.generation,
+        expectedOwnerRunId: lease.owner_run_id,
+        expectedPath: leaseFilePath(fd, 'TASK-MM-C'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+  );
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-MM-C')), true, 'lease must remain on identity mismatch');
+});
+
+test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on generation mismatch — lease file untouched', () => {
+  const fd = forgeDir('admin-release-mismatch-gen');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-MM-G', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-MM-G', { state: 'shipped' });
+
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-MM-G',
+        expectedClaimId: lease.claim_id,
+        expectedGeneration: lease.generation + 1,
+        expectedOwnerRunId: lease.owner_run_id,
+        expectedPath: leaseFilePath(fd, 'TASK-MM-G'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+  );
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-MM-G')), true);
+});
+
+test('adminReleaseLeaseByIdentity: LEASE_IDENTITY_MISMATCH on owner_run_id mismatch — lease file untouched', () => {
+  const fd = forgeDir('admin-release-mismatch-run');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-MM-R', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-MM-R', { state: 'shipped' });
+
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-MM-R',
+        expectedClaimId: lease.claim_id,
+        expectedGeneration: lease.generation,
+        expectedOwnerRunId: 'run-different',
+        expectedPath: leaseFilePath(fd, 'TASK-MM-R'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+  );
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-MM-R')), true);
+});
+
+test('adminReleaseLeaseByIdentity: LEASE_STATE_NOT_TERMINAL when row-14 sees running state — lease file untouched', () => {
+  const fd = forgeDir('admin-release-not-terminal');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-NT', runId: 'run-orig' });
+  writeStateJson(fd, 'TASK-NT', { state: 'running' });
+
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-NT',
+        expectedClaimId: lease.claim_id,
+        expectedGeneration: lease.generation,
+        expectedOwnerRunId: lease.owner_run_id,
+        expectedPath: leaseFilePath(fd, 'TASK-NT'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_STATE_NOT_TERMINAL',
+  );
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-NT')), true);
+});
+
+test('adminReleaseLeaseByIdentity: LEASE_STATE_NOT_TERMINAL when state.json absent (cannot confirm)', () => {
+  const fd = forgeDir('admin-release-no-state');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-NS', runId: 'run-orig' });
+  // No state.json — cannot confirm terminal.
+
+  assert.throws(
+    () =>
+      adminReleaseLeaseByIdentity({
+        forgeDir: fd,
+        taskId: 'TASK-NS',
+        expectedClaimId: lease.claim_id,
+        expectedGeneration: lease.generation,
+        expectedOwnerRunId: lease.owner_run_id,
+        expectedPath: leaseFilePath(fd, 'TASK-NS'),
+        requireTerminalState: true,
+        reason: 'gc:row-14:terminal-state',
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_STATE_NOT_TERMINAL',
+  );
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-NS')), true);
+});
+
+test('adminReleaseLeaseByIdentity: idempotent on already-gone lease file — no throw, no spurious history event', () => {
+  const fd = forgeDir('admin-release-idempotent');
+  // No acquire — file does not exist.
+  const fakePath = leaseFilePath(fd, 'TASK-GONE');
+
+  // Returns silently — no throw.
+  adminReleaseLeaseByIdentity({
+    forgeDir: fd,
+    taskId: 'TASK-GONE',
+    expectedClaimId: 'claim-X',
+    expectedGeneration: 0,
+    expectedOwnerRunId: 'run-X',
+    expectedPath: fakePath,
+    requireTerminalState: false,
+    reason: 'gc:row-13:duplicate',
+  });
+
+  // No history file should have been created.
+  assert.equal(existsSync(claimHistoryFilePath(fd, 'TASK-GONE')), false);
+});
+
+test('adminReleaseLeaseByIdentity: row-13 with requireTerminalState=false skips state check entirely', () => {
+  const fd = forgeDir('admin-release-r13-no-state-check');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-R13-NS', runId: 'run-orig' });
+  // Intentionally write running state — but row 13 path must NOT check it.
+  writeStateJson(fd, 'TASK-R13-NS', { state: 'running' });
+
+  // Create a duplicate at a non-canonical path with a distinct identity
+  const dupPath = leaseFilePath(fd, 'TASK-R13-NS') + '.dup';
+  const dupLease = { ...lease, claim_id: 'claim-DUP', generation: 0, owner_run_id: 'run-DUP' };
+  writeFileSync(dupPath, JSON.stringify(dupLease));
+
+  // Should succeed even though state is 'running' — row 13 path bypasses the state guard.
+  adminReleaseLeaseByIdentity({
+    forgeDir: fd,
+    taskId: 'TASK-R13-NS',
+    expectedClaimId: 'claim-DUP',
+    expectedGeneration: 0,
+    expectedOwnerRunId: 'run-DUP',
+    expectedPath: dupPath,
+    requireTerminalState: false,
+    reason: 'gc:row-13:duplicate',
+  });
+  assert.equal(existsSync(dupPath), false);
+  assert.equal(existsSync(leaseFilePath(fd, 'TASK-R13-NS')), true, 'canonical untouched');
 });
