@@ -303,6 +303,35 @@ export function runOrchestrateGc(
 //  end-to-end.
 // ────────────────────────────────────────────────────────────────────────────
 
+// Cheap auto-gc — called by `phases --ready` and `status` (read-band verbs).
+// Detect-only: writes a one-line "[gc] <task>: <description> — run gc to
+// apply" warning to stderr for each cheap-row divergence. Never mutates.
+// Per FORGE-22 plan Q6 (Codex 2nd-pass #4: real read-band pattern break
+// avoided here by NOT mutating).
+//
+// Stdout is untouched, so JSON consumers of `phases --ready --json` are
+// unaffected. Precedent: phases.ts:91 emits the freshness line to stderr.
+export function detectCheapDivergences(
+  forgeDir: string,
+  err: NodeJS.WritableStream,
+  now: Date,
+): void {
+  let snapshot: OrchestratorSnapshot;
+  try {
+    snapshot = buildSnapshot(forgeDir, now, 'cheap');
+  } catch {
+    // Best-effort — any I/O failure here is non-fatal; the host verb continues.
+    return;
+  }
+  const plan = planGc(snapshot);
+  if (plan.rows.length === 0) return;
+  for (const row of plan.rows) {
+    err.write(
+      `[gc] ${row.taskId}: row ${row.rowId} (${row.action}) — run \`forge orchestrate gc\` to apply\n`,
+    );
+  }
+}
+
 function buildSnapshot(
   forgeDir: string,
   now: Date,
