@@ -105,7 +105,7 @@ test('FORGE-105 — no settings.yaml uses defaults and prints suggestion', () =>
     stderr,
   });
   assert.equal(result.exitCode, 0);
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
   assert.match(stdout.buf, /FORGE_AUTO_CODEX=0 to disable/);
 });
 
@@ -121,7 +121,7 @@ test('FORGE-105 — settings auto_codex_enabled: true prints suggestion', () => 
     stderr,
   });
   assert.equal(result.exitCode, 0);
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
 
 test('FORGE-105 — settings auto_codex_enabled: false silences output', () => {
@@ -139,25 +139,25 @@ test('FORGE-105 — settings auto_codex_enabled: false silences output', () => {
   assert.equal(stdout.buf, '');
 });
 
-test('FORGE-105 — event plan-task maps to /codex review-plan', () => {
+test('FORGE-105 — event plan-task maps to /second-opinion review-plan', () => {
   const cwd = tmp();
   const { stdout } = capture();
   runCodexSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
 
-test('FORGE-105 — event ship maps to /codex review-impl', () => {
+test('FORGE-105 — event ship maps to /second-opinion review-impl', () => {
   const cwd = tmp();
   const { stdout } = capture();
   runCodexSuggest({ cwd, argv: ['ship'], env: {}, stdout, stderr: capture().stderr });
-  assert.match(stdout.buf, /\/codex review-impl/);
+  assert.match(stdout.buf, /\/second-opinion review-impl/);
 });
 
-test('FORGE-105 — event update-spec maps to /codex review-decision (reserved)', () => {
+test('FORGE-105 — event update-spec maps to /second-opinion review-decision (reserved)', () => {
   const cwd = tmp();
   const { stdout } = capture();
   runCodexSuggest({ cwd, argv: ['update-spec'], env: {}, stdout, stderr: capture().stderr });
-  assert.match(stdout.buf, /\/codex review-decision/);
+  assert.match(stdout.buf, /\/second-opinion review-decision/);
 });
 
 test('FORGE-105 — unknown event exits 1 and writes stderr', () => {
@@ -205,7 +205,7 @@ test('FORGE-105 — malformed settings.yaml falls back to defaults with stderr w
   });
   // Never crashes the parent skill — exit 0, fall back to defaults.
   assert.equal(result.exitCode, 0);
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
   assert.match(stderr.buf, /could not be parsed/);
 });
 
@@ -228,7 +228,7 @@ test('FORGE-105 — FORGE_AUTO_CODEX=1 leaves default behavior (suggestion fires
     stdout,
     stderr: capture().stderr,
   });
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
 
 // Codex F1 (confidence 8): GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR env vars
@@ -259,5 +259,5 @@ test('FORGE-105 — GIT_DIR/GIT_WORK_TREE env cannot redirect settings discovery
   });
   // Sanitization works → git resolves to cwd's parent tree (or null) → no
   // attacker settings consumed → defaults expand → suggestion fires.
-  assert.match(stdout.buf, /\/codex review-plan/);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
 });

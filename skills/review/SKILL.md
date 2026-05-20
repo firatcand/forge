@@ -37,9 +37,10 @@ fi
 2. Always invoke `code-reviewer` subagent
 3. If diff touches paths in CRITICAL.md, invoke `security-auditor`
 4. If task type is "design" or "frontend", invoke `design-reviewer`
-5. Aggregate findings; categorize by severity (block / improvement / nit)
-6. Print summary; ask user to address blocks before /ship
+5. If diff touches paths in CRITICAL.md AND `.forge/settings.yaml` has `agents.review_host_cli` set (not `null`): tell the user to run `/second-opinion review-impl` for an out-of-process, different-model-lineage check (or, if Claude is driving, invoke the slash command directly via the host's skill loader — skills are markdown commands, not shell binaries, so a `Bash(/second-opinion ...)` call will fail). Skip silently if `review_host_cli` is `null` (adopter opted out).
+6. Aggregate findings across all reviewers (in-process subagents + `/second-opinion` verdict); categorize by severity (block / improvement / nit). `/second-opinion` `severity: block` findings count toward the block bucket.
+7. Print summary; ask user to address blocks before /ship
 
 ## Output
 
-Markdown summary of findings per reviewer, with file:line references.
+Markdown summary of findings per reviewer, with file:line references. Includes the `/second-opinion` verdict file path when that step ran.

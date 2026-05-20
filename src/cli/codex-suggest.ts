@@ -138,7 +138,7 @@ function resolveCodexConfig(
 function suggestionLine(event: string): string {
   const verb = EVENT_TO_VERB[event];
   if (!verb) throw new Error(`codex-suggest: no verb mapping for event '${event}'`);
-  return `💡 Suggested next: /codex ${verb} (run with FORGE_AUTO_CODEX=0 to disable)`;
+  return `💡 Suggested next: /second-opinion ${verb} (run with FORGE_AUTO_CODEX=0 to disable)`;
 }
 
 function printUsage(stderrTarget: RunCodexSuggestOptions['stderr']): void {

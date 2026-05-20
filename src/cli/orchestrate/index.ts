@@ -29,6 +29,7 @@ import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
+import { secondOpinionHandler } from './second-opinion.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -181,6 +182,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['cancel', cancelHandler],
   ['reconcile', reconcileHandler],
   ['gc', gcHandler],
+  ['second-opinion', secondOpinionHandler],
 ]);
 
 // Order used for --help rendering. Read-only first, then mutating, then nested.
@@ -205,6 +207,7 @@ export const HELP_ORDER: readonly string[] = [
   'cancel',
   'reconcile',
   'gc',
+  'second-opinion',
 ];
 
 export async function dispatchOrchestrate(

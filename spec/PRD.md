@@ -260,7 +260,7 @@ design:
   reference: <url-or-path>          # only when mode = reference_external
 # Added 2026-05-17 (closed-loop workflow control — minimal surface after dropping Feature 7)
 codex:
-  auto_codex_enabled: true          # auto-suggest /codex at /plan-task exit, ADR draft, pre-/ship
+  auto_codex_enabled: true          # auto-suggest /second-opinion at /plan-task exit, ADR draft, pre-/ship (settings field keeps the `codex` name in v0.4; rename deferred to v0.5)
   auto_codex_token_cap: 50000       # max tokens per session for auto-codex (0 disables)
 decisions:
   decision_dir: ./spec/decisions    # where draft ADRs live (ephemeral; deleted on --apply)
@@ -304,7 +304,7 @@ doctor:
 **What it does**
 Surfaces, formalizes, and propagates mid-flight architectural decisions so all artifacts stay in sync. `spec/decisions/` is a **staging area** for in-flight decisions, NOT a permanent record. Three coordinated primitives, collapsed into a single user-facing skill:
 
-- **`/update-spec --draft`** — opens a new ADR draft at `spec/decisions/<date>-<slug>.md` (MADR-shaped frontmatter for structure). User reviews + optionally consults Codex via auto-suggested `/codex review-decision`. User marks `status: accepted` in frontmatter when ready.
+- **`/update-spec --draft`** — opens a new ADR draft at `spec/decisions/<date>-<slug>.md` (MADR-shaped frontmatter for structure). User reviews + optionally consults the configured second-opinion reviewer via auto-suggested `/second-opinion review-decision`. User marks `status: accepted` in frontmatter when ready.
 - **`/update-spec --apply <slug>`** — propagates the accepted ADR's change to SPEC + PRD § + phases.yaml task amendments + tracker issue body updates atomically (with per-artifact diff preview), writes the full ADR content (decision + alternatives + consequences) into the propagation commit message body, then **DELETES the ADR file**. After successful apply, `spec/decisions/` is empty until the next decision.
 - **`forge orchestrate doctor`** verb — read-only diagnostic that flags drift between SPEC↔code (symbols SPEC references that no longer exist in src/). Exit codes per SPEC §Precedence rules.
 
@@ -314,7 +314,7 @@ Surfaces, formalizes, and propagates mid-flight architectural decisions so all a
 1. Mid-build, user realizes architecture needs to change (e.g., "switching public API from REST to GraphQL")
 2. User runs `/update-spec --draft` — skill prompts for title, context, decision summary, alternatives considered, affected_spec_sections, affected_tasks
 3. ADR template written to `spec/decisions/<date>-<slug>.md` with frontmatter (`id`, `date`, `status: proposed`, `affected_spec_sections`, `affected_tasks`) and structured body sections
-4. (Auto-suggested) User runs `/codex review-decision` against the draft for adversarial input
+4. (Auto-suggested) User runs `/second-opinion review-decision` against the draft for adversarial input
 5. User edits the draft to incorporate feedback, manually flips frontmatter to `status: accepted`
 6. User runs `/update-spec --apply <slug>` — skill propagates the change with per-artifact diff preview:
    - Edits SPEC § marked as affected
@@ -480,7 +480,7 @@ claude                                 [normal Claude Code launch]
 
 # Mid-flight: worker detects an architectural shift it can't resolve under §Precedence rules
 > /update-spec --draft                 [drafts ADR in spec/decisions/<date>-<slug>.md]
-# (auto-suggested) /codex review-decision against the draft
+# (auto-suggested) /second-opinion review-decision against the draft
 # Review feedback; edit draft; flip frontmatter status: accepted
 > /update-spec --apply <slug>          [propagates to SPEC + PRD § + phases.yaml + tracker bodies
                                         atomically; writes rationale to commit message;
@@ -533,7 +533,7 @@ claude
 8. **Tracker adapter interface:** Responsibilities listed in Feature 1 (`listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `createIssue`, `createProject`, `setBlockedBy`). Formal typed interface signatures defer to /draft-spec. Extended 2026-05-17 with `updateIssueBody(id, body)` for `/update-spec --apply` and `/reconcile` propagation.
 9. **Suggest-don't-force (added 2026-05-17, simplified):** Skills present ready work via skill-end nudges and `/pickup-task`; user always approves before any state mutation. CLI verbs are split into read-only (`status`, `questions`, `doctor`, `phases`, `attach`) and user-approved mutate (everything else). No verb may straddle the boundary. No session-start hooks installed (sole-user workflow doesn't need automated re-grounding; explicit `/status-check` covers it).
 10. **Artifact precedence (added 2026-05-17, simplified):** When two artifacts disagree, agents follow: user instruction > SPEC > PRD > phases.yaml > tracker body > older attempts. Tracker body is a **projection** of phases.yaml, not equal authority. Workers MUST emit drift events rather than silently fix higher-precedence artifacts. See §Precedence rules. Ephemeral ADRs are NOT in the precedence chain (they're transient staging artifacts; SPEC IS truth post-apply).
-11. **Ephemeral ADRs (added 2026-05-17):** Architectural decisions are formalized via `/update-spec --draft` (writes a staging file to `spec/decisions/`), reviewed (optionally with `/codex review-decision`), accepted (user flips frontmatter), then propagated to SPEC + PRD + phases + tracker via `/update-spec --apply <slug>`. The propagation DELETES the ADR file on success; the rationale (Context + Decision + Alternatives + Consequences) goes into the apply-commit's message body. SPEC is the sole durable source of truth; `git log -- spec/SPEC.md` is the rationale history.
+11. **Ephemeral ADRs (added 2026-05-17):** Architectural decisions are formalized via `/update-spec --draft` (writes a staging file to `spec/decisions/`), reviewed (optionally with `/second-opinion review-decision`), accepted (user flips frontmatter), then propagated to SPEC + PRD + phases + tracker via `/update-spec --apply <slug>`. The propagation DELETES the ADR file on success; the rationale (Context + Decision + Alternatives + Consequences) goes into the apply-commit's message body. SPEC is the sole durable source of truth; `git log -- spec/SPEC.md` is the rationale history.
 
 ---
 

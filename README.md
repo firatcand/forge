@@ -36,7 +36,7 @@ IDEA  → /forge        → spec/BRIEF.md
       → /push-to-tracker → tracker project + per-phase grouping + issues
       
 TASK  → /pickup-task → /plan-task → /implement
-      → /review → /qa → /codex → /ship → /learn
+      → /review → /qa → /second-opinion → /ship → /learn
 
 PHASE → /phase-gate → /retro → next phase
 

@@ -209,3 +209,24 @@ export const RenderWorkerPromptArgsSchema = z.object({
   json: JsonFlag,
 });
 export type RenderWorkerPromptArgs = z.infer<typeof RenderWorkerPromptArgsSchema>;
+
+// `forge orchestrate second-opinion` (FORGE-89 / P2-T21) — dispatch a
+// second-opinion review through the IHarness adapter keyed off
+// settings.review_host_cli. The skill body (skills/second-opinion/SKILL.md)
+// writes the diff + prompt to temp files and calls this verb; the verb is the
+// sole boundary that knows about review_host_cli.
+export const SecondOpinionArgsSchema = z.object({
+  taskId: TaskIdSchema,
+  // Path to a file containing the diff to review. Read by the verb.
+  diffPath: z.string().min(1),
+  // Path to a file containing the review prompt body. Read by the verb.
+  promptPath: z.string().min(1),
+  // Working directory the underlying subprocess runs in. Defaults inside
+  // the verb to the worktree (resolved from forgeDir's parent).
+  cwd: z.string().min(1).optional(),
+  // Optional subprocess timeout override; defaults to harness default.
+  timeoutMs: z.number().int().positive().optional(),
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type SecondOpinionArgs = z.infer<typeof SecondOpinionArgsSchema>;
