@@ -29,6 +29,7 @@ import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
+import { secondOpinionHandler } from './second-opinion.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -113,7 +114,8 @@ const attachHandler: VerbHandler = {
 
 const gcHandler: VerbHandler = {
   band: 'mutate',
-  synopsis: 'Run the deterministic reconciler over local + tracker state.',
+  synopsis:
+    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const dryRun = hasFlag(rest, 'dry-run');
@@ -180,6 +182,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['cancel', cancelHandler],
   ['reconcile', reconcileHandler],
   ['gc', gcHandler],
+  ['second-opinion', secondOpinionHandler],
 ]);
 
 // Order used for --help rendering. Read-only first, then mutating, then nested.
@@ -204,6 +207,7 @@ export const HELP_ORDER: readonly string[] = [
   'cancel',
   'reconcile',
   'gc',
+  'second-opinion',
 ];
 
 export async function dispatchOrchestrate(

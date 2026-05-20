@@ -47,7 +47,12 @@ import {
   validateIdSegment,
 } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
-import { TaskStateSchema, type TaskStateRecord } from '../schemas/task-state.ts';
+import {
+  TaskStateSchema,
+  TERMINAL_TASK_STATES,
+  type TaskStateRecord,
+  type TerminalTaskState,
+} from '../schemas/task-state.ts';
 import {
   computeSpecRevisionSync,
   type SpecRevisionResult,
@@ -900,4 +905,262 @@ export function release(opts: ReleaseOptions): void {
     run_id: caller.run_id,
     generation: caller.generation,
   });
+}
+
+// ---- adminReleaseLeaseByIdentity (gc-only — identity-gated, NOT ownership-bypassing) ----
+//
+// Used by `src/orchestrator/gc.ts` for divergence-table rows 13 and 14 (per
+// spec/ORCHESTRATOR.md §"gc reconciliation rules"). The caller (planner)
+// captures the exact identity of the lease file it intends to delete during
+// snapshot; the executor (this function) re-reads at unlink time and confirms.
+// Identity mismatch → LEASE_IDENTITY_MISMATCH. State-guard mismatch (row 14) →
+// LEASE_STATE_NOT_TERMINAL. Never silently no-op.
+//
+// SAFETY: this primitive does NOT require caller ownership of the lease (gc has
+// no lease for the orphan it is releasing), but it requires the caller to have
+// observed the lease's exact identity in a recent snapshot. The fresh on-disk
+// re-read ensures we don't unlink a lease that was concurrently renewed via
+// heartbeat — generation/claim_id/owner_run_id would have advanced.
+//
+// Only `src/orchestrator/gc.ts` should import this symbol.
+
+export type AdminReleaseReason =
+  | 'gc:row-13:duplicate'    // older-generation duplicate lease file
+  | 'gc:row-14:terminal-state'; // canonical lease present but task state is terminal
+
+export interface AdminReleaseByIdentityOptions {
+  forgeDir: string;
+  taskId: string;
+  // Exact identity of the lease file the caller intends to delete.
+  expectedClaimId: string;
+  expectedGeneration: number;
+  expectedOwnerRunId: string;
+  // The lease's expires_at AT SNAPSHOT TIME. heartbeat() preserves
+  // (claim_id, generation, owner_run_id) — only expires_at and
+  // last_heartbeat_at change — so without this field a heartbeat firing
+  // between snapshot and unlink would silently bypass identity detection and
+  // we'd unlink a live, freshly-renewed lease. (Codex 3rd-pass BLOCK 1.)
+  expectedExpiresAt: string;
+  // Exact file path. For row 14 this is the canonical lease path; for row 13 a
+  // non-canonical duplicate (e.g., `lease.json.<bak>`) — the function will read
+  // and unlink whatever file lives at this path.
+  expectedPath: string;
+  // When true (row 14), also re-read state.json at the canonical state path
+  // and confirm state ∈ TERMINAL_TASK_STATES before unlink. State is re-read
+  // IMMEDIATELY before unlink to minimise the state-check → unlink TOCTOU
+  // window. (Codex 3rd-pass BLOCK 1.)
+  requireTerminalState: boolean;
+  reason: AdminReleaseReason;
+}
+
+export function adminReleaseLeaseByIdentity(
+  opts: AdminReleaseByIdentityOptions,
+): void {
+  const { forgeDir, expectedPath, requireTerminalState, reason } = opts;
+  const taskId = validateOrchestratorId(opts.taskId, 'taskId');
+
+  // 1. Read the lease at the exact expected path. Use readLeaseFile to validate
+  //    schema. If absent, treat as idempotent success — another gc pass may
+  //    have already cleaned up.
+  let storedLease: Lease | null;
+  try {
+    storedLease = readLeaseFile(taskId, expectedPath);
+  } catch (err) {
+    if (err instanceof OrchestratorError) throw err;
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to read lease at ${expectedPath} for admin release`,
+      { taskId, path: expectedPath, cause: err },
+    );
+  }
+  if (storedLease === null) {
+    // Already gone — idempotent. Do not append a history event for a no-op.
+    return;
+  }
+
+  // 2. Identity check — all FOUR fields must match. expires_at catches
+  //    heartbeat-renewals that preserve (claim_id, generation, owner_run_id)
+  //    but change expires_at. Without this check, a heartbeat firing between
+  //    snapshot and unlink would slip through identity validation and we'd
+  //    unlink an actively-renewed lease. (Codex 3rd-pass BLOCK 1.)
+  if (
+    storedLease.claim_id !== opts.expectedClaimId ||
+    storedLease.generation !== opts.expectedGeneration ||
+    storedLease.owner_run_id !== opts.expectedOwnerRunId ||
+    storedLease.expires_at !== opts.expectedExpiresAt
+  ) {
+    throw new OrchestratorError(
+      'LEASE_IDENTITY_MISMATCH',
+      `Lease at ${expectedPath} for task ${taskId} does not match expected identity (possible concurrent heartbeat)`,
+      {
+        taskId,
+        path: expectedPath,
+        expected_claim_id: opts.expectedClaimId,
+        expected_generation: opts.expectedGeneration,
+        expected_owner_run_id: opts.expectedOwnerRunId,
+        expected_expires_at: opts.expectedExpiresAt,
+        stored_claim_id: storedLease.claim_id,
+        stored_generation: storedLease.generation,
+        stored_owner_run_id: storedLease.owner_run_id,
+        stored_expires_at: storedLease.expires_at,
+        reason,
+      },
+    );
+  }
+
+  // 3. For row 14: re-read state.json at the canonical state path and confirm
+  //    state is terminal. Mismatch (e.g., concurrent transition back to running)
+  //    must abort the unlink.
+  if (requireTerminalState) {
+    const statePath = stateFilePath(forgeDir, taskId);
+    let stateRaw: string;
+    try {
+      stateRaw = fs.readFileSync(statePath, 'utf8');
+    } catch (err) {
+      if (isNodeFsError(err) && err.code === 'ENOENT') {
+        // No state.json means we cannot confirm terminal — refuse.
+        throw new OrchestratorError(
+          'LEASE_STATE_NOT_TERMINAL',
+          `Cannot confirm terminal state for task ${taskId}: state.json absent`,
+          { taskId, path: statePath, reason },
+        );
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to read state.json for terminal-state guard on task ${taskId}`,
+        { taskId, path: statePath, cause: err },
+      );
+    }
+    let stateParsed: unknown;
+    try {
+      stateParsed = JSON.parse(stateRaw);
+    } catch (err) {
+      throw new OrchestratorError(
+        'SCHEMA_INVALID',
+        `state.json for task ${taskId} contains invalid JSON during admin release`,
+        { taskId, path: statePath, cause: err },
+      );
+    }
+    const stateValidation = TaskStateSchema.safeParse(stateParsed);
+    if (!stateValidation.success) {
+      throw new OrchestratorError(
+        'SCHEMA_INVALID',
+        `state.json for task ${taskId} failed schema validation during admin release`,
+        { taskId, path: statePath, zodError: stateValidation.error.message },
+      );
+    }
+    const currentState = stateValidation.data.state;
+    if (!isTerminalTaskState(currentState)) {
+      throw new OrchestratorError(
+        'LEASE_STATE_NOT_TERMINAL',
+        `Refusing admin release: task ${taskId} state '${currentState}' is not terminal`,
+        {
+          taskId,
+          path: statePath,
+          current_state: currentState,
+          terminal_states: TERMINAL_TASK_STATES,
+          reason,
+        },
+      );
+    }
+  }
+
+  // 4. Verify-before-unlink: re-read the lease ONE more time immediately
+  //    before unlink. This is defense-in-depth on top of the identity check
+  //    at step 2 — if a heartbeat refreshed the lease between step 2 and now,
+  //    expires_at will have advanced. We cannot fully close the unlink-then-
+  //    re-link race (would need flock or equivalent), but this check
+  //    eliminates the most common observable window. Same shape as the
+  //    "Fix 1 (steal verify-before-write)" pattern in steal() above.
+  //    (Codex 3rd-pass BLOCK 1.)
+  const finalLease = readLeaseFile(taskId, expectedPath);
+  if (finalLease === null) {
+    return; // raced with another unlinker — benign
+  }
+  if (
+    finalLease.claim_id !== opts.expectedClaimId ||
+    finalLease.generation !== opts.expectedGeneration ||
+    finalLease.owner_run_id !== opts.expectedOwnerRunId ||
+    finalLease.expires_at !== opts.expectedExpiresAt
+  ) {
+    throw new OrchestratorError(
+      'LEASE_IDENTITY_MISMATCH',
+      `Lease at ${expectedPath} for task ${taskId} was modified between identity check and unlink (concurrent heartbeat)`,
+      {
+        taskId,
+        path: expectedPath,
+        reason,
+        detail: 'verify-before-unlink check failed',
+      },
+    );
+  }
+
+  // 4b. For row 14: re-read state.json IMMEDIATELY before unlink and re-
+  //     confirm terminal state. complete.ts can transition state from a
+  //     terminal value back to 'running' (e.g., on changes_requested) so a
+  //     stale terminal check is not safe. (Codex 3rd-pass BLOCK 1 — row 14
+  //     state-check-to-unlink window.)
+  if (requireTerminalState) {
+    const statePath = stateFilePath(forgeDir, taskId);
+    let stateRaw: string;
+    try {
+      stateRaw = fs.readFileSync(statePath, 'utf8');
+    } catch (err) {
+      if (isNodeFsError(err) && err.code === 'ENOENT') {
+        throw new OrchestratorError(
+          'LEASE_STATE_NOT_TERMINAL',
+          `State for task ${taskId} disappeared between snapshot and unlink`,
+          { taskId, reason },
+        );
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to re-read state.json for task ${taskId} during admin release`,
+        { taskId, cause: err, reason },
+      );
+    }
+    const stateParsed = TaskStateSchema.safeParse(JSON.parse(stateRaw));
+    if (!stateParsed.success || !isTerminalTaskState(stateParsed.data.state)) {
+      throw new OrchestratorError(
+        'LEASE_STATE_NOT_TERMINAL',
+        `Refusing admin release: task ${taskId} state '${stateParsed.success ? stateParsed.data.state : 'invalid'}' is not terminal (re-check before unlink)`,
+        {
+          taskId,
+          current_state: stateParsed.success ? stateParsed.data.state : null,
+          reason,
+        },
+      );
+    }
+  }
+
+  // 5. Unlink. ENOENT is benign (idempotent re-run after partial failure).
+  try {
+    fs.unlinkSync(expectedPath);
+  } catch (err) {
+    if (isNodeFsError(err) && err.code === 'ENOENT') {
+      return; // already gone — idempotent
+    }
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to unlink lease at ${expectedPath} for task ${taskId}`,
+      { taskId, path: expectedPath, cause: err, reason },
+    );
+  }
+
+  // 6. Record the admin release in claim-history.jsonl with the reason. This
+  //    is the audit trail — any unexpected admin_released event in a production
+  //    run is a bug to investigate.
+  appendClaimHistory(forgeDir, taskId, {
+    event: 'admin_released',
+    ts: new Date().toISOString(),
+    claim_id: opts.expectedClaimId,
+    run_id: opts.expectedOwnerRunId,
+    generation: opts.expectedGeneration,
+    reason,
+    path: expectedPath,
+  });
+}
+
+function isTerminalTaskState(state: string): state is TerminalTaskState {
+  return (TERMINAL_TASK_STATES as readonly string[]).includes(state);
 }

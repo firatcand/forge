@@ -39,7 +39,7 @@ fi
 4. **Secrets scan**: `gitleaks detect` on the diff
 5. **Conventional commit**: at least one commit on this branch follows `feat|fix|chore|docs(scope): message`
 6. **Test-or-die**: new code has new tests; bug fixes have regression tests
-7. **Multi-model review**: if diff touches CRITICAL.md paths, `/codex review` was run
+7. **Multi-model review**: if diff touches CRITICAL.md paths, `/second-opinion review-impl` was run
 
 If any gate fails, list what's missing. Do not proceed.
 
@@ -64,6 +64,6 @@ After the PR is open, emit the auto-codex suggestion hint:
 forge codex-suggest ship
 ```
 
-Prints `💡 Suggested next: /codex review-impl (run with FORGE_AUTO_CODEX=0 to disable)`.
+Prints `💡 Suggested next: /second-opinion review-impl (run with FORGE_AUTO_CODEX=0 to disable)`.
 Silent when `FORGE_AUTO_CODEX=0` is set or `codex.auto_codex_enabled: false` in `.forge/settings.yaml`.
-Independent of the CRITICAL.md hard-gate in §Gates.7 — that runs Codex automatically; this is a soft suggestion for the user to invoke `/codex review-impl` after the fact.
+Independent of the CRITICAL.md hard-gate in §Gates.7 — that runs `/second-opinion` automatically; this is a soft suggestion for the user to invoke `/second-opinion review-impl` after the fact.

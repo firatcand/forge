@@ -64,5 +64,5 @@ In-flight architectural decisions are drafted as **ephemeral ADRs** in `spec/dec
 Not active in v0.4. The `/update-spec` skill, `apply-decision` CLI verb, and `spec/decisions/` directory all land in v0.5 (see FORGE-93, FORGE-95, FORGE-101).
 
 ## Critical paths
-<!-- Files matching these patterns trigger /codex auto-review on /ship -->
+<!-- Files matching these patterns trigger /second-opinion auto-review on /ship -->
 See CRITICAL.md
