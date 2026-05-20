@@ -51,7 +51,7 @@ fi
    ```bash
    forge codex-suggest plan-task
    ```
-   Prints `💡 Suggested next: /codex review-plan (run with FORGE_AUTO_CODEX=0 to disable)`.
+   Prints `💡 Suggested next: /second-opinion review-plan (run with FORGE_AUTO_CODEX=0 to disable)`.
    Silent when `FORGE_AUTO_CODEX=0` is set or `codex.auto_codex_enabled: false` in `.forge/settings.yaml`.
 
 ## Fork severity filter
