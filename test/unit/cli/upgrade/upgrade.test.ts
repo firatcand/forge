@@ -249,12 +249,13 @@ test('upgrade --force does NOT bypass cli-too-old refusal', async () => {
   }
 });
 
-test('upgrade: crash-recovery — stale CONTEXT.md + bundled .version refreshes cleanly without --force', async () => {
-  // Simulates a mid-write crash: .version was written but CONTEXT.md was not
-  // (or vice-versa under the OLD write order). After the order swap, this
-  // state should NEVER occur — but if it does (e.g., another tool stamped
-  // .version), the next upgrade must recover idempotently, not refuse with
-  // exit 1.
+test('upgrade: refuses cleanly when .version=bundled but CONTEXT.md is stale (anomalous state)', async () => {
+  // Simulates a state that the NEW write order (CONTEXT.md before .version)
+  // can no longer produce, but which could exist if a third-party tool wrote
+  // .version directly. Pin the behavior: this looks identical to "user edited
+  // CONTEXT.md while versions match" and refuses with exit 1. The user must
+  // either restore CONTEXT.md or run --force. Test exists to lock the contract
+  // — a future relaxation (e.g., per-version SHAs) must be intentional.
   const cwd = bootstrap();
   try {
     const contextPath = resolve(cwd, '.forge/CONTEXT.md');
