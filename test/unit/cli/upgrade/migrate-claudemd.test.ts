@@ -205,16 +205,109 @@ test('migrateClaudemd: bail-clean when a methodology heading is missing', async 
 // Refusal paths (non-zero exit)
 // =====================================================================
 
-test('migrateClaudemd: refuses if .forge/CONTEXT.md already exists', async () => {
-  const cwd = bootstrapLegacy({ seedContext: true });
+test('migrateClaudemd: refuses if CLAUDE.md already has a Forge marker block (already migrated)', async () => {
+  // Bootstrap a "post-migration" CLAUDE.md: marker block + minimal product body.
+  // This is what a successful migration produces; running --migrate-claudemd
+  // again must refuse rather than try to re-strip.
+  const claudeWithMarker = `<!-- >>> forge-managed (do not edit between markers) >>> -->
+> some marker body
+@.forge/CONTEXT.md
+<!-- <<< forge-managed <<< -->
+
+# my-product
+## Stack
+TypeScript.
+`;
+  const cwd = bootstrapLegacy({ claudeOverride: claudeWithMarker });
   try {
     const result = await migrateClaudemd({ cwd });
     assert.equal(result.exitCode, 1);
-    assert.match(result.stderr, /already migrated|CONTEXT\.md already exists/i);
-    // CONTEXT.md preserved verbatim (we did NOT overwrite the pre-existing one)
-    assert.equal(readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'), '# pre-existing\n');
-    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), LEGACY_CLAUDEMD, 'CLAUDE.md unchanged');
+    assert.match(result.stderr, /already migrated|Forge marker block/i);
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), claudeWithMarker, 'CLAUDE.md unchanged');
     assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('migrateClaudemd: PROCEEDS when .forge/CONTEXT.md exists but CLAUDE.md is still legacy (partial-crash recovery)', async () => {
+  // Codex review IMPROVEMENT: a process killed between CONTEXT.md write and
+  // CLAUDE.md trim leaves the repo in a state where CONTEXT.md exists but
+  // CLAUDE.md still has the legacy methodology. The marker-block check
+  // (not CONTEXT.md existence) MUST allow this re-run to complete cleanly.
+  const cwd = bootstrapLegacy({ seedContext: true });
+  try {
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 0, `expected exit 0 (recovery), got: ${result.stderr}`);
+    // CLAUDE.md now has marker block + product content (trimmed)
+    const newClaude = readFileSync(join(cwd, 'CLAUDE.md'), 'utf8');
+    assert.match(newClaude, /<!-- >>> forge-managed/);
+    assert.doesNotMatch(newClaude, /## Forge principles/);
+    // CONTEXT.md was overwritten with bundled content (NOT the seeded "# pre-existing")
+    assert.match(readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'), /# Forge methodology/);
+    // .bak captures the legacy CLAUDE.md (NOT the seeded marker file)
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md.pre-migration.bak'), 'utf8'), LEGACY_CLAUDEMD);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('migrateClaudemd: refuses if CLAUDE.md is a symbolic link (security M1)', async () => {
+  const cwd = bootstrapLegacy({ skipClaude: true });
+  try {
+    // Stage a target file outside the symlink so we can verify it stays untouched.
+    const target = join(cwd, 'real-claude.md');
+    writeFileSync(target, LEGACY_CLAUDEMD);
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync(target, join(cwd, 'CLAUDE.md'));
+
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /CLAUDE\.md is a symbolic link/i);
+    // The target file MUST be unchanged
+    assert.equal(readFileSync(target, 'utf8'), LEGACY_CLAUDEMD, 'symlink target untouched');
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak written');
+    assert.ok(!existsSync(join(cwd, '.forge/CONTEXT.md')), 'no CONTEXT.md');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('migrateClaudemd: refuses if .forge/settings.yaml is a symbolic link (security M2)', async () => {
+  const cwd = bootstrapLegacy({ skipSettings: true });
+  try {
+    // Bootstrap without settings, then symlink settings.yaml.
+    mkdirSync(join(cwd, '.forge'));
+    const target = join(cwd, 'real-settings.yaml');
+    writeFileSync(target, 'evil: contents\n');
+    const { symlinkSync } = await import('node:fs');
+    symlinkSync(target, join(cwd, '.forge/settings.yaml'));
+
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /settings\.yaml is a symbolic link/i);
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('migrateClaudemd: preserves intentional whitespace (\\n\\n\\n) in product sections', async () => {
+  // Codex review BLOCK: the earlier global \n{3,} collapse silently rewrote
+  // user-owned product whitespace. After the fix, product whitespace MUST
+  // survive verbatim.
+  const claude = LEGACY_CLAUDEMD.replace(
+    '## Stack\n<!-- Auto-populated by /draft-spec — keep in sync with spec/SPEC.md -->',
+    '## Stack\n\n\nNode.js 22, TypeScript 5.\n<!-- Auto-populated by /draft-spec — keep in sync with spec/SPEC.md -->',
+  );
+  // sanity: three consecutive newlines present before migration
+  assert.match(claude, /## Stack\n\n\n/);
+  const cwd = bootstrapLegacy({ claudeOverride: claude });
+  try {
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 0, `expected exit 0, got: ${result.stderr}`);
+    const newClaude = readFileSync(join(cwd, 'CLAUDE.md'), 'utf8');
+    assert.match(newClaude, /## Stack\n\n\nNode\.js 22, TypeScript 5\./, 'triple-newline + custom prose survives verbatim');
   } finally {
     cleanup(cwd);
   }

@@ -330,6 +330,8 @@ test('e2e: --migrate-claudemd against v0.4 fixture → split layout', async () =
   assert.doesNotMatch(newClaude, /## Forge principles/);
   assert.doesNotMatch(newClaude, /## Source of truth/);
   assert.doesNotMatch(newClaude, /## Skill ↔ verb contract/);
+  assert.doesNotMatch(newClaude, /## Branch strategy/);
+  assert.doesNotMatch(newClaude, /## Ephemeral ADR workflow/);
   assert.match(newClaude, /## Stack/);
   assert.match(newClaude, /## Commands/);
   assert.match(newClaude, /## Conventions/);
@@ -355,10 +357,27 @@ test('e2e: --migrate-claudemd against v0.4 fixture → split layout', async () =
   assert.doesNotMatch(reUpgrade.stdout, /changed: \.forge\/CONTEXT\.md/);
 });
 
-test('e2e: --migrate-claudemd refuses if .forge/CONTEXT.md already exists (one-shot)', async () => {
-  const cwd = bootstrapLegacyRepo();
-  // Seed an existing CONTEXT.md to simulate "already migrated".
-  writeFileSync(join(cwd, '.forge/CONTEXT.md'), '# pre-existing\n');
+test('e2e: --migrate-claudemd refuses if CLAUDE.md already has Forge marker block (already migrated)', async () => {
+  // After codex review, the precondition shifted from CONTEXT.md-exists to
+  // CLAUDE.md-has-marker — that lets partial-crash recoveries succeed while
+  // still refusing genuine re-migration attempts. Set up a post-migration
+  // CLAUDE.md (marker block + minimal product body) and verify refusal.
+  const cwd = mkdtempSync(join(tmpdir(), 'forge-migrate-e2e-'));
+  mkdirSync(join(cwd, '.forge'));
+  writeFileSync(
+    join(cwd, '.forge/settings.yaml'),
+    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: claude\n  review_host_cli: codex\n  enabled_root_files:\n    - claude\ndesign:\n  mode: project_owned\n`,
+  );
+  const claudeWithMarker = `<!-- >>> forge-managed (do not edit between markers) >>> -->
+> marker body
+@.forge/CONTEXT.md
+<!-- <<< forge-managed <<< -->
+
+# my-product
+## Stack
+TypeScript.
+`;
+  writeFileSync(join(cwd, 'CLAUDE.md'), claudeWithMarker);
 
   const result = await execa(
     tsxBin,
@@ -367,8 +386,8 @@ test('e2e: --migrate-claudemd refuses if .forge/CONTEXT.md already exists (one-s
   );
 
   assert.equal(result.exitCode, 1);
-  assert.match(result.stderr, /already migrated|CONTEXT\.md already exists/i);
-  assert.equal(readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'), '# pre-existing\n');
+  assert.match(result.stderr, /already migrated|Forge marker block/i);
+  assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), claudeWithMarker, 'CLAUDE.md unchanged');
 });
 
 test('e2e: --migrate-claudemd --force is refused at CLI parse (mutex)', async () => {
