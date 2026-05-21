@@ -21,9 +21,13 @@ export {
   formatDriftWarning,
   compareVersions,
   formatCliTooOldRefusal,
+  readBundledMethodologyVersion,
 } from './version-check.ts';
 export type {
   DriftInfo,
   CheckVersionDriftInput,
   VersionComparison,
 } from './version-check.ts';
+
+export { upgrade } from './upgrade.ts';
+export type { UpgradeOptions, UpgradeResult } from './upgrade.ts';
