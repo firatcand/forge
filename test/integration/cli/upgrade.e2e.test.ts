@@ -280,3 +280,166 @@ test('e2e: forge upgrade on a stale (older) repo refreshes CONTEXT.md + .version
     readBundledMethodologyVersion(),
   );
 });
+
+// ============================================================================
+// FORGE-154 Phase C — --migrate-claudemd
+// ============================================================================
+
+const LEGACY_CLAUDEMD_PATH = resolve(repoRoot, 'test/fixtures/legacy-claudemd.md');
+
+/** Bootstrap a tmpdir that looks like a v0.4 repo just before migration:
+ *  - CLAUDE.md = pinned legacy fixture
+ *  - .forge/settings.yaml = minimal v0.5 shape (post-Phase-A schema)
+ *  - NO .forge/CONTEXT.md, NO .forge/.version (those are migration outputs)
+ */
+function bootstrapLegacyRepo(): string {
+  const cwd = mkdtempSync(join(tmpdir(), 'forge-migrate-e2e-'));
+  writeFileSync(join(cwd, 'CLAUDE.md'), readFileSync(LEGACY_CLAUDEMD_PATH, 'utf8'));
+  mkdirSync(join(cwd, '.forge'));
+  writeFileSync(
+    join(cwd, '.forge/settings.yaml'),
+    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: claude\n  review_host_cli: codex\n  enabled_root_files:\n    - claude\ndesign:\n  mode: project_owned\n`,
+  );
+  return cwd;
+}
+
+test('e2e: --migrate-claudemd against v0.4 fixture → split layout', async () => {
+  const cwd = bootstrapLegacyRepo();
+
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--migrate-claudemd'],
+    { cwd, reject: false, all: true },
+  );
+
+  assert.equal(result.exitCode, 0, `expected exit 0, got: ${result.all}`);
+  assert.match(result.stdout, /changed: CLAUDE\.md/);
+  assert.match(result.stdout, /changed: \.forge\/CONTEXT\.md/);
+  assert.match(result.stdout, /changed: \.forge\/\.version/);
+  assert.match(result.stdout, /changed: \.gitignore/);
+
+  // .bak holds the original
+  const bak = readFileSync(join(cwd, 'CLAUDE.md.pre-migration.bak'), 'utf8');
+  assert.equal(bak, readFileSync(LEGACY_CLAUDEMD_PATH, 'utf8'));
+
+  // CLAUDE.md trimmed: marker block + @import + product headings present;
+  // methodology headings absent.
+  const newClaude = readFileSync(join(cwd, 'CLAUDE.md'), 'utf8');
+  assert.match(newClaude, /<!-- >>> forge-managed/);
+  assert.match(newClaude, /@\.forge\/CONTEXT\.md/);
+  assert.doesNotMatch(newClaude, /## Forge principles/);
+  assert.doesNotMatch(newClaude, /## Source of truth/);
+  assert.doesNotMatch(newClaude, /## Skill ↔ verb contract/);
+  assert.match(newClaude, /## Stack/);
+  assert.match(newClaude, /## Commands/);
+  assert.match(newClaude, /## Conventions/);
+  assert.match(newClaude, /## Critical paths/); // preserved per plan Q2
+
+  // CONTEXT.md materialized; .version stamped
+  assert.match(
+    readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'),
+    /# Forge methodology/,
+  );
+  assert.equal(
+    readFileSync(join(cwd, '.forge/.version'), 'utf8').trim(),
+    readBundledMethodologyVersion(),
+  );
+
+  // .gitignore created with marker block
+  assert.match(readFileSync(join(cwd, '.gitignore'), 'utf8'), /# >>> forge-managed/);
+
+  // Idempotency boundary: re-running `forge upgrade` (no migrate flag) on the
+  // just-migrated repo is a no-op. CONTEXT.md SHA matches bundled → no rewrite.
+  const reUpgrade = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+  assert.equal(reUpgrade.exitCode, 0);
+  assert.doesNotMatch(reUpgrade.stdout, /changed: \.forge\/CONTEXT\.md/);
+});
+
+test('e2e: --migrate-claudemd refuses if .forge/CONTEXT.md already exists (one-shot)', async () => {
+  const cwd = bootstrapLegacyRepo();
+  // Seed an existing CONTEXT.md to simulate "already migrated".
+  writeFileSync(join(cwd, '.forge/CONTEXT.md'), '# pre-existing\n');
+
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--migrate-claudemd'],
+    { cwd, reject: false, all: true },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /already migrated|CONTEXT\.md already exists/i);
+  assert.equal(readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'), '# pre-existing\n');
+});
+
+test('e2e: --migrate-claudemd --force is refused at CLI parse (mutex)', async () => {
+  const cwd = bootstrapLegacyRepo();
+
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--migrate-claudemd', '--force'],
+    { cwd, reject: false, all: true },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /mutually exclusive with --force/);
+  // No writes happened — CLAUDE.md byte-identical to fixture.
+  assert.equal(
+    readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'),
+    readFileSync(LEGACY_CLAUDEMD_PATH, 'utf8'),
+  );
+});
+
+test('e2e: --migrate-claudemd --add-agent codex is refused at CLI parse (mutex)', async () => {
+  const cwd = bootstrapLegacyRepo();
+
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--migrate-claudemd', '--add-agent', 'codex'],
+    { cwd, reject: false, all: true },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.stderr, /mutually exclusive with --add-agent/);
+});
+
+test('e2e: --migrate-claudemd --dry-run leaves filesystem inert', async () => {
+  const cwd = bootstrapLegacyRepo();
+
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--migrate-claudemd', '--dry-run'],
+    { cwd, reject: false, all: true },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.match(result.stderr, /would write/i);
+
+  // No actual writes — the CLI still prints "changed:" lines for the would-be
+  // changes (matches existing `forge upgrade --dry-run` behavior), but the
+  // filesystem must be byte-identical to bootstrap state.
+  assert.equal(
+    readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'),
+    readFileSync(LEGACY_CLAUDEMD_PATH, 'utf8'),
+    'CLAUDE.md must be unchanged after dry-run',
+  );
+  assert.throws(
+    () => readFileSync(join(cwd, 'CLAUDE.md.pre-migration.bak'), 'utf8'),
+    { code: 'ENOENT' },
+    '.bak must not exist after dry-run',
+  );
+  assert.throws(
+    () => readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'),
+    { code: 'ENOENT' },
+    '.forge/CONTEXT.md must not exist after dry-run',
+  );
+  assert.throws(
+    () => readFileSync(join(cwd, '.forge/.version'), 'utf8'),
+    { code: 'ENOENT' },
+    '.forge/.version must not exist after dry-run',
+  );
+  assert.throws(
+    () => readFileSync(join(cwd, '.gitignore'), 'utf8'),
+    { code: 'ENOENT' },
+    '.gitignore must not exist after dry-run',
+  );
+});
