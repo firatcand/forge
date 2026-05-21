@@ -22,6 +22,7 @@ function baseAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers {
       retry_attempts: 10,
       primary_host_cli: 'claude',
       review_host_cli: 'codex',
+      enabled_root_files: ['claude'],
     },
     design: { mode: 'project_owned' },
     ...overrides,
@@ -205,6 +206,7 @@ test('validateTooling: MCP probe skipped when primary host is not claude', async
       retry_attempts: 0,
       primary_host_cli: 'codex',
       review_host_cli: 'gemini',
+      enabled_root_files: ['codex'],
     },
   });
   const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
@@ -277,6 +279,7 @@ test('validateTooling: review_host probe omitted when review_host_cli is null', 
       retry_attempts: 0,
       primary_host_cli: 'claude',
       review_host_cli: null,
+      enabled_root_files: ['claude'],
     },
   });
   const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });

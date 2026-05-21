@@ -35,6 +35,7 @@ function fixtureAnswers(): InitAnswers {
       retry_attempts: 10,
       primary_host_cli: 'claude',
       review_host_cli: 'codex',
+      enabled_root_files: ['claude'],
     },
     design: { mode: 'project_owned' },
   };

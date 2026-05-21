@@ -95,6 +95,9 @@ const SecretsSchema = z.discriminatedUnion('manager', [
 // supported harnesses; review excludes claude (different-model-lineage rule).
 const PrimaryHostCliEnum = z.enum(['claude', 'codex', 'gemini']);
 const ReviewHostCliEnum = z.enum(['codex', 'gemini']);
+// FORGE-152: enabled_root_files uses the same triple. Init writes one root
+// file per selected agent (CLAUDE.md / AGENTS.md / GEMINI.md).
+const EnabledRootFileEnum = z.enum(['claude', 'codex', 'gemini']);
 
 const AgentsAnswersSchema = z
   .object({
@@ -102,6 +105,11 @@ const AgentsAnswersSchema = z
     retry_attempts: z.number().int().min(0).max(100),
     primary_host_cli: PrimaryHostCliEnum,
     review_host_cli: ReviewHostCliEnum.nullable(),
+    // FORGE-152: which agent root files to write at init. Enforce at least 1
+    // — empty would leave the project without any agent surface. Settings
+    // schema's .transform() promotes empty to [primary_host_cli], but init's
+    // contract is stricter: never produce an answer set with 0 root files.
+    enabled_root_files: z.array(EnabledRootFileEnum).min(1),
   })
   .refine(
     (d) => d.review_host_cli === null || d.review_host_cli !== d.primary_host_cli,
@@ -109,7 +117,16 @@ const AgentsAnswersSchema = z
       message:
         'review_host_cli must differ from primary_host_cli (or be null to disable second-opinion review)',
     },
-  );
+  )
+  // FORGE-152: enabled_root_files must include primary_host_cli — the
+  // primary harness MUST have its root file written or it won't see any
+  // project context on launch. Allow extras beyond primary (e.g., user
+  // primary=claude but also wants AGENTS.md so Codex teammates can pair).
+  .refine((d) => d.enabled_root_files.includes(d.primary_host_cli), {
+    message:
+      'enabled_root_files must include primary_host_cli — the primary harness needs its root file',
+    path: ['enabled_root_files'],
+  });
 
 const DesignAnswersSchema = z.object({
   mode: z.enum(['project_owned', 'reference_external']),
@@ -138,6 +155,15 @@ export interface CollectAnswersOptions {
 interface NumberConfirmModule {
   number?: (opts: { message: string; default?: number; validate?: (v: number | undefined) => true | string }) => Promise<number>;
   confirm?: (opts: { message: string; default?: boolean }) => Promise<boolean>;
+  // FORGE-152: checkbox prompt for multi-agent root file selection. Pulled
+  // from @inquirer/prompts (the same package the other prompts use).
+  checkbox?: (opts: {
+    message: string;
+    choices: ReadonlyArray<{ name: string; value: string; checked?: boolean }>;
+    validate?: (
+      choices: ReadonlyArray<{ value: string }>,
+    ) => boolean | string | Promise<boolean | string>;
+  }) => Promise<readonly string[]>;
 }
 
 let numberConfirmOverride: NumberConfirmModule | null = null;
@@ -147,16 +173,22 @@ export function __setNumberConfirmForTests(mod: NumberConfirmModule | null): voi
 }
 
 async function loadNumberConfirm(): Promise<Required<NumberConfirmModule>> {
-  if (numberConfirmOverride?.number && numberConfirmOverride?.confirm) {
+  if (
+    numberConfirmOverride?.number &&
+    numberConfirmOverride?.confirm &&
+    numberConfirmOverride?.checkbox
+  ) {
     return {
       number: numberConfirmOverride.number,
       confirm: numberConfirmOverride.confirm,
+      checkbox: numberConfirmOverride.checkbox,
     };
   }
   const mod = await import('@inquirer/prompts');
   return {
     number: mod.number as Required<NumberConfirmModule>['number'],
     confirm: mod.confirm as Required<NumberConfirmModule>['confirm'],
+    checkbox: mod.checkbox as Required<NumberConfirmModule>['checkbox'],
   };
 }
 
@@ -357,6 +389,43 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     errorBlock('Invalid review host CLI', msg);
   }
 
+  // 10. FORGE-152: which agent root files to write?
+  // Pre-check the primary host CLI; user can add codex / gemini as additional
+  // root files for teammates on those agents. Empty selection auto-falls back
+  // to [primary_host_cli] in the validator below.
+  const { checkbox } = await loadNumberConfirm();
+  const rootFileChoices = [
+    {
+      name: 'Claude Code (CLAUDE.md)',
+      value: 'claude',
+      checked: primaryHostCli === 'claude',
+    },
+    {
+      name: 'Codex (AGENTS.md)',
+      value: 'codex',
+      checked: primaryHostCli === 'codex',
+    },
+    {
+      name: 'Gemini (GEMINI.md)',
+      value: 'gemini',
+      checked: primaryHostCli === 'gemini',
+    },
+  ] as const;
+  const enabledRootFilesRaw = (await checkbox({
+    message:
+      'Which agent root files should this project write? (primary is auto-selected; add others for teammates on other agents)',
+    choices: rootFileChoices,
+    validate: (selected) => {
+      if (selected.length === 0) return 'Select at least one agent root file.';
+      const values = selected.map((s) => s.value);
+      if (!values.includes(primaryHostCli)) {
+        return `Selection must include the primary host CLI (${primaryHostCli}).`;
+      }
+      return true;
+    },
+  })) as readonly ('claude' | 'codex' | 'gemini')[];
+  const enabledRootFiles: ('claude' | 'codex' | 'gemini')[] = [...enabledRootFilesRaw];
+
   const answers: InitAnswers = {
     project: {
       name,
@@ -370,6 +439,7 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
       retry_attempts: retryAttempts,
       primary_host_cli: primaryHostCli,
       review_host_cli: reviewHostCli,
+      enabled_root_files: enabledRootFiles,
     },
     design: { mode: 'project_owned' },
   };
