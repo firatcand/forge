@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import { parse as yamlParse } from 'yaml';
 import {
   scaffoldProject,
-  appendGitignoreBlock,
   appendLineIfMissing,
   appendToolingExcludes,
   toMinimalYamlObject,
@@ -113,19 +112,84 @@ test('.gitignore append is idempotent', () => {
   assert.equal(after1, after2);
 });
 
-test('appendGitignoreBlock leaves user content intact', () => {
-  const existing = 'node_modules\ndist\n';
-  const { content, appended } = appendGitignoreBlock(existing);
-  assert.equal(appended, true);
-  assert.ok(content.startsWith('node_modules\ndist\n'));
-  assert.ok(content.includes('.forge/worktrees/'));
+// FORGE-152: appendGitignoreBlock removed; the new .gitignore writer is
+// applyGitignoreBlock in src/cli/upgrade/gitignore-block.ts. Its unit tests
+// live in test/unit/cli/upgrade/gitignore-block.test.ts.
+
+test('FORGE-152: scaffold writes CLAUDE.md only when claude is enabled', () => {
+  const cwd = tmp();
+  const answers = fixtureAnswers();
+  scaffoldProject({ cwd, answers, templatesDir, isoDate: '2026-05-12' });
+  assert.ok(existsSync(resolve(cwd, 'CLAUDE.md')), 'CLAUDE.md should exist');
+  assert.ok(!existsSync(resolve(cwd, 'AGENTS.md')), 'AGENTS.md should NOT exist');
+  assert.ok(!existsSync(resolve(cwd, 'GEMINI.md')), 'GEMINI.md should NOT exist');
 });
 
-test('appendGitignoreBlock no-ops when "# forge" marker already present', () => {
-  const existing = 'node_modules\n# forge\n.forge/worktrees/\n';
-  const { content, appended } = appendGitignoreBlock(existing);
-  assert.equal(appended, false);
-  assert.equal(content, existing);
+test('FORGE-152: scaffold writes all three root files when all enabled', () => {
+  const cwd = tmp();
+  const answers: InitAnswers = {
+    ...fixtureAnswers(),
+    agents: {
+      max_concurrent: 10,
+      retry_attempts: 10,
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: ['claude', 'codex', 'gemini'],
+    },
+  };
+  scaffoldProject({ cwd, answers, templatesDir, isoDate: '2026-05-12' });
+  for (const name of ['CLAUDE.md', 'AGENTS.md', 'GEMINI.md']) {
+    const p = resolve(cwd, name);
+    assert.ok(existsSync(p), `${name} should exist`);
+    const contents = readFileSync(p, 'utf8');
+    assert.match(contents, /<!-- >>> forge-managed/, `${name} should have marker block`);
+  }
+});
+
+test('FORGE-152: scaffold writes only AGENTS.md when codex is the only enabled root', () => {
+  const cwd = tmp();
+  const answers: InitAnswers = {
+    ...fixtureAnswers(),
+    agents: {
+      max_concurrent: 10,
+      retry_attempts: 10,
+      primary_host_cli: 'codex',
+      review_host_cli: null,
+      enabled_root_files: ['codex'],
+    },
+  };
+  scaffoldProject({ cwd, answers, templatesDir, isoDate: '2026-05-12' });
+  assert.ok(existsSync(resolve(cwd, 'AGENTS.md')));
+  assert.ok(!existsSync(resolve(cwd, 'CLAUDE.md')));
+  assert.ok(!existsSync(resolve(cwd, 'GEMINI.md')));
+});
+
+test('FORGE-152: scaffold writes .forge/CONTEXT.md with methodology + CLI surface', () => {
+  const cwd = tmp();
+  scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  const p = resolve(cwd, '.forge/CONTEXT.md');
+  assert.ok(existsSync(p), '.forge/CONTEXT.md should exist');
+  const contents = readFileSync(p, 'utf8');
+  assert.match(contents, /# Forge methodology/);
+  assert.match(contents, /forge orchestrate/);
+  // The rendered CLI surface must include at least one slash command bullet.
+  assert.match(contents, /- `\/pickup-task`/);
+});
+
+test('FORGE-152: scaffold writes .forge/.version with a semver string', () => {
+  const cwd = tmp();
+  scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  const v = readFileSync(resolve(cwd, '.forge/.version'), 'utf8').trim();
+  assert.match(v, /^\d+\.\d+\.\d+/, `.forge/.version should be semver, got: ${JSON.stringify(v)}`);
+});
+
+test('FORGE-152: .gitignore has the new marker block with selective negation', () => {
+  const cwd = tmp();
+  scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  const gi = readFileSync(resolve(cwd, '.gitignore'), 'utf8');
+  assert.match(gi, /# >>> forge-managed/);
+  assert.match(gi, /\/\.forge\/\*/);
+  assert.match(gi, /!\/\.forge\/settings\.yaml/);
 });
 
 test('scaffold skips overwriting existing files by default', () => {
