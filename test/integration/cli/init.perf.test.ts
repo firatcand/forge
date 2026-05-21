@@ -16,6 +16,9 @@ const VALID_ANSWERS = {
     retry_attempts: 3,
     primary_host_cli: 'claude',
     review_host_cli: 'codex',
+    // FORGE-152: InitAnswersSchema requires enabled_root_files (.min(1) +
+    // must-include-primary refinement). Add minimal claude-only setup.
+    enabled_root_files: ['claude'],
   },
   design: { mode: 'project_owned' },
 };

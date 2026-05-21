@@ -375,11 +375,16 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
       default: defaultReview,
     })) as string;
     const value = reviewChoice === 'none' ? null : (reviewChoice as 'codex' | 'gemini');
+    // FORGE-152: the enabled_root_files field is collected AFTER this loop.
+    // Seed it with the primary so the .min(1) + must-include-primary refinements
+    // pass here — they're validated for real once the checkbox prompt fires
+    // below. This loop only enforces the review/primary collision rule.
     const candidate = AgentsAnswersSchema.safeParse({
       max_concurrent: maxConcurrent,
       retry_attempts: retryAttempts,
       primary_host_cli: primaryHostCli,
       review_host_cli: value,
+      enabled_root_files: [primaryHostCli],
     });
     if (candidate.success) {
       reviewHostCli = value;
