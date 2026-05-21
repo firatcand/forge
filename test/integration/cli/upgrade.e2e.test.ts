@@ -173,6 +173,41 @@ test('e2e: forge upgrade --add-agent codex writes AGENTS.md and updates settings
   assert.match(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), /<!-- >>> forge-managed/);
 });
 
+test('e2e: forge upgrade --add-agent with NO value is rejected (Codex round-1 fix)', async () => {
+  const cwd = bootstrapInitdRepo();
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--add-agent'],
+    { cwd, reject: false },
+  );
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /--add-agent requires a value/);
+});
+
+test('e2e: forge upgrade --add-agent followed by another flag is rejected (no positional fallthrough)', async () => {
+  const cwd = bootstrapInitdRepo();
+  // Without the MISSING_VALUE check, `--add-agent --force` would silently
+  // interpret --force as the agent name and then unsafely pass through.
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--add-agent', '--force'],
+    { cwd, reject: false },
+  );
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /--add-agent requires a value/);
+});
+
+test('e2e: forge upgrade --add-agent + --remove-agent are mutually exclusive (Codex round-1 fix)', async () => {
+  const cwd = bootstrapInitdRepo({ enabled: ['claude'] });
+  const result = await execa(
+    tsxBin,
+    [entry, 'upgrade', '--add-agent', 'codex', '--remove-agent', 'codex'],
+    { cwd, reject: false },
+  );
+  assert.notEqual(result.exitCode, 0);
+  assert.match(result.stderr, /mutually exclusive/);
+});
+
 test('e2e: forge upgrade --add-agent rejects unknown agent name', async () => {
   const cwd = bootstrapInitdRepo();
 

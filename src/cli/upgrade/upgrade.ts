@@ -19,6 +19,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { SettingsSchema, type Settings } from '../../schemas/index.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import {
   ROOT_FILE_BY_AGENT,
@@ -73,14 +74,23 @@ function locateContextTemplate(): string {
   throw new Error('forge upgrade: templates/CONTEXT.template.md not found in bundle');
 }
 
-interface SettingsShape {
+/**
+ * Working snapshot of settings.yaml as parsed YAML — mutable so --add-agent /
+ * --remove-agent can update agents.enabled_root_files and re-serialize. This
+ * preserves all raw YAML fields (comments are lost; field ordering is mostly
+ * preserved by the yaml package). We validate the parsed shape via
+ * SettingsSchema.safeParse() to fail fast on unknown agent kinds or other
+ * shape drift — but we DO NOT serialize the schema-defaulted object back to
+ * disk (that would expand every default), so the working snapshot is the raw
+ * parsed YAML, not the schema output.
+ */
+interface SettingsYaml {
   readonly version: number;
   readonly project: { readonly name: string };
-  readonly agents: {
+  agents: {
     readonly primary_host_cli: AgentKind;
     enabled_root_files: AgentKind[];
   };
-  // Other fields are preserved verbatim through yaml round-trip.
   [key: string]: unknown;
 }
 
@@ -101,17 +111,32 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       stderr: 'forge upgrade: .forge/settings.yaml not found. Run `forge init` first.',
     };
   }
-  let settings: SettingsShape;
+  let settings: SettingsYaml;
+  let validated: Settings;
   try {
-    settings = yamlParse(readFileSync(settingsPath, 'utf8')) as SettingsShape;
-    if (!settings?.agents?.primary_host_cli) {
-      throw new Error('settings.agents.primary_host_cli missing');
+    const raw = yamlParse(readFileSync(settingsPath, 'utf8')) as unknown;
+    // Validate via SettingsSchema — fail fast on unknown agent kinds, missing
+    // fields, or malformed shape. Codex review (FORGE-153 round 1) caught
+    // that an unchecked cast lets `enabled_root_files: ["cursor"]` reach the
+    // refresh loop and throw mid-write. Schema validation BEFORE any writes
+    // keeps refusal idempotent (exit 3, no partial state).
+    const parsed = SettingsSchema.safeParse(raw);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      const path = firstIssue?.path.join('.') ?? '(root)';
+      return {
+        exitCode: 3,
+        filesChanged: [],
+        stderr: `forge upgrade: invalid .forge/settings.yaml — ${path}: ${firstIssue?.message ?? 'schema validation failed'}`,
+      };
     }
-    // Promote empty enabled_root_files to [primary_host_cli] — mirrors the
-    // schema transform so this verb behaves identically whether the YAML omits
-    // the field or lists it explicitly.
+    validated = parsed.data;
+    // Build the working snapshot from the RAW YAML (so re-serialization stays
+    // minimal) but mirror enabled_root_files from the schema-defaulted value
+    // (which expands empty/absent → [primary_host_cli]).
+    settings = raw as SettingsYaml;
     if (!Array.isArray(settings.agents.enabled_root_files) || settings.agents.enabled_root_files.length === 0) {
-      settings.agents.enabled_root_files = [settings.agents.primary_host_cli];
+      settings.agents = { ...settings.agents, enabled_root_files: [...validated.agents.enabled_root_files] };
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -121,6 +146,9 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       stderr: `forge upgrade: failed to parse .forge/settings.yaml — ${msg}`,
     };
   }
+  // Defensive: unused var silences typescript's "declared but never read" when
+  // the validated object is only consumed to mirror enabled_root_files.
+  void validated;
 
   // 1. Resolve the CLI's bundled methodology version.
   const bundledVersion = readBundledMethodologyVersion();
@@ -183,15 +211,23 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     }
     const versionNeedsBump = onDiskVersionAtCheck !== bundledVersion;
     if (!opts.dryRun) {
-      // Atomicity (plan §4c): stamp .version BEFORE rewriting CONTEXT.md so a
-      // mid-flight crash leaves the next `upgrade` in a state where the SHA
-      // mismatch alone triggers a re-run (idempotent recovery).
-      writeAtomic(versionPath, `${bundledVersion}\n`);
-      // .bak only on the edit-detection path (versions matched, --force in play).
+      // Atomicity (revised after Codex review): write CONTEXT.md FIRST, then
+      // .version. The naive "write .version first as sentinel" pattern inverts
+      // crash recovery — if we crash between the writes with .version=bundled
+      // but CONTEXT.md=stale, the next upgrade sees versionsMatch=true +
+      // SHA-mismatch and refuses as "local edits", forcing the user to --force.
+      //
+      // With CONTEXT.md first:
+      //   - crash before CONTEXT.md write: nothing changed; next run retries
+      //   - crash after CONTEXT.md, before .version: SHA matches → no rewrite
+      //     of CONTEXT.md; the `else` branch below catches the stale .version
+      //     and refreshes it idempotently.
+      // writeAtomic() uses tmp+rename so partial CONTEXT.md is impossible.
       if (onDiskContext.length > 0 && versionsMatch && opts.force) {
         writeFileSync(`${contextPath}.bak`, onDiskContext);
       }
       writeAtomic(contextPath, desiredContext);
+      writeAtomic(versionPath, `${bundledVersion}\n`);
     }
     changed.push('.forge/CONTEXT.md');
     if (versionNeedsBump) changed.push('.forge/.version');
@@ -234,7 +270,7 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
 /** B4: --add-agent. Idempotent. Returns a refusal result on schema violation, else null. */
 function applyAddAgent(
   opts: UpgradeOptions,
-  settings: SettingsShape,
+  settings: SettingsYaml,
   cwd: string,
   recentlyWritten: Set<string>,
   changed: string[],
@@ -277,7 +313,7 @@ function applyAddAgent(
 /** B5: --remove-agent. Refuses to remove primary_host_cli or to drop below 1 enabled file. */
 function applyRemoveAgent(
   opts: UpgradeOptions,
-  settings: SettingsShape,
+  settings: SettingsYaml,
   cwd: string,
   changed: string[],
 ): UpgradeResult | null {

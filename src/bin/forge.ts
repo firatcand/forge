@@ -153,12 +153,27 @@ if (command === 'init') {
   void (async () => {
     try {
       const flags = args.slice(1);
-      const addAgent = readFlagValue(flags, '--add-agent');
-      const removeAgent = readFlagValue(flags, '--remove-agent');
+      const addAgentParse = readFlagValue(flags, '--add-agent');
+      const removeAgentParse = readFlagValue(flags, '--remove-agent');
       const force = flags.includes('--force');
       const dryRun = flags.includes('--dry-run');
       const confirm = flags.includes('--confirm');
 
+      // Reject ambiguous flag states early — fail before any work.
+      if (addAgentParse === 'MISSING_VALUE') {
+        console.error('forge upgrade: --add-agent requires a value (claude, codex, or gemini)');
+        process.exit(1);
+      }
+      if (removeAgentParse === 'MISSING_VALUE') {
+        console.error('forge upgrade: --remove-agent requires a value (claude, codex, or gemini)');
+        process.exit(1);
+      }
+      const addAgent = addAgentParse;
+      const removeAgent = removeAgentParse;
+      if (addAgent !== null && removeAgent !== null) {
+        console.error('forge upgrade: --add-agent and --remove-agent are mutually exclusive (Codex round-1 review)');
+        process.exit(1);
+      }
       if (addAgent !== null && !isValidAgentKind(addAgent)) {
         console.error(`forge upgrade: --add-agent: unknown agent '${addAgent}' (expected: claude, codex, gemini)`);
         process.exit(1);
@@ -192,16 +207,22 @@ if (command === 'init') {
   failUnknown(command, version);
 }
 
-function readFlagValue(flags: string[], name: string): string | null {
-  // Accept both `--flag value` and `--flag=value` forms.
+// Returns: the flag's value (string), 'MISSING_VALUE' sentinel if the flag is
+// present but has no value (e.g., `--add-agent` with nothing after, or followed
+// by another flag), or null if the flag is absent entirely.
+function readFlagValue(flags: string[], name: string): string | 'MISSING_VALUE' | null {
   for (let i = 0; i < flags.length; i++) {
     const f = flags[i]!;
     if (f === name) {
       const next = flags[i + 1];
-      return next ?? null;
+      // Missing entirely OR next token is another flag → treat as missing value.
+      if (next === undefined || next.startsWith('--')) return 'MISSING_VALUE';
+      return next;
     }
     if (f.startsWith(`${name}=`)) {
-      return f.slice(name.length + 1);
+      const v = f.slice(name.length + 1);
+      // `--flag=` with nothing after the equals.
+      return v.length === 0 ? 'MISSING_VALUE' : v;
     }
   }
   return null;
