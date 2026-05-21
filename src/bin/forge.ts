@@ -5,6 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { runInit } from '../cli/init.ts';
 import { runCodexSuggest } from '../cli/codex-suggest.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
+import { upgrade } from '../cli/upgrade/upgrade.ts';
+import {
+  checkVersionDrift,
+  formatDriftWarning,
+} from '../cli/upgrade/version-check.ts';
+import type { AgentKind } from '../cli/upgrade/agent-root-files.ts';
 
 type PackageJson = { version: string };
 
@@ -96,6 +102,27 @@ if (args.length === 0) {
 
 const command = args[0] ?? '';
 
+// FORGE-153 B8: drift-warning pre-hook. Fires once per CLI invocation when the
+// repo's .forge/.version disagrees with the bundled methodology version.
+// - Suppressed by FORGE_QUIET=1 (matches design §9 contract).
+// - Suppressed for `upgrade` itself — running the verb that fixes drift
+//   shouldn't print "run forge upgrade to refresh."
+// - Failures are swallowed silently. The pre-hook is a courtesy; never let it
+//   break unrelated commands (e.g., when cwd has no .forge/ at all).
+function maybeWarnDrift(cmd: string): void {
+  if (cmd === 'upgrade') return;
+  if (process.env.FORGE_QUIET === '1') return;
+  try {
+    const drift = checkVersionDrift({ cwd: process.cwd(), currentVersion: version });
+    if (drift) {
+      process.stderr.write(`${formatDriftWarning(drift)}\n`);
+    }
+  } catch {
+    // Swallow — drift warnings are best-effort.
+  }
+}
+maybeWarnDrift(command);
+
 if (command === 'init') {
   // No top-level await: the CJS build target (dist/bin/forge.cjs) doesn't support it.
   const positional = args.slice(1).find((a) => !a.startsWith('-'));
@@ -122,6 +149,85 @@ if (command === 'init') {
   // safe to call from /plan-task and /ship at skill end.
   const result = runCodexSuggest({ cwd: process.cwd(), argv: args.slice(1) });
   process.exit(result.exitCode);
+} else if (command === 'upgrade') {
+  void (async () => {
+    try {
+      const flags = args.slice(1);
+      const addAgentParse = readFlagValue(flags, '--add-agent');
+      const removeAgentParse = readFlagValue(flags, '--remove-agent');
+      const force = flags.includes('--force');
+      const dryRun = flags.includes('--dry-run');
+      const confirm = flags.includes('--confirm');
+
+      // Reject ambiguous flag states early — fail before any work.
+      if (addAgentParse === 'MISSING_VALUE') {
+        console.error('forge upgrade: --add-agent requires a value (claude, codex, or gemini)');
+        process.exit(1);
+      }
+      if (removeAgentParse === 'MISSING_VALUE') {
+        console.error('forge upgrade: --remove-agent requires a value (claude, codex, or gemini)');
+        process.exit(1);
+      }
+      const addAgent = addAgentParse;
+      const removeAgent = removeAgentParse;
+      if (addAgent !== null && removeAgent !== null) {
+        console.error('forge upgrade: --add-agent and --remove-agent are mutually exclusive (Codex round-1 review)');
+        process.exit(1);
+      }
+      if (addAgent !== null && !isValidAgentKind(addAgent)) {
+        console.error(`forge upgrade: --add-agent: unknown agent '${addAgent}' (expected: claude, codex, gemini)`);
+        process.exit(1);
+      }
+      if (removeAgent !== null && !isValidAgentKind(removeAgent)) {
+        console.error(`forge upgrade: --remove-agent: unknown agent '${removeAgent}' (expected: claude, codex, gemini)`);
+        process.exit(1);
+      }
+
+      const result = await upgrade({
+        cwd: process.cwd(),
+        force,
+        dryRun,
+        confirm,
+        ...(addAgent !== null ? { addAgent: addAgent as AgentKind } : {}),
+        ...(removeAgent !== null ? { removeAgent: removeAgent as AgentKind } : {}),
+      });
+
+      if (result.stderr) process.stderr.write(`${result.stderr}\n`);
+      for (const f of result.filesChanged) {
+        process.stdout.write(`changed: ${f}\n`);
+      }
+      process.exit(result.exitCode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`forge upgrade failed: ${msg}`);
+      process.exit(1);
+    }
+  })();
 } else {
   failUnknown(command, version);
+}
+
+// Returns: the flag's value (string), 'MISSING_VALUE' sentinel if the flag is
+// present but has no value (e.g., `--add-agent` with nothing after, or followed
+// by another flag), or null if the flag is absent entirely.
+function readFlagValue(flags: string[], name: string): string | 'MISSING_VALUE' | null {
+  for (let i = 0; i < flags.length; i++) {
+    const f = flags[i]!;
+    if (f === name) {
+      const next = flags[i + 1];
+      // Missing entirely OR next token is another flag → treat as missing value.
+      if (next === undefined || next.startsWith('--')) return 'MISSING_VALUE';
+      return next;
+    }
+    if (f.startsWith(`${name}=`)) {
+      const v = f.slice(name.length + 1);
+      // `--flag=` with nothing after the equals.
+      return v.length === 0 ? 'MISSING_VALUE' : v;
+    }
+  }
+  return null;
+}
+
+function isValidAgentKind(v: string | null): v is 'claude' | 'codex' | 'gemini' {
+  return v === 'claude' || v === 'codex' || v === 'gemini';
 }
