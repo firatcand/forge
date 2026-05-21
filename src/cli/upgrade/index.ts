@@ -6,3 +6,12 @@
 
 export { renderContext } from './render-context.ts';
 export type { RenderContextInput } from './render-context.ts';
+
+export {
+  buildPrefixBlock,
+  replacePrefixBlock,
+  extractPrefixBlock,
+  bodyWithoutPrefixBlock,
+  ROOT_FILE_BY_AGENT,
+} from './agent-root-files.ts';
+export type { AgentKind, PrefixBlockInput } from './agent-root-files.ts';
