@@ -270,7 +270,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 ### Feature 3: Init flow
 
 **What it does**
-Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures project context, tool choices, and writes `.forge/settings.yaml` + scaffolds project structure (`spec/`, `plans/tasks/`, `.gitignore`, `CLAUDE.md`, `CRITICAL.md`).
+Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures project context, tool choices, and writes `.forge/settings.yaml` + scaffolds project structure (`spec/`, `plans/tasks/`, `.gitignore`, per-agent root files, `CRITICAL.md`, `.forge/CONTEXT.md`, `.forge/.version`).
 
 **User flow**
 1. User runs `npx @firatcand/forge init [project-name]` from a clean directory
@@ -279,8 +279,9 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - One-line description
    - High-level goal / what you're building (free text, multi-line)
    - Task tracker — Linear / GitHub Issues / Notion (default: GitHub Issues)
-   - Primary coding agent CLI — Claude Code / Codex CLI / Cursor / Gemini CLI (default: Claude Code)
-   - Secondary coding agent CLI for adversarial review — Codex CLI / Gemini CLI / disabled (default: Codex when primary is Claude, else Claude)
+   - Primary coding agent CLI — Claude Code / Codex CLI / Gemini CLI (default: Claude Code; Cursor was dropped per FORGE-88 — no runtime adapter ever shipped)
+   - Secondary coding agent CLI for adversarial review — Codex CLI / Gemini CLI / disabled (default: Codex when primary is Claude, else Codex)
+   - **Which agent root files to write (FORGE-152)** — multi-select for CLAUDE.md / AGENTS.md / GEMINI.md. The primary host CLI is pre-checked; user can add others so teammates on those agents have a tracked root file with the methodology breadcrumb. Validator: must include primary.
    - GitHub connected? — yes / no (if yes, validates `gh auth status`)
    - Secret manager — `.env` file [default] / 1Password / AWS Secrets / Doppler / Infisical
    - Concurrent subagent cap per main session (default 3, max 10)
@@ -290,9 +291,15 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - GitHub Issues → checks for `gh` CLI authenticated
    - Notion → asks for API key, validates
    - Coding agents → checks for `claude --version`, `codex --version`, etc.
-4. CLI scaffolds project files using `templates/` (BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`, plus `templates/adr.template.md` *— template ships in v0.4 for v0.5 prep; the `/update-spec --draft` skill itself is deferred to v0.5, see Feature 5*)
-5. CLI writes `.forge/settings.yaml` with all answers
-6. CLI prints clear next-step instructions: *"Run `claude` and then `/forge` to start the discovery interview. Run `/status-check` any time to see project state."*
+4. CLI scaffolds project files using `templates/`:
+   - BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`
+   - `templates/adr.template.md` ships in v0.4 for v0.5 prep (the `/update-spec --draft` skill itself is deferred to v0.5, see Feature 5)
+   - **Per-agent root files (FORGE-152):** one tracked root file per selected agent — CLAUDE.md (with native `@.forge/CONTEXT.md` import + first-run approval-dialog callout), AGENTS.md (Codex prose-directive form), GEMINI.md (mirrors AGENTS). Each carries a forge-managed marker block at the top; product content below is user-owned.
+   - **`.forge/CONTEXT.md` (FORGE-152):** tool-agnostic methodology doc rendered from `templates/CONTEXT.template.md` + bundled CLI registry. Gitignored after step 6 but materialized at init so the first agent session has methodology immediately.
+   - **`.forge/.version` (FORGE-152):** forge's package.json version, stamped for Phase B's drift-warning pre-hook.
+5. CLI writes `.forge/settings.yaml` with all answers (including `agents.enabled_root_files`)
+6. CLI adds the forge-managed marker block to `.gitignore`: `/.forge/*` with `!/.forge/settings.yaml` exception. Block is shared with Phase B's `forge upgrade` for drift-free round-trip; idempotent on re-run; user-curated rules outside the markers are preserved.
+7. CLI prints clear next-step instructions: *"Run `claude` and then `/forge` to start the discovery interview. Run `/status-check` any time to see project state."* For Claude Code users, the banner notes the one-time `@.forge/CONTEXT.md` approval prompt on first session — must accept it or the methodology context is silently skipped.
 
 **Acceptance criteria**
 - [ ] Init completes in <30 seconds end-to-end (excludes external tooling validation; see next bullet)
@@ -340,8 +347,12 @@ secrets:
   manager: env_file | 1password | aws_secrets | doppler | infisical
   env_file_path: ./.env.local       # only when manager = env_file
 agents:
-  primary_host_cli: claude          # claude | codex | cursor | gemini
-  review_host_cli: codex            # must differ from primary; null disables REVIEW
+  primary_host_cli: claude          # claude | codex | gemini  (cursor dropped FORGE-88)
+  review_host_cli: codex            # codex | gemini | null  (must differ from primary; null disables REVIEW)
+  enabled_root_files:               # FORGE-152: which agent root files init writes
+    - claude                        # → CLAUDE.md
+    # - codex                       # → AGENTS.md  (add for Codex-on-the-team)
+    # - gemini                      # → GEMINI.md  (add for Gemini-on-the-team)
   subagent_cap_per_main: 3          # cap on parallel subagents per main session
   lease_ttl_ms: 1800000             # 30 min; heartbeat every 5 min, steal after expiry
   heartbeat_interval_ms: 300000
