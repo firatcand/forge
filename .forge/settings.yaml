@@ -18,5 +18,10 @@ agents:
   on_persistent_failure: notify
   primary_host_cli: claude
   review_host_cli: codex
+  # FORGE-152: this repo dogfoods with only CLAUDE.md (since the framework
+  # itself is iterated primarily via Claude Code). Adopters who want Codex /
+  # Gemini support add their kind here and re-run forge init / forge upgrade.
+  enabled_root_files:
+    - claude
 design:
   mode: project_owned
