@@ -15,3 +15,5 @@ export {
   ROOT_FILE_BY_AGENT,
 } from './agent-root-files.ts';
 export type { AgentKind, PrefixBlockInput } from './agent-root-files.ts';
+
+export { applyGitignoreBlock, hasGitignoreBlock } from './gitignore-block.ts';
