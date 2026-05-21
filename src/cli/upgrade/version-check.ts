@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export interface DriftInfo {
   readonly onDisk: string;
@@ -50,4 +51,24 @@ export function formatCliTooOldRefusal(drift: DriftInfo): string {
     `Running upgrade now would DOWNGRADE the repo's methodology version.`,
     `Update your CLI first: \`npm install -g @firatcand/forge\` (or your equivalent).`,
   ].join('\n');
+}
+
+/**
+ * Read forge's own package.json version. Walks up from this module to find
+ * package.json. Works in dev (src/cli/upgrade/ → ../../../package.json) and
+ * after bundling (dist/ → ../package.json). Mirrors the pattern used in
+ * scaffold.ts and src/bin/forge.ts so all three callsites resolve identically.
+ */
+export function readBundledMethodologyVersion(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (let i = 0; i < 5; i++) {
+    const candidate = resolve(here, ...(Array(i).fill('..') as string[]), 'package.json');
+    if (existsSync(candidate)) {
+      const pkg = JSON.parse(readFileSync(candidate, 'utf8')) as { version: string };
+      if (typeof pkg.version === 'string' && pkg.version.length > 0) {
+        return pkg.version;
+      }
+    }
+  }
+  throw new Error('forge: could not resolve package.json to read bundled methodology version');
 }
