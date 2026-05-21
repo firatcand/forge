@@ -127,3 +127,51 @@ test('bodyWithoutPrefixBlock: strips block + leading blank lines', () => {
 test('bodyWithoutPrefixBlock: passthrough when no block', () => {
   assert.equal(bodyWithoutPrefixBlock('# Product\n'), '# Product\n');
 });
+
+// FORGE-152 drift gate: the marker block at the top of each project template
+// MUST match buildPrefixBlock's output byte-for-byte. Without this gate,
+// init and `forge upgrade` could produce divergent prefix blocks (init reads
+// the template verbatim; upgrade calls buildPrefixBlock) — and Phase B's
+// strict edit-detection would flag every fresh init as "user-edited."
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
+
+const REPO_ROOT = (() => {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, '..', '..', '..', '..');
+})();
+
+function readTemplate(name: string): string {
+  return readFileSync(resolve(REPO_ROOT, 'templates', name), 'utf8');
+}
+
+function extractTemplateMarkerBlock(template: string): string | null {
+  return extractPrefixBlock(template);
+}
+
+test('drift gate: CLAUDE.project.template.md marker block matches buildPrefixBlock("claude")', () => {
+  const expected = buildPrefixBlock('claude', { repoUrl: REPO_URL });
+  const template = readTemplate('CLAUDE.project.template.md');
+  const actual = extractTemplateMarkerBlock(template);
+  assert.equal(
+    actual,
+    expected,
+    'CLAUDE.project.template.md marker block does not match buildPrefixBlock("claude"). Re-render the template prose to match agent-root-files.ts.',
+  );
+});
+
+test('drift gate: AGENTS.project.template.md marker block matches buildPrefixBlock("codex")', () => {
+  const expected = buildPrefixBlock('codex', { repoUrl: REPO_URL });
+  const template = readTemplate('AGENTS.project.template.md');
+  const actual = extractTemplateMarkerBlock(template);
+  assert.equal(actual, expected);
+});
+
+test('drift gate: GEMINI.project.template.md marker block matches buildPrefixBlock("gemini")', () => {
+  const expected = buildPrefixBlock('gemini', { repoUrl: REPO_URL });
+  const template = readTemplate('GEMINI.project.template.md');
+  const actual = extractTemplateMarkerBlock(template);
+  assert.equal(actual, expected);
+});
