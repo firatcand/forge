@@ -158,6 +158,7 @@ if (command === 'init') {
       const force = flags.includes('--force');
       const dryRun = flags.includes('--dry-run');
       const confirm = flags.includes('--confirm');
+      const migrateClaudemd = flags.includes('--migrate-claudemd');
 
       // Reject ambiguous flag states early — fail before any work.
       if (addAgentParse === 'MISSING_VALUE') {
@@ -182,12 +183,30 @@ if (command === 'init') {
         console.error(`forge upgrade: --remove-agent: unknown agent '${removeAgent}' (expected: claude, codex, gemini)`);
         process.exit(1);
       }
+      // FORGE-154 (plan Q3): --migrate-claudemd is mutually exclusive with
+      // every other write-modifying flag. Migration is one-shot legacy
+      // support; the other flags assume a v0.5-shape repo. --dry-run is
+      // allowed (preview the migration without writes).
+      if (migrateClaudemd) {
+        const conflicting: string[] = [];
+        if (force) conflicting.push('--force');
+        if (addAgent !== null) conflicting.push('--add-agent');
+        if (removeAgent !== null) conflicting.push('--remove-agent');
+        if (confirm) conflicting.push('--confirm');
+        if (conflicting.length > 0) {
+          console.error(
+            `forge upgrade: --migrate-claudemd is mutually exclusive with ${conflicting.join(', ')}. Run migration first, then re-run upgrade with the other flags.`,
+          );
+          process.exit(1);
+        }
+      }
 
       const result = await upgrade({
         cwd: process.cwd(),
         force,
         dryRun,
         confirm,
+        migrateClaudemd,
         ...(addAgent !== null ? { addAgent: addAgent as AgentKind } : {}),
         ...(removeAgent !== null ? { removeAgent: removeAgent as AgentKind } : {}),
       });
