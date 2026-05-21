@@ -1,6 +1,6 @@
 # forge — PRD (v-next)
 
-> Drafted: 2026-05-08 · Amended: 2026-05-17 (closed-loop workflow control) · **Re-amended: 2026-05-17 PM (team-mode minimum architecture — supersedes morning amendment in several places)**
+> Drafted: 2026-05-08 · Amended: 2026-05-17 (closed-loop workflow control) · Re-amended: 2026-05-17 PM (team-mode minimum architecture) · **Amended: 2026-05-21 (CLAUDE.md methodology split + multi-agent root files — FORGE-151)**
 > Source: spec/BRIEF.md
 > Mode: PRD with embedded feature specs
 
@@ -79,6 +79,47 @@ The ADR template scaffold (`templates/adr.template.md`) does ship in v0.4 (FORGE
 **The honest cost of this simplification (explicitly accepted):** a dev pushes "we now use async dispatch for billing events." Another dev mid-task on "invoice retry UI" doesn't connect the dots. Their work ships against the old assumption. Bug surfaces later. Mitigations are the **team's** responsibility (PR review, standup, Slack), not forge's. Forge's role is mechanism, not architectural governance.
 
 **Why pull back:** Codex consults consistently expanded the surface (proposal-object lifecycle, section ownership tags, active worktree registry, revalidation gates, PR-policy modes). The user consistently chose simpler. The final position is: forge is a scaffolder + dispatcher + sync bridge. Symphony's positioning (pure scheduler; tracker is read-only input; spec is repo-owned policy) is a useful reference point — forge is slightly broader (spec lifecycle is in scope) but does not become a coordination engine.
+
+---
+
+## Amendments (2026-05-21 — CLAUDE.md methodology split + multi-agent root files)
+
+Drafted in `spec/decisions/2026-05-21-claudemd-methodology-split.md` (in-flight design). Locked during user-led design session 2026-05-21. Lands across **FORGE-152** (Phase A), **FORGE-153** (Phase B), **FORGE-154** (Phase C); parent epic **FORGE-151**. Blocks all other Linear work until shipped.
+
+**Why:** Today the `forge init` flow writes a single `CLAUDE.md` mixing product-owned rules with framework-owned methodology, and only Claude Code can read it. Codex and Gemini users have no in-context methodology. Roster (downstream Forge-built product) patched this manually; the refactor lifts the patch into Forge so every scaffolded repo gets the split natively.
+
+### Sections in this PRD that change (read this amendment before trusting them)
+
+| Section | Status |
+|---|---|
+| §Feature 3 — Init flow | **Amended** — adds multi-agent selection question (multi-select: Claude Code / Codex CLI / Gemini CLI); writes only the selected agent root files; writes `.forge/CONTEXT.md` + `.forge/.version`; emits `.gitignore` marker block. Default selection = user's currently-invoked agent. Inline edit lands in Phase A. |
+| §Feature 4 — `.forge/settings.yaml` example | **Amended** — `agents` block gains `enabled_root_files: ['claude_code']` (default; multi-select at init expands the array). Inline edit lands in Phase A. |
+| §Feature 4 — Cross-host parity | **Amended** — Codex/Gemini users get first-class methodology context via their respective root files (no longer Claude-only) |
+| §Acceptance criteria — Init UX | **Amended** — new criterion: `forge init` produces tracked `CLAUDE.md`+`AGENTS.md`+`GEMINI.md` only for selected agents, plus tracked `.forge/settings.yaml`, gitignored `.forge/CONTEXT.md`+`.forge/.version`, `.gitignore` with forge-managed marker block |
+| §New feature — `forge upgrade` | **Added** (Phase B / FORGE-153) — explicit re-sync verb; never auto-runs on `npm install`/`npm update`; refuses on user-edited `.forge/CONTEXT.md`; `--force` saves `.bak`; `--add-agent` / `--remove-agent` / `--dry-run` flags; CLI drift warning on every forge invocation when methodology version differs from bundled (`FORGE_QUIET=1` suppresses) |
+| §New feature — Legacy migration | **Added** (Phase C / FORGE-154) — one-shot `forge upgrade --migrate-claudemd`; strict heading-by-heading SHA-256 match against pinned v0.4 fixture; bails to manual recipe on any drift; saves `CLAUDE.md.pre-migration.bak` on success |
+
+### User-facing decisions (locked)
+
+- **Forge methodology is gitignored, per-developer.** `.forge/CONTEXT.md` materializes when a dev runs `forge init` or `forge upgrade` in a repo. Not shared via git; not in the published npm package's runtime files; not visible to non-Forge collaborators. Methodology is a tool, not source code.
+- **Each agent's root file is tracked.** Users see one of `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` (or several, if their team uses multiple agents). Product rules live here. A small marker-delimited prefix block at the top (managed by Forge) carries the breadcrumb + import directive to `.forge/CONTEXT.md`.
+- **Breadcrumb for non-Claude tools.** Agents that don't follow the AGENTS.md / CLAUDE.md / GEMINI.md conventions (Cursor, Aider, future tools) read the marker block at the top of whichever root file they pick up — the breadcrumb tells them "this project uses Forge; install via `npm i -g @firatcand/forge && forge upgrade`."
+- **`forge init` asks which agents to support.** Multi-select prompt. Default = the currently-invoking agent. Stored as `agents.enabled_root_files[]` in `.forge/settings.yaml` (tracked, project config).
+- **Re-sync is explicit, never automatic.** `forge upgrade` requires user invocation. `npm install -g @firatcand/forge` only updates the binary, never touches the user's working tree.
+- **Strict edit detection.** `forge upgrade` refuses to overwrite a `.forge/CONTEXT.md` that the user has edited (byte-diff against bundled). `--force` saves the edited copy to `.forge/CONTEXT.md.bak` before overwriting.
+- **CLI drift warning.** Every forge command prints to stderr if local `.forge/.version` is older than bundled (one-line, suppressible via `FORGE_QUIET=1`).
+- **Legacy migration is opt-in and reversible.** `forge upgrade --migrate-claudemd` runs once per repo; refuses if `.forge/CONTEXT.md` already exists; bails on any drift from a pinned v0.4 fixture and prints a manual recipe; saves `CLAUDE.md.pre-migration.bak`.
+
+### Out of scope (in this amendment)
+
+- Postinstall hooks that touch cwd at `npm install` time
+- Auto-fetching forge from the GitHub link in the breadcrumb
+- `forge downgrade` verb
+- Per-repo methodology-version pinning (no consumer yet)
+
+### Relationship to v0.5 ADR workflow
+
+This refactor's own design lives at `spec/decisions/2026-05-21-claudemd-methodology-split.md` — the same `spec/decisions/` directory that the v0.5 `/update-spec --draft` skill (FORGE-93) will own. The split refactor uses the ADR location informally; the formal lifecycle (auto-propagation, ADR deletion) ships with v0.5. After Phase C lands, this ADR + its plan file will be manually deleted; SPEC.md amendment block + this PRD amendment block + the merge commits are the durable record.
 
 ---
 
@@ -229,7 +270,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 ### Feature 3: Init flow
 
 **What it does**
-Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures project context, tool choices, and writes `.forge/settings.yaml` + scaffolds project structure (`spec/`, `plans/tasks/`, `.gitignore`, `CLAUDE.md`, `CRITICAL.md`).
+Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures project context, tool choices, and writes `.forge/settings.yaml` + scaffolds project structure (`spec/`, `plans/tasks/`, `.gitignore`, per-agent root files, `CRITICAL.md`, `.forge/CONTEXT.md`, `.forge/.version`).
 
 **User flow**
 1. User runs `npx @firatcand/forge init [project-name]` from a clean directory
@@ -238,8 +279,9 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - One-line description
    - High-level goal / what you're building (free text, multi-line)
    - Task tracker — Linear / GitHub Issues / Notion (default: GitHub Issues)
-   - Primary coding agent CLI — Claude Code / Codex CLI / Cursor / Gemini CLI (default: Claude Code)
-   - Secondary coding agent CLI for adversarial review — Codex CLI / Gemini CLI / disabled (default: Codex when primary is Claude, else Claude)
+   - Primary coding agent CLI — Claude Code / Codex CLI / Gemini CLI (default: Claude Code; Cursor was dropped per FORGE-88 — no runtime adapter ever shipped)
+   - Secondary coding agent CLI for adversarial review — Codex CLI / Gemini CLI / disabled (default: Codex when primary is Claude, else Codex)
+   - **Which agent root files to write (FORGE-152)** — multi-select for CLAUDE.md / AGENTS.md / GEMINI.md. The primary host CLI is pre-checked; user can add others so teammates on those agents have a tracked root file with the methodology breadcrumb. Validator: must include primary.
    - GitHub connected? — yes / no (if yes, validates `gh auth status`)
    - Secret manager — `.env` file [default] / 1Password / AWS Secrets / Doppler / Infisical
    - Concurrent subagent cap per main session (default 3, max 10)
@@ -249,9 +291,15 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - GitHub Issues → checks for `gh` CLI authenticated
    - Notion → asks for API key, validates
    - Coding agents → checks for `claude --version`, `codex --version`, etc.
-4. CLI scaffolds project files using `templates/` (BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`, plus `templates/adr.template.md` *— template ships in v0.4 for v0.5 prep; the `/update-spec --draft` skill itself is deferred to v0.5, see Feature 5*)
-5. CLI writes `.forge/settings.yaml` with all answers
-6. CLI prints clear next-step instructions: *"Run `claude` and then `/forge` to start the discovery interview. Run `/status-check` any time to see project state."*
+4. CLI scaffolds project files using `templates/`:
+   - BRIEF/PRD/SPEC/DESIGN/CRITICAL templates pre-placed in `spec/`
+   - `templates/adr.template.md` ships in v0.4 for v0.5 prep (the `/update-spec --draft` skill itself is deferred to v0.5, see Feature 5)
+   - **Per-agent root files (FORGE-152):** one tracked root file per selected agent — CLAUDE.md (with native `@.forge/CONTEXT.md` import + first-run approval-dialog callout), AGENTS.md (Codex prose-directive form), GEMINI.md (mirrors AGENTS). Each carries a forge-managed marker block at the top; product content below is user-owned.
+   - **`.forge/CONTEXT.md` (FORGE-152):** tool-agnostic methodology doc rendered from `templates/CONTEXT.template.md` + bundled CLI registry. Gitignored after step 6 but materialized at init so the first agent session has methodology immediately.
+   - **`.forge/.version` (FORGE-152):** forge's package.json version, stamped for Phase B's drift-warning pre-hook.
+5. CLI writes `.forge/settings.yaml` with all answers (including `agents.enabled_root_files`)
+6. CLI adds the forge-managed marker block to `.gitignore`: `/.forge/*` with `!/.forge/settings.yaml` exception. Block is shared with Phase B's `forge upgrade` for drift-free round-trip; idempotent on re-run; user-curated rules outside the markers are preserved.
+7. CLI prints clear next-step instructions: *"Run `claude` and then `/forge` to start the discovery interview. Run `/status-check` any time to see project state."* For Claude Code users, the banner notes the one-time `@.forge/CONTEXT.md` approval prompt on first session — must accept it or the methodology context is silently skipped.
 
 **Acceptance criteria**
 - [ ] Init completes in <30 seconds end-to-end (excludes external tooling validation; see next bullet)
@@ -299,8 +347,12 @@ secrets:
   manager: env_file | 1password | aws_secrets | doppler | infisical
   env_file_path: ./.env.local       # only when manager = env_file
 agents:
-  primary_host_cli: claude          # claude | codex | cursor | gemini
-  review_host_cli: codex            # must differ from primary; null disables REVIEW
+  primary_host_cli: claude          # claude | codex | gemini  (cursor dropped FORGE-88)
+  review_host_cli: codex            # codex | gemini | null  (must differ from primary; null disables REVIEW)
+  enabled_root_files:               # FORGE-152: which agent root files init writes
+    - claude                        # → CLAUDE.md
+    # - codex                       # → AGENTS.md  (add for Codex-on-the-team)
+    # - gemini                      # → GEMINI.md  (add for Gemini-on-the-team)
   subagent_cap_per_main: 3          # cap on parallel subagents per main session
   lease_ttl_ms: 1800000             # 30 min; heartbeat every 5 min, steal after expiry
   heartbeat_interval_ms: 300000

@@ -51,7 +51,7 @@ function scriptedPromptModule(script: ScriptedAnswer[]) {
   };
 }
 
-function scriptedNumberConfirm(numbers: number[]) {
+function scriptedNumberConfirm(numbers: number[], checkboxAnswer?: readonly string[]) {
   let idx = 0;
   return {
     number: async (opts: { default?: number; validate?: (n: number | undefined) => true | string }) => {
@@ -64,6 +64,25 @@ function scriptedNumberConfirm(numbers: number[]) {
       return v;
     },
     confirm: async () => true,
+    // FORGE-152: the enabled_root_files checkbox prompt. Defaults to whatever
+    // is pre-checked in the choices array (which collectAnswers sets to
+    // [primary_host_cli]). Tests can override by passing checkboxAnswer.
+    checkbox: async (opts: {
+      choices: ReadonlyArray<{ value: string; checked?: boolean }>;
+      validate?: (
+        selected: ReadonlyArray<{ value: string }>,
+      ) => boolean | string | Promise<boolean | string>;
+    }) => {
+      const value =
+        checkboxAnswer !== undefined
+          ? [...checkboxAnswer]
+          : opts.choices.filter((c) => c.checked).map((c) => c.value);
+      if (opts.validate) {
+        const ok = await opts.validate(value.map((v) => ({ value: v })));
+        if (ok !== true) throw new Error(`checkbox validation failed: ${ok}`);
+      }
+      return value;
+    },
   };
 }
 
@@ -112,6 +131,7 @@ test('InitAnswersSchema accepts a happy-path linear/env_file answers object', ()
       retry_attempts: 10,
       primary_host_cli: 'claude',
       review_host_cli: 'codex',
+      enabled_root_files: ['claude'],
     },
     design: { mode: 'project_owned' },
   });
@@ -129,6 +149,7 @@ test('InitAnswersSchema rejects review_host_cli === primary_host_cli', () => {
       retry_attempts: 3,
       primary_host_cli: 'claude',
       review_host_cli: 'claude',
+      enabled_root_files: ['claude'],
     },
     design: { mode: 'project_owned' },
   });
@@ -146,10 +167,48 @@ test('InitAnswersSchema allows review_host_cli: null', () => {
       retry_attempts: 0,
       primary_host_cli: 'codex',
       review_host_cli: null,
+      enabled_root_files: ['codex'],
     },
     design: { mode: 'project_owned' },
   });
   assert.equal(ok.success, true);
+});
+
+// FORGE-152: new schema-level refinements
+test('FORGE-152 — InitAnswersSchema rejects empty enabled_root_files', () => {
+  const bad = InitAnswersSchema.safeParse({
+    project: { name: 'a' },
+    goal: 'x',
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file', env_file_path: './.env' },
+    agents: {
+      max_concurrent: 5,
+      retry_attempts: 3,
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: [],
+    },
+    design: { mode: 'project_owned' },
+  });
+  assert.equal(bad.success, false);
+});
+
+test('FORGE-152 — InitAnswersSchema rejects enabled_root_files missing primary', () => {
+  const bad = InitAnswersSchema.safeParse({
+    project: { name: 'a' },
+    goal: 'x',
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file', env_file_path: './.env' },
+    agents: {
+      max_concurrent: 5,
+      retry_attempts: 3,
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: ['codex', 'gemini'],
+    },
+    design: { mode: 'project_owned' },
+  });
+  assert.equal(bad.success, false);
 });
 
 test('collectAnswers — happy path linear + env_file via scripted prompts', async (t) => {

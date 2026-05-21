@@ -50,4 +50,8 @@ tmp/
 /plans/tasks/*.plan.md
 /plans/tasks/*.investigation.md
 /docs/learnings/**
-/.forge/
+
+# >>> forge-managed (do not edit between markers) >>>
+/.forge/*
+!/.forge/settings.yaml
+# <<< forge-managed <<<

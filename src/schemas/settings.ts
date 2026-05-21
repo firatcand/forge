@@ -114,9 +114,28 @@ const AgentsSchema = z
       'CRITICAL.md',
       'CLAUDE.md',
       'AGENTS.md',
+      'GEMINI.md',
       'package.json',
       'phases.yaml',
     ]),
+    // FORGE-152: which agent root files (CLAUDE.md / AGENTS.md / GEMINI.md)
+    // the project writes. Enum values match primary_host_cli / review_host_cli
+    // for schema consistency. Empty (absent or explicit []) is promoted to
+    // [primary_host_cli] by the .transform() below — see
+    // test/unit/settings.schema.test.ts for the contract.
+    enabled_root_files: z
+      .array(z.enum(['claude', 'codex', 'gemini']))
+      .default([]),
+  })
+  // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
+  // Runs BEFORE refinements so the refined object sees the promoted value.
+  // Empty (absent or explicit []) → degenerate config; one root file is the
+  // minimum useful state.
+  .transform((d) => {
+    if (d.enabled_root_files.length === 0) {
+      return { ...d, enabled_root_files: [d.primary_host_cli] };
+    }
+    return d;
   })
   // .refine() before .default({}) — the collision check must see the
   // resolved object after inner defaults expand.

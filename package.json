@@ -25,6 +25,7 @@
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "test:pack": "node scripts/test-pack.mjs",
     "lint:test-helpers": "node scripts/lint-test-helpers.mjs",
+    "forge:render-context": "node --import tsx scripts/forge-render-context.mjs",
     "dev": "tsx watch src/bin/forge.ts"
   },
   "dependencies": {

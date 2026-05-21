@@ -8,11 +8,20 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import type { InitAnswers } from './prompts.ts';
 import { renderTemplate, resolveTemplatesDir, type TemplateVars } from './templates.ts';
+// FORGE-152: integration points for the new CLAUDE.md split layout.
+import {
+  renderContext,
+  ROOT_FILE_BY_AGENT,
+  applyGitignoreBlock,
+  type AgentKind,
+} from '../upgrade/index.ts';
+import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 
 export interface ScaffoldOptions {
   cwd: string;
@@ -41,15 +50,39 @@ export interface ToolingExcludeResult {
 }
 
 const STAGING_DIR = '.forge/.init-staging';
-const GITIGNORE_MARKER = '# forge';
-const GITIGNORE_BLOCK = [
-  '',
-  '# forge — orchestrator artefacts (auto-managed; safe to keep out of VCS)',
-  '.forge/worktrees/',
-  '.forge/logs/',
-  '.forge/.init-staging/',
-  '',
-].join('\n');
+
+// FORGE-152: the `forge` GitHub URL used in the breadcrumb marker block. Lives
+// here (not in agent-root-files.ts) because that module is generic over the
+// repoUrl input — the URL is a deployment-level constant.
+const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
+
+/**
+ * Read forge's own package.json version. Used to stamp .forge/.version at
+ * init time so Phase B's drift-warning pre-hook can compare the on-disk
+ * methodology version against the installed CLI's bundled version.
+ *
+ * Walks up from this module file to find package.json. Works in both dev
+ * (src/cli/init/scaffold.ts → ../../../package.json) and after bundling
+ * (dist/* relative paths) because tsdown preserves __dirname semantics.
+ */
+function readPackageVersion(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  // Walk up to 5 levels to find package.json. In dev: src/cli/init/ → repo root
+  // is 3 levels. In bundled dist: dist/ → repo root is 1 level. Loop up to 5
+  // to be tolerant of either layout without baking in a brittle relative path.
+  for (let i = 0; i < 5; i++) {
+    const candidate = resolve(here, ...Array(i).fill('..'), 'package.json');
+    if (existsSync(candidate)) {
+      const pkg = JSON.parse(readFileSync(candidate, 'utf8')) as { version: string };
+      if (typeof pkg.version === 'string' && pkg.version.length > 0) {
+        return pkg.version;
+      }
+    }
+  }
+  throw new Error(
+    'forge init: could not resolve forge package.json to stamp .forge/.version',
+  );
+}
 
 // Exclude entry for flat-ignore files (.eslintignore, .prettierignore).
 const TOOLING_EXCLUDE_LINE = '.forge/worktrees/';
@@ -139,6 +172,7 @@ export function toSettingsObject(answers: InitAnswers): Settings {
       on_persistent_failure: 'notify' as const,
       primary_host_cli: answers.agents.primary_host_cli,
       review_host_cli: answers.agents.review_host_cli,
+      enabled_root_files: answers.agents.enabled_root_files,
       // preflight_globs is intentionally omitted — the zod default in
       // SettingsSchema fills it on load. Keeping it out of the scaffolded
       // YAML lets future default-list updates ship transparently to
@@ -170,6 +204,7 @@ export function toMinimalYamlObject(answers: InitAnswers): Record<string, unknow
     retry_attempts: answers.agents.retry_attempts,
     primary_host_cli: answers.agents.primary_host_cli,
     review_host_cli: answers.agents.review_host_cli,
+    enabled_root_files: answers.agents.enabled_root_files,
   };
 
   const design: Record<string, unknown> = { mode: answers.design.mode };
@@ -196,14 +231,6 @@ function injectBriefGoal(briefRaw: string, goal: string): string {
   return briefRaw.replace(re, `$1${goal}`);
 }
 
-export function appendGitignoreBlock(existing: string | null): { content: string; appended: boolean } {
-  if (existing !== null && existing.includes(GITIGNORE_MARKER)) {
-    return { content: existing, appended: false };
-  }
-  const base = existing ?? '';
-  const sep = base.length === 0 || base.endsWith('\n') ? '' : '\n';
-  return { content: base + sep + GITIGNORE_BLOCK, appended: true };
-}
 
 /**
  * Append `line` to `filePath` if the file exists and doesn't already contain
@@ -307,6 +334,12 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
   return result;
 }
 
+const TEMPLATE_BY_AGENT: Readonly<Record<AgentKind, string>> = {
+  claude: 'CLAUDE.project.template.md',
+  codex: 'AGENTS.project.template.md',
+  gemini: 'GEMINI.project.template.md',
+} as const;
+
 function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   const templatesDir = opts.templatesDir ?? resolveTemplatesDir();
   const yamlContent = yamlStringify(toMinimalYamlObject(opts.answers), { lineWidth: 0 });
@@ -314,14 +347,43 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   const briefRaw = renderTemplate(templatesDir, 'BRIEF.template.md', vars);
   const brief = injectBriefGoal(briefRaw, opts.answers.goal);
 
+  // FORGE-152: one root file per enabled agent. CLAUDE.md only when 'claude'
+  // is enabled, AGENTS.md only when 'codex', etc. Per-agent prefix marker
+  // block comes from each template (which matches buildPrefixBlock byte-for-
+  // byte — enforced by drift-gate tests in agent-root-files.test.ts).
+  const rootFileArtifacts: Artifact[] = opts.answers.agents.enabled_root_files.map(
+    (agent) => ({
+      relPath: ROOT_FILE_BY_AGENT[agent],
+      contents: renderTemplate(templatesDir, TEMPLATE_BY_AGENT[agent], vars),
+    }),
+  );
+
+  // FORGE-152: render .forge/CONTEXT.md from the methodology template +
+  // CLI registry. Gitignored after this commit (the marker block in
+  // .gitignore added below covers it), but materializes at init so the
+  // first session has the methodology immediately. Phase B's forge upgrade
+  // will use the same renderContext to refresh it.
+  const contextTemplate = readFileSync(
+    resolve(templatesDir, 'CONTEXT.template.md'),
+    'utf8',
+  );
+  const methodologyVersion = readPackageVersion();
+  const renderedContext = renderContext(contextTemplate, {
+    version: methodologyVersion,
+    verbs: CLI_VERBS,
+    slashCommands: SLASH_COMMANDS,
+  });
+
   const artefacts: Artifact[] = [
     { relPath: 'spec/BRIEF.md', contents: brief },
     { relPath: 'spec/PRD.md', contents: renderTemplate(templatesDir, 'PRD.template.md', vars) },
     { relPath: 'spec/SPEC.md', contents: renderTemplate(templatesDir, 'SPEC.template.md', vars) },
     { relPath: 'spec/DESIGN.md', contents: renderTemplate(templatesDir, 'DESIGN.template.md', vars) },
     { relPath: 'CRITICAL.md', contents: renderTemplate(templatesDir, 'CRITICAL.template.md', vars) },
-    { relPath: 'CLAUDE.md', contents: renderTemplate(templatesDir, 'CLAUDE.project.template.md', vars) },
+    ...rootFileArtifacts,
     { relPath: 'plans/tasks/.gitkeep', contents: '' },
+    { relPath: '.forge/CONTEXT.md', contents: renderedContext },
+    { relPath: '.forge/.version', contents: `${methodologyVersion}\n` },
     // settings.yaml is the last to land — proves init succeeded.
     { relPath: '.forge/settings.yaml', contents: yamlContent, mustOverwrite: true },
   ];
@@ -411,12 +473,14 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     written.push(a.relPath);
   }
 
-  // 3) .gitignore append (idempotent).
+  // 3) .gitignore marker block (FORGE-152: ignore .forge/* except settings.yaml).
+  // Shared with Phase B's forge upgrade — both call applyGitignoreBlock so the
+  // block is byte-identical regardless of which path wrote it.
   const giPath = resolve(opts.cwd, '.gitignore');
-  const existingGi = existsSync(giPath) ? readFileSync(giPath, 'utf8') : null;
-  const { content, appended } = appendGitignoreBlock(existingGi);
-  if (appended) {
-    writeAtomic(giPath, content);
+  const existingGi = existsSync(giPath) ? readFileSync(giPath, 'utf8') : '';
+  const newGi = applyGitignoreBlock(existingGi);
+  if (newGi !== existingGi) {
+    writeAtomic(giPath, newGi);
     written.push('.gitignore');
   } else {
     skipped.push('.gitignore');

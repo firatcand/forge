@@ -94,6 +94,9 @@ test('AC3 — applies defaults when agents+design absent', () => {
     'CRITICAL.md',
     'CLAUDE.md',
     'AGENTS.md',
+    // FORGE-152: GEMINI.md is a new agent root file, written when
+    // agents.enabled_root_files includes 'gemini'.
+    'GEMINI.md',
     'package.json',
     'phases.yaml',
   ]);
@@ -620,4 +623,73 @@ test('FORGE-105 — doctor block: override respected', () => {
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.equal(result.data.doctor.spec_code_check_enabled, false);
+});
+
+// FORGE-152 (Phase A — A1): agents.enabled_root_files — which agent root
+// files (CLAUDE.md / AGENTS.md / GEMINI.md) the project writes. Defaults to
+// [primary_host_cli] when absent, so existing settings.yaml files continue to
+// parse without migration.
+test('FORGE-152 — enabled_root_files defaults to [primary_host_cli] when absent', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'claude', review_host_cli: 'codex' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.agents.enabled_root_files, ['claude']);
+});
+
+test('FORGE-152 — enabled_root_files accepts multi-agent selection', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: {
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: ['claude', 'codex'],
+    },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.agents.enabled_root_files, ['claude', 'codex']);
+});
+
+test('FORGE-152 — enabled_root_files rejects unknown agent', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: {
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: ['claude', 'cursor'],
+    },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-152 — enabled_root_files: explicit [] promotes to [primary_host_cli]', () => {
+  // Empty array (absent or explicit []) is functionally identical: "no agent
+  // root files." That config is degenerate — settings.yaml has no agent
+  // surface to attach to. Always promote empty to [primary_host_cli].
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: {
+      primary_host_cli: 'codex',
+      review_host_cli: null,
+      enabled_root_files: [],
+    },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.agents.enabled_root_files, ['codex']);
 });
