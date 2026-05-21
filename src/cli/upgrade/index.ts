@@ -1,8 +1,6 @@
-// FORGE-152: re-export the upgrade module surface.
-//
-// Phase A ships render-context only (consumed by scripts/forge-render-context.mjs
-// and by src/cli/init/scaffold.ts). Phase B will add agent-root-files,
-// gitignore-block, version-check, and the upgrade verb entry point here.
+// Re-export the upgrade module surface. FORGE-152 (Phase A) shipped
+// render-context, agent-root-files, and gitignore-block. FORGE-153 (Phase B)
+// adds version-check and the upgrade verb entry point.
 
 export { renderContext } from './render-context.ts';
 export type { RenderContextInput } from './render-context.ts';
@@ -17,3 +15,15 @@ export {
 export type { AgentKind, PrefixBlockInput } from './agent-root-files.ts';
 
 export { applyGitignoreBlock, hasGitignoreBlock } from './gitignore-block.ts';
+
+export {
+  checkVersionDrift,
+  formatDriftWarning,
+  compareVersions,
+  formatCliTooOldRefusal,
+} from './version-check.ts';
+export type {
+  DriftInfo,
+  CheckVersionDriftInput,
+  VersionComparison,
+} from './version-check.ts';
