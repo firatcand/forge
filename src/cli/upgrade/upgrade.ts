@@ -16,7 +16,6 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
@@ -29,7 +28,9 @@ import {
   type AgentKind,
 } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
+import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
+import { locateContextTemplate } from './template-loader.ts';
 import {
   checkVersionDrift,
   compareVersions,
@@ -45,6 +46,8 @@ export interface UpgradeOptions {
   readonly removeAgent?: AgentKind;
   /** Required to remove an agent whose root file has user content below the marker block. */
   readonly confirm?: boolean;
+  /** One-shot migration from v0.4 combined CLAUDE.md → v0.5 split layout (FORGE-154). */
+  readonly migrateClaudemd?: boolean;
 }
 
 export interface UpgradeResult {
@@ -57,21 +60,6 @@ const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
 
 function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');
-}
-
-function locateContextTemplate(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  // Dev: src/cli/upgrade/ → ../../../templates/. Bundled: dist/ → ../templates/.
-  for (let i = 0; i < 5; i++) {
-    const candidate = resolve(
-      here,
-      ...(Array(i).fill('..') as string[]),
-      'templates',
-      'CONTEXT.template.md',
-    );
-    if (existsSync(candidate)) return readFileSync(candidate, 'utf8');
-  }
-  throw new Error('forge upgrade: templates/CONTEXT.template.md not found in bundle');
 }
 
 /**
@@ -96,6 +84,17 @@ interface SettingsYaml {
 
 export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   const cwd = opts.cwd;
+
+  // FORGE-154 Phase C — one-shot legacy migration. Routes BEFORE the
+  // settings.yaml validation below because the migration's own precondition
+  // checks (.forge/CONTEXT.md must not exist; settings.yaml must exist) are
+  // tuned for the v0.4 → v0.5 transition and return their own exit codes.
+  // Mutex with other write-modifying flags is enforced at the CLI router
+  // (src/bin/forge.ts) so by the time we reach here, no conflict is possible.
+  if (opts.migrateClaudemd) {
+    return migrateClaudemd({ cwd, dryRun: opts.dryRun });
+  }
+
   const settingsPath = resolve(cwd, '.forge/settings.yaml');
   const versionPath = resolve(cwd, '.forge/.version');
   const contextPath = resolve(cwd, '.forge/CONTEXT.md');

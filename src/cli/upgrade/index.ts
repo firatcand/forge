@@ -1,6 +1,7 @@
 // Re-export the upgrade module surface. FORGE-152 (Phase A) shipped
 // render-context, agent-root-files, and gitignore-block. FORGE-153 (Phase B)
-// adds version-check and the upgrade verb entry point.
+// added version-check and the upgrade verb entry point. FORGE-154 (Phase C)
+// adds migrate-claudemd and the shared template-loader.
 
 export { renderContext } from './render-context.ts';
 export type { RenderContextInput } from './render-context.ts';
@@ -31,3 +32,13 @@ export type {
 
 export { upgrade } from './upgrade.ts';
 export type { UpgradeOptions, UpgradeResult } from './upgrade.ts';
+
+export {
+  migrateClaudemd,
+  METHODOLOGY_HEADINGS,
+  REFERENCE_SHAS,
+  extractSection,
+} from './migrate-claudemd.ts';
+export type { MigrateOptions, MigrateResult } from './migrate-claudemd.ts';
+
+export { locateContextTemplate } from './template-loader.ts';
