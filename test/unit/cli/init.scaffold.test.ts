@@ -28,6 +28,7 @@ function fixtureAnswers(): InitAnswers {
     project: { name: 'sample-app', description: 'a sample app' },
     goal: 'ship a sample app with forge',
     tracker: { type: 'linear', config: { team_id: 'TEAM-1' } },
+    github_connected: false,
     secrets: { manager: 'env_file', env_file_path: './.env.local' },
     agents: {
       max_concurrent: 10,

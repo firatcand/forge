@@ -51,8 +51,13 @@ function scriptedPromptModule(script: ScriptedAnswer[]) {
   };
 }
 
-function scriptedNumberConfirm(numbers: number[], checkboxAnswer?: readonly string[]) {
+function scriptedNumberConfirm(
+  numbers: number[],
+  checkboxAnswer?: readonly string[],
+  confirmAnswers?: readonly boolean[],
+) {
   let idx = 0;
+  let confirmIdx = 0;
   return {
     number: async (opts: { default?: number; validate?: (n: number | undefined) => true | string }) => {
       const v = numbers[idx++];
@@ -63,7 +68,14 @@ function scriptedNumberConfirm(numbers: number[], checkboxAnswer?: readonly stri
       }
       return v;
     },
-    confirm: async () => true,
+    confirm: async () => {
+      if (confirmAnswers === undefined) return true;
+      const v = confirmAnswers[confirmIdx++];
+      if (v === undefined) {
+        throw new Error(`exhausted scripted confirm answers at #${confirmIdx}`);
+      }
+      return v;
+    },
     // FORGE-152: the enabled_root_files checkbox prompt. Defaults to whatever
     // is pre-checked in the choices array (which collectAnswers sets to
     // [primary_host_cli]). Tests can override by passing checkboxAnswer.
@@ -354,4 +366,84 @@ test('collectAnswers — aws_secrets and infisical labelled (adapter pending) bu
   __setNumberConfirmForTests(scriptedNumberConfirm([10, 10]));
   const answers = await collectAnswers({ cwd: '/tmp/d' });
   assert.equal(answers.secrets.manager, 'aws_secrets');
+});
+
+// FORGE-108: standalone "GitHub connected?" prompt — decoupled from tracker choice.
+test('FORGE-108 — collectAnswers captures github_connected=true when user confirms', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'g' },
+      // Linear tracker (NOT github) — proves the new prompt is independent.
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'T' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'claude' },
+      { match: /Review host CLI/, value: 'codex' },
+    ]),
+  );
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10], undefined, [true]));
+  const answers = await collectAnswers({ cwd: '/tmp/d' });
+  assert.equal(answers.tracker.type, 'linear');
+  assert.equal(answers.github_connected, true);
+});
+
+test('FORGE-108 — collectAnswers captures github_connected=false when user declines', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'g' },
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'T' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'claude' },
+      { match: /Review host CLI/, value: 'codex' },
+    ]),
+  );
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10], undefined, [false]));
+  const answers = await collectAnswers({ cwd: '/tmp/d' });
+  assert.equal(answers.github_connected, false);
+});
+
+// Backend-dev's audit flagged this gap: the existing collision test only
+// covers ONE retry. This test forces TWO retries before reaching a valid
+// non-colliding choice — verifies the loop doesn't have an off-by-one.
+test('FORGE-108 — collectAnswers review_host_cli collision loop handles >1 retry', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'g' },
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'T' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'codex' },
+      // Three review-host attempts: collision, collision again, then 'none'.
+      // primary=codex; the only review options are 'codex' (collides) and 'none'.
+      { match: /Review host CLI/, value: 'codex' },
+      { match: /Review host CLI/, value: 'codex' },
+      { match: /Review host CLI/, value: 'none' },
+    ]),
+  );
+  __setNumberConfirmForTests(scriptedNumberConfirm([5, 5]));
+  const answers = await collectAnswers({ cwd: '/tmp/d' });
+  assert.equal(answers.agents.primary_host_cli, 'codex');
+  assert.equal(answers.agents.review_host_cli, null);
 });

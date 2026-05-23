@@ -140,6 +140,14 @@ export const InitAnswersSchema = z.object({
   }),
   goal: z.string().min(1),
   tracker: TrackerSchema,
+  // FORGE-108: init-time observation, NOT persisted to settings.yaml. Gates
+  // the agent-level `gh auth status` probe in validate.ts so users who pair
+  // a non-GitHub tracker (Linear / Notion) with GitHub code hosting still
+  // get their auth checked. The existing tracker-conditional gh probe at
+  // validate.ts probeTracker(github) is a separate concern (tracker-API auth).
+  // `.default(false)` keeps existing test fixtures parsing without churn —
+  // the interactive prompt always supplies an explicit value at init time.
+  github_connected: z.boolean().default(false),
   secrets: SecretsSchema,
   agents: AgentsAnswersSchema,
   design: DesignAnswersSchema,
@@ -291,7 +299,19 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     };
   }
 
-  // 5. secret manager
+  // 5. GitHub connected? (FORGE-108)
+  // Init-time observation; gates the agent-level gh auth status probe in
+  // validate.ts. Decoupled from tracker choice so non-GitHub-tracker users
+  // (Linear, Notion) who still use GitHub for code hosting get their auth
+  // checked. Loads inquirer's confirm prompt lazily (same module as the
+  // existing checkbox/number prompts).
+  const { confirm: askConfirmAgents } = await loadNumberConfirm();
+  const githubConnected = await askConfirmAgents({
+    message: 'Are you using GitHub for code hosting? (validates `gh auth status` if yes)',
+    default: true,
+  });
+
+  // 6. secret manager
   const secretChoice = (await loggerPrompt('Which secret manager?', {
     choices: SECRET_MGR_CHOICES as unknown as readonly string[],
     default: 'env_file',
@@ -340,27 +360,27 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   // not used yet but reserve for E14 / E2 path callers
   void askConfirm;
 
-  // 6. max_concurrent
+  // 7. max_concurrent
   const maxConcurrent = await askNumber({
     message: 'Max concurrent tasks?',
     default: 10,
     validate: validateInt(1, 50, 'max_concurrent'),
   });
 
-  // 7. retry_attempts
+  // 8. retry_attempts
   const retryAttempts = await askNumber({
     message: 'Retry attempts on failure?',
     default: 10,
     validate: validateInt(0, 100, 'retry_attempts'),
   });
 
-  // 8. primary host cli (FORGE-88: gemini gated on FORGE_GEMINI_EXPERIMENTAL=1)
+  // 9. primary host cli (FORGE-88: gemini gated on FORGE_GEMINI_EXPERIMENTAL=1)
   const primaryHostCli = (await loggerPrompt('Primary host CLI (writes code)?', {
     choices: primaryHostCliChoices() as unknown as readonly string[],
     default: 'claude',
   })) as 'claude' | 'codex' | 'gemini';
 
-  // 9. review host cli — re-prompt on collision
+  // 10. review host cli — re-prompt on collision
   const reviewChoices = [...reviewHostCliChoices(), 'none'] as const;
   // Pick the first non-colliding option as default; falls back to 'none'
   // when primary occupies the only available review slot (e.g. primary=codex
@@ -394,7 +414,7 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     errorBlock('Invalid review host CLI', msg);
   }
 
-  // 10. FORGE-152: which agent root files to write?
+  // 11. FORGE-152: which agent root files to write?
   // Pre-check the primary host CLI; user can add codex / gemini as additional
   // root files for teammates on those agents. Empty selection auto-falls back
   // to [primary_host_cli] in the validator below.
@@ -438,6 +458,7 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     },
     goal,
     tracker,
+    github_connected: githubConnected,
     secrets,
     agents: {
       max_concurrent: maxConcurrent,

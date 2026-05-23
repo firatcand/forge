@@ -263,6 +263,25 @@ async function probeSecretManager(
   }
 }
 
+// FORGE-108: agent-level GitHub auth probe. Distinct from the tracker-
+// conditional `gh` probe in probeTracker(github) — fires when the user
+// answers "yes" to the standalone "GitHub connected?" question, regardless
+// of tracker choice. A user pairing Linear/Notion with GitHub code hosting
+// would otherwise never get their gh auth checked at init.
+async function probeGhAuthAgent(exec: ExecaLike, timeoutMs: number): Promise<ProbeResult> {
+  return runProbe(
+    'gh_auth_agent',
+    'GitHub CLI auth',
+    'https://cli.github.com/',
+    exec,
+    'gh',
+    ['auth', 'status'],
+    timeoutMs,
+    (r) => (r.exitCode === 0 ? true : `gh auth status exited ${r.exitCode}`),
+    '`gh` CLI not authenticated.',
+  );
+}
+
 async function probeTracker(answers: InitAnswers, exec: ExecaLike, timeoutMs: number): Promise<ProbeResult | null> {
   const t = answers.tracker;
   const hostIsClaude = answers.agents.primary_host_cli === 'claude';
@@ -335,6 +354,15 @@ export async function validateTooling(
   tasks.push(probeTracker(answers, exec, timeoutMs));
   if (answers.tracker.type === 'linear') {
     tasks.push(Promise.resolve(probeLinearApiKey(getEnv)));
+  }
+  // FORGE-108: agent-level gh auth probe — fires when user said "yes" to
+  // "GitHub connected?" regardless of tracker. Slightly redundant when tracker
+  // is also GitHub (both probes run with the same key prefix), but defensible:
+  // probeTracker(github) checks tracker-API access while probeGhAuthAgent
+  // checks code-host access. They share the underlying `gh auth status` call
+  // but the unverified[] key distinguishes them.
+  if (answers.github_connected) {
+    tasks.push(probeGhAuthAgent(exec, timeoutMs));
   }
   tasks.push(probeSecretManager(answers, exec, timeoutMs, opts.cwd));
 
