@@ -356,12 +356,11 @@ export async function validateTooling(
     tasks.push(Promise.resolve(probeLinearApiKey(getEnv)));
   }
   // FORGE-108: agent-level gh auth probe — fires when user said "yes" to
-  // "GitHub connected?" regardless of tracker. Slightly redundant when tracker
-  // is also GitHub (both probes run with the same key prefix), but defensible:
-  // probeTracker(github) checks tracker-API access while probeGhAuthAgent
-  // checks code-host access. They share the underlying `gh auth status` call
-  // but the unverified[] key distinguishes them.
-  if (answers.github_connected) {
+  // "GitHub connected?" AND tracker is NOT github. When tracker is github,
+  // probeTracker already runs `gh auth status` with identical args; running
+  // it twice produces two ProbeResults that test the same fact and can only
+  // disagree under a transient-auth race. Skip the redundant call.
+  if (answers.github_connected && answers.tracker.type !== 'github') {
     tasks.push(probeGhAuthAgent(exec, timeoutMs));
   }
   tasks.push(probeSecretManager(answers, exec, timeoutMs, opts.cwd));

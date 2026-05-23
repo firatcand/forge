@@ -352,6 +352,42 @@ test('FORGE-108 — validateTooling omits gh_auth_agent probe when github_connec
   );
 });
 
+test('FORGE-108 — validateTooling does NOT double-probe gh when tracker=github + github_connected=true', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  let ghAuthCalls = 0;
+  const exec: ExecaLike = async (cmd, args) => {
+    const cmdLine = `${cmd} ${args.join(' ')}`;
+    if (cmd === 'gh' && args[0] === 'auth' && args[1] === 'status') {
+      ghAuthCalls++;
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    }
+    if (cmdLine === 'git --version') {
+      return { exitCode: 0, stdout: 'git version 2.40.1', stderr: '', timedOut: false };
+    }
+    if (cmdLine === 'claude --version') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    if (cmdLine === 'codex --version') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    return { exitCode: 127, stdout: '', stderr: 'not found', timedOut: false };
+  };
+  const answers = baseAnswers({
+    tracker: { type: 'github', config: { repo: 'firatcand/forge' } },
+    github_connected: true,
+  });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
+  // Existing probeTracker(github) emits key 'gh'. The new probeGhAuthAgent
+  // emits 'gh_auth_agent'. The guard `tracker.type !== 'github'` MUST suppress
+  // the latter when github is already covered.
+  const ghProbe = report.results.find((r) => r.key === 'gh');
+  const ghAuthAgentProbe = report.results.find((r) => r.key === 'gh_auth_agent');
+  assert.ok(ghProbe, 'tracker-conditional `gh` probe should run for tracker=github');
+  assert.equal(
+    ghAuthAgentProbe,
+    undefined,
+    'gh_auth_agent probe must NOT also run when tracker=github (would double-probe identical args)',
+  );
+  assert.equal(ghAuthCalls, 1, 'gh auth status should run exactly once, not twice');
+});
+
 test('FORGE-108 — validateTooling routes gh_auth_agent failure into unverified[] under autoSkip', async () => {
   const cwd = tmp();
   writeFileSync(join(cwd, '.env.local'), '');

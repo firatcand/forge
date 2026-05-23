@@ -70,10 +70,11 @@ function scriptedNumberConfirm(
     },
     confirm: async () => {
       if (confirmAnswers === undefined) return true;
-      const v = confirmAnswers[confirmIdx++];
+      const v = confirmAnswers[confirmIdx];
       if (v === undefined) {
-        throw new Error(`exhausted scripted confirm answers at #${confirmIdx}`);
+        throw new Error(`exhausted scripted confirm answers at index ${confirmIdx}`);
       }
+      confirmIdx++;
       return v;
     },
     // FORGE-152: the enabled_root_files checkbox prompt. Defaults to whatever

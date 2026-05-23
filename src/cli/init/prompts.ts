@@ -306,9 +306,14 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   // checked. Loads inquirer's confirm prompt lazily (same module as the
   // existing checkbox/number prompts).
   const { confirm: askConfirmAgents } = await loadNumberConfirm();
+  // `default: false` so Enter-through-everything stays consistent with the
+  // PRD §Feature 3 promise: "all defaults work without user input → valid
+  // project." Defaulting to true would surface a `gh auth status` failure
+  // for machines that don't have `gh` installed (common when adopters use
+  // Linear or Notion as their tracker).
   const githubConnected = await askConfirmAgents({
     message: 'Are you using GitHub for code hosting? (validates `gh auth status` if yes)',
-    default: true,
+    default: false,
   });
 
   // 6. secret manager
