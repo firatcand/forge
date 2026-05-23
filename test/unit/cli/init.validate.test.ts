@@ -16,6 +16,7 @@ function baseAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers {
     project: { name: 'app' },
     goal: 'g',
     tracker: { type: 'linear', config: { team_id: 'T' } },
+    github_connected: false,
     secrets: { manager: 'env_file', env_file_path: './.env.local' },
     agents: {
       max_concurrent: 10,
@@ -312,6 +313,97 @@ test('validateTooling: onProbeFailure(true) appends to unverified', async () => 
   });
   const report = await validateTooling(baseAnswers(), { cwd, exec, onProbeFailure: async () => true });
   assert.ok(report.unverified.includes('primary_host'));
+});
+
+// FORGE-108: agent-level gh auth probe gated by github_connected flag.
+test('FORGE-108 — validateTooling fires gh_auth_agent probe when github_connected=true (Linear tracker)', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    'claude mcp list': { exitCode: 0, stdout: 'linear' },
+    'gh auth status': { exitCode: 0 },
+  });
+  const answers = baseAnswers({ github_connected: true });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true, getEnv: () => 'fake-key' });
+  const ghAuthAgent = report.results.find((r) => r.key === 'gh_auth_agent');
+  assert.ok(ghAuthAgent, 'gh_auth_agent probe must run when github_connected=true');
+  assert.equal(ghAuthAgent.status, 'pass');
+});
+
+test('FORGE-108 — validateTooling omits gh_auth_agent probe when github_connected=false', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    'claude mcp list': { exitCode: 0, stdout: 'linear' },
+    'gh auth status': { exitCode: 0 }, // wired but should NOT fire
+  });
+  const answers = baseAnswers({ github_connected: false });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true, getEnv: () => 'fake-key' });
+  assert.equal(
+    report.results.find((r) => r.key === 'gh_auth_agent'),
+    undefined,
+    'gh_auth_agent probe must NOT run when github_connected=false',
+  );
+});
+
+test('FORGE-108 — validateTooling does NOT double-probe gh when tracker=github + github_connected=true', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  let ghAuthCalls = 0;
+  const exec: ExecaLike = async (cmd, args) => {
+    const cmdLine = `${cmd} ${args.join(' ')}`;
+    if (cmd === 'gh' && args[0] === 'auth' && args[1] === 'status') {
+      ghAuthCalls++;
+      return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    }
+    if (cmdLine === 'git --version') {
+      return { exitCode: 0, stdout: 'git version 2.40.1', stderr: '', timedOut: false };
+    }
+    if (cmdLine === 'claude --version') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    if (cmdLine === 'codex --version') return { exitCode: 0, stdout: '', stderr: '', timedOut: false };
+    return { exitCode: 127, stdout: '', stderr: 'not found', timedOut: false };
+  };
+  const answers = baseAnswers({
+    tracker: { type: 'github', config: { repo: 'firatcand/forge' } },
+    github_connected: true,
+  });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
+  // Existing probeTracker(github) emits key 'gh'. The new probeGhAuthAgent
+  // emits 'gh_auth_agent'. The guard `tracker.type !== 'github'` MUST suppress
+  // the latter when github is already covered.
+  const ghProbe = report.results.find((r) => r.key === 'gh');
+  const ghAuthAgentProbe = report.results.find((r) => r.key === 'gh_auth_agent');
+  assert.ok(ghProbe, 'tracker-conditional `gh` probe should run for tracker=github');
+  assert.equal(
+    ghAuthAgentProbe,
+    undefined,
+    'gh_auth_agent probe must NOT also run when tracker=github (would double-probe identical args)',
+  );
+  assert.equal(ghAuthCalls, 1, 'gh auth status should run exactly once, not twice');
+});
+
+test('FORGE-108 — validateTooling routes gh_auth_agent failure into unverified[] under autoSkip', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    'claude mcp list': { exitCode: 0, stdout: 'linear' },
+    'gh auth status': { exitCode: 1, stderr: 'not logged in' },
+  });
+  const answers = baseAnswers({ github_connected: true });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true, getEnv: () => 'fake-key' });
+  assert.ok(
+    report.unverified.includes('gh_auth_agent'),
+    'gh_auth_agent failure must land in unverified[] under autoSkip',
+  );
 });
 
 // suppress unused-var lints by referencing mkdirSync

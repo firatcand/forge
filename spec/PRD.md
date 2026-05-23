@@ -303,7 +303,7 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
 
 **Acceptance criteria**
 - [ ] Init completes in <30 seconds end-to-end (excludes external tooling validation; see next bullet)
-- [ ] External validations (tracker auth, `gh auth status`, `claude --version`) are async/skippable; init returns control to user immediately and prints results as they arrive
+- [ ] External validations (tracker auth, `gh auth status`, `claude --version`) run concurrently via `Promise.all` and complete before scaffold; total init time stays under 30s p95. Non-interactive mode treats failures as `unverified[]` rather than aborting init. *(Note: an earlier draft of this AC required streaming "returns control immediately" UX; FORGE-108 closed this as deliberate scope-cut — current parallel-then-await design already delivers the performance intent and avoids a post-scaffold callback surface that would touch five modules for a UX nicety on a sub-5s operation.)*
 - [ ] All defaults work without user input (Enter through every prompt → valid project)
 - [ ] `.forge/settings.yaml` validates against schema before write
 - [ ] Existing files are not overwritten silently — prompt for confirmation
