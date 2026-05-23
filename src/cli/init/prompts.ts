@@ -305,16 +305,27 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   // (Linear, Notion) who still use GitHub for code hosting get their auth
   // checked. Loads inquirer's confirm prompt lazily (same module as the
   // existing checkbox/number prompts).
-  const { confirm: askConfirmAgents } = await loadNumberConfirm();
-  // `default: false` so Enter-through-everything stays consistent with the
-  // PRD §Feature 3 promise: "all defaults work without user input → valid
-  // project." Defaulting to true would surface a `gh auth status` failure
-  // for machines that don't have `gh` installed (common when adopters use
-  // Linear or Notion as their tracker).
-  const githubConnected = await askConfirmAgents({
-    message: 'Are you using GitHub for code hosting? (validates `gh auth status` if yes)',
-    default: false,
-  });
+  // Skip the prompt when tracker is already GitHub — the user has already
+  // declared GitHub usage, and the agent-level probe in validate.ts is
+  // suppressed in that case (probeTracker(github) covers it). Asking again
+  // is redundant Q&A. Set the flag to `true` informationally; the validate
+  // guard `&& tracker.type !== 'github'` keeps the redundant probe off.
+  // (Codex second-opinion catch — the original code asked unconditionally,
+  // producing UX ambiguity when paired with the validate-side suppression.)
+  let githubConnected: boolean;
+  if (tracker.type === 'github') {
+    githubConnected = true;
+  } else {
+    const { confirm: askConfirmAgents } = await loadNumberConfirm();
+    // `default: false` so Enter-through-everything stays consistent with
+    // PRD §Feature 3: "all defaults work without user input → valid project."
+    // Defaulting to true would surface a `gh auth status` failure on machines
+    // that don't have `gh` installed (common when tracker is Linear/Notion).
+    githubConnected = await askConfirmAgents({
+      message: 'Are you using GitHub for code hosting? (validates `gh auth status` if yes)',
+      default: false,
+    });
+  }
 
   // 6. secret manager
   const secretChoice = (await loggerPrompt('Which secret manager?', {

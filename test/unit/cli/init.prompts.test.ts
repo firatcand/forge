@@ -68,14 +68,21 @@ function scriptedNumberConfirm(
       }
       return v;
     },
-    confirm: async () => {
-      if (confirmAnswers === undefined) return true;
-      const v = confirmAnswers[confirmIdx];
-      if (v === undefined) {
-        throw new Error(`exhausted scripted confirm answers at index ${confirmIdx}`);
+    confirm: async (opts: { message: string; default?: boolean }) => {
+      if (confirmAnswers !== undefined) {
+        const v = confirmAnswers[confirmIdx];
+        if (v === undefined) {
+          throw new Error(`exhausted scripted confirm answers at index ${confirmIdx}`);
+        }
+        confirmIdx++;
+        return v;
       }
-      confirmIdx++;
-      return v;
+      // Mirror inquirer's "press Enter to accept" behaviour. Returning the
+      // prompt's `default` (rather than a hardcoded `true`) ensures the
+      // production-time default propagates into tests, so a regression on
+      // any `.default()` in the schema is detectable. (Codex second-opinion
+      // catch — original `async () => true` masked default-regression bugs.)
+      return opts.default ?? true;
     },
     // FORGE-152: the enabled_root_files checkbox prompt. Defaults to whatever
     // is pre-checked in the choices array (which collectAnswers sets to
@@ -416,6 +423,67 @@ test('FORGE-108 — collectAnswers captures github_connected=false when user dec
   __setNumberConfirmForTests(scriptedNumberConfirm([10, 10], undefined, [false]));
   const answers = await collectAnswers({ cwd: '/tmp/d' });
   assert.equal(answers.github_connected, false);
+});
+
+// Codex second-opinion catch: existing tests passed `scriptedNumberConfirm`
+// without confirmAnswers, which used to hardcode-return `true`. That masked
+// the production default. Now the helper returns `opts.default`. This test
+// pins the contract: a non-github tracker + unscripted confirm yields
+// github_connected=false (matches the prompt's `default: false`).
+test('FORGE-108 — collectAnswers defaults github_connected=false when prompt is unscripted (non-github tracker)', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'g' },
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'T' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'claude' },
+      { match: /Review host CLI/, value: 'codex' },
+    ]),
+  );
+  // No confirmAnswers passed — helper now returns opts.default (false).
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10]));
+  const answers = await collectAnswers({ cwd: '/tmp/d' });
+  assert.equal(
+    answers.github_connected,
+    false,
+    "unscripted confirm should propagate prompt's default:false, not a hardcoded true",
+  );
+});
+
+// Codex second-opinion catch — when tracker is already github, skip the
+// "GitHub connected?" prompt to avoid redundant Q&A.
+test('FORGE-108 — collectAnswers skips github_connected prompt when tracker=github (auto-true)', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'g' },
+      { match: /task tracker/, value: 'github' },
+      { match: /GitHub repo/, value: 'firatcand/forge' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'claude' },
+      { match: /Review host CLI/, value: 'codex' },
+    ]),
+  );
+  // Passing an empty confirmAnswers array would trigger "exhausted" if the
+  // prompt fired. The fact that this passes proves the prompt was skipped.
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10], undefined, []));
+  const answers = await collectAnswers({ cwd: '/tmp/d' });
+  assert.equal(answers.tracker.type, 'github');
+  assert.equal(answers.github_connected, true);
 });
 
 // Backend-dev's audit flagged this gap: the existing collision test only
