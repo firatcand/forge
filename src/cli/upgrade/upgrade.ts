@@ -30,6 +30,7 @@ import {
 import { applyGitignoreBlock } from './gitignore-block.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
+import { applySkillFarm, locatePackageRoot } from './skill-farm.ts';
 import { locateContextTemplate } from './template-loader.ts';
 import {
   checkVersionDrift,
@@ -263,7 +264,28 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     changed.push('.gitignore');
   }
 
+  // 9. Refresh per-host skill + agent farm (FORGE-156). Each enabled host
+  //    gets pointers to the bundled skills/<name>/ and agents/<name>.md so
+  //    the host's slash-command / subagent discovery resolves in this project.
+  //    Idempotent: existing-and-correct entries are left alone; mismatches
+  //    are backed up to `.bak` and replaced.
+  if (!opts.dryRun) {
+    const farm = applySkillFarm({
+      cwd,
+      packageRoot: locatePackageRoot(),
+      enabledAgents: settings.agents.enabled_root_files,
+    });
+    for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
+    for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
+  }
+
   return { exitCode: 0, filesChanged: changed, stderr: '' };
+}
+
+/** Render a path relative to cwd for the filesChanged report — keeps the
+ * report readable rather than dumping absolute /Users/... paths. */
+function relativeFromCwd(cwd: string, abs: string): string {
+  return abs.startsWith(`${cwd}/`) ? abs.slice(cwd.length + 1) : abs;
 }
 
 /** B4: --add-agent. Idempotent. Returns a refusal result on schema violation, else null. */

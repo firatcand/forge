@@ -17,9 +17,27 @@ const MARKER_OPEN = '# >>> forge-managed (do not edit between markers) >>>';
 const MARKER_CLOSE = '# <<< forge-managed <<<';
 
 // The body is `.forge/*` (ignore-all) plus the single un-ignore for
-// settings.yaml. Keep this list narrow: every line here is a contract with
+// settings.yaml, plus the per-host skill + agent farm dirs that
+// `forge init` / `forge upgrade` materialize from the bundled npm package
+// (FORGE-156). Keep this list narrow: every line here is a contract with
 // every adopter repo, and changes force a `forge upgrade` cycle.
-const BLOCK_BODY = ['/.forge/*', '!/.forge/settings.yaml'].join('\n');
+//
+// Why blanket-ignore `.claude/skills/` etc. rather than enumerate forge's
+// own skill names? The farm targets are per-machine pointers (symlinks
+// into the local node_modules, or copies of bundled content). Committing
+// them would break any teammate whose npm layout differs, and rotate on
+// every `forge upgrade`. Adopters who want to track their own non-forge
+// skills in these dirs can add a `!` override line BELOW the marker block.
+const BLOCK_BODY = [
+  '/.forge/*',
+  '!/.forge/settings.yaml',
+  '/.claude/skills/',
+  '/.claude/agents/',
+  '/.codex/skills/',
+  '/.codex/agents/',
+  '/.gemini/skills/',
+  '/.gemini/agents/',
+].join('\n');
 
 const FULL_BLOCK = `${MARKER_OPEN}\n${BLOCK_BODY}\n${MARKER_CLOSE}\n`;
 

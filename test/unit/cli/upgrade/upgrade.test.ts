@@ -13,6 +13,7 @@ import {
 import { applyGitignoreBlock } from '../../../../src/cli/upgrade/gitignore-block.ts';
 import { readBundledMethodologyVersion } from '../../../../src/cli/upgrade/version-check.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../../../../src/cli/registry.ts';
+import { applySkillFarm, locatePackageRoot } from '../../../../src/cli/upgrade/skill-farm.ts';
 import { upgrade } from '../../../../src/cli/upgrade/upgrade.ts';
 
 const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
@@ -82,6 +83,11 @@ function bootstrap(opts: BootstrapOpts = {}): string {
 
   // .gitignore with marker block
   writeFileSync(join(cwd, '.gitignore'), applyGitignoreBlock(''));
+
+  // FORGE-156: pre-create the skill farm so "no-op on clean repo" tests
+  // see a truly-clean state. Without this, every upgrade reports the farm
+  // creation as a change.
+  applySkillFarm({ cwd, packageRoot: locatePackageRoot(), enabledAgents: enabled });
 
   return cwd;
 }
