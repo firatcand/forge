@@ -94,10 +94,16 @@ jobs:
           name: dist-node-${{ matrix.node-version }}
           path: dist
         continue-on-error: true   # adopters without a dist artifact skip the download
-      # TODO: replace with smoke commands that exercise YOUR built artifact.
-      # CLI example:        - run: node dist/bin/<your-cli>.cjs --version
-      # Library example:    - run: node -e "require('./dist/index.cjs')"
-      - run: echo "TODO — customize this smoke step for your project's built artifact."
+      # IMPORTANT: replace the failing step below with commands that
+      # actually exercise YOUR built artifact. Examples:
+      #   CLI:        - run: node dist/bin/<your-cli>.cjs --version
+      #   Library:    - run: node -e "require('./dist/index.cjs')"
+      # The step is intentionally fail-closed so a copy-pasted template
+      # cannot ship to npm without a real prod-only smoke check.
+      - run: |
+          echo "::error file=.github/workflows/release.yml::release.yml smoke step is unconfigured."
+          echo "::error::Replace this step with commands that exercise your built artifact in the prod-only env (see comment block above)."
+          exit 1
 
   publish:
     name: npm publish --provenance
