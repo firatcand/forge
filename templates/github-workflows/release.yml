@@ -11,6 +11,11 @@ name: Release
 #
 # Required: `npm test`, `npm run build`, `npm run typecheck` scripts in package.json.
 # Optional: `npm run test:pack` (skips if absent).
+#
+# NOTE: the `smoke` job runs your built CLI / library in a PROD-ONLY install
+# (devDependencies stripped) to catch the case where runtime code accidentally
+# resolves a devDependency that won't ship to users. Customize the smoke
+# commands to exercise YOUR built artifact(s).
 
 on:
   push:
@@ -59,10 +64,44 @@ jobs:
       - run: npm run typecheck --if-present
       - run: npm test --if-present
       - run: npm run build --if-present
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: ignore   # adopters without a `dist/` directory don't fail here
+
+  smoke:
+    name: smoke prod-only (${{ matrix.node-version }})
+    # PROD-ONLY install + exercise the built artifact. Catches the case
+    # where runtime code accidentally resolves a devDependency that
+    # won't ship to users. Customize the commands below for YOUR artifact.
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist
+        continue-on-error: true   # adopters without a dist artifact skip the download
+      # TODO: replace with smoke commands that exercise YOUR built artifact.
+      # CLI example:        - run: node dist/bin/<your-cli>.cjs --version
+      # Library example:    - run: node -e "require('./dist/index.cjs')"
+      - run: echo "TODO — customize this smoke step for your project's built artifact."
 
   publish:
     name: npm publish --provenance
-    needs: test
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

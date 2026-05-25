@@ -5,10 +5,13 @@ name: Release
 # Flow:
 #   1. `verify` ensures the tag matches package.json version (refuses
 #      v0.3.1 if package.json says 0.3.0). Catches "forgot to bump".
-#   2. `test` re-runs the full CI gate on the tagged commit (defense in
-#      depth — main CI passed at merge time, but the tagged commit might
-#      differ from main HEAD if someone tags a back-revision).
-#   3. `publish` runs `npm publish --provenance` with NPM_TOKEN. The
+#   2. `test` runs the full dev-environment gate (typecheck, test, build,
+#      pack-gate) and uploads the dist/ artifact.
+#   3. `smoke` re-installs with `npm ci --omit=dev` and exercises the
+#      uploaded dist against PROD-ONLY dependencies — catches any runtime
+#      import that accidentally resolves to a devDependency (Codex P1 on
+#      the original PR diff). Mirrors ci.yml's smoke job exactly.
+#   4. `publish` runs `npm publish --provenance` with NPM_TOKEN. The
 #      `--provenance` flag attaches a cryptographic SLSA attestation that
 #      adopters can verify with `npm audit signatures`.
 #
@@ -69,11 +72,42 @@ jobs:
       - run: npm test
       - run: npm run build
       - run: npm run test:pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke:
+    name: smoke prod-only (${{ matrix.node-version }})
+    # Critical: install ONLY production deps, then exercise the dist
+    # artifact from `test`. Catches the case where runtime code resolved
+    # a devDependency at test time but won't have it post-publish
+    # (the bug class ship-gates-missed-build-step.md documents).
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist
       - run: node dist/bin/forge.cjs --version
+      - run: node dist/bin/forge.cjs --help
 
   publish:
     name: npm publish --provenance
-    needs: test
+    needs: smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
