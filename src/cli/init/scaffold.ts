@@ -15,10 +15,13 @@ import { writeAtomic } from '../../core/fs-atomic.ts';
 import type { InitAnswers } from './prompts.ts';
 import { renderTemplate, resolveTemplatesDir, type TemplateVars } from './templates.ts';
 // FORGE-152: integration points for the new CLAUDE.md split layout.
+// FORGE-156: per-host skill+agent farm materialized at init time.
 import {
   renderContext,
   ROOT_FILE_BY_AGENT,
   applyGitignoreBlock,
+  applySkillFarm,
+  locatePackageRoot,
   type AgentKind,
 } from '../upgrade/index.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
@@ -491,6 +494,37 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   const tooling = appendToolingExcludes(opts.cwd);
   for (const f of tooling.written) written.push(f);
   for (const f of tooling.skipped) skipped.push(f);
+
+  // 4.5) Per-host skill + agent farm (FORGE-156). Materializes
+  //      .claude/skills/ + .claude/agents/ (and same for codex/gemini if
+  //      enabled) as symlinks (POSIX) or copies (Windows) into the bundled
+  //      npm package. Without this, host-side slash commands and subagents
+  //      don't resolve in a freshly-initialized project.
+  try {
+    const farm = applySkillFarm({
+      cwd: opts.cwd,
+      packageRoot: locatePackageRoot(),
+      enabledAgents: opts.answers.agents.enabled_root_files,
+    });
+    for (const p of farm.created) {
+      const rel = p.startsWith(`${opts.cwd}/`) ? p.slice(opts.cwd.length + 1) : p;
+      written.push(rel);
+    }
+    // Refreshed entries are only possible if a prior init crashed mid-write;
+    // surface them as `written` for the same reason — the user sees the path.
+    for (const p of farm.refreshed) {
+      const rel = p.startsWith(`${opts.cwd}/`) ? p.slice(opts.cwd.length + 1) : p;
+      written.push(rel);
+    }
+  } catch (err) {
+    // Farm materialization failure must not abort init — the rest of the
+    // scaffold is correct. Surface a warning via the existing init-warnings
+    // sidecar instead.
+    tooling.warned.push({
+      target: 'skill-farm',
+      snippet: `Forge skill+agent farm could not be materialized: ${err instanceof Error ? err.message : String(err)}\n\nRun \`forge upgrade\` after init to retry. Without it, host-side slash commands (\`/forge\`, \`/pickup-task\`, ...) will not resolve in this project.`,
+    });
+  }
 
   // 5) Init warnings sidecar — merges unverified tool probes + tooling-exclude warnings.
   let warningsPath: string | undefined;

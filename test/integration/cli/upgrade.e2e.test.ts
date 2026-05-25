@@ -14,6 +14,7 @@ import {
   type AgentKind,
 } from '../../../src/cli/upgrade/agent-root-files.ts';
 import { applyGitignoreBlock } from '../../../src/cli/upgrade/gitignore-block.ts';
+import { applySkillFarm, locatePackageRoot } from '../../../src/cli/upgrade/skill-farm.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../../../src/cli/registry.ts';
 
 const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
@@ -48,6 +49,12 @@ function bootstrapInitdRepo(opts: { enabled?: AgentKind[]; primary?: AgentKind; 
     );
   }
   writeFileSync(join(cwd, '.gitignore'), applyGitignoreBlock(''));
+
+  // FORGE-156: pre-create the skill farm so "no-op on clean repo" tests
+  // see a truly-clean state. The CLI subprocess we spawn below uses the
+  // same skill-farm module loaded from this repo, so the targets it
+  // computes match what we materialize here.
+  applySkillFarm({ cwd, packageRoot: locatePackageRoot(), enabledAgents: enabled });
 
   return cwd;
 }

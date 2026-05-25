@@ -30,6 +30,7 @@ import {
 import { applyGitignoreBlock } from './gitignore-block.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
+import { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
 import { locateContextTemplate } from './template-loader.ts';
 import {
   checkVersionDrift,
@@ -263,7 +264,28 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     changed.push('.gitignore');
   }
 
+  // 9. Refresh per-host skill + agent farm (FORGE-156). Each enabled host
+  //    gets pointers to the bundled skills/<name>/ and agents/<name>.md so
+  //    the host's slash-command / subagent discovery resolves in this project.
+  //    Idempotent: existing-and-correct entries are left alone; mismatches
+  //    are backed up to `.bak` and replaced. dryRun is passed through so
+  //    --dry-run still surfaces the would-be created entries (Codex review).
+  const farm = applySkillFarm({
+    cwd,
+    packageRoot: locatePackageRoot(),
+    enabledAgents: settings.agents.enabled_root_files,
+    dryRun: opts.dryRun,
+  });
+  for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
+  for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
+
   return { exitCode: 0, filesChanged: changed, stderr: '' };
+}
+
+/** Render a path relative to cwd for the filesChanged report — keeps the
+ * report readable rather than dumping absolute /Users/... paths. */
+function relativeFromCwd(cwd: string, abs: string): string {
+  return abs.startsWith(`${cwd}/`) ? abs.slice(cwd.length + 1) : abs;
 }
 
 /** B4: --add-agent. Idempotent. Returns a refusal result on schema violation, else null. */
@@ -368,6 +390,19 @@ function applyRemoveAgent(
     writeAtomic(resolve(cwd, '.forge/settings.yaml'), yamlStringify(settings, { lineWidth: 0 }));
   }
   changed.push('.forge/settings.yaml');
+
+  // FORGE-156 follow-up (Codex review): prune the disabled host's farm
+  // entries so it can no longer discover forge slash commands / subagents
+  // in this project. Enumerates bundled forge entries from packageRoot and
+  // deletes ONLY those specific entries — user-owned non-forge content in
+  // the same `.X/skills/` or `.X/agents/` dir survives (Codex P1 review).
+  const pruned = pruneHostFarm({
+    cwd,
+    host: agent,
+    packageRoot: locatePackageRoot(),
+    dryRun: opts.dryRun,
+  });
+  for (const p of pruned) changed.push(p);
 
   return null;
 }
