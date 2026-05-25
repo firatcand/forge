@@ -99,6 +99,35 @@ How you dogfooded the change on a real project.
 Yes / No. If yes, what migrates.
 ```
 
+## Releasing
+
+Releases are automated (FORGE-157). The flow:
+
+1. Open a release PR that bumps `package.json` version and adds (or moves `[Unreleased]` into) a `## [X.Y.Z] — YYYY-MM-DD` section in `CHANGELOG.md`.
+2. Merge the PR.
+3. Tag the merge commit on `main` and push the tag:
+   ```bash
+   git tag v0.3.1 9308b22  # use the actual merge SHA
+   git push origin v0.3.1
+   ```
+4. `.github/workflows/release.yml` runs the full CI gate on the tagged commit, refuses if the tag doesn't match `package.json` version, and runs `npm publish --provenance`.
+5. `.github/workflows/release-draft.yml` slices the `## [0.3.1]` section from `CHANGELOG.md` and creates a DRAFT GitHub Release pre-filled with those notes. Review + click Publish in the GH UI.
+6. Verify the published package: `npm audit signatures @firatcand/forge@0.3.1` should report a verified attestation.
+
+### One-time setup: `NPM_TOKEN` secret
+
+The publish step needs an npm token in the repo's GitHub secrets.
+
+1. Create a granular automation token at https://www.npmjs.com/settings/<your-username>/tokens/granular-access-tokens/new
+   - **Token name:** `forge-publish-from-gh-actions` (or any label you'll remember)
+   - **Token expires:** as long as you're comfortable with — 90 days is a reasonable balance
+   - **Packages and scopes** → restrict to `@firatcand/forge`
+   - **Permissions** → `Read and write` (publish requires write)
+2. Add the token to the repo: Settings → Secrets and variables → Actions → New repository secret
+   - **Name:** `NPM_TOKEN`
+   - **Secret:** the token from step 1
+3. Rotate every ~90 days, or whenever the token expires.
+
 ## Code of conduct
 
 Be kind. Assume good faith. Keep PR discussions focused on the change. If a discussion drifts toward the meta-design of forge, take it to a separate issue.
