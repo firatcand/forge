@@ -325,18 +325,21 @@ test('applySkillFarm: directories under skills/ that lack SKILL.md are excluded 
   });
 });
 
-test('pruneHostFarm: removes bundled forge entries from .X/skills + .X/agents', () => {
+test('pruneHostFarm: removes forge-owned symlinks for bundled entries', () => {
   withTmpDir((tmp) => {
     const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'plan-task'], ['code-reviewer']);
     const cwd = resolve(tmp, 'proj');
-    mkdirSync(resolve(cwd, '.codex/skills/forge'), { recursive: true });
-    mkdirSync(resolve(cwd, '.codex/skills/plan-task'), { recursive: true });
-    mkdirSync(resolve(cwd, '.codex/agents'), { recursive: true });
-    writeFileSync(resolve(cwd, '.codex/skills/forge/SKILL.md'), '# forge\n');
-    writeFileSync(resolve(cwd, '.codex/skills/plan-task/SKILL.md'), '# plan-task\n');
-    writeFileSync(resolve(cwd, '.codex/agents/code-reviewer.md'), '# code-reviewer\n');
-    // Hypothetical sibling content the prune must leave alone — e.g.
-    // an adopter's project-level Codex config.
+    mkdirSync(cwd, { recursive: true });
+
+    // Use applySkillFarm to create the farm state we'd actually prune —
+    // real forge-owned symlinks with the canonical relative target.
+    applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['codex'],
+      mode: 'symlink',
+    });
+    // Adopter's project-level Codex config the prune must leave alone.
     writeFileSync(resolve(cwd, '.codex/config.toml'), 'model = "o3"\n');
 
     const removed = pruneHostFarm({ cwd, host: 'codex', packageRoot: pkg });
@@ -352,47 +355,98 @@ test('pruneHostFarm: removes bundled forge entries from .X/skills + .X/agents', 
   });
 });
 
-test('pruneHostFarm: user-owned skills/agents in same dir SURVIVE the prune (Codex P1 data-safety)', () => {
-  // The gitignore-block doc explicitly invites adopters to track their own
-  // non-forge skills/agents in these dirs via `!` override rules. A previous
-  // version of pruneHostFarm rm-rf'd the whole .X/skills/ dir, which would
-  // silently delete that user content. The fix: enumerate forge's bundled
-  // names and delete only those.
+test('pruneHostFarm: user-owned skills/agents with DIFFERENT names survive the prune (Codex P1)', () => {
   withTmpDir((tmp) => {
     const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
     const cwd = resolve(tmp, 'proj');
-    mkdirSync(resolve(cwd, '.claude/skills/forge'), { recursive: true });
+    mkdirSync(cwd, { recursive: true });
+
+    // Forge-owned symlinks (forge, code-reviewer).
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    // User-authored content under non-bundled names.
     mkdirSync(resolve(cwd, '.claude/skills/my-custom-skill'), { recursive: true });
-    mkdirSync(resolve(cwd, '.claude/agents'), { recursive: true });
-    writeFileSync(resolve(cwd, '.claude/skills/forge/SKILL.md'), '# forge bundled\n');
     writeFileSync(
       resolve(cwd, '.claude/skills/my-custom-skill/SKILL.md'),
-      '# user-authored skill — must survive prune\n',
+      '# user-authored skill — must survive\n',
     );
-    writeFileSync(resolve(cwd, '.claude/agents/code-reviewer.md'), '# bundled\n');
     writeFileSync(
       resolve(cwd, '.claude/agents/my-custom-agent.md'),
-      '# user-authored agent — must survive prune\n',
+      '# user-authored agent — must survive\n',
     );
+
+    pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+
+    assert.equal(existsSync(resolve(cwd, '.claude/skills/forge')), false);
+    assert.equal(existsSync(resolve(cwd, '.claude/agents/code-reviewer.md')), false);
+    assert.ok(existsSync(resolve(cwd, '.claude/skills/my-custom-skill')));
+    assert.ok(existsSync(resolve(cwd, '.claude/agents/my-custom-agent.md')));
+  });
+});
+
+test('pruneHostFarm: user-EJECTED skill at bundled name (real dir replacing symlink) survives (Codex P2 round 3)', () => {
+  // The trickier edge case: user ejected forge's `forge` skill by replacing
+  // the symlink with their own real directory using the SAME name. Without
+  // provenance verification, the prune deletes their work just because the
+  // basename matches a bundled entry. The isForgeOwnedSymlink check is the
+  // load-bearing guard here.
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'plan-task'], []);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    // Start with the full farm…
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+    // …then EJECT `.claude/skills/forge` (rm symlink, replace with real dir).
+    rmSync(resolve(cwd, '.claude/skills/forge'));
+    mkdirSync(resolve(cwd, '.claude/skills/forge'));
+    writeFileSync(
+      resolve(cwd, '.claude/skills/forge/SKILL.md'),
+      '# user override of forge — must survive --remove-agent\n',
+    );
+    // Also eject by re-symlinking elsewhere — also a "not forge-owned" case.
+    const decoy = resolve(tmp, 'decoy');
+    mkdirSync(decoy);
+    writeFileSync(resolve(decoy, 'SKILL.md'), '# decoy\n');
+    rmSync(resolve(cwd, '.claude/skills/plan-task'));
+    symlinkSync(decoy, resolve(cwd, '.claude/skills/plan-task'), 'dir');
 
     const removed = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
 
-    // Bundled entries gone.
-    assert.equal(existsSync(resolve(cwd, '.claude/skills/forge')), false);
-    assert.equal(existsSync(resolve(cwd, '.claude/agents/code-reviewer.md')), false);
-    // User entries survive.
+    // Both ejected entries survive — neither is a forge-owned symlink.
+    assert.equal(removed.length, 0, `expected 0 removed (both ejected); got ${JSON.stringify(removed)}`);
     assert.ok(
-      existsSync(resolve(cwd, '.claude/skills/my-custom-skill')),
-      'user-authored skill must NOT be deleted',
+      existsSync(resolve(cwd, '.claude/skills/forge')),
+      'user-ejected skill at bundled name must survive',
+    );
+    assert.match(
+      readFileSync(resolve(cwd, '.claude/skills/forge/SKILL.md'), 'utf8'),
+      /user override/,
+      'ejected content is intact',
     );
     assert.ok(
-      existsSync(resolve(cwd, '.claude/agents/my-custom-agent.md')),
-      'user-authored agent must NOT be deleted',
+      existsSync(resolve(cwd, '.claude/skills/plan-task')),
+      'user-re-symlinked skill at bundled name must survive',
     );
-    // Removed report only mentions the bundled names.
-    assert.equal(removed.length, 2);
-    assert.ok(removed.includes('.claude/skills/forge'));
-    assert.ok(removed.includes('.claude/agents/code-reviewer.md'));
+  });
+});
+
+test('pruneHostFarm: copy-mode entries are NOT pruned (Windows limitation)', () => {
+  // Copies aren't distinguishable from user content post-hoc without a
+  // manifest. For data safety, the prune skips them; the v0.3.0 CHANGELOG
+  // documents this as a known limitation Windows adopters can work around
+  // by manually rm'ing .X/skills/.
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'copy' });
+
+    const removed = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+
+    assert.equal(removed.length, 0);
+    assert.ok(existsSync(resolve(cwd, '.claude/skills/forge')), 'copy survives prune by design');
   });
 });
 
@@ -400,8 +454,8 @@ test('pruneHostFarm: dryRun reports what would be removed without touching disk'
   withTmpDir((tmp) => {
     const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
     const cwd = resolve(tmp, 'proj');
-    mkdirSync(resolve(cwd, '.gemini/skills/forge'), { recursive: true });
-    writeFileSync(resolve(cwd, '.gemini/skills/forge/SKILL.md'), '# forge\n');
+    mkdirSync(cwd, { recursive: true });
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['gemini'], mode: 'symlink' });
 
     const removed = pruneHostFarm({ cwd, host: 'gemini', packageRoot: pkg, dryRun: true });
 

@@ -330,17 +330,21 @@ function pushOutcome(
  * `forge upgrade --remove-agent` so a disabled host can no longer
  * discover forge slash commands/subagents in the project.
  *
- * Data-safety contract (Codex P1 review): we enumerate the bundled skill
- * + agent names from `packageRoot` and delete ONLY those specific entries
- * from the host's `.X/skills/` and `.X/agents/` dirs. Any user-owned
- * non-forge content in those dirs (per gitignore-block.ts: "adopters who
- * want to track their own non-forge skills can add `!` override lines")
- * is left intact.
+ * Data-safety contract (Codex P1 + P2 reviews):
+ *   1. Only enumerate entries whose names match the bundled forge set
+ *      (so we never touch unrelated user content in `.X/skills/`).
+ *   2. Within that candidate set, only delete entries whose **provenance
+ *      is verifiable as forge-owned** — currently: it's a symlink whose
+ *      `readlink` matches the expected bundled target. Anything else
+ *      (a real file/dir at a bundled name) is treated as user-replaced
+ *      content (e.g. an "eject" of a forge skill via `!` override) and
+ *      left in place.
  *
- * Note: if forge renames a bundled skill across versions, the OLD name is
- * not in the current bundled set and will be left in the farm. Acceptable
- * for v0.3.0 — forge upgrade also wouldn't refresh under the old name,
- * and the user gets a harmless dead symlink at worst.
+ * Known limitation (Windows / copy mode): copies aren't distinguishable
+ * from user content post-hoc without a manifest or content hash, so this
+ * function leaves them alone too. Adopters on Windows running
+ * `--remove-agent` need to manually `rm .X/skills/` if they want the
+ * stale forge copies gone. Tracked as a v0.3.1+ improvement.
  *
  * Returns the relative paths it removed (or would remove under dryRun)
  * so the caller can report them in `filesChanged`.
@@ -356,17 +360,32 @@ export function pruneHostFarm(
   const removed: string[] = [];
 
   for (const name of skillNames) {
-    const entry = resolve(cwd, hostDirs.skills, name);
-    if (!existsSync(entry) && !isBrokenSymlink(entry)) continue;
-    if (!opts.dryRun) rmSync(entry, { recursive: true, force: true });
+    const dest = resolve(cwd, hostDirs.skills, name);
+    const src = resolve(packageRoot, 'skills', name);
+    if (!isForgeOwnedSymlink(dest, src)) continue;
+    if (!opts.dryRun) rmSync(dest, { recursive: true, force: true });
     removed.push(`${hostDirs.skills}/${name}`);
   }
   for (const name of agentFiles) {
-    const entry = resolve(cwd, hostDirs.agents, name);
-    if (!existsSync(entry) && !isBrokenSymlink(entry)) continue;
-    if (!opts.dryRun) rmSync(entry, { recursive: true, force: true });
+    const dest = resolve(cwd, hostDirs.agents, name);
+    const src = resolve(packageRoot, 'agents', name);
+    if (!isForgeOwnedSymlink(dest, src)) continue;
+    if (!opts.dryRun) rmSync(dest, { recursive: true, force: true });
     removed.push(`${hostDirs.agents}/${name}`);
   }
 
   return removed;
+}
+
+/**
+ * Provenance check: returns true only when `dest` is a symlink whose
+ * `readlink` matches the relative path forge would compute for `src`.
+ * Real files/dirs at `dest` (user-replaced content), or symlinks pointing
+ * elsewhere (user re-symlinked), return false — we leave them alone.
+ */
+function isForgeOwnedSymlink(dest: string, src: string): boolean {
+  const lst = safeLstat(dest);
+  if (!lst || !lst.isSymbolicLink()) return false;
+  const expectedTarget = relative(dirname(dest), src);
+  return safeReadlink(dest) === expectedTarget;
 }
