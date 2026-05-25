@@ -224,14 +224,33 @@ function isBrokenSymlink(p: string): boolean {
   return !!st && st.isSymbolicLink() && !existsSync(p);
 }
 
-/** Enumerate entries in a bundled source directory, filtered by kind. */
-function listBundledEntries(rootPath: string, kind: 'directory' | 'file'): string[] {
-  if (!existsSync(rootPath)) return [];
-  return readdirSync(rootPath).filter((name) => {
-    const full = resolve(rootPath, name);
+/**
+ * Enumerate bundled skill directories — only those containing a `SKILL.md`.
+ * The forge package ships internal helper directories under `skills/` (e.g.
+ * `skills/_shared/` referenced by other SKILL.md files via @import) that are
+ * NOT themselves skills. Without the SKILL.md filter, those internal dirs
+ * leak into adopter farms and show up as invalid skills in every host
+ * (Codex review).
+ */
+function listBundledSkills(skillsRoot: string): string[] {
+  if (!existsSync(skillsRoot)) return [];
+  return readdirSync(skillsRoot).filter((name) => {
+    const full = resolve(skillsRoot, name);
     try {
-      const st = statSync(full);
-      return kind === 'directory' ? st.isDirectory() : st.isFile();
+      return statSync(full).isDirectory() && existsSync(resolve(full, 'SKILL.md'));
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** Enumerate bundled agent files (every `.md` under `agents/`). */
+function listBundledAgents(agentsRoot: string): string[] {
+  if (!existsSync(agentsRoot)) return [];
+  return readdirSync(agentsRoot).filter((name) => {
+    const full = resolve(agentsRoot, name);
+    try {
+      return statSync(full).isFile();
     } catch {
       return false;
     }
@@ -263,8 +282,8 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
   const skillsRoot = resolve(packageRoot, 'skills');
   const agentsRoot = resolve(packageRoot, 'agents');
 
-  const skillNames = listBundledEntries(skillsRoot, 'directory');
-  const agentFiles = listBundledEntries(agentsRoot, 'file');
+  const skillNames = listBundledSkills(skillsRoot);
+  const agentFiles = listBundledAgents(agentsRoot);
 
   for (const agent of opts.enabledAgents) {
     const hostDirs = HOST_DIRS[agent];
@@ -303,4 +322,31 @@ function pushOutcome(
   if (outcome === 'created') created.push(path);
   else if (outcome === 'refreshed') refreshed.push(path);
   else skipped.push(path);
+}
+
+/**
+ * Remove the per-host skill + agent farm directories for a single host.
+ * Called by `forge upgrade --remove-agent` so a disabled host can no longer
+ * discover forge slash commands/subagents in the project (Codex review:
+ * without this, the farm step only materializes ENABLED hosts and never
+ * prunes the disabled one's stale dirs).
+ *
+ * Returns the relative paths it removed (or would remove in dryRun mode)
+ * so the caller can report them in `filesChanged`. Only removes
+ * `.X/skills/` and `.X/agents/` — leaves any other `.X/` content alone
+ * (e.g. Codex's project-level `config.toml`, if an adopter has one).
+ */
+export function pruneHostFarm(
+  opts: { cwd: string; host: AgentKind; dryRun?: boolean },
+): readonly string[] {
+  const cwd = canonicalizeIfExists(opts.cwd);
+  const hostDirs = HOST_DIRS[opts.host];
+  const removed: string[] = [];
+  for (const sub of [hostDirs.skills, hostDirs.agents] as const) {
+    const full = resolve(cwd, sub);
+    if (!existsSync(full)) continue;
+    if (!opts.dryRun) rmSync(full, { recursive: true, force: true });
+    removed.push(sub);
+  }
+  return removed;
 }

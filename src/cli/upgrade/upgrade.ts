@@ -30,7 +30,7 @@ import {
 import { applyGitignoreBlock } from './gitignore-block.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
-import { applySkillFarm, locatePackageRoot } from './skill-farm.ts';
+import { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
 import { locateContextTemplate } from './template-loader.ts';
 import {
   checkVersionDrift,
@@ -268,16 +268,16 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   //    gets pointers to the bundled skills/<name>/ and agents/<name>.md so
   //    the host's slash-command / subagent discovery resolves in this project.
   //    Idempotent: existing-and-correct entries are left alone; mismatches
-  //    are backed up to `.bak` and replaced.
-  if (!opts.dryRun) {
-    const farm = applySkillFarm({
-      cwd,
-      packageRoot: locatePackageRoot(),
-      enabledAgents: settings.agents.enabled_root_files,
-    });
-    for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
-    for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
-  }
+  //    are backed up to `.bak` and replaced. dryRun is passed through so
+  //    --dry-run still surfaces the would-be created entries (Codex review).
+  const farm = applySkillFarm({
+    cwd,
+    packageRoot: locatePackageRoot(),
+    enabledAgents: settings.agents.enabled_root_files,
+    dryRun: opts.dryRun,
+  });
+  for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
+  for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
 
   return { exitCode: 0, filesChanged: changed, stderr: '' };
 }
@@ -390,6 +390,13 @@ function applyRemoveAgent(
     writeAtomic(resolve(cwd, '.forge/settings.yaml'), yamlStringify(settings, { lineWidth: 0 }));
   }
   changed.push('.forge/settings.yaml');
+
+  // FORGE-156 follow-up (Codex review): prune the disabled host's farm dirs
+  // so it can no longer discover forge slash commands / subagents in this
+  // project. Only touches `.X/skills/` and `.X/agents/` — leaves any other
+  // `.X/` content alone (e.g. an adopter's project-level Codex config.toml).
+  const pruned = pruneHostFarm({ cwd, host: agent, dryRun: opts.dryRun });
+  for (const p of pruned) changed.push(p);
 
   return null;
 }

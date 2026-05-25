@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { resolve, sep } from 'node:path';
 import {
   applySkillFarm,
+  pruneHostFarm,
   type FarmMode,
 } from '../../../../src/cli/upgrade/skill-farm.ts';
 
@@ -284,6 +285,75 @@ test('applySkillFarm: gemini host enabled — creates .gemini/skills/ and .gemin
     // The other hosts must NOT be created.
     assert.equal(existsSync(resolve(cwd, '.claude')), false);
     assert.equal(existsSync(resolve(cwd, '.codex')), false);
+  });
+});
+
+test('applySkillFarm: directories under skills/ that lack SKILL.md are excluded (Codex P3)', () => {
+  // Forge ships `skills/_shared/` as an internal @import helper, not a skill.
+  // Without the SKILL.md filter, _shared leaks into every adopter farm and
+  // surfaces as an invalid skill in every host's discovery.
+  withTmpDir((tmp) => {
+    const pkg = resolve(tmp, 'pkg');
+    mkdirSync(resolve(pkg, 'skills/real-skill'), { recursive: true });
+    writeFileSync(resolve(pkg, 'skills/real-skill/SKILL.md'), '# real-skill\n');
+    // Bundled helper — directory exists but no SKILL.md.
+    mkdirSync(resolve(pkg, 'skills/_shared'));
+    writeFileSync(resolve(pkg, 'skills/_shared/helper.md'), '# helper\n');
+    mkdirSync(resolve(pkg, 'agents'));
+
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['claude'],
+      mode: 'symlink',
+    });
+
+    // Only the real skill should be in the farm — _shared is filtered.
+    assert.equal(result.created.length, 1, `expected 1 farm entry, got ${result.created.length}`);
+    assert.ok(
+      result.created[0]!.endsWith('.claude/skills/real-skill'),
+      `expected real-skill; got ${result.created[0]}`,
+    );
+    assert.equal(
+      existsSync(resolve(cwd, '.claude/skills/_shared')),
+      false,
+      '_shared must NOT be materialized into the farm',
+    );
+  });
+});
+
+test('pruneHostFarm: removes the host skill+agent dirs only, leaves other .X content alone', () => {
+  withTmpDir((tmp) => {
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(resolve(cwd, '.codex/skills/forge'), { recursive: true });
+    mkdirSync(resolve(cwd, '.codex/agents'), { recursive: true });
+    writeFileSync(resolve(cwd, '.codex/skills/forge/SKILL.md'), '# forge\n');
+    writeFileSync(resolve(cwd, '.codex/agents/code-reviewer.md'), '# code-reviewer\n');
+    // Hypothetical sibling content the prune must leave alone — e.g.
+    // an adopter's project-level Codex config.
+    writeFileSync(resolve(cwd, '.codex/config.toml'), 'model = "o3"\n');
+
+    const removed = pruneHostFarm({ cwd, host: 'codex' });
+
+    assert.deepEqual([...removed].sort(), ['.codex/agents', '.codex/skills']);
+    assert.equal(existsSync(resolve(cwd, '.codex/skills')), false, 'skills dir gone');
+    assert.equal(existsSync(resolve(cwd, '.codex/agents')), false, 'agents dir gone');
+    assert.ok(existsSync(resolve(cwd, '.codex/config.toml')), 'unrelated .codex/ content preserved');
+  });
+});
+
+test('pruneHostFarm: dryRun reports what would be removed without touching disk', () => {
+  withTmpDir((tmp) => {
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(resolve(cwd, '.gemini/skills'), { recursive: true });
+
+    const removed = pruneHostFarm({ cwd, host: 'gemini', dryRun: true });
+
+    assert.deepEqual([...removed], ['.gemini/skills']);
+    assert.ok(existsSync(resolve(cwd, '.gemini/skills')), 'dryRun must not touch disk');
   });
 });
 

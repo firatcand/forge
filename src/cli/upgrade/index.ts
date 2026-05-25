@@ -44,5 +44,5 @@ export type { MigrateOptions, MigrateResult } from './migrate-claudemd.ts';
 export { locateContextTemplate } from './template-loader.ts';
 
 // FORGE-156: per-host project-local skill + agent farm.
-export { applySkillFarm, locatePackageRoot } from './skill-farm.ts';
+export { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
 export type { FarmMode, SkillFarmOptions, SkillFarmResult } from './skill-farm.ts';
