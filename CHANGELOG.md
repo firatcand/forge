@@ -4,6 +4,14 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- **Release automation** (FORGE-157) — two GitHub Action workflows that fire on `v*` tag push:
+  - `.github/workflows/release.yml` — verifies the tag matches `package.json` version, re-runs the full CI gate (typecheck, test, build, pack-gate, smoke) on the tagged commit, then runs `npm publish --provenance`. The `--provenance` flag attaches a SLSA cryptographic attestation linking the published tarball to its source commit + workflow run; adopters can verify with `npm audit signatures`.
+  - `.github/workflows/release-draft.yml` — slices the matching `## [X.Y.Z]` section out of `CHANGELOG.md` and creates a DRAFT GitHub Release pre-filled with those notes; reviewer publishes from the GH UI when ready.
+  - Required GitHub secret: `NPM_TOKEN` (granular automation token, scoped to the `@firatcand/forge` package, publish permission only). Setup recipe in `CONTRIBUTING.md` §Releasing.
+- **Adopter release templates** at `templates/github-workflows/release.yml` and `templates/github-workflows/release-draft.yml` — generic versions (no forge-specific smoke step) that adopter projects can copy into their own `.github/workflows/` manually. Auto-scaffolding by `forge init` is deferred — adopter projects aren't always npm packages, so the npm-vs-other-publishing prompt design needs more work before we wire scaffold integration.
+
 ## [0.3.0] — 2026-05-25
 
 First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI verb surface, `plans/phases.yaml` schema, and `CLAUDE.md` layout. Existing v0.2.x adopters should run `forge upgrade` after upgrading, and `forge upgrade --migrate-claudemd` if they have a v0.4-shape combined `CLAUDE.md`.

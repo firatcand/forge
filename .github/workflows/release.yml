@@ -1,0 +1,126 @@
+name: Release
+
+# FORGE-157 — npm publish on `v*` tag push, with SLSA provenance.
+#
+# Flow:
+#   1. `verify` ensures the tag matches package.json version (refuses
+#      v0.3.1 if package.json says 0.3.0). Catches "forgot to bump".
+#   2. `test` runs the full dev-environment gate (typecheck, test, build,
+#      pack-gate) and uploads the dist/ artifact.
+#   3. `smoke` re-installs with `npm ci --omit=dev` and exercises the
+#      uploaded dist against PROD-ONLY dependencies — catches any runtime
+#      import that accidentally resolves to a devDependency (Codex P1 on
+#      the original PR diff). Mirrors ci.yml's smoke job exactly.
+#   4. `publish` runs `npm publish --provenance` with NPM_TOKEN. The
+#      `--provenance` flag attaches a cryptographic SLSA attestation that
+#      adopters can verify with `npm audit signatures`.
+#
+# Security: GITHUB_REF_NAME is consumed via env var (safe), never via
+#   shell interpolation of untrusted ${{ github.event.* }} fields.
+#
+# Required secret: `NPM_TOKEN` — granular automation token, scoped to
+#   the @firatcand/forge package, publish permission only. See
+#   CONTRIBUTING.md §Releasing for setup.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write    # required by --provenance
+
+concurrency:
+  # Serialize publishes per-tag so a re-pushed tag can't race itself.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify tag matches package.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse if tag != package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v${TAG} does not match package.json version ${PKG}. Refusing to publish."
+            echo "::error::Bump package.json to ${TAG} (or re-tag with v${PKG}) and re-run."
+            exit 1
+          fi
+          echo "Tag and package.json agree on version ${TAG}."
+
+  test:
+    name: test (${{ matrix.node-version }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  smoke:
+    name: smoke prod-only (${{ matrix.node-version }})
+    # Critical: install ONLY production deps, then exercise the dist
+    # artifact from `test`. Catches the case where runtime code resolved
+    # a devDependency at test time but won't have it post-publish
+    # (the bug class ship-gates-missed-build-step.md documents).
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x', '24.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist
+      - run: node dist/bin/forge.cjs --version
+      - run: node dist/bin/forge.cjs --help
+
+  publish:
+    name: npm publish --provenance
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          # registry-url tells `npm publish` where to send + how to read
+          # NODE_AUTH_TOKEN. Without it, npm uses the local config which
+          # has no token in a CI runner.
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

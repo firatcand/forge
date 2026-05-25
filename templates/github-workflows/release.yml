@@ -1,0 +1,123 @@
+name: Release
+
+# Forge template — npm publish on `v*` tag push with SLSA provenance.
+# Adapted from .github/workflows/release.yml in the forge repo (FORGE-157).
+# Edit freely to match your project's gate (e.g. add lint, e2e, integration).
+#
+# Required GitHub secret: `NPM_TOKEN`
+#   Create a granular automation token at https://www.npmjs.com/settings/<user>/tokens
+#   Scope: only the package you publish, publish permission only.
+#   Add via: Repo Settings → Secrets and variables → Actions → New repository secret.
+#
+# Required: `npm test`, `npm run build`, `npm run typecheck` scripts in package.json.
+# Optional: `npm run test:pack` (skips if absent).
+#
+# NOTE: the `smoke` job runs your built CLI / library in a PROD-ONLY install
+# (devDependencies stripped) to catch the case where runtime code accidentally
+# resolves a devDependency that won't ship to users. Customize the smoke
+# commands to exercise YOUR built artifact(s).
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write    # required by --provenance
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify tag matches package.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse if tag != package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::Tag v${TAG} does not match package.json version ${PKG}."
+            exit 1
+          fi
+          echo "Tag and package.json agree on version ${TAG}."
+
+  test:
+    name: test (${{ matrix.node-version }})
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      - run: npm run typecheck --if-present
+      - run: npm test --if-present
+      - run: npm run build --if-present
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist/
+          retention-days: 1
+          if-no-files-found: ignore   # adopters without a `dist/` directory don't fail here
+
+  smoke:
+    name: smoke prod-only (${{ matrix.node-version }})
+    # PROD-ONLY install + exercise the built artifact. Catches the case
+    # where runtime code accidentally resolves a devDependency that
+    # won't ship to users. Customize the commands below for YOUR artifact.
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: ['22.x']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci --omit=dev
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-node-${{ matrix.node-version }}
+          path: dist
+        continue-on-error: true   # adopters without a dist artifact skip the download
+      # IMPORTANT: replace the failing step below with commands that
+      # actually exercise YOUR built artifact. Examples:
+      #   CLI:        - run: node dist/bin/<your-cli>.cjs --version
+      #   Library:    - run: node -e "require('./dist/index.cjs')"
+      # The step is intentionally fail-closed so a copy-pasted template
+      # cannot ship to npm without a real prod-only smoke check.
+      - run: |
+          echo "::error file=.github/workflows/release.yml::release.yml smoke step is unconfigured."
+          echo "::error::Replace this step with commands that exercise your built artifact in the prod-only env (see comment block above)."
+          exit 1
+
+  publish:
+    name: npm publish --provenance
+    needs: smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run build --if-present
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

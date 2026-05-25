@@ -1,0 +1,52 @@
+name: Draft GitHub Release
+
+# Forge template — creates a DRAFT GitHub Release pre-filled with the
+# matching CHANGELOG section when a `v*` tag is pushed. Pairs with
+# release.yml: tag push fires both workflows; release.yml publishes to
+# npm, this one drafts the GH Release for you to review + publish from
+# the GH UI.
+#
+# Assumes CHANGELOG.md sections are formatted as `## [X.Y.Z]` — common
+# Keep a Changelog convention. If your CHANGELOG uses a different
+# heading style, edit the awk pattern below.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  draft-release:
+    name: Draft release from CHANGELOG
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract CHANGELOG section for this tag
+        id: changelog
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          NOTES="$(awk -v tag="$TAG" '
+            BEGIN { flag=0 }
+            /^## \[/ && flag==1 { exit }
+            $0 ~ ("^## \\[" tag "\\]") { flag=1; next }
+            flag==1 { print }
+          ' CHANGELOG.md)"
+          NOTES="$(printf '%s' "$NOTES" | sed -e ':a' -e '/^$/{$d;N;ba' -e '}')"
+          if [ -z "$NOTES" ]; then
+            NOTES="Release notes not found in CHANGELOG.md for version ${TAG}. Edit this draft before publishing."
+          fi
+          {
+            echo 'notes<<__EOF__'
+            echo "$NOTES"
+            echo '__EOF__'
+          } >> "$GITHUB_OUTPUT"
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.notes }}
+          draft: true
+          prerelease: false
