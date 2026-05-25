@@ -325,35 +325,88 @@ test('applySkillFarm: directories under skills/ that lack SKILL.md are excluded 
   });
 });
 
-test('pruneHostFarm: removes the host skill+agent dirs only, leaves other .X content alone', () => {
+test('pruneHostFarm: removes bundled forge entries from .X/skills + .X/agents', () => {
   withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'plan-task'], ['code-reviewer']);
     const cwd = resolve(tmp, 'proj');
     mkdirSync(resolve(cwd, '.codex/skills/forge'), { recursive: true });
+    mkdirSync(resolve(cwd, '.codex/skills/plan-task'), { recursive: true });
     mkdirSync(resolve(cwd, '.codex/agents'), { recursive: true });
     writeFileSync(resolve(cwd, '.codex/skills/forge/SKILL.md'), '# forge\n');
+    writeFileSync(resolve(cwd, '.codex/skills/plan-task/SKILL.md'), '# plan-task\n');
     writeFileSync(resolve(cwd, '.codex/agents/code-reviewer.md'), '# code-reviewer\n');
     // Hypothetical sibling content the prune must leave alone — e.g.
     // an adopter's project-level Codex config.
     writeFileSync(resolve(cwd, '.codex/config.toml'), 'model = "o3"\n');
 
-    const removed = pruneHostFarm({ cwd, host: 'codex' });
+    const removed = pruneHostFarm({ cwd, host: 'codex', packageRoot: pkg });
 
-    assert.deepEqual([...removed].sort(), ['.codex/agents', '.codex/skills']);
-    assert.equal(existsSync(resolve(cwd, '.codex/skills')), false, 'skills dir gone');
-    assert.equal(existsSync(resolve(cwd, '.codex/agents')), false, 'agents dir gone');
+    assert.deepEqual(
+      [...removed].sort(),
+      ['.codex/agents/code-reviewer.md', '.codex/skills/forge', '.codex/skills/plan-task'],
+    );
+    assert.equal(existsSync(resolve(cwd, '.codex/skills/forge')), false);
+    assert.equal(existsSync(resolve(cwd, '.codex/skills/plan-task')), false);
+    assert.equal(existsSync(resolve(cwd, '.codex/agents/code-reviewer.md')), false);
     assert.ok(existsSync(resolve(cwd, '.codex/config.toml')), 'unrelated .codex/ content preserved');
+  });
+});
+
+test('pruneHostFarm: user-owned skills/agents in same dir SURVIVE the prune (Codex P1 data-safety)', () => {
+  // The gitignore-block doc explicitly invites adopters to track their own
+  // non-forge skills/agents in these dirs via `!` override rules. A previous
+  // version of pruneHostFarm rm-rf'd the whole .X/skills/ dir, which would
+  // silently delete that user content. The fix: enumerate forge's bundled
+  // names and delete only those.
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(resolve(cwd, '.claude/skills/forge'), { recursive: true });
+    mkdirSync(resolve(cwd, '.claude/skills/my-custom-skill'), { recursive: true });
+    mkdirSync(resolve(cwd, '.claude/agents'), { recursive: true });
+    writeFileSync(resolve(cwd, '.claude/skills/forge/SKILL.md'), '# forge bundled\n');
+    writeFileSync(
+      resolve(cwd, '.claude/skills/my-custom-skill/SKILL.md'),
+      '# user-authored skill — must survive prune\n',
+    );
+    writeFileSync(resolve(cwd, '.claude/agents/code-reviewer.md'), '# bundled\n');
+    writeFileSync(
+      resolve(cwd, '.claude/agents/my-custom-agent.md'),
+      '# user-authored agent — must survive prune\n',
+    );
+
+    const removed = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+
+    // Bundled entries gone.
+    assert.equal(existsSync(resolve(cwd, '.claude/skills/forge')), false);
+    assert.equal(existsSync(resolve(cwd, '.claude/agents/code-reviewer.md')), false);
+    // User entries survive.
+    assert.ok(
+      existsSync(resolve(cwd, '.claude/skills/my-custom-skill')),
+      'user-authored skill must NOT be deleted',
+    );
+    assert.ok(
+      existsSync(resolve(cwd, '.claude/agents/my-custom-agent.md')),
+      'user-authored agent must NOT be deleted',
+    );
+    // Removed report only mentions the bundled names.
+    assert.equal(removed.length, 2);
+    assert.ok(removed.includes('.claude/skills/forge'));
+    assert.ok(removed.includes('.claude/agents/code-reviewer.md'));
   });
 });
 
 test('pruneHostFarm: dryRun reports what would be removed without touching disk', () => {
   withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
     const cwd = resolve(tmp, 'proj');
-    mkdirSync(resolve(cwd, '.gemini/skills'), { recursive: true });
+    mkdirSync(resolve(cwd, '.gemini/skills/forge'), { recursive: true });
+    writeFileSync(resolve(cwd, '.gemini/skills/forge/SKILL.md'), '# forge\n');
 
-    const removed = pruneHostFarm({ cwd, host: 'gemini', dryRun: true });
+    const removed = pruneHostFarm({ cwd, host: 'gemini', packageRoot: pkg, dryRun: true });
 
-    assert.deepEqual([...removed], ['.gemini/skills']);
-    assert.ok(existsSync(resolve(cwd, '.gemini/skills')), 'dryRun must not touch disk');
+    assert.deepEqual([...removed], ['.gemini/skills/forge']);
+    assert.ok(existsSync(resolve(cwd, '.gemini/skills/forge')), 'dryRun must not touch disk');
   });
 });
 

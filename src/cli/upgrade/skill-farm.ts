@@ -325,28 +325,48 @@ function pushOutcome(
 }
 
 /**
- * Remove the per-host skill + agent farm directories for a single host.
- * Called by `forge upgrade --remove-agent` so a disabled host can no longer
- * discover forge slash commands/subagents in the project (Codex review:
- * without this, the farm step only materializes ENABLED hosts and never
- * prunes the disabled one's stale dirs).
+ * Remove the per-host skill + agent farm entries for a single host that
+ * were materialized from the bundled npm package. Called by
+ * `forge upgrade --remove-agent` so a disabled host can no longer
+ * discover forge slash commands/subagents in the project.
  *
- * Returns the relative paths it removed (or would remove in dryRun mode)
- * so the caller can report them in `filesChanged`. Only removes
- * `.X/skills/` and `.X/agents/` — leaves any other `.X/` content alone
- * (e.g. Codex's project-level `config.toml`, if an adopter has one).
+ * Data-safety contract (Codex P1 review): we enumerate the bundled skill
+ * + agent names from `packageRoot` and delete ONLY those specific entries
+ * from the host's `.X/skills/` and `.X/agents/` dirs. Any user-owned
+ * non-forge content in those dirs (per gitignore-block.ts: "adopters who
+ * want to track their own non-forge skills can add `!` override lines")
+ * is left intact.
+ *
+ * Note: if forge renames a bundled skill across versions, the OLD name is
+ * not in the current bundled set and will be left in the farm. Acceptable
+ * for v0.3.0 — forge upgrade also wouldn't refresh under the old name,
+ * and the user gets a harmless dead symlink at worst.
+ *
+ * Returns the relative paths it removed (or would remove under dryRun)
+ * so the caller can report them in `filesChanged`.
  */
 export function pruneHostFarm(
-  opts: { cwd: string; host: AgentKind; dryRun?: boolean },
+  opts: { cwd: string; host: AgentKind; packageRoot: string; dryRun?: boolean },
 ): readonly string[] {
   const cwd = canonicalizeIfExists(opts.cwd);
+  const packageRoot = canonicalizeIfExists(opts.packageRoot);
   const hostDirs = HOST_DIRS[opts.host];
+  const skillNames = listBundledSkills(resolve(packageRoot, 'skills'));
+  const agentFiles = listBundledAgents(resolve(packageRoot, 'agents'));
   const removed: string[] = [];
-  for (const sub of [hostDirs.skills, hostDirs.agents] as const) {
-    const full = resolve(cwd, sub);
-    if (!existsSync(full)) continue;
-    if (!opts.dryRun) rmSync(full, { recursive: true, force: true });
-    removed.push(sub);
+
+  for (const name of skillNames) {
+    const entry = resolve(cwd, hostDirs.skills, name);
+    if (!existsSync(entry) && !isBrokenSymlink(entry)) continue;
+    if (!opts.dryRun) rmSync(entry, { recursive: true, force: true });
+    removed.push(`${hostDirs.skills}/${name}`);
   }
+  for (const name of agentFiles) {
+    const entry = resolve(cwd, hostDirs.agents, name);
+    if (!existsSync(entry) && !isBrokenSymlink(entry)) continue;
+    if (!opts.dryRun) rmSync(entry, { recursive: true, force: true });
+    removed.push(`${hostDirs.agents}/${name}`);
+  }
+
   return removed;
 }

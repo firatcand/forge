@@ -391,11 +391,17 @@ function applyRemoveAgent(
   }
   changed.push('.forge/settings.yaml');
 
-  // FORGE-156 follow-up (Codex review): prune the disabled host's farm dirs
-  // so it can no longer discover forge slash commands / subagents in this
-  // project. Only touches `.X/skills/` and `.X/agents/` — leaves any other
-  // `.X/` content alone (e.g. an adopter's project-level Codex config.toml).
-  const pruned = pruneHostFarm({ cwd, host: agent, dryRun: opts.dryRun });
+  // FORGE-156 follow-up (Codex review): prune the disabled host's farm
+  // entries so it can no longer discover forge slash commands / subagents
+  // in this project. Enumerates bundled forge entries from packageRoot and
+  // deletes ONLY those specific entries — user-owned non-forge content in
+  // the same `.X/skills/` or `.X/agents/` dir survives (Codex P1 review).
+  const pruned = pruneHostFarm({
+    cwd,
+    host: agent,
+    packageRoot: locatePackageRoot(),
+    dryRun: opts.dryRun,
+  });
   for (const p of pruned) changed.push(p);
 
   return null;
