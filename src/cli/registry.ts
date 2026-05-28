@@ -40,6 +40,11 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'Snapshot of task and run state.',
   },
   {
+    name: 'dashboard',
+    summary:
+      'Cross-run cockpit: active sessions, open questions, ready/blocked, overlap + lease health.',
+  },
+  {
     name: 'attach',
     summary: 'Tail per-run notifications.jsonl.',
   },
