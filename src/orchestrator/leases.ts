@@ -1164,3 +1164,29 @@ export function adminReleaseLeaseByIdentity(
 function isTerminalTaskState(state: string): state is TerminalTaskState {
   return (TERMINAL_TASK_STATES as readonly string[]).includes(state);
 }
+
+// ---- Lease health classification (read-only; used by the dashboard verb) ----
+//
+// Grace runs AFTER expiry, mirroring steal eligibility in steal() above
+// (`now > expires_at + grace`). A lease is:
+//   - alive:         now < expires_at
+//   - expiring_soon: expires_at <= now <= expires_at + stealGraceMs
+//                    (expired, in the grace window, not yet stealable)
+//   - stale:         now > expires_at + stealGraceMs (stealable / orphaned) —
+//                    also when expires_at is unparseable.
+// Pure: no I/O. stealGraceMs defaults to STEAL_GRACE_MS_DEFAULT; settings.agents
+// has no steal_grace field, so there is no override source to consult.
+export type LeaseHealth = 'alive' | 'expiring_soon' | 'stale';
+
+export function classifyLeaseHealth(
+  expiresAt: string,
+  now: Date,
+  stealGraceMs: number = STEAL_GRACE_MS_DEFAULT,
+): LeaseHealth {
+  const exp = new Date(expiresAt).getTime();
+  if (Number.isNaN(exp)) return 'stale';
+  const t = now.getTime();
+  if (t < exp) return 'alive';
+  if (t <= exp + stealGraceMs) return 'expiring_soon';
+  return 'stale';
+}

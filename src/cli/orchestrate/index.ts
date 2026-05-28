@@ -30,6 +30,7 @@ import { guardrailCheckHandler } from './guardrail-check.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
+import { dashboardHandler } from './dashboard.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -162,6 +163,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['doctor', doctorHandler],
   ['questions', questionsHandler],
   ['status', statusHandler],
+  ['dashboard', dashboardHandler],
   ['attach', attachHandler],
   ['spec-diff', specDiffHandler],
   ['guardrail-check', guardrailCheckHandler],
@@ -189,6 +191,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
 export const HELP_ORDER: readonly string[] = [
   'phases',
   'status',
+  'dashboard',
   'questions',
   'doctor',
   'attach',

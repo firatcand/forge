@@ -96,6 +96,16 @@ export const RunListArgsSchema = z.object({
 });
 export type RunListArgs = z.infer<typeof RunListArgsSchema>;
 
+// `forge orchestrate dashboard` (FORGE-90) — read-only cross-run cockpit.
+// Aggregates active sessions, open questions, ready/blocked tasks, overlap
+// warnings, and lease health across all of .forge/orchestrator/. No lease, no
+// tracker mutation, no state write.
+export const DashboardArgsSchema = z.object({
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type DashboardArgs = z.infer<typeof DashboardArgsSchema>;
+
 export const ClaimArgsSchema = z.object({
   taskId: TaskIdSchema,
   runId: RunIdSchema,
