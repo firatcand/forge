@@ -16,6 +16,7 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
+import { parseClaimFence } from './claim-fence.ts';
 import {
   assertValidBodyInput,
   parseExtraForgeFooters,
@@ -914,6 +915,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   private toIssue(raw: GhIssueJson): Issue {
     const labels = raw.labels.map((l) => l.name);
     const { forgeTaskId, blockerIds } = parseForgeFooters(raw.body);
+    const claim = parseClaimFence(raw.body);
     const issue: Issue = {
       id: String(raw.number),
       identifier: `#${raw.number}`,
@@ -923,6 +925,11 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       url: raw.url,
     };
     if (forgeTaskId !== undefined) issue.forgeTaskId = forgeTaskId;
+    if (claim) {
+      issue.claimId = claim.claimId;
+      issue.claimGeneration = claim.generation;
+      issue.claimOwnerRunId = claim.ownerRunId;
+    }
     return issue;
   }
 

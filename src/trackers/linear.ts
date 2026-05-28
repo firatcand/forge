@@ -8,6 +8,7 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
+import { parseClaimFence } from './claim-fence.ts';
 import {
   assertValidBodyInput,
   parseExtraForgeFooters,
@@ -1396,6 +1397,7 @@ export function deriveStateFromLinearIssue(raw: LinearIssueLike): IssueState {
 // Convert a flattened Linear issue into forge's tracker-agnostic Issue.
 export function toIssue(raw: LinearIssueLike): Issue {
   const { forgeTaskId, blockerIds } = parseForgeFooters(raw.description);
+  const claim = parseClaimFence(raw.description);
   const issue: Issue = {
     id: raw.id,
     identifier: raw.identifier,
@@ -1405,6 +1407,11 @@ export function toIssue(raw: LinearIssueLike): Issue {
     url: raw.url,
   };
   if (forgeTaskId !== undefined) issue.forgeTaskId = forgeTaskId;
+  if (claim) {
+    issue.claimId = claim.claimId;
+    issue.claimGeneration = claim.generation;
+    issue.claimOwnerRunId = claim.ownerRunId;
+  }
   return issue;
 }
 
