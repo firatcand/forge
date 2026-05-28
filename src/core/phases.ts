@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import * as path from 'node:path';
 import { parse as parseYaml, YAMLParseError } from 'yaml';
 import { z } from 'zod';
@@ -72,4 +72,21 @@ export function loadPhases(filePath: string): LoadPhasesResult {
   }
 
   return { phases, freshnessLine: computeFreshnessLine(phases.source) };
+}
+
+// Canonical phases.yaml search order. Repo-relative, checked against `cwd`.
+export const PHASES_YAML_PATHS = ['plans/phases.yaml', 'phases.yaml'] as const;
+
+// Resolve the phases.yaml path under `cwd`, or undefined if none exists.
+// Shared by `forge orchestrate phases` and the claim-time overlap gate (FORGE-170).
+export function resolvePhasesYaml(cwd: string): string | undefined {
+  for (const rel of PHASES_YAML_PATHS) {
+    const full = path.join(cwd, rel);
+    try {
+      if (statSync(full).isFile()) return full;
+    } catch {
+      // ENOENT: try next.
+    }
+  }
+  return undefined;
 }

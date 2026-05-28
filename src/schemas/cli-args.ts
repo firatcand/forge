@@ -111,6 +111,10 @@ export const ClaimArgsSchema = z.object({
   runId: RunIdSchema,
   forgeDir: ForgeDirField,
   json: JsonFlag,
+  // FORGE-170: bypass the claim-time overlap gate (hard-overlap refusal).
+  // Optional (no default) so existing ClaimArgs constructors stay valid;
+  // `!opts.force` treats undefined as "gate on".
+  force: z.boolean().optional(),
 });
 export type ClaimArgs = z.infer<typeof ClaimArgsSchema>;
 

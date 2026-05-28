@@ -134,6 +134,10 @@ const AgentsSchema = z
       'package.json',
       'phases.yaml',
     ]),
+    // FORGE-170: files that must NOT be written by two concurrent attempts.
+    // Consumed by src/orchestrator/overlap.ts for the claim-time hard-overlap
+    // gate AND `phases --ready` classification. Undefined → DEFAULT_HARD_LOCK_GLOBS.
+    hard_lock_globs: z.array(z.string().min(1)).optional(),
     // FORGE-152: which agent root files (CLAUDE.md / AGENTS.md / GEMINI.md)
     // the project writes. Enum values match primary_host_cli / review_host_cli
     // for schema consistency. Empty (absent or explicit []) is promoted to

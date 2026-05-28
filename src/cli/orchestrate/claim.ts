@@ -31,6 +31,11 @@ import {
   type ClaimableTracker,
 } from './tracker-factory.ts';
 import type { SpecRevisionResult } from '../../orchestrator/spec-diff.ts';
+import { loadPhases, resolvePhasesYaml } from '../../core/phases.ts';
+import { loadSettings } from '../../core/settings.ts';
+import { collectActiveAttempts } from '../../orchestrator/readiness.ts';
+import { classifyOverlap } from '../../orchestrator/overlap.ts';
+import type { Task } from '../../schemas/phases.ts';
 import type { VerbHandler } from './index.ts';
 
 export interface ClaimDeps {
@@ -79,6 +84,18 @@ export async function runOrchestrateClaim(
           { json: opts.json },
         ),
       };
+    }
+  }
+
+  // Overlap gate (FORGE-170): refuse to claim a task whose declared write_globs
+  // hard-overlap an already-active attempt — stops two parallel tasks editing the
+  // same conflict-domain files. Pre-flight only (not atomic across concurrent
+  // claims of *different* tasks); the dispatcher re-evaluates --ready each loop, so
+  // a refused task is retried once the conflict clears. --force bypasses.
+  if (!opts.force) {
+    const overlapErr = checkOverlapGate(opts.forgeDir, opts.taskId);
+    if (overlapErr) {
+      return { exitCode: emit(overlapErr, { json: opts.json }) };
     }
   }
 
@@ -238,6 +255,57 @@ export async function runOrchestrateClaim(
   };
 }
 
+// FORGE-170 overlap gate. Returns a fail() envelope if the candidate task
+// hard-overlaps an active attempt, else null. Degrades to null (allow) when the
+// metadata needed to classify is absent — phases.yaml missing, candidate not in
+// phases, or settings unreadable — so claim still works in bootstrap/test contexts.
+function checkOverlapGate(
+  forgeDir: string,
+  taskId: string,
+): ReturnType<typeof fail> | null {
+  const cwd = forgeDir.replace(/[/\\]\.forge\/?$/, '') || process.cwd();
+  const phasesPath = resolvePhasesYaml(cwd);
+  if (!phasesPath) return null;
+
+  let tasks: Array<{ task: Task }>;
+  try {
+    const { phases } = loadPhases(phasesPath);
+    tasks = phases.phases.flatMap((p) => p.tasks.map((task) => ({ task })));
+  } catch {
+    return null;
+  }
+
+  const candidate = tasks.find(
+    ({ task }) => task.id === taskId || task.tracker_issue_id === taskId,
+  );
+  if (!candidate) return null;
+
+  let hardLockGlobs: readonly string[] | undefined;
+  try {
+    hardLockGlobs = loadSettings(path.join(forgeDir, 'settings.yaml')).agents.hard_lock_globs;
+  } catch {
+    hardLockGlobs = undefined;
+  }
+
+  const overlap = classifyOverlap({
+    activeAttempts: collectActiveAttempts(forgeDir, tasks),
+    candidate: { taskId, writeGlobs: candidate.task.write_globs ?? [] },
+    ...(hardLockGlobs ? { hardLockGlobs } : {}),
+  });
+  if (overlap.classification !== 'hard-overlap') return null;
+
+  return fail(
+    'OVERLAP_CONFLICT',
+    `cannot claim ${taskId}: hard-overlap with active attempt(s) ${overlap.conflictingTaskIds.join(', ')} on ${overlap.offendingGlobs.join(', ')}. Wait for them to finish, or re-run with --force.`,
+    true,
+    {
+      conflicting_task_ids: overlap.conflictingTaskIds,
+      offending_globs: overlap.offendingGlobs,
+      hint: 'another in-flight task writes the same hard-lock files; retry after it completes or pass --force to override',
+    },
+  );
+}
+
 function mapClaimReasonToCode(reason: string): string {
   switch (reason) {
     case 'already_claimed':
@@ -271,11 +339,13 @@ export const claimHandler: VerbHandler = {
     const taskId = parseFlag(rest, 'task') ?? rest.find((a) => !a.startsWith('--')) ?? '';
     const runId = parseFlag(rest, 'run') ?? parseFlag(rest, 'run-id') ?? '';
     const json = hasFlag(rest, 'json');
+    const force = hasFlag(rest, 'force');
     return runOrchestrateClaim({
       taskId,
       runId,
       forgeDir,
       json,
+      force,
     });
   },
 };

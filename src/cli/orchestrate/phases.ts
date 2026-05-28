@@ -6,10 +6,10 @@
 //
 // Read-only band: no lease, no tracker mutation, no state write.
 
-import { statSync } from 'node:fs';
 import path from 'node:path';
 
-import { loadPhases } from '../../core/phases.ts';
+import { loadPhases, resolvePhasesYaml } from '../../core/phases.ts';
+import { loadSettings } from '../../core/settings.ts';
 import type { Phases, Task } from '../../schemas/phases.ts';
 import {
   classifyOverlap,
@@ -24,8 +24,6 @@ import type { VerbHandler } from './index.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { detectCheapDivergences } from './gc.ts';
-
-const PHASES_YAML_PATHS = ['plans/phases.yaml', 'phases.yaml'] as const;
 
 export interface ReadyTaskOut {
   readonly task_id: string;
@@ -151,11 +149,19 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
 
   // Build active-attempts set by scanning .forge/orchestrator/tasks/.
   const activeAttempts = collectActiveAttempts(opts.forgeDir, tasks);
+  // FORGE-170: honor settings.agents.hard_lock_globs override (default list otherwise).
+  let hardLockGlobs: readonly string[] | undefined;
+  try {
+    hardLockGlobs = loadSettings(path.join(opts.forgeDir, 'settings.yaml')).agents.hard_lock_globs;
+  } catch {
+    hardLockGlobs = undefined;
+  }
 
   const out: ReadyTaskOut[] = candidates.map(({ task, phaseId }) => {
     const overlap = classifyOverlap({
       activeAttempts,
       candidate: { taskId: task.id, writeGlobs: task.write_globs ?? [] },
+      ...(hardLockGlobs ? { hardLockGlobs } : {}),
     });
     return {
       task_id: task.tracker_issue_id ?? task.id,
@@ -178,19 +184,6 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   const limited = opts.limit ? out.slice(0, opts.limit) : out;
   const result: PhasesResultData = { tasks: limited, overlap_check: 'enabled' };
   return { exitCode: emit(ok(result), { json: opts.json }) };
-}
-
-function resolvePhasesYaml(cwd: string): string | undefined {
-  for (const rel of PHASES_YAML_PATHS) {
-    const full = path.join(cwd, rel);
-    try {
-      const s = statSync(full);
-      if (s.isFile()) return full;
-    } catch {
-      // ENOENT: try next.
-    }
-  }
-  return undefined;
 }
 
 // Adapter for the verb-table dispatcher.
