@@ -5,9 +5,12 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Merge queue: required check contexts must report on merge_group runs, or
+  # the queue stalls forever waiting for checks that never fire.
+  merge_group:
 
-# Cancel superseded PR runs to avoid runner pile-up; preserve every run on
-# main so the merge history is fully recorded.
+# Cancel superseded PR runs to avoid runner pile-up; preserve every run on main
+# and every merge_group run (queue correctness depends on it completing).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
