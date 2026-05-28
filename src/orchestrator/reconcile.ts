@@ -8,7 +8,7 @@
 // updateIssueBody atomically; the skill confirms orphan prune before apply.
 
 import type { Document, Node } from 'yaml';
-import { YAMLSeq, isMap, isSeq } from 'yaml';
+import { YAMLSeq, isMap, isScalar, isSeq } from 'yaml';
 
 // A YAML node has an anchor when its source had `&name` syntax. yaml v2 stores
 // it on `node.anchor`. We can't safely splice the node out of its parent
@@ -408,12 +408,35 @@ export function applyPlanToDocument(
           taskNode.set('title', String(change.to));
           mutations++;
         } else if (change.field === 'depends_on') {
-          const seq = new YAMLSeq();
-          seq.flow = true;
-          for (const dep of change.to as readonly string[]) {
-            seq.add(dep);
+          const next = change.to as readonly string[];
+          const nextSet = new Set(next);
+          const existing = taskNode.get('depends_on', true);
+          if (isSeq(existing)) {
+            // Edit the existing sequence in place so its collection style
+            // (block vs flow) and any inline comments on retained items
+            // survive. Rebuilding a fresh flow YAMLSeq destroyed both.
+            // (FORGE-121.) Iterate backwards so splices don't shift indices.
+            for (let di = existing.items.length - 1; di >= 0; di--) {
+              const item = existing.items[di];
+              const val = isScalar(item) ? item.value : item;
+              if (typeof val === 'string' && !nextSet.has(val)) {
+                existing.items.splice(di, 1);
+              }
+            }
+            const present = new Set(
+              existing.items.map((it) => (isScalar(it) ? it.value : it)),
+            );
+            for (const dep of next) {
+              if (!present.has(dep)) existing.add(dep);
+            }
+          } else {
+            // No existing sequence node (null/absent) — create one in the
+            // forge default flow style.
+            const seq = new YAMLSeq();
+            seq.flow = true;
+            for (const dep of next) seq.add(dep);
+            taskNode.set('depends_on', seq);
           }
-          taskNode.set('depends_on', seq);
           mutations++;
         }
       }

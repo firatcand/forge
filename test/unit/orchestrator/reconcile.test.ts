@@ -776,7 +776,7 @@ phases:
   void doc;
 });
 
-test('applyPlanToDocument — depends_on update writes flow-style array', () => {
+test('applyPlanToDocument — preserves flow-style depends_on on update', () => {
   const doc = parseDocument(SAMPLE_YAML);
   const plan = {
     updated: [
@@ -799,6 +799,64 @@ test('applyPlanToDocument — depends_on update writes flow-style array', () => 
   const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
   assert.equal(n, 1);
   assert.match(doc.toString(), /depends_on:\s*\[\s*P1-T00\s*\]/);
+});
+
+test('applyPlanToDocument — preserves block-style depends_on + inline item comments on update', () => {
+  // FORGE-121: the update must edit the existing depends_on sequence IN PLACE
+  // (keep matched items + their inline comments, splice removed, append added)
+  // instead of rebuilding a flow YAMLSeq — which destroyed both the block
+  // style and any per-item inline comments.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - P1-T00 # foundational schema
+          - P1-T02
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T02'] as readonly string[],
+            to: ['P1-T00', 'P1-T03'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  const out = doc.toString();
+  // Retained item keeps its inline comment.
+  assert.match(out, /- P1-T00 # foundational schema/);
+  // Removed item is gone.
+  assert.equal(out.includes('P1-T02'), false);
+  // Added item appended in block style.
+  assert.match(out, /- P1-T03/);
+  // Block style preserved — NOT collapsed to a flow array.
+  assert.equal(/depends_on:\s*\[/.test(out), false);
 });
 
 test('applyPullToPhases — added entries are NOT auto-inserted', () => {
