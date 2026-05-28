@@ -102,6 +102,29 @@ test('diffPull — depends_on diff maps tracker blockerIds back to task IDs', ()
   assert.deepEqual(plan.updated[0]!.changes[0]!.to, ['P1-T01']);
 });
 
+test('diffPull — duplicate tracker blockerIds do not produce a spurious depends_on diff', () => {
+  // Codex 2nd-pass: mapBlockerIdsToTaskIds must dedupe. A tracker that reports
+  // the same blocker twice would otherwise yield change.to = [P1-T01, P1-T01],
+  // which never matches the deduped local list — re-diffing the same change on
+  // every --pull.
+  const blocker = mkTask({ id: 'P1-T01', tracker_issue_id: 'tracker-1' });
+  const child = mkTask({
+    id: 'P1-T02',
+    tracker_issue_id: 'tracker-2',
+    title: 'Child',
+    depends_on: ['P1-T01'],
+  });
+  const blockerIssue = mkIssue({ id: 'tracker-1', forgeTaskId: 'P1-T01' });
+  const childIssue = mkIssue({
+    id: 'tracker-2',
+    forgeTaskId: 'P1-T02',
+    title: 'Child',
+    blockerIds: ['tracker-1', 'tracker-1'],
+  });
+  const plan = diffPull([blockerIssue, childIssue], mkPhases([blocker, child]));
+  assert.equal(plan.updated.length, 0);
+});
+
 test('diffPull — tracker issue without forgeTaskId is reported as unmanaged', () => {
   const issue = mkIssue({ id: 'tracker-9', identifier: 'FORGE-99', forgeTaskId: undefined });
   const plan = diffPull([issue], mkPhases([]));
@@ -642,6 +665,51 @@ test('applyPlanToDocument — applies title update and preserves comments', () =
   assert.match(out, /title: New title/);
 });
 
+test('applyPlanToDocument — preserves the title scalar quote style on update', () => {
+  // FORGE-121 regression guard. yaml v2's map.set(key, str) on an EXISTING key
+  // mutates that pair's value node in place, keeping its quote style — so a
+  // title update does not churn the quoting on the one line that changed. The
+  // value below ("New title") needs no quoting, so the ONLY reason it stays
+  // quoted in the output is style preservation. A future change that rebuilds
+  // the title node (delete+re-add, or a forced-plain scalar) would drop the
+  // quotes and fail this test.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: "Old title"
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [{ field: 'title' as const, from: 'Old title', to: 'New title' }],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  assert.match(doc.toString(), /title: "New title"/);
+});
+
 test('applyPlanToDocument — prunes orphan when confirmPrune=true', () => {
   const doc = parseDocument(SAMPLE_YAML);
   const plan = {
@@ -731,7 +799,7 @@ phases:
   void doc;
 });
 
-test('applyPlanToDocument — depends_on update writes flow-style array', () => {
+test('applyPlanToDocument — preserves flow-style depends_on on update', () => {
   const doc = parseDocument(SAMPLE_YAML);
   const plan = {
     updated: [
@@ -754,6 +822,164 @@ test('applyPlanToDocument — depends_on update writes flow-style array', () => 
   const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
   assert.equal(n, 1);
   assert.match(doc.toString(), /depends_on:\s*\[\s*P1-T00\s*\]/);
+});
+
+test('applyPlanToDocument — preserves block-style depends_on + inline item comments on update', () => {
+  // FORGE-121: the update must edit the existing depends_on sequence IN PLACE
+  // (keep matched items + their inline comments, splice removed, append added)
+  // instead of rebuilding a flow YAMLSeq — which destroyed both the block
+  // style and any per-item inline comments.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - P1-T00 # foundational schema
+          - P1-T02
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T02'] as readonly string[],
+            to: ['P1-T00', 'P1-T03'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  const out = doc.toString();
+  // Retained item keeps its inline comment.
+  assert.match(out, /- P1-T00 # foundational schema/);
+  // Removed item is gone.
+  assert.equal(out.includes('P1-T02'), false);
+  // Added item appended in block style.
+  assert.match(out, /- P1-T03/);
+  // Block style preserved — NOT collapsed to a flow array.
+  assert.equal(/depends_on:\s*\[/.test(out), false);
+});
+
+test('applyPlanToDocument — collapses pre-existing duplicate depends_on items to match target', () => {
+  // Codex 2nd-pass BLOCK: set-based in-place reconcile must still drop a
+  // pre-existing duplicate, or the next --pull re-diffs the same change
+  // forever (the old rebuild-from-`to` path deduped).
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - P1-T00
+          - P1-T00
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T00'] as readonly string[],
+            to: ['P1-T00'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  applyPlanToDocument(doc, plan, { confirmPrune: false });
+  const out = doc.toString();
+  assert.equal((out.match(/P1-T00/g) || []).length, 1);
+});
+
+test('applyPlanToDocument — refuses to drop an anchored depends_on item (would dangle aliases)', () => {
+  // Codex 2nd-pass: mirror the task-prune anchor guard for dep items. The
+  // first dep is anchored and aliased by alias_field; the update drops it,
+  // which would leave *dep dangling on serialize. Throw early instead.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - &dep P1-T00
+          - P1-T02
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+        alias_field: *dep
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T02'] as readonly string[],
+            to: ['P1-T02'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  assert.throws(
+    () => applyPlanToDocument(doc, plan, { confirmPrune: false }),
+    /YAML anchor/,
+  );
 });
 
 test('applyPullToPhases — added entries are NOT auto-inserted', () => {

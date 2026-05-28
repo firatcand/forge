@@ -8,7 +8,7 @@
 // updateIssueBody atomically; the skill confirms orphan prune before apply.
 
 import type { Document, Node } from 'yaml';
-import { YAMLSeq, isMap, isSeq } from 'yaml';
+import { YAMLSeq, isMap, isScalar, isSeq } from 'yaml';
 
 // A YAML node has an anchor when its source had `&name` syntax. yaml v2 stores
 // it on `node.anchor`. We can't safely splice the node out of its parent
@@ -105,17 +105,21 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 // Map tracker.blockerIds (tracker IDs) → task.depends_on (task IDs) via the
 // tracker_issue_id index. Tracker blockers that don't map to a known task ID
 // are dropped silently — they represent orphan/unmanaged blockers we can't
-// reconcile to phases.yaml.
+// reconcile to phases.yaml. Deduped: depends_on is a set, and a tracker that
+// reports the same blocker twice must not yield a duplicate task ID — that
+// would re-diff against the deduped local list on every --pull. (Codex
+// 2nd-pass.) This is the sole producer of the depends_on change.to, so the
+// canonical (deduped, sorted) shape flows to every consumer.
 function mapBlockerIdsToTaskIds(
   blockerIds: readonly string[],
   idx: TaskIndex,
 ): readonly string[] {
-  const out: string[] = [];
+  const out = new Set<string>();
   for (const trackerId of blockerIds) {
     const taskId = idx.trackerIdToTaskId.get(trackerId);
-    if (taskId) out.push(taskId);
+    if (taskId) out.add(taskId);
   }
-  return out.sort();
+  return [...out].sort();
 }
 
 function diffTaskAgainstIssue(
@@ -408,12 +412,53 @@ export function applyPlanToDocument(
           taskNode.set('title', String(change.to));
           mutations++;
         } else if (change.field === 'depends_on') {
-          const seq = new YAMLSeq();
-          seq.flow = true;
-          for (const dep of change.to as readonly string[]) {
-            seq.add(dep);
+          const next = change.to as readonly string[];
+          const nextSet = new Set(next);
+          const existing = taskNode.get('depends_on', true);
+          if (isSeq(existing)) {
+            // Edit the existing sequence in place so its collection style
+            // (block vs flow) and any inline comments on retained items
+            // survive. Rebuilding a fresh flow YAMLSeq destroyed both.
+            // (FORGE-121.)
+            const kept = new Set<string>();
+            const removeAt: number[] = [];
+            for (let di = 0; di < existing.items.length; di++) {
+              const item = existing.items[di] as Node;
+              const val = isScalar(item) ? item.value : undefined;
+              const dep = typeof val === 'string' ? val : undefined;
+              // Keep the FIRST occurrence of each wanted dep (so its inline
+              // comment survives); drop unwanted deps AND any duplicate
+              // occurrences. Collapsing duplicates keeps the result a faithful
+              // set so the next --pull doesn't re-diff. (Codex 2nd-pass BLOCK.)
+              if (dep !== undefined && nextSet.has(dep) && !kept.has(dep)) {
+                kept.add(dep);
+                continue;
+              }
+              // Refuse to splice a YAML-anchored item: an alias elsewhere
+              // would dangle on serialize, exactly like the task-prune guard
+              // above. (Codex 2nd-pass.)
+              if (hasYamlAnchor(item)) {
+                throw new Error(
+                  `applyPlanToDocument: refusing to drop depends_on item '${String(dep)}' on task '${id}' — its node has a YAML anchor; aliases elsewhere in the document would dangle. Resolve the anchor manually before re-running --pull.`,
+                );
+              }
+              removeAt.push(di);
+            }
+            // Splice in reverse so earlier indices stay valid.
+            for (let k = removeAt.length - 1; k >= 0; k--) {
+              existing.items.splice(removeAt[k], 1);
+            }
+            for (const dep of next) {
+              if (!kept.has(dep)) existing.add(dep);
+            }
+          } else {
+            // No existing sequence node (null/absent) — create one in the
+            // forge default flow style.
+            const seq = new YAMLSeq();
+            seq.flow = true;
+            for (const dep of next) seq.add(dep);
+            taskNode.set('depends_on', seq);
           }
-          taskNode.set('depends_on', seq);
           mutations++;
         }
       }
