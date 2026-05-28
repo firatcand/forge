@@ -27,6 +27,7 @@ import type {
   ClaimResult,
   CreateIssuePayload,
   Issue,
+  IssueListPage,
   IssueState,
 } from './types.ts';
 
@@ -220,6 +221,22 @@ function deriveOpenStateFromLabels(labels: readonly string[]): IssueState {
   return 'todo';
 }
 
+// Closed GitHub issues map to a terminal forge state (NOT_PLANNED → cancelled,
+// otherwise done) so /reconcile orphan detection treats a Done-bound task as
+// present rather than removed. Open issues fall back to the label-derived
+// workflow state. `state`/`stateReason` are only present on list-path JSON.
+function deriveGitHubState(
+  raw: GhIssueJson,
+  labels: readonly string[],
+): IssueState {
+  if (raw.state?.toUpperCase() === 'CLOSED') {
+    return raw.stateReason?.toUpperCase() === 'NOT_PLANNED'
+      ? 'cancelled'
+      : 'done';
+  }
+  return deriveOpenStateFromLabels(labels);
+}
+
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 export interface GitHubTrackerOptions {
@@ -279,8 +296,21 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   // ─── listActiveIssues ──────────────────────────────────────────────────────
 
   async listActiveIssues(): Promise<Issue[]> {
+    const page = await this.listByState('open', 'listActiveIssues');
+    return page.issues;
+  }
+
+  // All issues incl. closed (done/cancelled) — see Tracker.listAllIssues.
+  async listAllIssues(): Promise<IssueListPage> {
+    return this.listByState('all', 'listAllIssues');
+  }
+
+  private async listByState(
+    ghState: 'open' | 'all',
+    op: string,
+  ): Promise<IssueListPage> {
     return this.withRetry(
-      'listActiveIssues',
+      op,
       async () => {
         const args = [
           'issue',
@@ -288,9 +318,9 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           '--repo',
           this.repo,
           '--state',
-          'open',
+          ghState,
           '--json',
-          'id,number,title,labels,body,url',
+          'id,number,title,labels,body,url,state,stateReason',
           '--limit',
           String(GH_LIST_LIMIT),
         ];
@@ -299,11 +329,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
         try {
           result = await this.gh(args);
         } catch (err) {
-          throw this.normalizeError(
-            'listActiveIssues',
-            err,
-            classifyGitHubError(err),
-          );
+          throw this.normalizeError(op, err, classifyGitHubError(err));
         }
 
         let parsed: GhIssueJson[];
@@ -311,7 +337,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           const raw = JSON.parse(result.stdout) as unknown;
           parsed = z.array(GhIssueJsonSchema).parse(raw);
         } catch (err) {
-          throw this.normalizeError('listActiveIssues', err, {
+          throw this.normalizeError(op, err, {
             code: 'VALIDATION',
             details: {
               reason: 'gh-json-parse-failed',
@@ -320,15 +346,16 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
           });
         }
 
-        if (parsed.length === GH_LIST_LIMIT) {
-          this.logger.warn('tracker.listActiveIssues', {
+        const truncated = parsed.length >= GH_LIST_LIMIT;
+        if (truncated) {
+          this.logger.warn(`tracker.${op}`, {
             reason: 'limit-hit',
             limit: GH_LIST_LIMIT,
             repo: this.repo,
           });
         }
 
-        return parsed.map((raw) => this.toIssue(raw));
+        return { issues: parsed.map((raw) => this.toIssue(raw)), truncated };
       },
       this.retryOpts,
     );
@@ -918,7 +945,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       id: String(raw.number),
       identifier: `#${raw.number}`,
       title: raw.title,
-      state: deriveOpenStateFromLabels(labels),
+      state: deriveGitHubState(raw, labels),
       blockerIds,
       url: raw.url,
     };

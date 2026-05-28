@@ -249,6 +249,198 @@ test('diffPull — forgeTaskId fallback DOES match when local task has no tracke
   assert.equal(plan.updated[0]!.task_id, 'P1-T01');
 });
 
+// ----- diffPull: FORGE-165 identifier/UUID match resilience -----
+
+test('diffPull — FORGE-165: identifier-keyed tracker_issue_id matches a footer-less issue (no false orphan/unmanaged)', () => {
+  // Linear's listActiveIssues returns id=UUID, identifier="FORGE-90", and —
+  // for issues created/edited outside forge — NO forge:task footer. phases.yaml
+  // stores the human identifier. The matcher must bind them. Previously this
+  // flagged the task as a prunable orphan AND the issue as unmanaged.
+  const task = mkTask({ tracker_issue_id: 'FORGE-90', title: 'Same' });
+  const issue = mkIssue({
+    id: 'uuid-eb15e290',
+    identifier: 'FORGE-90',
+    title: 'Same',
+    forgeTaskId: undefined,
+  });
+  const plan = diffPull([issue], mkPhases([task]));
+  assert.equal(plan.removed.length, 0, 'identifier match must not orphan the task');
+  assert.equal(plan.unmanaged.length, 0, 'identifier match must not flag the issue unmanaged');
+  assert.equal(plan.updated.length, 0);
+  assert.equal(plan.added.length, 0);
+});
+
+test('diffPull — FORGE-165: identifier-keyed match still diffs title', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-90', title: 'Local title' });
+  const issue = mkIssue({
+    id: 'uuid-1',
+    identifier: 'FORGE-90',
+    title: 'Tracker title',
+    forgeTaskId: undefined,
+  });
+  const plan = diffPull([issue], mkPhases([task]));
+  assert.equal(plan.updated.length, 1);
+  assert.equal(plan.updated[0]!.changes[0]!.field, 'title');
+  // Report the locally-stored tracker_issue_id, not the issue's UUID.
+  assert.equal(plan.updated[0]!.tracker_issue_id, 'FORGE-90');
+});
+
+test('diffPull — FORGE-165: footer-less matched issue does NOT propose wiping depends_on', () => {
+  // blockerIds are footer-derived, so a footer-less issue has blockerIds:[] by
+  // ABSENCE. After matching by identifier, the depends_on diff must be skipped
+  // so local deps are not proposed for deletion on --pull.
+  const blocker = mkTask({ id: 'P1-T01', tracker_issue_id: 'FORGE-1' });
+  const child = mkTask({
+    id: 'P1-T02',
+    tracker_issue_id: 'FORGE-2',
+    title: 'Child',
+    depends_on: ['P1-T01'],
+  });
+  const blockerIssue = mkIssue({ id: 'u1', identifier: 'FORGE-1', forgeTaskId: undefined });
+  const childIssue = mkIssue({
+    id: 'u2',
+    identifier: 'FORGE-2',
+    title: 'Child',
+    forgeTaskId: undefined,
+    blockerIds: [],
+  });
+  const plan = diffPull([blockerIssue, childIssue], mkPhases([blocker, child]));
+  const childUpdate = plan.updated.find((u) => u.task_id === 'P1-T02');
+  const dependsChange = childUpdate?.changes.find((c) => c.field === 'depends_on');
+  assert.equal(dependsChange, undefined, 'footer-less issue must not propose wiping depends_on');
+  assert.equal(plan.removed.length, 0);
+  assert.equal(plan.unmanaged.length, 0);
+});
+
+test('diffPull — FORGE-165: whole identifier-keyed board, nothing changed → clean no-op', () => {
+  // The exact production failure mode: every task binds a human identifier and
+  // every live issue is footer-less. Must be a clean no-op, not a wholesale
+  // orphan + unmanaged false-prune.
+  const tasks = [
+    mkTask({ id: 'P1-T01', tracker_issue_id: 'FORGE-6', title: 'A' }),
+    mkTask({ id: 'P1-T02', tracker_issue_id: 'FORGE-7', title: 'B' }),
+    mkTask({ id: 'P1-T03', tracker_issue_id: 'FORGE-8', title: 'C' }),
+  ];
+  const issues = [
+    mkIssue({ id: 'u6', identifier: 'FORGE-6', title: 'A', forgeTaskId: undefined }),
+    mkIssue({ id: 'u7', identifier: 'FORGE-7', title: 'B', forgeTaskId: undefined }),
+    mkIssue({ id: 'u8', identifier: 'FORGE-8', title: 'C', forgeTaskId: undefined }),
+  ];
+  const plan = diffPull(issues, mkPhases(tasks));
+  assert.equal(plan.removed.length, 0);
+  assert.equal(plan.unmanaged.length, 0);
+  assert.equal(plan.updated.length, 0);
+  assert.equal(plan.added.length, 0);
+});
+
+test('diffPull — FORGE-165: UUID-keyed tracker_issue_id still matches (no regression)', () => {
+  const task = mkTask({ tracker_issue_id: 'uuid-1', title: 'Same' });
+  const issue = mkIssue({ id: 'uuid-1', identifier: 'FORGE-50', title: 'Same', forgeTaskId: undefined });
+  const plan = diffPull([issue], mkPhases([task]));
+  assert.equal(plan.removed.length, 0);
+  assert.equal(plan.unmanaged.length, 0);
+  assert.equal(plan.updated.length, 0);
+});
+
+test('diffPull — FORGE-165: a genuinely absent issue is still a true orphan', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-404' });
+  const plan = diffPull([], mkPhases([task]));
+  assert.equal(plan.removed.length, 1);
+  assert.equal(plan.removed[0]!.tracker_issue_id, 'FORGE-404');
+});
+
+test('diffPull — FORGE-165: a footer-less issue bound by no local task is still unmanaged', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-6', title: 'A' });
+  const matched = mkIssue({ id: 'u6', identifier: 'FORGE-6', title: 'A', forgeTaskId: undefined });
+  const stranger = mkIssue({ id: 'u-x', identifier: 'FORGE-999', title: 'Outside', forgeTaskId: undefined });
+  const plan = diffPull([matched, stranger], mkPhases([task]));
+  assert.equal(plan.unmanaged.length, 1);
+  assert.equal(plan.unmanaged[0]!.identifier, 'FORGE-999');
+  assert.equal(plan.removed.length, 0);
+});
+
+// ----- diffPull: FORGE-165 Bug 2 — Done/Cancelled issues are not false orphans -----
+// reconcile --pull now feeds diffPull the FULL issue set (listAllIssues incl.
+// terminal). These lock in that terminal issues keep their bound tasks present
+// without adding roadmap noise.
+
+test('diffPull — Bug2: a task bound to a Done issue is NOT orphaned', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-6', title: 'Bootstrap' });
+  const doneIssue = mkIssue({
+    id: 'u6',
+    identifier: 'FORGE-6',
+    title: 'Bootstrap',
+    state: 'done',
+    forgeTaskId: undefined,
+  });
+  const plan = diffPull([doneIssue], mkPhases([task]));
+  assert.equal(plan.removed.length, 0, 'Done-bound task must not be orphaned');
+  assert.equal(plan.unmanaged.length, 0);
+  assert.equal(plan.updated.length, 0);
+});
+
+test('diffPull — Bug2: a cancelled-bound task is NOT orphaned', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-9', title: 'Dropped' });
+  const issue = mkIssue({
+    id: 'u9',
+    identifier: 'FORGE-9',
+    title: 'Dropped',
+    state: 'cancelled',
+    forgeTaskId: undefined,
+  });
+  const plan = diffPull([issue], mkPhases([task]));
+  assert.equal(plan.removed.length, 0);
+});
+
+test('diffPull — Bug2: a terminal issue with no local task is NOT surfaced as added/unmanaged', () => {
+  const doneNoFooter = mkIssue({
+    id: 'ux',
+    identifier: 'FORGE-900',
+    title: 'Old done',
+    state: 'done',
+    forgeTaskId: undefined,
+  });
+  const doneWithFooter = mkIssue({
+    id: 'uy',
+    identifier: 'FORGE-901',
+    title: 'Old done 2',
+    state: 'done',
+    forgeTaskId: 'P9-T01',
+  });
+  const plan = diffPull([doneNoFooter, doneWithFooter], mkPhases([]));
+  assert.equal(plan.unmanaged.length, 0, 'terminal footer-less issue must not be unmanaged');
+  assert.equal(plan.added.length, 0, 'terminal footer-bearing issue must not be added');
+  assert.equal(plan.removed.length, 0);
+});
+
+test('diffPull — Bug2: a Done issue still syncs a title change to its bound task', () => {
+  const task = mkTask({ tracker_issue_id: 'FORGE-6', title: 'Old' });
+  const issue = mkIssue({
+    id: 'u6',
+    identifier: 'FORGE-6',
+    title: 'New',
+    state: 'done',
+    forgeTaskId: undefined,
+  });
+  const plan = diffPull([issue], mkPhases([task]));
+  assert.equal(plan.updated.length, 1);
+  assert.equal(plan.updated[0]!.changes[0]!.field, 'title');
+});
+
+test('diffPull — Bug2: a truncated tracker view skips orphan detection (fail closed)', () => {
+  // Codex 2nd-pass block: if listAllIssues hit its page cap, an absent issue
+  // may simply be off-page, not deleted. Never prune from an incomplete view.
+  const orphan = mkTask({ tracker_issue_id: 'FORGE-404' });
+  const plan = diffPull([], mkPhases([orphan]), { trackerViewTruncated: true });
+  assert.equal(plan.removed.length, 0, 'truncated view must not prune orphans');
+});
+
+test('diffPull — a complete view still detects the true orphan', () => {
+  const orphan = mkTask({ tracker_issue_id: 'FORGE-404' });
+  const plan = diffPull([], mkPhases([orphan]), { trackerViewTruncated: false });
+  assert.equal(plan.removed.length, 1);
+});
+
 // ---------------- diffPush ----------------
 
 test('diffPush — task without tracker_issue_id is skipped', () => {
