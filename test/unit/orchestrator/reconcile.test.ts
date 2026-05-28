@@ -102,6 +102,29 @@ test('diffPull — depends_on diff maps tracker blockerIds back to task IDs', ()
   assert.deepEqual(plan.updated[0]!.changes[0]!.to, ['P1-T01']);
 });
 
+test('diffPull — duplicate tracker blockerIds do not produce a spurious depends_on diff', () => {
+  // Codex 2nd-pass: mapBlockerIdsToTaskIds must dedupe. A tracker that reports
+  // the same blocker twice would otherwise yield change.to = [P1-T01, P1-T01],
+  // which never matches the deduped local list — re-diffing the same change on
+  // every --pull.
+  const blocker = mkTask({ id: 'P1-T01', tracker_issue_id: 'tracker-1' });
+  const child = mkTask({
+    id: 'P1-T02',
+    tracker_issue_id: 'tracker-2',
+    title: 'Child',
+    depends_on: ['P1-T01'],
+  });
+  const blockerIssue = mkIssue({ id: 'tracker-1', forgeTaskId: 'P1-T01' });
+  const childIssue = mkIssue({
+    id: 'tracker-2',
+    forgeTaskId: 'P1-T02',
+    title: 'Child',
+    blockerIds: ['tracker-1', 'tracker-1'],
+  });
+  const plan = diffPull([blockerIssue, childIssue], mkPhases([blocker, child]));
+  assert.equal(plan.updated.length, 0);
+});
+
 test('diffPull — tracker issue without forgeTaskId is reported as unmanaged', () => {
   const issue = mkIssue({ id: 'tracker-9', identifier: 'FORGE-99', forgeTaskId: undefined });
   const plan = diffPull([issue], mkPhases([]));

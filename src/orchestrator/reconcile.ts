@@ -105,17 +105,21 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 // Map tracker.blockerIds (tracker IDs) → task.depends_on (task IDs) via the
 // tracker_issue_id index. Tracker blockers that don't map to a known task ID
 // are dropped silently — they represent orphan/unmanaged blockers we can't
-// reconcile to phases.yaml.
+// reconcile to phases.yaml. Deduped: depends_on is a set, and a tracker that
+// reports the same blocker twice must not yield a duplicate task ID — that
+// would re-diff against the deduped local list on every --pull. (Codex
+// 2nd-pass.) This is the sole producer of the depends_on change.to, so the
+// canonical (deduped, sorted) shape flows to every consumer.
 function mapBlockerIdsToTaskIds(
   blockerIds: readonly string[],
   idx: TaskIndex,
 ): readonly string[] {
-  const out: string[] = [];
+  const out = new Set<string>();
   for (const trackerId of blockerIds) {
     const taskId = idx.trackerIdToTaskId.get(trackerId);
-    if (taskId) out.push(taskId);
+    if (taskId) out.add(taskId);
   }
-  return out.sort();
+  return [...out].sort();
 }
 
 function diffTaskAgainstIssue(
