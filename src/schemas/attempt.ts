@@ -62,6 +62,17 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     ts: Ts,
     question_id: Id,
   }),
+  // FORGE-65: the question verb hit the per-task hard_cap and proceeded without
+  // asking. `reason` records the logged justification (AC7); `chosen_option_id`
+  // is the option the worker is told to take (its recommendation, or null when
+  // it fell back to the classification's default_action).
+  z.object({
+    type: z.literal('autonomous_decision'),
+    ts: Ts,
+    decision_key: z.string().min(1).max(200),
+    chosen_option_id: z.string().min(1).max(64).nullable(),
+    reason: z.string().min(1).max(2_000),
+  }),
   z.object({
     type: z.literal('attempt_completed'),
     ts: Ts,

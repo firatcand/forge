@@ -336,3 +336,24 @@ test('guardrail-check: SETTINGS_LOAD_ERROR when settings.yaml missing', () => {
   });
   assert.equal(result.exitCode, 1);
 });
+
+test('guardrail-check: outside-repo path is rejected BEFORE settings are loaded (Codex 2nd-pass)', (t) => {
+  // Containment must be resolved before settings.yaml: a missing/bad settings
+  // file must NOT mask the OUTSIDE_REPO rejection with SETTINGS_LOAD_ERROR.
+  const stdout = captureStdout(t);
+  const repoRoot = mkdtempSync(join(tmpdir(), 'forge-guardrail-order-'));
+  const forgeDir = join(repoRoot, '.forge');
+  mkdirSync(forgeDir, { recursive: true }); // NOTE: no settings.yaml written
+  __resetSettingsCacheForTests();
+  const otherDir = mkdtempSync(join(tmpdir(), 'forge-other-'));
+  const result = runGuardrailCheck({
+    path: join(otherDir, 'src/index.ts'),
+    forgeDir,
+    cwd: repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout.at(-1) ?? '');
+  // Must be the containment rejection, NOT a settings-load error.
+  assert.equal(env.error.code, 'INVALID_ARGS');
+});
