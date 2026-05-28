@@ -54,4 +54,10 @@ tmp/
 # >>> forge-managed (do not edit between markers) >>>
 /.forge/*
 !/.forge/settings.yaml
+/.claude/skills/
+/.claude/agents/
+/.codex/skills/
+/.codex/agents/
+/.gemini/skills/
+/.gemini/agents/
 # <<< forge-managed <<<
