@@ -905,7 +905,9 @@ await test('listActiveIssues — filters by team + active state types, maps issu
     labels: [LABEL_STATE_IN_REVIEW],
   });
   const issueB = makeIssue({ id: 'b', identifier: 'FORGE-2', title: 'two' });
-  let capturedFilter: { teamId: string; stateTypes: readonly string[] } | null = null;
+  let capturedFilter:
+    | { teamId: string; stateTypes: readonly string[] | undefined }
+    | null = null;
   const { tracker } = makeTracker({
     listIssues: async (opts) => {
       capturedFilter = { teamId: opts.teamId, stateTypes: opts.stateTypes };
@@ -919,10 +921,50 @@ await test('listActiveIssues — filters by team + active state types, maps issu
   assert.equal(result[0]!.forgeTaskId, 'P0-T01');
   assert.deepEqual(result[0]!.blockerIds, ['b']);
   assert.equal(capturedFilter!.teamId, 'team-uuid-test');
+  assert.ok(capturedFilter!.stateTypes, 'listActiveIssues must pass a stateTypes filter');
   assert.deepEqual(
-    [...capturedFilter!.stateTypes].sort(),
+    [...capturedFilter!.stateTypes!].sort(),
     ['backlog', 'started', 'triage', 'unstarted'],
   );
+});
+
+await test('listAllIssues — passes NO stateTypes filter and includes duplicate-state issues', async () => {
+  // Regression for FORGE-165 Bug 2: enumerating state types silently dropped
+  // tasks bound to issues in states outside the list (e.g. Linear "Duplicate"),
+  // falsely orphaning them. listAllIssues must omit the filter entirely.
+  const active = makeIssue({ id: 'a', identifier: 'FORGE-1', title: 'one' });
+  const dup = makeIssue({
+    id: 'd',
+    identifier: 'FORGE-20',
+    title: 'dupe',
+    state: { id: 'st-dup', name: 'Duplicate', type: 'duplicate' },
+  });
+  let capturedStateTypes: unknown = 'UNSET';
+  const { tracker } = makeTracker({
+    listIssues: async (opts) => {
+      capturedStateTypes = opts.stateTypes;
+      return [active, dup];
+    },
+  });
+  const result = await tracker.listAllIssues();
+  assert.equal(capturedStateTypes, undefined, 'listAllIssues must not constrain state types');
+  assert.equal(result.truncated, false);
+  assert.equal(result.issues.length, 2);
+  const dupIssue = result.issues.find((i) => i.identifier === 'FORGE-20');
+  assert.ok(dupIssue, 'duplicate-state issue must be returned (no false orphan)');
+  assert.equal(dupIssue!.state, 'cancelled', 'Duplicate maps to a terminal IssueState');
+});
+
+await test('listAllIssues — flags truncated=true when the page limit is hit', async () => {
+  // Regression for FORGE-165 Bug 2 / Codex 2nd-pass block: a truncated view
+  // must signal incompleteness so reconcile --pull fails closed (no prune).
+  const many: LinearIssueLike[] = Array.from({ length: 200 }, (_, i) =>
+    makeIssue({ id: `i${i}`, identifier: `FORGE-${i}` }),
+  );
+  const { tracker } = makeTracker({ listIssues: async () => many });
+  const result = await tracker.listAllIssues();
+  assert.equal(result.truncated, true, 'hitting LINEAR_LIST_LIMIT must set truncated');
+  assert.equal(result.issues.length, 200);
 });
 
 await test('listActiveIssues — warns when limit is hit', async () => {

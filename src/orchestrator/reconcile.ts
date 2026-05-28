@@ -128,6 +128,14 @@ function diffTaskAgainstIssue(
     changes.push({ field: 'title', from: task.title, to: issue.title });
   }
 
+  // depends_on is derived from the issue's forge:task footer (blockerIds).
+  // When the issue has no footer (forgeTaskId undefined), blockerIds is empty
+  // by ABSENCE — not because the deps were cleared on the tracker. Diffing
+  // against it would spuriously propose wiping local depends_on, so skip the
+  // depends_on diff for footer-less issues. title (above) is a real
+  // first-class field and is always diffed.
+  const hasFooter = issue.forgeTaskId !== undefined;
+
   // depends_on diff is only meaningful when EVERY local dep can be
   // represented on the tracker side (i.e. every local dep maps to a
   // tracker_issue_id). If any local dep is "local-only" (a phases.yaml task
@@ -140,7 +148,7 @@ function diffTaskAgainstIssue(
     const entry = idx.byTaskId.get(depTaskId);
     return entry !== undefined && entry.task.tracker_issue_id !== undefined;
   });
-  if (allLocalDepsMapToTracker) {
+  if (hasFooter && allLocalDepsMapToTracker) {
     const trackerDepsAsTaskIds = mapBlockerIdsToTaskIds(issue.blockerIds, idx);
     const localDeps = [...task.depends_on].sort();
     if (!sameStringArray(localDeps, trackerDepsAsTaskIds)) {
@@ -150,7 +158,11 @@ function diffTaskAgainstIssue(
   return changes;
 }
 
-export function diffPull(issues: readonly Issue[], phases: Phases): PullPlan {
+export function diffPull(
+  issues: readonly Issue[],
+  phases: Phases,
+  opts: { trackerViewTruncated?: boolean } = {},
+): PullPlan {
   const idx = buildTaskIndex(phases);
   const seenTrackerIds = new Set<string>();
 
@@ -159,64 +171,98 @@ export function diffPull(issues: readonly Issue[], phases: Phases): PullPlan {
   const unmanaged: UnmanagedIssue[] = [];
 
   for (const issue of issues) {
+    // phases.yaml may bind tracker_issue_id to EITHER the tracker's internal
+    // id (a UUID on Linear) OR the human identifier ("FORGE-90"). Seed both
+    // namespaces so the orphan sweep below — which compares the stored
+    // tracker_issue_id key — recognizes this issue as seen regardless of which
+    // form the local task recorded. Seeding the unmatched case too is
+    // harmless: nothing in byTrackerId will key on it.
     seenTrackerIds.add(issue.id);
-    if (!issue.forgeTaskId) {
-      unmanaged.push({
-        tracker_issue_id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-      });
-      continue;
-    }
-    // Match by tracker_issue_id first. Fall back to forgeTaskId footer ONLY
-    // if the local task has no tracker_issue_id yet (e.g. the issue was
-    // created via `forge orchestrate` outside this yaml's lifetime and the
-    // back-link hasn't been recorded). Per Codex 2nd-pass review: if the
-    // local task already binds a *different* tracker_issue_id, a duplicate
-    // or adversarial issue carrying the same forge:task footer must NOT
-    // attribute updates back to that local task — it's an unmanaged
-    // collision, not a match.
-    const byTrackerId = idx.byTrackerId.get(issue.id);
-    let local: { phase: Phase; task: Task } | undefined = byTrackerId;
+    seenTrackerIds.add(issue.identifier);
+
+    // Primary match: a local task that binds this issue via tracker_issue_id.
+    // Try the internal id first, then the human identifier. This explicit
+    // binding wins even when the issue carries no forge:task footer — a
+    // recorded tracker_issue_id is a stronger link than the footer.
+    let local: { phase: Phase; task: Task } | undefined =
+      idx.byTrackerId.get(issue.id) ?? idx.byTrackerId.get(issue.identifier);
+
+    const forgeTaskId = issue.forgeTaskId;
+
     if (!local) {
-      const byTaskId = idx.byTaskId.get(issue.forgeTaskId);
+      // The pull path fetches ALL issues (incl. done/cancelled) for
+      // orphan-safety. A terminal issue with no local binding is finished work
+      // that isn't actionable: don't surface it as `added` (don't propose
+      // re-adding completed work to the roadmap) or `unmanaged` (noise). It's
+      // already in seenTrackerIds, so suppressing it here is safe.
+      const terminal = issue.state === 'done' || issue.state === 'cancelled';
+
+      // No tracker_issue_id binding. Fall back to the forge:task footer.
+      if (forgeTaskId === undefined) {
+        // No binding and no footer → created/edited outside forge.
+        if (!terminal) {
+          unmanaged.push({
+            tracker_issue_id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+          });
+        }
+        continue;
+      }
+      // Match by footer ONLY if the local task has no tracker_issue_id yet
+      // (e.g. the issue was created via `forge orchestrate` outside this yaml's
+      // lifetime and the back-link hasn't been recorded). Per Codex 2nd-pass
+      // review: if the local task already binds a *different* tracker_issue_id,
+      // a duplicate or adversarial issue carrying the same forge:task footer
+      // must NOT attribute updates back to that local task — it's an unmanaged
+      // collision, not a match.
+      const byTaskId = idx.byTaskId.get(forgeTaskId);
       if (byTaskId && byTaskId.task.tracker_issue_id === undefined) {
         local = byTaskId;
       } else if (byTaskId) {
-        // Local task already binds a different tracker_issue_id — this
-        // incoming issue is a duplicate-footer collision. Surface as
-        // unmanaged so the user can investigate; do NOT silently apply.
-        unmanaged.push({
-          tracker_issue_id: issue.id,
-          identifier: issue.identifier,
-          title: issue.title,
-        });
+        if (!terminal) {
+          unmanaged.push({
+            tracker_issue_id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+          });
+        }
+        continue;
+      } else {
+        // Footer present but no matching local task → genuinely new on tracker.
+        if (!terminal) {
+          added.push({
+            tracker_issue_id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            forge_task_id: forgeTaskId,
+          });
+        }
         continue;
       }
     }
-    if (!local) {
-      added.push({
-        tracker_issue_id: issue.id,
-        identifier: issue.identifier,
-        title: issue.title,
-        forge_task_id: issue.forgeTaskId,
-      });
-      continue;
-    }
+
     const changes = diffTaskAgainstIssue(local.task, issue, idx);
     if (changes.length > 0) {
       updated.push({
         task_id: local.task.id,
-        tracker_issue_id: issue.id,
+        tracker_issue_id: local.task.tracker_issue_id ?? issue.id,
         changes,
       });
     }
   }
 
+  // Orphan detection requires a COMPLETE tracker view: a task is only "removed"
+  // when its issue is genuinely absent. If the adapter truncated the issue list
+  // (page/limit cap hit), an absent issue may simply be off-page — pruning it
+  // would be a false positive. Fail closed: skip orphan detection entirely.
+  // (FORGE-165 Bug 2 / Codex 2nd-pass block — prune only from a full view.)
   const removed: RemovedTask[] = [];
-  for (const [trackerId, entry] of idx.byTrackerId) {
-    if (!seenTrackerIds.has(trackerId)) {
-      removed.push({ task_id: entry.task.id, tracker_issue_id: trackerId });
+  if (!opts.trackerViewTruncated) {
+    for (const [trackerId, entry] of idx.byTrackerId) {
+      if (!seenTrackerIds.has(trackerId)) {
+        removed.push({ task_id: entry.task.id, tracker_issue_id: trackerId });
+      }
     }
   }
 

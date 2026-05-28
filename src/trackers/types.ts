@@ -24,6 +24,15 @@ export interface Issue {
   claimOwnerRunId?: string;
 }
 
+// Result of listAllIssues. `truncated` is true when the adapter hit its
+// page/limit cap, so the set may be incomplete. reconcile --pull MUST NOT prune
+// orphans from a truncated view — an absent issue could simply be off-page, not
+// deleted. Callers fail closed (skip orphan detection) when truncated.
+export interface IssueListPage {
+  issues: Issue[];
+  truncated: boolean;
+}
+
 export interface CreateIssuePayload {
   title: string;
   body: string;

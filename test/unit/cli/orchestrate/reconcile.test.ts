@@ -102,6 +102,9 @@ function fakeTracker(opts: {
   const t: Tracker = {
     type: 'linear',
     listActiveIssues: opts.list,
+    // Pull uses listAllIssues; push uses listActiveIssues. Wire both to the
+    // same fixture so a single `list` drives whichever path the test exercises.
+    listAllIssues: async () => ({ issues: await opts.list(), truncated: false }),
     async claim() {
       throw new Error('not used');
     },
@@ -515,7 +518,7 @@ test('runOrchestrateReconcile — exits 3 when phases.yaml is absent', async () 
   }
 });
 
-test('runOrchestrateReconcile — exits 4 when listActiveIssues throws', async () => {
+test('runOrchestrateReconcile — exits 4 when the tracker issue-list call throws', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
   try {
     const out = captureStream();

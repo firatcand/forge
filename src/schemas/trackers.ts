@@ -55,6 +55,11 @@ export const GhIssueJsonSchema = z.object({
   labels: z.array(GhLabelJsonSchema),
   body: z.string().nullable(),
   url: z.string(),
+  // Only requested by the list paths (listActiveIssues/listAllIssues), not the
+  // single-issue claim view — hence optional. `stateReason` is null for open
+  // issues and "COMPLETED"/"NOT_PLANNED"/"REOPENED" for closed ones.
+  state: z.string().optional(),
+  stateReason: z.string().nullable().optional(),
 });
 
 export const GhIssueLabelsOnlySchema = z.object({

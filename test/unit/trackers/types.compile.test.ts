@@ -39,6 +39,7 @@ const fakeStates: IssueState[] = [
 const fakeAdapter: Tracker = {
   type: 'github',
   listActiveIssues: async () => [fakeIssue],
+  listAllIssues: async () => ({ issues: [fakeIssue], truncated: false }),
   claim: async (_id: string, _runId: string) => ({ ok: true }) as ClaimResult,
   releaseClaim: async (_id: string, _runId: string) => {},
   updateState: async () => {},
@@ -53,14 +54,14 @@ const fakeAdapter: Tracker = {
   healthCheck: async () => ({ ok: true }),
 };
 
-// @ts-expect-error — interface requires all 10 methods
+// @ts-expect-error — interface requires all methods (listAllIssues now too)
 const _missingMethods: Tracker = {
   type: 'github',
   listActiveIssues: async () => [],
 };
 void _missingMethods;
 
-test('Tracker interface compiles with all 9 methods implemented (v2 signatures)', async () => {
+test('Tracker interface compiles with all methods implemented (v2 signatures)', async () => {
   const issues = await fakeAdapter.listActiveIssues();
   assert.equal(issues.length, 1);
   assert.equal(issues[0]?.id, 't_1');

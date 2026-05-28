@@ -8,6 +8,7 @@ import type {
   ClaimResult,
   CreateIssuePayload,
   Issue,
+  IssueListPage,
   IssueState,
   TrackerType,
 } from './types.ts';
@@ -22,7 +23,17 @@ export interface Logger {
 export interface Tracker {
   readonly type: TrackerType;
 
+  // Non-terminal issues only (triage/backlog/unstarted/started). Used by the
+  // orchestrator's eligibility pass — callers want claimable work.
   listActiveIssues(): Promise<Issue[]>;
+
+  // ALL issues regardless of state, INCLUDING done/cancelled. Used by
+  // `/reconcile --pull` orphan detection: a task may legitimately bind a Done
+  // issue, and the active-only view would falsely flag it as removed. Only an
+  // issue genuinely absent from this full set is a true orphan. Returns a
+  // `truncated` flag — when set, the page-limit was hit and the caller MUST NOT
+  // prune orphans (the missing issue could be off-page, not deleted).
+  listAllIssues(): Promise<IssueListPage>;
 
   claim(issueId: string, runId: string): Promise<ClaimResult>;
   releaseClaim(issueId: string, runId: string): Promise<void>;
@@ -85,6 +96,7 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   }
 
   abstract listActiveIssues(): Promise<Issue[]>;
+  abstract listAllIssues(): Promise<IssueListPage>;
   abstract claim(issueId: string, runId: string): Promise<ClaimResult>;
   abstract releaseClaim(issueId: string, runId: string): Promise<void>;
   abstract updateState(issueId: string, state: IssueState): Promise<void>;
