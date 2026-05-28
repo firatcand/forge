@@ -2,14 +2,21 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { CodexHarness } from '../../../src/harnesses/codex.ts';
 import { HarnessError } from '../../../src/harnesses/base.ts';
-import type { SpawnResult, SpawnSubprocess } from '../../../src/harnesses/subprocess.ts';
+import type {
+  SpawnOpts,
+  SpawnResult,
+  SpawnSubprocess,
+} from '../../../src/harnesses/subprocess.ts';
 
 function recordingSpawn(
   result: SpawnResult,
-): { spawn: SpawnSubprocess; calls: { cmd: string; args: readonly string[] }[] } {
-  const calls: { cmd: string; args: readonly string[] }[] = [];
-  const spawn: SpawnSubprocess = async (cmd, args) => {
-    calls.push({ cmd, args });
+): {
+  spawn: SpawnSubprocess;
+  calls: { cmd: string; args: readonly string[]; opts: SpawnOpts }[];
+} {
+  const calls: { cmd: string; args: readonly string[]; opts: SpawnOpts }[] = [];
+  const spawn: SpawnSubprocess = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
     return result;
   };
   return { spawn, calls };
@@ -92,6 +99,28 @@ test('CodexHarness.runReview synthesizes a verdict when stdout is free-form', as
   assert.equal(result.verdict, 'changes_requested');
   assert.equal(result.findings[0].severity, 'improvement');
   assert.match(result.findings[0].message, /looks fine/);
+});
+
+test('CodexHarness.runReview passes the diff via stdin, not argv (FORGE-166)', async () => {
+  const { spawn, calls } = recordingSpawn({
+    stdout: '```json\n{"version":1,"verdict":"pass","findings":[],"host":"codex"}\n```',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 1,
+  });
+  const h = new CodexHarness({ spawnSubprocess: spawn });
+  const bigDiff = 'D'.repeat(5000);
+  const result = await h.runReview(bigDiff, 'review please', dispatchOpts);
+  assert.equal(result.verdict, 'pass');
+  assert.equal(calls.length, 1);
+  // The diff must NOT be embedded in any argv argument — that was the
+  // SPAWN_FAILED cause on large diffs.
+  assert.ok(
+    calls[0].args.every((a) => !a.includes(bigDiff)),
+    'diff must not be embedded in argv',
+  );
+  // It must be delivered via stdin instead.
+  assert.equal(calls[0].opts.stdinPayload, bigDiff);
 });
 
 test('CodexHarness.healthCheck returns ok:true with version string when codex --version succeeds', async () => {

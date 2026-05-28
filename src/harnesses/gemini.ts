@@ -66,7 +66,10 @@ export class GeminiHarness implements IHarness {
     reviewPrompt: string,
     opts: DispatchOpts,
   ): Promise<ReviewVerdict> {
-    const prompt = `${reviewPrompt}\n\n## Diff\n\n${diff}`;
+    // FORGE-166: pass the diff via stdin, NOT argv (see CodexHarness.runReview).
+    // gemini reads piped stdin as additional context; the argv prompt stays
+    // bounded so a large diff can't exceed the OS exec arg-size limit.
+    const prompt = `${reviewPrompt}\n\nThe diff under review is provided via stdin.`;
     const result = await this.#spawn(
       GEMINI_BIN,
       ['-p', prompt, '--approval-mode=yolo'],
@@ -75,6 +78,7 @@ export class GeminiHarness implements IHarness {
         timeoutMs: opts.timeoutMs,
         env: opts.env,
         host: 'gemini',
+        stdinPayload: diff,
       },
     );
     return parseHarnessVerdict({ host: 'gemini', stdout: result.stdout });
