@@ -328,9 +328,12 @@ async function runPull(
   out: NodeJS.WritableStream,
   err: NodeJS.WritableStream,
 ): Promise<OrchestrateReconcileResult> {
-  let issues;
+  let page;
   try {
-    issues = await tracker.listActiveIssues();
+    // Pull orphan detection needs the FULL issue set, including done/cancelled:
+    // a task may legitimately bind a completed issue, and the active-only view
+    // would falsely flag it as removed (FORGE-165).
+    page = await tracker.listAllIssues();
   } catch (e) {
     const code = e instanceof TrackerError ? e.code : 'TRACKER_ERROR';
     const message = e instanceof Error ? e.message : String(e);
@@ -338,7 +341,19 @@ async function runPull(
     return { exitCode: 4 };
   }
 
-  const plan = diffPull(issues, loaded.phases);
+  if (page.truncated) {
+    // The tracker view hit its page/limit cap, so the issue set may be
+    // incomplete. diffPull fails closed (no orphan detection) — warn the user
+    // that pruning was skipped so a true orphan isn't silently retained.
+    err.write(
+      'warning: tracker issue list was truncated (page limit hit); ' +
+        'orphan detection skipped to avoid false prune.\n',
+    );
+  }
+
+  const plan = diffPull(page.issues, loaded.phases, {
+    trackerViewTruncated: page.truncated,
+  });
 
   if (args.dryRun) {
     writeJson(out, {

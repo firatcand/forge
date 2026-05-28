@@ -1,5 +1,6 @@
 export type {
   Issue,
+  IssueListPage,
   IssueState,
   CreateIssuePayload,
   ClaimResult,

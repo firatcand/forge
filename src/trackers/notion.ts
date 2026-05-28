@@ -18,6 +18,7 @@ import type {
   ClaimResult,
   CreateIssuePayload,
   Issue,
+  IssueListPage,
   IssueState,
 } from './types.ts';
 
@@ -520,16 +521,30 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   // orchestrator's eligibility pass doesn't have to.
 
   async listActiveIssues(): Promise<Issue[]> {
+    const page = await this.listFiltered(false, 'listActiveIssues');
+    return page.issues;
+  }
+
+  // All issues incl. done/cancelled (still excludes archived/trashed pages,
+  // which are genuinely removed) — see Tracker.listAllIssues.
+  async listAllIssues(): Promise<IssueListPage> {
+    return this.listFiltered(true, 'listAllIssues');
+  }
+
+  private async listFiltered(
+    includeTerminal: boolean,
+    op: string,
+  ): Promise<IssueListPage> {
     return this.withRetry(
-      'listActiveIssues',
+      op,
       async () => {
-        const dataSourceId = await this.resolveDataSourceId('listActiveIssues');
+        const dataSourceId = await this.resolveDataSourceId(op);
         const issues: Issue[] = [];
         let cursor: string | undefined;
         let rawPagesFetched = 0;
         const pageSize = 100;
 
-        // Paginate until: (a) we accumulate NOTION_LIST_LIMIT active issues,
+        // Paginate until: (a) we accumulate NOTION_LIST_LIMIT matching issues,
         // (b) the database has no more results, or (c) we hit the raw-page
         // safety cap. Stopping early based on raw-page count (the prior bug)
         // could miss active work in databases with many Done/Cancelled rows
@@ -544,17 +559,13 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
           };
           if (cursor !== undefined) args.start_cursor = cursor;
 
-          const raw = await this.runTool(
-            'API-query-data-source',
-            args,
-            'listActiveIssues',
-          );
+          const raw = await this.runTool('API-query-data-source', args, op);
 
           let parsed;
           try {
             parsed = NotionDatabaseQueryResponseSchema.parse(raw);
           } catch (err) {
-            throw this.normalizeError('listActiveIssues', err, {
+            throw this.normalizeError(op, err, {
               code: 'VALIDATION',
               details: { reason: 'database-query-parse-failed' },
             });
@@ -563,7 +574,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
           for (const page of parsed.results) {
             if (page.archived === true) continue;
             const issue = pageToIssue(page, this.databaseId);
-            if (issue.state !== 'done' && issue.state !== 'cancelled') {
+            const terminal =
+              issue.state === 'done' || issue.state === 'cancelled';
+            if (includeTerminal || !terminal) {
               issues.push(issue);
               if (issues.length >= NOTION_LIST_LIMIT) break;
             }
@@ -577,21 +590,26 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
           }
         }
 
-        if (issues.length >= NOTION_LIST_LIMIT) {
-          this.logger.warn('tracker.listActiveIssues', {
+        const limitHit = issues.length >= NOTION_LIST_LIMIT;
+        const capHit = rawPagesFetched >= NOTION_RAW_PAGE_CAP;
+        if (limitHit) {
+          this.logger.warn(`tracker.${op}`, {
             reason: 'limit-hit',
             limit: NOTION_LIST_LIMIT,
             databaseId: this.databaseId,
           });
-        } else if (rawPagesFetched >= NOTION_RAW_PAGE_CAP) {
-          this.logger.warn('tracker.listActiveIssues', {
+        } else if (capHit) {
+          this.logger.warn(`tracker.${op}`, {
             reason: 'raw-page-cap-hit',
             cap: NOTION_RAW_PAGE_CAP,
             databaseId: this.databaseId,
           });
         }
 
-        return issues.slice(0, NOTION_LIST_LIMIT);
+        return {
+          issues: issues.slice(0, NOTION_LIST_LIMIT),
+          truncated: limitHit || capHit,
+        };
       },
       this.retryOpts,
     );

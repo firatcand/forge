@@ -76,6 +76,10 @@ function makeFakeTracker(initial: Issue[]): {
   const tracker: Tracker = {
     type: 'linear',
     listActiveIssues: async () => Array.from(issues.values()),
+    listAllIssues: async () => ({
+      issues: Array.from(issues.values()),
+      truncated: false,
+    }),
     async claim() {
       throw new Error('unused');
     },
