@@ -205,9 +205,12 @@ The verb logs a `guardrail_checked` event to your attempt's event stream. A fort
    ```
    forge orchestrate question {{TASK_ID}} --attempt {{ATTEMPT_ID}} \
      --decision-key "<stable-dedupe-key>" \
-     --question "<one paragraph>"
+     --question "<one paragraph>" \
+     --recommended-option-id "<id of the option you recommend>" \
+     --what-happens-if-unanswered "<one line: the safe default if nobody answers>"
    ```
-   Optional: `--options-file <PATH>` to attach options.
+   `--recommended-option-id` and `--what-happens-if-unanswered` are REQUIRED — the verb rejects the write without them. `--recommended-option-id` must name one of your options (the defaults are `yes` / `no` when you don't pass `--options-file`).
+   Optional: `--options-file <PATH>` to attach custom options.
 
    `<stable-dedupe-key>` examples:
    - `public-api:event-payload-shape:v1`
@@ -243,3 +246,7 @@ The verb logs a `guardrail_checked` event to your attempt's event stream. A fort
 ## Answered questions from prior attempts
 
 {{ANSWERED_QUESTIONS}}
+
+## Question budget
+
+{{BUDGET_WARNING}}

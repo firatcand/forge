@@ -241,6 +241,9 @@ test('dispatch-skill-flow: question round — workers write, skill polls --run -
         '--attempt', attemptId,
         '--decision-key', `decide-${taskId.toLowerCase()}`,
         '--question', `Which path for ${taskId}?`,
+        // FORGE-65: the question verb now requires these on every write (AC8).
+        '--recommended-option-id', 'yes',
+        '--what-happens-if-unanswered', 'Block the task until the supervisor answers.',
         '--forge-dir', forgeDir,
       ],
       work,

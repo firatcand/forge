@@ -141,6 +141,17 @@ export const QuestionWriteArgsSchema = z.object({
   optionsFile: z.string().min(1).optional(),
   driftEventId: z.string().min(1).max(128).optional(),
   routingHint: RoutingHintSchema.optional(),
+  // FORGE-65: both REQUIRED on every written question (AC8), enforced by the
+  // verb (runOrchestrateQuestionWrite) rather than the schema so readQuestion
+  // can still parse legacy/in-flight question files that predate this rule.
+  // Bounds mirror QuestionSchema (recommended_option_id / what_happens_if_unanswered).
+  recommendedOptionId: z.string().min(1).max(64).optional(),
+  whatHappensIfUnanswered: z.string().min(1).max(2_000).optional(),
+  // FORGE-65: per-task budget override passed by the dispatcher (FORGE-98),
+  // which reads question_budget from phases.yaml. Absent → the verb uses the
+  // global default from settings.yaml agents.question_budget.
+  questionBudgetSoft: z.number().int().positive().optional(),
+  questionBudgetHard: z.number().int().positive().optional(),
   forgeDir: ForgeDirField,
   json: JsonFlag,
 });
