@@ -2,7 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GeminiHarness } from '../../../src/harnesses/gemini.ts';
 import { HarnessError, isHarnessError } from '../../../src/harnesses/base.ts';
-import type { SpawnResult, SpawnSubprocess } from '../../../src/harnesses/subprocess.ts';
+import type {
+  SpawnOpts,
+  SpawnResult,
+  SpawnSubprocess,
+} from '../../../src/harnesses/subprocess.ts';
 
 const ENABLED_ENV = { FORGE_GEMINI_EXPERIMENTAL: '1' };
 const DISABLED_ENV = { FORGE_GEMINI_EXPERIMENTAL: '0' };
@@ -11,11 +15,14 @@ const ok: SpawnResult = { stdout: '0.5.0\n', stderr: '', exitCode: 0, durationMs
 
 function recordingSpawn(
   responses: SpawnResult[],
-): { spawn: SpawnSubprocess; calls: { cmd: string; args: readonly string[] }[] } {
-  const calls: { cmd: string; args: readonly string[] }[] = [];
+): {
+  spawn: SpawnSubprocess;
+  calls: { cmd: string; args: readonly string[]; opts: SpawnOpts }[];
+} {
+  const calls: { cmd: string; args: readonly string[]; opts: SpawnOpts }[] = [];
   let i = 0;
-  const spawn: SpawnSubprocess = async (cmd, args) => {
-    calls.push({ cmd, args });
+  const spawn: SpawnSubprocess = async (cmd, args, opts) => {
+    calls.push({ cmd, args, opts });
     return responses[Math.min(i++, responses.length - 1)];
   };
   return { spawn, calls };
@@ -105,4 +112,25 @@ test('GeminiHarness.runReview parses verdict via shared parser', async () => {
   const r = await h.runReview('diff', 'review', dispatchOpts);
   assert.equal(r.verdict, 'changes_requested');
   assert.equal(r.host, 'gemini');
+});
+
+test('GeminiHarness.runReview passes the diff via stdin, not argv (FORGE-166)', async () => {
+  const verdict = JSON.stringify({
+    version: 1,
+    verdict: 'pass',
+    findings: [],
+    host: 'gemini',
+  });
+  const { spawn, calls } = recordingSpawn([
+    { stdout: `\`\`\`json\n${verdict}\n\`\`\``, stderr: '', exitCode: 0, durationMs: 5 },
+  ]);
+  const h = new GeminiHarness({ env: ENABLED_ENV, spawnSubprocess: spawn });
+  const bigDiff = 'G'.repeat(5000);
+  await h.runReview(bigDiff, 'review', dispatchOpts);
+  assert.equal(calls.length, 1);
+  assert.ok(
+    calls[0].args.every((a) => !a.includes(bigDiff)),
+    'diff must not be embedded in argv',
+  );
+  assert.equal(calls[0].opts.stdinPayload, bigDiff);
 });

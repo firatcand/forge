@@ -56,7 +56,11 @@ export class CodexHarness implements IHarness {
     reviewPrompt: string,
     opts: DispatchOpts,
   ): Promise<ReviewVerdict> {
-    const prompt = `${reviewPrompt}\n\n## Diff\n\n${diff}`;
+    // FORGE-166: pass the diff via stdin, NOT argv. Embedding a large diff in
+    // the prompt argument blows the OS exec arg-size limit (SPAWN_FAILED).
+    // codex appends piped stdin as a <stdin> block, so the reviewer still sees
+    // the full diff. The argv prompt stays bounded (instructions only).
+    const prompt = `${reviewPrompt}\n\nThe diff under review is provided via stdin (a <stdin> block).`;
     const result = await this.#spawn(
       CODEX_BIN,
       ['exec', '--color', 'never', prompt],
@@ -65,6 +69,7 @@ export class CodexHarness implements IHarness {
         timeoutMs: opts.timeoutMs,
         env: opts.env,
         host: 'codex',
+        stdinPayload: diff,
       },
     );
     return parseHarnessVerdict({ host: 'codex', stdout: result.stdout });
