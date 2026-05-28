@@ -141,6 +141,38 @@ test('spawnSubprocess hands the child an already-closed stdin (immediate EOF)', 
   assert.equal(result.exitCode, 0);
 });
 
+// FORGE-166: when stdinPayload is set, the child receives it on stdin followed
+// by EOF. The child below echoes the byte count it read from stdin.
+test('spawnSubprocess delivers stdinPayload to the child stdin', async () => {
+  const result = await spawnSubprocess(
+    NODE,
+    [
+      '-e',
+      'let n=0;process.stdin.on("data",c=>n+=c.length).on("end",()=>process.stdout.write(`got:${n}`))',
+    ],
+    { cwd: tmpdir(), host: HOST, timeoutMs: 5_000, stdinPayload: 'hello' },
+  );
+  assert.equal(result.stdout, 'got:5');
+  assert.equal(result.exitCode, 0);
+});
+
+// FORGE-166 regression: a payload far larger than the OS exec arg-size limit
+// spawns successfully when routed via stdin (it failed with SPAWN_FAILED when
+// embedded in argv). 256 KiB comfortably exceeds a single-arg limit.
+test('spawnSubprocess handles a large stdinPayload that would blow argv', async () => {
+  const big = 'x'.repeat(256 * 1024);
+  const result = await spawnSubprocess(
+    NODE,
+    [
+      '-e',
+      'let n=0;process.stdin.on("data",c=>n+=c.length).on("end",()=>process.stdout.write(`got:${n}`))',
+    ],
+    { cwd: tmpdir(), host: HOST, timeoutMs: 10_000, stdinPayload: big },
+  );
+  assert.equal(result.stdout, `got:${big.length}`);
+  assert.equal(result.exitCode, 0);
+});
+
 // /review I3: HarnessError.details holds an excerpt of the last arg, not the full
 // rendered prompt — prevents leaking subprocess context to PR descriptions / logs.
 test('spawnSubprocess truncates args_excerpt at 200 bytes on failure', async () => {

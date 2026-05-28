@@ -59,6 +59,12 @@ export interface SpawnOpts {
   readonly timeoutMs?: number;
   readonly env?: Readonly<Record<string, string>>;
   readonly host: HarnessHost;
+  // FORGE-166: when set, written to the child's stdin (execa `input`). Used to
+  // pass large payloads (e.g. a review diff) that would exceed the OS exec
+  // arg-size limit if embedded in argv (the cause of SPAWN_FAILED on big diffs).
+  // codex/gemini append piped stdin as a <stdin> context block. When undefined,
+  // stdin is /dev/null (immediate EOF) per FORGE-135 — see the execa call below.
+  readonly stdinPayload?: string;
 }
 
 export interface SpawnResult {
@@ -93,16 +99,21 @@ export const spawnSubprocess: SpawnSubprocess = async (command, args, opts) => {
       cwd: opts.cwd,
       timeout: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       maxBuffer: MAX_STDOUT_BYTES,
-      // FORGE-135: codex-cli 0.130.0 (and gemini in some versions) performs a
-      // blocking stdin read before processing the prompt argument — see
-      // `codex exec --help`: "If stdin is piped and a prompt is also provided,
-      // stdin is appended as a <stdin> block." execa's default `stdin: 'pipe'`
-      // leaves the parent end open with no writer, so the child blocks forever
-      // at 0% CPU on the initial read. No caller pipes a payload into the
-      // subprocess today; forcing `'ignore'` (→ /dev/null) gives an immediate
-      // EOF and is correct for every host. If a future caller needs to pass a
-      // diff via stdin, add a `SpawnOpts.stdinPayload` field at that time.
-      stdin: 'ignore',
+      // FORGE-135 / FORGE-166: codex-cli 0.130.0 (and gemini in some versions)
+      // performs a blocking stdin read before processing the prompt argument —
+      // see `codex exec --help`: "If stdin is piped and a prompt is also
+      // provided, stdin is appended as a <stdin> block." execa's default
+      // `stdin: 'pipe'` leaves the parent end open with no writer, so the child
+      // blocks forever at 0% CPU on the initial read.
+      //   - stdinPayload set (FORGE-166): write it via `input` then close —
+      //     gives the child the payload followed by EOF. This routes large
+      //     review diffs through stdin instead of argv, avoiding the OS
+      //     arg-size limit that surfaced as SPAWN_FAILED on big diffs.
+      //   - stdinPayload unset (FORGE-135): force `'ignore'` (→ /dev/null) for
+      //     an immediate EOF, correct for every host with no payload.
+      ...(opts.stdinPayload !== undefined
+        ? { input: opts.stdinPayload }
+        : { stdin: 'ignore' as const }),
       // /review N2: NodeJS.ProcessEnv values are `string | undefined`,
       // but SpawnOpts.env is `Readonly<Record<string, string>>` — no
       // `undefined` values can flow in, so the runtime shape is correct.
