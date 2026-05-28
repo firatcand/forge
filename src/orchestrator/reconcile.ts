@@ -415,19 +415,37 @@ export function applyPlanToDocument(
             // Edit the existing sequence in place so its collection style
             // (block vs flow) and any inline comments on retained items
             // survive. Rebuilding a fresh flow YAMLSeq destroyed both.
-            // (FORGE-121.) Iterate backwards so splices don't shift indices.
-            for (let di = existing.items.length - 1; di >= 0; di--) {
-              const item = existing.items[di];
-              const val = isScalar(item) ? item.value : item;
-              if (typeof val === 'string' && !nextSet.has(val)) {
-                existing.items.splice(di, 1);
+            // (FORGE-121.)
+            const kept = new Set<string>();
+            const removeAt: number[] = [];
+            for (let di = 0; di < existing.items.length; di++) {
+              const item = existing.items[di] as Node;
+              const val = isScalar(item) ? item.value : undefined;
+              const dep = typeof val === 'string' ? val : undefined;
+              // Keep the FIRST occurrence of each wanted dep (so its inline
+              // comment survives); drop unwanted deps AND any duplicate
+              // occurrences. Collapsing duplicates keeps the result a faithful
+              // set so the next --pull doesn't re-diff. (Codex 2nd-pass BLOCK.)
+              if (dep !== undefined && nextSet.has(dep) && !kept.has(dep)) {
+                kept.add(dep);
+                continue;
               }
+              // Refuse to splice a YAML-anchored item: an alias elsewhere
+              // would dangle on serialize, exactly like the task-prune guard
+              // above. (Codex 2nd-pass.)
+              if (hasYamlAnchor(item)) {
+                throw new Error(
+                  `applyPlanToDocument: refusing to drop depends_on item '${String(dep)}' on task '${id}' — its node has a YAML anchor; aliases elsewhere in the document would dangle. Resolve the anchor manually before re-running --pull.`,
+                );
+              }
+              removeAt.push(di);
             }
-            const present = new Set(
-              existing.items.map((it) => (isScalar(it) ? it.value : it)),
-            );
+            // Splice in reverse so earlier indices stay valid.
+            for (let k = removeAt.length - 1; k >= 0; k--) {
+              existing.items.splice(removeAt[k], 1);
+            }
             for (const dep of next) {
-              if (!present.has(dep)) existing.add(dep);
+              if (!kept.has(dep)) existing.add(dep);
             }
           } else {
             // No existing sequence node (null/absent) — create one in the

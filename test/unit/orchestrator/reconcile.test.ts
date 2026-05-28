@@ -859,6 +859,106 @@ phases:
   assert.equal(/depends_on:\s*\[/.test(out), false);
 });
 
+test('applyPlanToDocument — collapses pre-existing duplicate depends_on items to match target', () => {
+  // Codex 2nd-pass BLOCK: set-based in-place reconcile must still drop a
+  // pre-existing duplicate, or the next --pull re-diffs the same change
+  // forever (the old rebuild-from-`to` path deduped).
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - P1-T00
+          - P1-T00
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T00'] as readonly string[],
+            to: ['P1-T00'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  applyPlanToDocument(doc, plan, { confirmPrune: false });
+  const out = doc.toString();
+  assert.equal((out.match(/P1-T00/g) || []).length, 1);
+});
+
+test('applyPlanToDocument — refuses to drop an anchored depends_on item (would dangle aliases)', () => {
+  // Codex 2nd-pass: mirror the task-prune anchor guard for dep items. The
+  // first dep is anchored and aliased by alias_field; the update drops it,
+  // which would leave *dep dangling on serialize. Throw early instead.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: T
+        description: d
+        type: foundation
+        priority: P0
+        depends_on:
+          - &dep P1-T00
+          - P1-T02
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+        alias_field: *dep
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [
+          {
+            field: 'depends_on' as const,
+            from: ['P1-T00', 'P1-T02'] as readonly string[],
+            to: ['P1-T02'] as readonly string[],
+          },
+        ],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  assert.throws(
+    () => applyPlanToDocument(doc, plan, { confirmPrune: false }),
+    /YAML anchor/,
+  );
+});
+
 test('applyPullToPhases — added entries are NOT auto-inserted', () => {
   const phases = mkPhases([]);
   const plan = {
