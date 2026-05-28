@@ -14,7 +14,7 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [0.3.0] — 2026-05-25
 
-First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI verb surface, `plans/phases.yaml` schema, and `CLAUDE.md` layout. Existing v0.2.x adopters should run `forge upgrade` after upgrading, and `forge upgrade --migrate-claudemd` if they have a v0.4-shape combined `CLAUDE.md`.
+First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI verb surface, `plans/phases.yaml` schema, and `CLAUDE.md` layout. Existing v0.2.x adopters should run `forge upgrade` after upgrading, and `forge upgrade --migrate-claudemd` if they have a v0.2.x-shape combined `CLAUDE.md`.
 
 ### Migration summary
 
@@ -27,7 +27,7 @@ First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI 
 
 - **`.forge/CONTEXT.md` methodology split + multi-agent root files** (FORGE-152 / Phase A, [#216](https://github.com/firatcand/forge/pull/216)) — `forge init` now writes a slim per-agent root file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`, user-selected via the init prompt) plus a Forge-managed `.forge/CONTEXT.md` containing the methodology. Methodology no longer pollutes the product's `CLAUDE.md`. `.forge/CONTEXT.md` is gitignored and regenerated from the bundled npm package.
 - **`forge upgrade` verb** (FORGE-153 / Phase B, [#217](https://github.com/firatcand/forge/pull/217)) — explicit re-sync verb. Refreshes `.forge/CONTEXT.md` from the bundled template, manages enabled agents via `--add-agent` / `--remove-agent`, supports `--dry-run`, writes `.forge/.version`. Strict edit detection refuses to overwrite user edits; `--force` overrides and writes `.bak`. Exit codes 1/3/4 implemented (exit 2 — dirty-worktree + lease guard — tracked as FORGE-155).
-- **`forge upgrade --migrate-claudemd`** (FORGE-154 / Phase C, [#219](https://github.com/firatcand/forge/pull/219)) — one-shot migration for existing v0.4-shape `CLAUDE.md` files. Strict heading-by-heading SHA-256 match against a pinned v0.4 fixture; bails to a manual recipe on drift.
+- **`forge upgrade --migrate-claudemd`** (FORGE-154 / Phase C, [#219](https://github.com/firatcand/forge/pull/219)) — one-shot migration for existing v0.2.x-shape `CLAUDE.md` files. Strict heading-by-heading SHA-256 match against a pinned v0.2.x fixture; bails to a manual recipe on drift.
 - **`forge init` GitHub-connected prompt + `gh auth` probe** (FORGE-108 / P3-T01, [#220](https://github.com/firatcand/forge/pull/220)) — standalone yes/no prompt with non-blocking `gh auth status` validation. Scaffolded `.forge/settings.yaml` now includes `codex` / `decisions` / `doctor` blocks per the extended SettingsSchema.
 - **Multi-host project-local skill + agent farm** (FORGE-156) — `forge init` and `forge upgrade` now materialize per-host directories for every enabled agent, so host-side slash-command and subagent discovery resolves in a freshly-initialized project. Layout (one per enabled host):
   - Claude Code → `.claude/skills/<name>/SKILL.md`, `.claude/agents/<name>.md`
@@ -54,7 +54,7 @@ First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI 
   - Listing ready tasks → `forge orchestrate phases --ready`.
   - Session re-grounding → `forge orchestrate status` (or the `/status-check` skill).
   - "I had an idea" intent → user explicitly invokes `/amend-roadmap` (no automatic detection).
-- **Legacy `linear_*` keys in `plans/phases.yaml`** — `linear_project_id`, `linear_team_id`, per-phase `linear_milestone_id`, per-task `linear_id`, and top-level `github_repo` are gone from the schema. The canonical tracker-agnostic keys (`tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`) are now the only supported names. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives only in `.forge/settings.yaml::tracker.config`, no longer duplicated into `phases.yaml`. Originally scheduled for v0.4.0; accelerated because there are no external adopters with stored legacy keys.
+- **Legacy `linear_*` keys in `plans/phases.yaml`** — `linear_project_id`, `linear_team_id`, per-phase `linear_milestone_id`, per-task `linear_id`, and top-level `github_repo` are gone from the schema. The canonical tracker-agnostic keys (`tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`) are now the only supported names. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives only in `.forge/settings.yaml::tracker.config`, no longer duplicated into `phases.yaml`. Originally scheduled for v0.3.0; accelerated because there are no external adopters with stored legacy keys.
 
 ### Deprecated
 
