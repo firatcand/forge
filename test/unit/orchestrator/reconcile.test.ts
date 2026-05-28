@@ -642,6 +642,51 @@ test('applyPlanToDocument — applies title update and preserves comments', () =
   assert.match(out, /title: New title/);
 });
 
+test('applyPlanToDocument — preserves the title scalar quote style on update', () => {
+  // FORGE-121 regression guard. yaml v2's map.set(key, str) on an EXISTING key
+  // mutates that pair's value node in place, keeping its quote style — so a
+  // title update does not churn the quoting on the one line that changed. The
+  // value below ("New title") needs no quoting, so the ONLY reason it stays
+  // quoted in the output is style preservation. A future change that rebuilds
+  // the title node (delete+re-add, or a forced-plain scalar) would drop the
+  // quotes and fail this test.
+  const yaml = `project: forge
+phases:
+  - id: phase-1
+    name: P
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: "Old title"
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const doc = parseDocument(yaml);
+  const plan = {
+    updated: [
+      {
+        task_id: 'P1-T01',
+        tracker_issue_id: 'tracker-1',
+        changes: [{ field: 'title' as const, from: 'Old title', to: 'New title' }],
+      },
+    ],
+    removed: [],
+    added: [],
+    unmanaged: [],
+  };
+  const n = applyPlanToDocument(doc, plan, { confirmPrune: false });
+  assert.equal(n, 1);
+  assert.match(doc.toString(), /title: "New title"/);
+});
+
 test('applyPlanToDocument — prunes orphan when confirmPrune=true', () => {
   const doc = parseDocument(SAMPLE_YAML);
   const plan = {
