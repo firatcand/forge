@@ -173,6 +173,35 @@ export function listOpenQuestionsAcrossTree(
   return out;
 }
 
+// Count the total number of question files written across all attempts of a
+// task. Used by the per-task question budget (FORGE-65). Counts files, not
+// distinct decision_keys: dedupe prevents duplicate writes upstream, so each
+// file is one genuine ask. Tolerates a missing tree / invalid id (returns 0).
+export function countTaskQuestions(taskId: string, opts: FindOptions): number {
+  let validated: string;
+  try {
+    validated = validateIdSegment(taskId, 'taskId');
+  } catch (err) {
+    if (err instanceof QuestionChannelError && err.code === 'INVALID_ID') return 0;
+    throw err;
+  }
+  const root = tasksRootDir(opts.forgeDir);
+  let attempts: readonly string[];
+  try {
+    attempts = listSubdirs(attemptsDir(opts.forgeDir, validated));
+  } catch (err) {
+    if (err instanceof QuestionChannelError && err.code === 'INVALID_ID') return 0;
+    throw err;
+  }
+  let total = 0;
+  for (const attemptId of attempts) {
+    total += listJsonIds(
+      join(root, validated, 'attempts', attemptId, 'questions'),
+    ).length;
+  }
+  return total;
+}
+
 export interface DecisionKeyLookupOptions extends FindOptions {
   readonly taskId: string;
 }

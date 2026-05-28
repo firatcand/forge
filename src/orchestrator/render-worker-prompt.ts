@@ -53,6 +53,11 @@ export interface WorkerPromptContext {
   readonly host: WorkerHost;
   readonly priorAttempts: readonly PriorAttemptSummary[];
   readonly answeredQuestions: readonly AnsweredQuestionSummary[];
+  // FORGE-65: soft-cap warning injected once the task crosses its soft question
+  // budget (AC6). The dispatcher (FORGE-98) computes this via
+  // decision-classifier.computeTaskBudget + buildSoftCapWarning and passes it in;
+  // absent → the {{BUDGET_WARNING}} slot renders "(none)".
+  readonly softCapWarning?: string;
 }
 
 // Allowlisted placeholder tokens. Adding a new token requires touching this
@@ -68,6 +73,7 @@ const PLACEHOLDERS = new Set([
   'CONVENTIONS',
   'PRIOR_ATTEMPTS',
   'ANSWERED_QUESTIONS',
+  'BUDGET_WARNING',
 ]);
 
 function renderAcceptance(criteria: readonly string[]): string {
@@ -88,6 +94,10 @@ function renderPriorAttempts(attempts: readonly PriorAttemptSummary[]): string {
 function renderAnsweredQuestions(answers: readonly AnsweredQuestionSummary[]): string {
   if (answers.length === 0) return '(none)';
   return answers.map((a) => `- \`${a.decisionKey}\` → ${a.answer}`).join('\n');
+}
+
+function renderBudgetWarning(warning?: string): string {
+  return warning && warning.length > 0 ? warning : '(none)';
 }
 
 function stripOtherHostBlocks(template: string, host: WorkerHost): string {
@@ -140,6 +150,7 @@ export function renderWorkerPrompt(template: string, ctx: WorkerPromptContext): 
     ['CONVENTIONS', ctx.conventions],
     ['PRIOR_ATTEMPTS', renderPriorAttempts(ctx.priorAttempts)],
     ['ANSWERED_QUESTIONS', renderAnsweredQuestions(ctx.answeredQuestions)],
+    ['BUDGET_WARNING', renderBudgetWarning(ctx.softCapWarning)],
   ]);
 
   return substitutePlaceholders(stripped, values);

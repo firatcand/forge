@@ -77,9 +77,17 @@ test('template: contains allowlisted placeholder tokens', () => {
     'CONVENTIONS',
     'PRIOR_ATTEMPTS',
     'ANSWERED_QUESTIONS',
+    'BUDGET_WARNING',
   ]) {
     assert.match(template, new RegExp(`{{${token}}}`), `expected {{${token}}} placeholder`);
   }
+});
+
+test('template: documents the required question flags (FORGE-65)', () => {
+  // The question verb now rejects writes without these; the documented worker
+  // flow must include them or the primary path fails before the gate.
+  assert.match(template, /--recommended-option-id/, 'expected --recommended-option-id in the question invocation');
+  assert.match(template, /--what-happens-if-unanswered/, 'expected --what-happens-if-unanswered in the question invocation');
 });
 
 test('template: every {{TOKEN}} in the template is in the allowlist', () => {
@@ -94,6 +102,7 @@ test('template: every {{TOKEN}} in the template is in the allowlist', () => {
     'CONVENTIONS',
     'PRIOR_ATTEMPTS',
     'ANSWERED_QUESTIONS',
+    'BUDGET_WARNING',
   ]);
   const used = new Set<string>();
   for (const m of template.matchAll(/{{([A-Z_]+)}}/g)) {

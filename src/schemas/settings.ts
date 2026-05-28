@@ -71,6 +71,22 @@ export const SecretsSchema = z.discriminatedUnion('manager', [
   InfisicalSecretsSchema,
 ]);
 
+// FORGE-65: per-task question budget. `soft` warns; `hard` forces an autonomous
+// decision. Both default (3 / 6 per spec/ORCHESTRATOR.md:936); `hard` must be
+// >= `soft` or the soft warning would be unreachable. Exported so the per-task
+// override in phases.yaml (TaskSchema.question_budget) can describe the same
+// shape with optional members.
+export const QuestionBudgetSchema = z
+  .object({
+    soft: z.number().int().positive().default(3),
+    hard: z.number().int().positive().default(6),
+  })
+  .refine((b) => b.hard >= b.soft, {
+    message: 'question_budget.hard must be >= question_budget.soft',
+    path: ['hard'],
+  })
+  .default({});
+
 const AgentsSchema = z
   .object({
     max_concurrent: z.number().int().positive().default(10),
@@ -126,6 +142,14 @@ const AgentsSchema = z
     enabled_root_files: z
       .array(z.enum(['claude', 'codex', 'gemini']))
       .default([]),
+    // FORGE-65: per-task ceiling on the TOTAL number of architectural questions
+    // a single task may write across all its attempts (spec/ORCHESTRATOR.md:936).
+    // soft → a warning is injected into the next attempt's worker prompt;
+    // hard → the question verb forces an autonomous decision instead of writing.
+    // This is the GLOBAL default; a task may override it via question_budget in
+    // phases.yaml. Distinct from the per-decision_key respawn cap (max_attempts),
+    // which is owned by FORGE-146.
+    question_budget: QuestionBudgetSchema,
   })
   // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
   // Runs BEFORE refinements so the refined object sees the promoted value.

@@ -9,8 +9,14 @@ import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
 import { runOrchestrateHeartbeat } from '../../../../src/cli/orchestrate/heartbeat.ts';
 import { runOrchestrateQuestionWrite } from '../../../../src/cli/orchestrate/question-write.ts';
+import { writeAnswerAtomic } from '../../../../src/orchestrator/questions/index.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
+
+const REQUIRED = {
+  recommendedOptionId: 'yes',
+  whatHappensIfUnanswered: 'Block the task until the supervisor answers.',
+} as const;
 
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
@@ -92,12 +98,15 @@ test('question write succeeds, transitions to blocked_on_question', async (t) =>
     decisionKey: 'arch:foo-vs-bar:hash',
     question: 'Should we do X or Y?',
     optionsFile,
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'We block the task until resolved.',
     forgeDir: ctx.forgeDir,
     json: true,
   });
   assert.equal(result.exitCode, 0);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.ok, true);
+  assert.equal(env.data.outcome, 'written');
   assert.ok(env.data.question_id);
   // Question file written.
   const qDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'questions');
@@ -106,6 +115,9 @@ test('question write succeeds, transitions to blocked_on_question', async (t) =>
   const qData = JSON.parse(readFileSync(join(qDir, files[0]!), 'utf8'));
   assert.equal(qData.question, 'Should we do X or Y?');
   assert.equal(qData.decision_key, 'arch:foo-vs-bar:hash');
+  // AC8: required fields are persisted on the written question.
+  assert.equal(qData.recommended_option_id, 'yes');
+  assert.equal(qData.what_happens_if_unanswered, 'We block the task until resolved.');
   // State transitioned.
   const state = JSON.parse(
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
@@ -121,6 +133,8 @@ test('question write echoes --drift-event-id + --routing-hint into envelope', as
     attemptId: ctx.attemptId,
     decisionKey: 'drift:spec-vs-impl:abc',
     question: 'SPEC and impl disagree — which wins?',
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'Default to SPEC and proceed.',
     forgeDir: ctx.forgeDir,
     json: true,
     driftEventId: 'evt-7',
@@ -143,10 +157,224 @@ test('question write fails when options-file is malformed', async (t) => {
     decisionKey: 'arch:x:y',
     question: 'Q?',
     optionsFile: bad,
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'Block until resolved.',
     forgeDir: ctx.forgeDir,
     json: true,
   });
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'INVALID_OPTIONS_FILE');
+});
+
+// --- AC8: required fields enforced at the verb -------------------------------
+
+test('AC8: missing --recommended-option-id is rejected with MISSING_REQUIRED_FIELD', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    whatHappensIfUnanswered: 'Block until resolved.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'MISSING_REQUIRED_FIELD');
+});
+
+test('AC8: missing --what-happens-if-unanswered is rejected with MISSING_REQUIRED_FIELD', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    recommendedOptionId: 'yes',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'MISSING_REQUIRED_FIELD');
+});
+
+test('AC8: --recommended-option-id that is not one of the options → INVALID_RECOMMENDED_OPTION', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    recommendedOptionId: 'maybe', // default options are yes/no
+    whatHappensIfUnanswered: 'Block until resolved.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'INVALID_RECOMMENDED_OPTION');
+});
+
+test('a malformed settings.yaml surfaces SETTINGS_LOAD_ERROR (not silently defaulted)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Present-but-invalid settings.yaml → must surface, not fall back to defaults.
+  writeFileSync(join(ctx.forgeDir, 'settings.yaml'), 'tracker:\n  type: bogus\n', 'utf8');
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'SETTINGS_LOAD_ERROR');
+});
+
+// --- AC4 / AC5 / AC7: gate outcomes through the verb -------------------------
+
+test('AC4: a second call for an answered decision_key returns outcome=reused, no new file', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const write1 = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:reuse',
+    question: 'First ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(write1.exitCode, 0);
+  const env1 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env1.data.outcome, 'written');
+
+  // Supervisor answers it.
+  writeAnswerAtomic(
+    {
+      version: 1,
+      question_id: env1.data.question_id,
+      answered_at: new Date().toISOString(),
+      answered_by: 'supervisor',
+      option_id: 'yes',
+    },
+    { forgeDir: ctx.forgeDir, taskId: 'FORGE-1', attemptId: ctx.attemptId },
+  );
+
+  // Respawned worker re-encounters the same decision_key.
+  const write2 = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:reuse',
+    question: 'First ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(write2.exitCode, 0);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.data.outcome, 'reused');
+  assert.equal(env2.data.option_id, 'yes');
+
+  // Still exactly one question file — no duplicate write.
+  const qDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'questions');
+  assert.equal(readdirSync(qDir).length, 1);
+});
+
+test('AC5: a second call for an open decision_key returns outcome=blocked_on_existing, no new file', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:pending',
+    question: 'Pending ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  const env1 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const firstId = env1.data.question_id;
+
+  const write2 = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:pending',
+    question: 'Pending ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(write2.exitCode, 0);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.data.outcome, 'blocked_on_existing');
+  assert.equal(env2.data.question_id, firstId);
+
+  const qDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'questions');
+  assert.equal(readdirSync(qDir).length, 1);
+});
+
+test('AC7: hard_cap reached → outcome=forced_autonomous + autonomous_decision event logged', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Default budget (no settings.yaml in fixture) is soft 3 / hard 6.
+  for (let i = 0; i < 6; i++) {
+    const r = await runOrchestrateQuestionWrite({
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      decisionKey: `arch:k${i}`,
+      question: `Ask ${i}?`,
+      ...REQUIRED,
+      forgeDir: ctx.forgeDir,
+      json: true,
+    });
+    assert.equal(r.exitCode, 0, `write ${i} should succeed`);
+    const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+    assert.equal(env.data.outcome, 'written');
+  }
+
+  // 7th distinct question — over the hard cap → forced autonomous.
+  const forced = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:over-cap',
+    question: 'One too many?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(forced.exitCode, 0);
+  const fenv = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(fenv.data.outcome, 'forced_autonomous');
+  assert.equal(fenv.data.chosen_option_id, 'yes');
+
+  // Still only 6 question files — the 7th was NOT written.
+  const qDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'questions');
+  assert.equal(readdirSync(qDir).length, 6);
+
+  // The autonomous decision is logged in the attempt event stream.
+  const eventsPath = join(
+    ctx.forgeDir,
+    'orchestrator/tasks/FORGE-1/attempts',
+    ctx.attemptId,
+    'events.jsonl',
+  );
+  const events = readFileSync(eventsPath, 'utf8')
+    .trim()
+    .split('\n')
+    .map((l) => JSON.parse(l));
+  const auto = events.find((e) => e.type === 'autonomous_decision');
+  assert.ok(auto, 'expected an autonomous_decision event');
+  assert.equal(auto.decision_key, 'arch:over-cap');
+  assert.equal(auto.chosen_option_id, 'yes');
+  assert.match(auto.reason, /hard_cap/);
 });

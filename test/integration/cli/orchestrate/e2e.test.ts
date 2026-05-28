@@ -191,6 +191,9 @@ test('orchestrate e2e: 3-task fixture end-to-end via CLI verbs', () => {
       '--attempt', dispatch2.attempt_id,
       '--decision-key', 'arch:test:question',
       '--question', 'Which path to take?',
+      // FORGE-65: the question verb now requires these on every write (AC8).
+      '--recommended-option-id', 'yes',
+      '--what-happens-if-unanswered', 'Block the task until the supervisor answers.',
       '--forge-dir', forgeDir,
     ],
     work,
