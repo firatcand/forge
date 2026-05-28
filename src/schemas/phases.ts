@@ -70,6 +70,17 @@ export const TaskSchema = z.object({
   // Optional file-glob declaration consumed by src/orchestrator/overlap.ts to
   // classify candidate-vs-active overlap when phases --ready surfaces tasks.
   write_globs: z.array(z.string().min(1)).optional(),
+  // FORGE-65: optional per-task override of agents.question_budget (the global
+  // default). Either member may be set independently; an unset member falls
+  // back to the global default at resolution time (decision-classifier.ts).
+  // Mirrors the soft/hard shape of QuestionBudgetSchema but with optional
+  // members so a task can tune just one bound.
+  question_budget: z
+    .object({
+      soft: z.number().int().positive().optional(),
+      hard: z.number().int().positive().optional(),
+    })
+    .optional(),
   // Free-form lifecycle metadata used by phases.yaml today; kept loose so the
   // loader doesn't reject the production file.
   deferred_at: z.string().optional(),

@@ -77,6 +77,7 @@ test('template: contains allowlisted placeholder tokens', () => {
     'CONVENTIONS',
     'PRIOR_ATTEMPTS',
     'ANSWERED_QUESTIONS',
+    'BUDGET_WARNING',
   ]) {
     assert.match(template, new RegExp(`{{${token}}}`), `expected {{${token}}} placeholder`);
   }
@@ -94,6 +95,7 @@ test('template: every {{TOKEN}} in the template is in the allowlist', () => {
     'CONVENTIONS',
     'PRIOR_ATTEMPTS',
     'ANSWERED_QUESTIONS',
+    'BUDGET_WARNING',
   ]);
   const used = new Set<string>();
   for (const m of template.matchAll(/{{([A-Z_]+)}}/g)) {

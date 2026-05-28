@@ -19,11 +19,11 @@
 // append is best-effort and only happens when caller identity (task +
 // attempt + lease) can be resolved.
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { loadSettings } from '../../core/settings.ts';
-import { matchAny, InvalidGlobError } from '../../orchestrator/glob-match.ts';
+import { runPreflight, type PreflightResult } from '../../orchestrator/preflight.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import { leaseFilePath, validateIdSegment } from '../../orchestrator/questions/paths.ts';
 import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
@@ -40,89 +40,12 @@ export interface GuardrailCheckArgs {
   readonly json?: boolean;
 }
 
-export interface GuardrailCheckResult {
-  readonly architectural: boolean;
-  readonly path: string;
-  readonly matched_glob: string | null;
-  readonly suggested_decision_key: string | null;
-}
+// FORGE-65: the verb's result shape is the preflight library's result shape.
+// Kept as a named alias so existing importers of GuardrailCheckResult are
+// unaffected by the extraction into src/orchestrator/preflight.ts.
+export type GuardrailCheckResult = PreflightResult;
 
 const MAX_PATH_LEN = 1024;
-
-function slugify(s: string): string {
-  // Lowercase, replace non-[a-z0-9.-_] with '-', collapse repeats, trim.
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-}
-
-function suggestDecisionKey(matchedGlob: string, relativePath: string): string {
-  // Stable key: `guardrail:<glob>:<basename>`. The basename anchors the key
-  // per-file so two writes to the same guardrail glob don't dedupe against
-  // each other.
-  const base = path.basename(relativePath);
-  return `guardrail:${slugify(matchedGlob)}:${slugify(base)}`;
-}
-
-/**
- * Resolve `cwd + targetPath` to a repo-relative path, refusing anything that
- * escapes the repoRoot — including via symlinks. Returns `null` when the
- * target is outside the repo (caller treats as `INVALID_ARGS`).
- *
- * Security-auditor + Codex review on FORGE-97: lexical containment via
- * `path.relative` is insufficient. A symlinked file inside the repo pointing
- * to `/etc/passwd` would otherwise be classified as non-architectural; a
- * relative path like `../../etc/passwd` would surface its traversal depth in
- * the response envelope.
- */
-function resolveRepoRelative(
-  repoRoot: string,
-  cwd: string,
-  targetPath: string,
-): { relative: string } | { error: 'OUTSIDE_REPO' } {
-  // Realpath the repoRoot once. If the repoRoot itself doesn't exist
-  // (impossible in practice — the caller is running INSIDE it), fall back to
-  // the lexical path so we still fail closed below.
-  let realRepoRoot: string;
-  try {
-    realRepoRoot = realpathSync(repoRoot);
-  } catch {
-    realRepoRoot = repoRoot;
-  }
-
-  // For the target, the file might not exist yet (that's the common case —
-  // the worker is asking BEFORE the write). Realpath the longest existing
-  // prefix and append the unresolved tail.
-  const abs = path.resolve(cwd, targetPath);
-  const real = realpathOfLongestPrefix(abs);
-
-  const relative = path.relative(realRepoRoot, real);
-  if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
-    return { error: 'OUTSIDE_REPO' };
-  }
-  return { relative };
-}
-
-function realpathOfLongestPrefix(abs: string): string {
-  // Walk up the path until realpath succeeds; reattach the unresolved tail.
-  // This handles "target file doesn't exist yet" without skipping symlink
-  // resolution on the existing ancestors.
-  let cursor = abs;
-  const tail: string[] = [];
-  while (cursor !== path.dirname(cursor)) {
-    try {
-      const real = realpathSync(cursor);
-      return tail.length ? path.join(real, ...tail.reverse()) : real;
-    } catch {
-      tail.push(path.basename(cursor));
-      cursor = path.dirname(cursor);
-    }
-  }
-  // Reached filesystem root with no existing ancestor — return the lexical path.
-  return abs;
-}
 
 export function runGuardrailCheck(args: GuardrailCheckArgs): {
   exitCode: number;
@@ -142,23 +65,6 @@ export function runGuardrailCheck(args: GuardrailCheckArgs): {
     };
   }
 
-  // RepoRoot convention mirrors spec-diff.ts: dirname(forgeDir).
-  const repoRoot = path.dirname(args.forgeDir);
-  const resolved = resolveRepoRelative(repoRoot, args.cwd, args.path);
-  if ('error' in resolved) {
-    // Refuse to answer for paths outside the repo. The response envelope
-    // intentionally does NOT echo the resolved path — that would leak the
-    // repoRoot's depth in the filesystem to envelope readers
-    // (security-auditor on FORGE-97).
-    return {
-      exitCode: emit(
-        fail('INVALID_ARGS', 'path resolves outside the repository (after symlink resolution)', false),
-        { json },
-      ),
-    };
-  }
-  const relative = resolved.relative;
-
   // Load settings. preflight_globs has a schema default, so a missing field
   // expands to the standard list.
   let preflightGlobs: readonly string[];
@@ -172,41 +78,37 @@ export function runGuardrailCheck(args: GuardrailCheckArgs): {
     };
   }
 
-  // Match against globs.
-  let match: ReturnType<typeof matchAny>;
-  try {
-    match = matchAny(relative, preflightGlobs);
-  } catch (e) {
-    if (e instanceof InvalidGlobError) {
-      return {
-        exitCode: emit(
-          fail('INVALID_GLOB', e.message, false, { glob: e.glob }),
-          { json },
-        ),
-      };
-    }
-    // matchAny only throws InvalidGlobError or the absolute-path guard,
-    // which can't fire here (we just produced `relative`). Conservative: treat
-    // as non-matching but surface to stderr for triage.
-    process.stderr.write(`guardrail-check: unexpected matcher error: ${e instanceof Error ? e.message : String(e)}\n`);
-    match = { matched: false };
+  // RepoRoot convention mirrors spec-diff.ts: dirname(forgeDir).
+  const repoRoot = path.dirname(args.forgeDir);
+  const outcome = runPreflight({
+    repoRoot,
+    cwd: args.cwd,
+    targetPath: args.path,
+    globs: preflightGlobs,
+  });
+
+  if (outcome.kind === 'outside_repo') {
+    // Refuse to answer for paths outside the repo. The response envelope
+    // intentionally does NOT echo the resolved path — that would leak the
+    // repoRoot's depth in the filesystem to envelope readers
+    // (security-auditor on FORGE-97).
+    return {
+      exitCode: emit(
+        fail('INVALID_ARGS', 'path resolves outside the repository (after symlink resolution)', false),
+        { json },
+      ),
+    };
+  }
+  if (outcome.kind === 'invalid_glob') {
+    return {
+      exitCode: emit(
+        fail('INVALID_GLOB', outcome.message, false, { glob: outcome.glob }),
+        { json },
+      ),
+    };
   }
 
-  const result: GuardrailCheckResult = match.matched
-    ? {
-        architectural: true,
-        path: relative,
-        // `match.matched === true` guarantees `matchedGlob` is a defined
-        // string (see glob-match.ts:matchAny return shape).
-        matched_glob: match.matchedGlob!,
-        suggested_decision_key: suggestDecisionKey(match.matchedGlob!, relative),
-      }
-    : {
-        architectural: false,
-        path: relative,
-        matched_glob: null,
-        suggested_decision_key: null,
-      };
+  const result = outcome.result;
 
   // Best-effort event append. Only happens when caller identity is known.
   if (args.taskId && args.attemptId) {

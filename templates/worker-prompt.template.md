@@ -243,3 +243,7 @@ The verb logs a `guardrail_checked` event to your attempt's event stream. A fort
 ## Answered questions from prior attempts
 
 {{ANSWERED_QUESTIONS}}
+
+## Question budget
+
+{{BUDGET_WARNING}}

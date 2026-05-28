@@ -31,6 +31,7 @@ export {
   validateIdSegment,
 } from './paths.ts';
 export {
+  countTaskQuestions,
   findAnsweredQuestionByDecisionKey,
   findOpenQuestionByDecisionKey,
   findQuestionFile,
