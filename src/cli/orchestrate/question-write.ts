@@ -1,19 +1,28 @@
 // `forge orchestrate question` — worker writes an architectural question.
 //
-// Wraps writeQuestionAtomic from src/orchestrator/questions/writer.ts.
-// Transitions state running → blocked_on_question. Appends question_written
-// event to attempts/<a>/events.jsonl.
+// This is the single enforcement chokepoint for the question lifecycle
+// (spec/ORCHESTRATOR.md:886-906): forge cannot mechanically intercept worker
+// file-writes (ORCHESTRATOR.md:752), so the gate runs HERE, in the verb, not
+// in the (untrusted) worker prompt. Before a question is written we run
+// gateQuestion (src/orchestrator/decision-classifier.ts):
+//
+//   reuse a prior answer for this decision_key (AC4)
+//   → else block on an existing open question for this decision_key (AC5)
+//   → else, if the per-task hard_cap is reached, force an autonomous decision
+//     and log it (AC7)
+//   → else write the question (carrying a soft-cap warning once soft is
+//     crossed, surfaced for the next attempt's prompt — AC6).
+//
+// recommended_option_id + what_happens_if_unanswered are REQUIRED here (AC8),
+// enforced at the verb rather than in QuestionSchema so readQuestion stays
+// lenient toward legacy/in-flight question files the dedupe scan reads.
 //
 // Per spec line 184-189, the verb signature is:
 //   forge orchestrate question <task-id> --attempt <attempt-id>
 //     --decision-key <key> --question <text> [--options-file <path>]
+//     --recommended-option-id <id> --what-happens-if-unanswered <text>
+//     [--question-budget-soft <n>] [--question-budget-hard <n>]
 //     [--drift-event-id <id>] [--routing-hint apply-decision|amend-roadmap]
-//
-// Decision classification is REQUIRED by the schema but NOT a CLI flag in the
-// spec — workers can pass --classification-file <path> (JSON) to override; if
-// absent, we apply a conservative default (architectural / other / medium /
-// module / ask). Per-fork: classification surface is internal to workers, so
-// the default is part of the verb's behavior and not user-facing.
 
 import { readFileSync } from 'node:fs';
 import { v7 as uuidv7 } from 'uuid';
@@ -22,14 +31,21 @@ import { z } from 'zod';
 import { QuestionWriteArgsSchema, type QuestionWriteArgs } from '../../schemas/cli-args.ts';
 import {
   QuestionOptionSchema,
-  DecisionClassificationSchema,
   type Question,
   type DecisionClassification,
 } from '../../schemas/questions.ts';
 import { writeQuestionAtomic } from '../../orchestrator/questions/writer.ts';
+import {
+  validateClassification,
+  ClassificationError,
+  gateQuestion,
+  resolveBudget,
+  type ResolvedBudget,
+} from '../../orchestrator/decision-classifier.ts';
+import { loadSettings } from '../../core/settings.ts';
 import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { OrchestratorError } from '../../core/errors.ts';
+import { OrchestratorError, SettingsError } from '../../core/errors.ts';
 import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
 import path from 'node:path';
 import { emit, fail, ok } from '../envelope.ts';
@@ -39,6 +55,11 @@ import type { VerbHandler } from './index.ts';
 const QUESTION_EXPIRY_HOURS_DEFAULT = 24;
 
 const OPTIONS_FILE_SCHEMA = z.array(QuestionOptionSchema).min(2).max(10);
+
+// Fallback global budget when settings.yaml can't be loaded — matches the
+// QuestionBudgetSchema defaults so "no settings" behaves like "settings with
+// defaults" (spec/ORCHESTRATOR.md:936).
+const DEFAULT_QUESTION_BUDGET: ResolvedBudget = { soft: 3, hard: 6 };
 
 const DEFAULT_CLASSIFICATION: DecisionClassification = {
   decision_type: 'architectural',
@@ -52,7 +73,6 @@ const DEFAULT_CLASSIFICATION: DecisionClassification = {
 export interface QuestionWriteExtras {
   readonly classificationFile?: string;
   readonly maxAttempts?: number;
-  readonly recommendedOptionId?: string;
 }
 
 export async function runOrchestrateQuestionWrite(
@@ -64,6 +84,28 @@ export async function runOrchestrateQuestionWrite(
     return { exitCode: emit(fail('INVALID_ARGS', parsed.error.message, false), { json: args.json }) };
   }
   const opts = parsed.data;
+
+  // AC8: recommended_option_id + what_happens_if_unanswered are required on
+  // every question the CLI writes. Reject early, before any I/O.
+  if (!opts.recommendedOptionId) {
+    return {
+      exitCode: emit(
+        fail('MISSING_REQUIRED_FIELD', '--recommended-option-id is required', false),
+        { json: opts.json },
+      ),
+    };
+  }
+  if (!opts.whatHappensIfUnanswered) {
+    return {
+      exitCode: emit(
+        fail('MISSING_REQUIRED_FIELD', '--what-happens-if-unanswered is required', false),
+        { json: opts.json },
+      ),
+    };
+  }
+  // Narrowed to string by the guards above.
+  const recommendedOptionId = opts.recommendedOptionId;
+  const whatHappensIfUnanswered = opts.whatHappensIfUnanswered;
 
   // 1. Load options (if --options-file provided; otherwise default to a yes/no).
   let options;
@@ -107,7 +149,25 @@ export async function runOrchestrateQuestionWrite(
     ];
   }
 
-  // 2. Load classification (or use default).
+  // recommended_option_id must name an actual option. Validate once, here, so a
+  // bogus id is rejected with a clear error on EVERY outcome — including
+  // forced_autonomous (which logs chosen_option_id) — rather than surfacing as
+  // an opaque SCHEMA_INVALID from writeQuestionAtomic only on the write path
+  // (Codex 2nd-pass).
+  if (!options.some((o) => o.id === recommendedOptionId)) {
+    return {
+      exitCode: emit(
+        fail(
+          'INVALID_RECOMMENDED_OPTION',
+          `--recommended-option-id '${recommendedOptionId}' is not one of the question's options`,
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 2. Load classification (or use default), via the standalone validator (AC1).
   let classification = DEFAULT_CLASSIFICATION;
   if (extras.classificationFile) {
     let raw: string;
@@ -121,16 +181,27 @@ export async function runOrchestrateQuestionWrite(
         ),
       };
     }
-    const parsedClass = DecisionClassificationSchema.safeParse(JSON.parse(raw));
-    if (!parsedClass.success) {
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch (err) {
       return {
         exitCode: emit(
-          fail('INVALID_CLASSIFICATION', parsedClass.error.message, false),
+          fail('INVALID_CLASSIFICATION', `--classification-file is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, false),
           { json: opts.json },
         ),
       };
     }
-    classification = parsedClass.data;
+    try {
+      classification = validateClassification(parsedJson);
+    } catch (err) {
+      if (err instanceof ClassificationError) {
+        return {
+          exitCode: emit(fail('INVALID_CLASSIFICATION', err.issues, false), { json: opts.json }),
+        };
+      }
+      throw err;
+    }
   }
 
   // 3. Read lease for caller identity.
@@ -150,7 +221,116 @@ export async function runOrchestrateQuestionWrite(
     };
   }
 
-  // 4. Build the question record.
+  // 4. Resolve the per-task budget: global default from settings.yaml, with the
+  //    dispatcher-supplied per-task override applied on top (FORGE-98 passes the
+  //    flags after reading phases.yaml; absent → global default).
+  let budget;
+  try {
+    budget = resolveBudget(loadGlobalBudget(opts.forgeDir), {
+      soft: opts.questionBudgetSoft,
+      hard: opts.questionBudgetHard,
+    });
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof SettingsError ? 'SETTINGS_LOAD_ERROR' : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 5. Gate: reuse → block → hard_cap → write.
+  const outcome = gateQuestion({
+    forgeDir: opts.forgeDir,
+    taskId: opts.taskId,
+    decisionKey: opts.decisionKey,
+    budget,
+    recommendedOptionId,
+    defaultAction: classification.default_action,
+  });
+
+  if (outcome.kind === 'reuse') {
+    return {
+      exitCode: emit(
+        ok({
+          outcome: 'reused',
+          decision_key: opts.decisionKey,
+          question_id: outcome.question.question_id,
+          option_id: outcome.answer.option_id,
+          ...(outcome.answer.note ? { note: outcome.answer.note } : {}),
+        }),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  if (outcome.kind === 'block_on_existing') {
+    return {
+      exitCode: emit(
+        ok({
+          outcome: 'blocked_on_existing',
+          decision_key: opts.decisionKey,
+          question_id: outcome.question.question_id,
+        }),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  if (outcome.kind === 'forced_autonomous') {
+    // AC7: the autonomous decision MUST be logged. Unlike the best-effort
+    // question_written append, this event IS the deliverable here, so a write
+    // failure is surfaced rather than swallowed.
+    try {
+      appendAttemptEvent(
+        {
+          type: 'autonomous_decision',
+          ts: new Date().toISOString(),
+          decision_key: opts.decisionKey,
+          chosen_option_id: outcome.chosenOptionId,
+          reason: outcome.reason,
+        },
+        {
+          forgeDir: opts.forgeDir,
+          taskId: opts.taskId,
+          attemptId: opts.attemptId,
+          caller: {
+            run_id: lease.owner_run_id,
+            claim_id: lease.claim_id,
+            generation: lease.generation,
+          },
+        },
+      );
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'EVENT_WRITE_FAILED',
+            `failed to log autonomous_decision: ${err instanceof Error ? err.message : String(err)}`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    return {
+      exitCode: emit(
+        ok({
+          outcome: 'forced_autonomous',
+          decision_key: opts.decisionKey,
+          chosen_option_id: outcome.chosenOptionId,
+          reason: outcome.reason,
+        }),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // outcome.kind === 'write'
   const questionId = uuidv7();
   const now = new Date();
   const expiresAt = new Date(now.getTime() + QUESTION_EXPIRY_HOURS_DEFAULT * 3_600_000);
@@ -170,10 +350,11 @@ export async function runOrchestrateQuestionWrite(
     context: '',
     options,
     classification,
-    ...(extras.recommendedOptionId ? { recommended_option_id: extras.recommendedOptionId } : {}),
+    recommended_option_id: recommendedOptionId,
+    what_happens_if_unanswered: whatHappensIfUnanswered,
   };
 
-  // 5. Atomic write.
+  // Atomic write.
   try {
     writeQuestionAtomic(question, {
       forgeDir: opts.forgeDir,
@@ -190,7 +371,7 @@ export async function runOrchestrateQuestionWrite(
     };
   }
 
-  // 6. Append the 'question_written' event.
+  // Append the 'question_written' event (best-effort audit trail).
   try {
     appendAttemptEvent(
       {
@@ -214,7 +395,7 @@ export async function runOrchestrateQuestionWrite(
     // Best-effort audit trail.
   }
 
-  // 7. State transition: running → blocked_on_question.
+  // State transition: running → blocked_on_question.
   try {
     const state = readTaskState(opts.forgeDir, opts.taskId);
     if (state.state === 'running') {
@@ -243,21 +424,40 @@ export async function runOrchestrateQuestionWrite(
   }
 
   // Note: --drift-event-id and --routing-hint are accepted via the CLI; in the
-  // v0.4 simplified pipeline (per spec note line 188-189) they are stored on the
-  // question only when a future migration extends the QuestionSchema. For now,
-  // accepting the flags keeps the worker prompt template future-proof — the
-  // verb echoes them in the response envelope.
+  // v0.4 simplified pipeline (per spec note line 188-189) they are echoed in the
+  // response envelope so the worker prompt template stays future-proof.
   return {
     exitCode: emit(
       ok({
+        outcome: 'written',
         question_id: questionId,
         decision_key: opts.decisionKey,
+        ...(outcome.softCapWarning ? { soft_cap_warning: outcome.softCapWarning } : {}),
         ...(opts.driftEventId ? { drift_event_id: opts.driftEventId } : {}),
         ...(opts.routingHint ? { routing_hint: opts.routingHint } : {}),
       }),
       { json: opts.json },
     ),
   };
+}
+
+// Load the project's global question budget from settings.yaml. Best-effort:
+// a missing/unreadable settings file falls back to the schema defaults (3/6)
+// with a stderr note, so the question verb does not hard-depend on settings.yaml.
+function loadGlobalBudget(forgeDir: string): ResolvedBudget {
+  try {
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return settings.agents.question_budget;
+  } catch (err) {
+    // Absent settings.yaml → fall back to the schema defaults (3/6): the question
+    // verb must work in a bare tree. But a present-but-malformed settings.yaml is
+    // a real config error and must surface, not be silently defaulted away
+    // (Codex 2nd-pass).
+    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
+      return DEFAULT_QUESTION_BUDGET;
+    }
+    throw err;
+  }
 }
 
 function readLease(forgeDir: string, taskId: string): Lease {
@@ -293,6 +493,10 @@ export const questionWriteHandler: VerbHandler = {
     const decisionKey = parseFlag(rest, 'decision-key') ?? '';
     const question = parseFlag(rest, 'question') ?? '';
     const optionsFile = parseFlag(rest, 'options-file');
+    const recommendedOptionId = parseFlag(rest, 'recommended-option-id');
+    const whatHappensIfUnanswered = parseFlag(rest, 'what-happens-if-unanswered');
+    const softRaw = parseFlag(rest, 'question-budget-soft');
+    const hardRaw = parseFlag(rest, 'question-budget-hard');
     const driftEventId = parseFlag(rest, 'drift-event-id');
     const routingHintRaw = parseFlag(rest, 'routing-hint');
     const routingHint = (routingHintRaw === 'apply-decision' || routingHintRaw === 'amend-roadmap')
@@ -307,6 +511,10 @@ export const questionWriteHandler: VerbHandler = {
       forgeDir,
       json,
       ...(optionsFile ? { optionsFile } : {}),
+      ...(recommendedOptionId ? { recommendedOptionId } : {}),
+      ...(whatHappensIfUnanswered ? { whatHappensIfUnanswered } : {}),
+      ...(softRaw !== undefined ? { questionBudgetSoft: Number(softRaw) } : {}),
+      ...(hardRaw !== undefined ? { questionBudgetHard: Number(hardRaw) } : {}),
       ...(driftEventId ? { driftEventId } : {}),
       ...(routingHint ? { routingHint } : {}),
     });
