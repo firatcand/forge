@@ -182,7 +182,8 @@ test('DEFAULT_HARD_LOCK_GLOBS includes the spec-required entries', () => {
     'package.json',
     'package-lock.json',
     'tsconfig.json',
-    'plans/phases.yaml',
+    'spec/**',
+    'skills/**',
     'src/index.ts',
     'migrations/**',
     'prisma/schema.prisma',
@@ -192,4 +193,13 @@ test('DEFAULT_HARD_LOCK_GLOBS includes the spec-required entries', () => {
       `expected DEFAULT_HARD_LOCK_GLOBS to include ${required}`,
     );
   }
+});
+
+// FORGE-170: phases.yaml is a generated cache (regenerated on conflict), so it
+// is intentionally NOT a hard-lock — locking it would serialize ~every task.
+test('DEFAULT_HARD_LOCK_GLOBS excludes plans/phases.yaml', () => {
+  assert.ok(
+    !DEFAULT_HARD_LOCK_GLOBS.includes('plans/phases.yaml'),
+    'plans/phases.yaml must NOT be a hard-lock (handled by regen, not locking)',
+  );
 });
