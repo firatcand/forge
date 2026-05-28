@@ -402,7 +402,15 @@ async function runPull(
   }
   setSourceOnDocument(loaded.doc, nextSource);
 
-  writeAtomic(phasesPath, loaded.doc.toString());
+  // Serialize without re-folding long scalars (lineWidth: 0) or padding flow
+  // collections (flowCollectionPadding: false). The yaml lib's defaults rewrap
+  // every long description/goal/acceptance string at 80 cols and render
+  // `[P1-T01]` as `[ P1-T01 ]`, producing thousands of lines of cosmetic churn
+  // on --pull even when only a handful of titles changed (FORGE-121).
+  writeAtomic(
+    phasesPath,
+    loaded.doc.toString({ lineWidth: 0, flowCollectionPadding: false }),
+  );
 
   writeJson(out, {
     ok: true,

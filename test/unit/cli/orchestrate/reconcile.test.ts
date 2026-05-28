@@ -266,6 +266,81 @@ test('runOrchestrateReconcile — --pull --confirm-prune writes phases.yaml with
   }
 });
 
+test('runOrchestrateReconcile — --pull does NOT rewrap long scalars or pad flow arrays (FORGE-121)', async () => {
+  // A title change on one task must not reformat the rest of the file. The yaml
+  // lib defaults (lineWidth 80, flowCollectionPadding true) would fold every
+  // long description/goal/acceptance string and render [P1-T00] as [ P1-T00 ],
+  // producing thousands of lines of cosmetic churn on --pull.
+  const LONG =
+    'This is a very long description that exceeds eighty characters so the yaml serializer would otherwise fold it across multiple lines on rewrite causing churn.';
+  const phasesYaml = `project: forge
+source:
+  tracker: linear
+  project_id: test-project-uuid
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000abcd
+phases:
+  - id: phase-1
+    name: Phase 1
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T00
+        title: Blocker
+        description: b
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: Old title
+        description: "${LONG}"
+        type: foundation
+        priority: P0
+        depends_on: [P1-T00]
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+  const wt = mkScratchWorktree({ phasesYaml });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          {
+            id: 'tracker-1',
+            identifier: 'FORGE-1',
+            title: 'New title',
+            state: 'todo',
+            blockerIds: [],
+          },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    // Title applied.
+    assert.match(after, /title: New title/);
+    // Long description stays on ONE line (would be folded with default lineWidth).
+    assert.match(after, new RegExp(`description: "${LONG.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}"`));
+    // Flow array keeps its original padding-free style.
+    assert.match(after, /depends_on: \[P1-T00\]/);
+    assert.equal(after.includes('[ P1-T00 ]'), false);
+  } finally {
+    wt.cleanup();
+  }
+});
+
 test('runOrchestrateReconcile — --pull writes source stanza atomically (FORGE-113 AC #3)', async () => {
   const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
   try {
