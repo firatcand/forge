@@ -11,6 +11,7 @@ import type {
   ClaimResult,
   CreateIssuePayload,
   Issue,
+  IssueListPage,
   IssueState,
   TrackerType,
 } from '../../../src/trackers/index.ts';
@@ -36,6 +37,9 @@ class TestTracker extends BaseTracker {
 
   async listActiveIssues(): Promise<Issue[]> {
     return [];
+  }
+  async listAllIssues(): Promise<IssueListPage> {
+    return { issues: [], truncated: false };
   }
   async claim(_issueId: string, _runId: string): Promise<ClaimResult> {
     return { ok: true };
