@@ -6,7 +6,7 @@
 //
 // Read-only band: no lease, no tracker mutation, no state write.
 
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import path from 'node:path';
 
 import { loadPhases } from '../../core/phases.ts';
@@ -14,25 +14,16 @@ import type { Phases, Task } from '../../schemas/phases.ts';
 import {
   classifyOverlap,
   type OverlapClassification,
-  type TaskWriteGlobs,
 } from '../../orchestrator/overlap.ts';
-import { TaskStateSchema } from '../../schemas/task-state.ts';
-import type { TaskState } from '../../schemas/task-state.ts';
+import {
+  collectActiveAttempts,
+  isTrackerIdDone,
+} from '../../orchestrator/readiness.ts';
 import { PhasesArgsSchema, type PhasesArgs } from '../../schemas/cli-args.ts';
 import type { VerbHandler } from './index.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { detectCheapDivergences } from './gc.ts';
-
-// States that block another claim of the same task; an attempt in any of
-// these states is "active" for overlap purposes.
-const ACTIVE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
-  'claimed',
-  'dispatched',
-  'running',
-  'blocked_on_question',
-  'awaiting_respawn',
-]);
 
 const PHASES_YAML_PATHS = ['plans/phases.yaml', 'phases.yaml'] as const;
 
@@ -200,62 +191,6 @@ function resolvePhasesYaml(cwd: string): string | undefined {
     }
   }
   return undefined;
-}
-
-function isTrackerIdDone(
-  depId: string,
-  tasks: ReadonlyArray<{ task: Task; phaseId: string }>,
-): boolean {
-  // Allow phases.yaml depends_on to reference either a P<phase>-T<n> id OR a
-  // tracker issue id (FORGE-NN). Match by either.
-  for (const { task } of tasks) {
-    if (task.tracker_issue_id === depId && task.status === 'done') return true;
-  }
-  return false;
-}
-
-function collectActiveAttempts(
-  forgeDir: string,
-  allTasks: ReadonlyArray<{ task: Task; phaseId: string }>,
-): TaskWriteGlobs[] {
-  const tasksRoot = path.join(forgeDir, 'orchestrator', 'tasks');
-  let entries: string[];
-  try {
-    entries = readdirSync(tasksRoot);
-  } catch {
-    return [];
-  }
-  const out: TaskWriteGlobs[] = [];
-  const globsByTaskId = new Map<string, readonly string[]>();
-  for (const { task } of allTasks) {
-    if (task.write_globs) globsByTaskId.set(task.id, task.write_globs);
-    if (task.tracker_issue_id && task.write_globs) {
-      globsByTaskId.set(task.tracker_issue_id, task.write_globs);
-    }
-  }
-  for (const entry of entries) {
-    const statePath = path.join(tasksRoot, entry, 'state.json');
-    let raw: string;
-    try {
-      raw = readFileSync(statePath, 'utf8');
-    } catch {
-      continue;
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      continue;
-    }
-    const result = TaskStateSchema.safeParse(parsed);
-    if (!result.success) continue;
-    if (!ACTIVE_STATES.has(result.data.state)) continue;
-    out.push({
-      taskId: result.data.task_id,
-      writeGlobs: globsByTaskId.get(result.data.task_id) ?? [],
-    });
-  }
-  return out;
 }
 
 // Adapter for the verb-table dispatcher.
