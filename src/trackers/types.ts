@@ -14,6 +14,14 @@ export interface Issue {
   blockerIds: string[];
   url?: string;
   forgeTaskId?: string;
+  // FORGE-145: local-lease claim identity mirrored onto the tracker via the
+  // `forge:claim` body fence (see src/trackers/claim-fence.ts). Populated on
+  // read by each adapter; absent when no fence is present. Advisory only —
+  // never the authority for lease ownership, which stays the generation-fenced
+  // local lease. gc reads these to detect tracker/local claim divergence.
+  claimId?: string;
+  claimGeneration?: number;
+  claimOwnerRunId?: string;
 }
 
 // Result of listAllIssues. `truncated` is true when the adapter hit its
