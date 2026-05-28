@@ -18,6 +18,7 @@ import {
 import { TrackerError } from './errors.ts';
 import {
   assertValidBodyInput,
+  parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
@@ -941,6 +942,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   private toIssue(raw: GhIssueJson): Issue {
     const labels = raw.labels.map((l) => l.name);
     const { forgeTaskId, blockerIds } = parseForgeFooters(raw.body);
+    const claim = parseClaimFooter(raw.body);
     const issue: Issue = {
       id: String(raw.number),
       identifier: `#${raw.number}`,
@@ -950,6 +952,11 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       url: raw.url,
     };
     if (forgeTaskId !== undefined) issue.forgeTaskId = forgeTaskId;
+    if (claim) {
+      issue.claimId = claim.claimId;
+      issue.claimGeneration = claim.generation;
+      issue.claimOwnerRunId = claim.ownerRunId;
+    }
     return issue;
   }
 
