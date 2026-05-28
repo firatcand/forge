@@ -80,6 +80,13 @@ export const TaskSchema = z.object({
       soft: z.number().int().positive().optional(),
       hard: z.number().int().positive().optional(),
     })
+    // When both are set, hard must be >= soft or the soft warning is
+    // unreachable (Codex 2nd-pass: the global QuestionBudgetSchema enforces
+    // this; the per-task override must too).
+    .refine((b) => b.soft === undefined || b.hard === undefined || b.hard >= b.soft, {
+      message: 'question_budget.hard must be >= question_budget.soft',
+      path: ['hard'],
+    })
     .optional(),
   // Free-form lifecycle metadata used by phases.yaml today; kept loose so the
   // loader doesn't reject the production file.

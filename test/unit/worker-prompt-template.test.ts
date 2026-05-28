@@ -83,6 +83,13 @@ test('template: contains allowlisted placeholder tokens', () => {
   }
 });
 
+test('template: documents the required question flags (FORGE-65)', () => {
+  // The question verb now rejects writes without these; the documented worker
+  // flow must include them or the primary path fails before the gate.
+  assert.match(template, /--recommended-option-id/, 'expected --recommended-option-id in the question invocation');
+  assert.match(template, /--what-happens-if-unanswered/, 'expected --what-happens-if-unanswered in the question invocation');
+});
+
 test('template: every {{TOKEN}} in the template is in the allowlist', () => {
   const ALLOWLIST = new Set([
     'TASK_ID',

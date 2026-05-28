@@ -35,6 +35,14 @@ export type PreflightOutcome =
   | { readonly kind: 'outside_repo' }
   | { readonly kind: 'invalid_glob'; readonly glob: string; readonly message: string };
 
+// The match half of runPreflight, split out so callers that must order other
+// work between containment-resolution and glob-matching (e.g. the
+// guardrail-check verb loads settings ONLY after confirming the path is
+// in-repo) can do so. Operates on an already-resolved repo-relative path.
+export type MatchPreflightOutcome =
+  | { readonly kind: 'ok'; readonly result: PreflightResult }
+  | { readonly kind: 'invalid_glob'; readonly glob: string; readonly message: string };
+
 export function slugify(s: string): string {
   // Lowercase, replace non-[a-z0-9.-_] with '-', collapse repeats, trim.
   return s
@@ -117,43 +125,54 @@ export interface RunPreflightArgs {
 }
 
 /**
- * Combined preflight: resolve the target to a repo-relative path, match it
- * against the guardrail globs, and (on a hit) suggest the stable decision_key.
- * Pure except for the realpath probing in resolveRepoRelative.
+ * Match an already-resolved repo-relative path against the guardrail globs and
+ * (on a hit) suggest the stable decision_key. Pure.
  */
-export function runPreflight(args: RunPreflightArgs): PreflightOutcome {
-  const resolved = resolveRepoRelative(args.repoRoot, args.cwd, args.targetPath);
-  if ('error' in resolved) {
-    return { kind: 'outside_repo' };
-  }
-  const relative = resolved.relative;
-
+export function matchPreflight(
+  relativePath: string,
+  globs: readonly string[],
+): MatchPreflightOutcome {
   let match: ReturnType<typeof matchAny>;
   try {
-    match = matchAny(relative, args.globs);
+    match = matchAny(relativePath, globs);
   } catch (e) {
     if (e instanceof InvalidGlobError) {
       return { kind: 'invalid_glob', glob: e.glob, message: e.message };
     }
     // matchAny only throws InvalidGlobError or its absolute-path guard. The
-    // guard cannot fire here — we just produced `relative` from
-    // resolveRepoRelative, which rejected absolute / escaping paths above.
+    // guard cannot fire here — the caller passes a repo-relative path produced
+    // by resolveRepoRelative, which rejected absolute / escaping paths.
     throw e;
   }
 
   const result: PreflightResult = match.matched
     ? {
         architectural: true,
-        path: relative,
+        path: relativePath,
         matched_glob: match.matchedGlob!,
-        suggested_decision_key: suggestDecisionKey(match.matchedGlob!, relative),
+        suggested_decision_key: suggestDecisionKey(match.matchedGlob!, relativePath),
       }
     : {
         architectural: false,
-        path: relative,
+        path: relativePath,
         matched_glob: null,
         suggested_decision_key: null,
       };
 
   return { kind: 'ok', result };
+}
+
+/**
+ * Combined preflight: resolve the target to a repo-relative path, then match it
+ * against the guardrail globs. Pure except for the realpath probing in
+ * resolveRepoRelative. Callers that must interleave work between resolution and
+ * matching (e.g. loading settings only for in-repo paths) should call
+ * resolveRepoRelative + matchPreflight directly instead.
+ */
+export function runPreflight(args: RunPreflightArgs): PreflightOutcome {
+  const resolved = resolveRepoRelative(args.repoRoot, args.cwd, args.targetPath);
+  if ('error' in resolved) {
+    return { kind: 'outside_repo' };
+  }
+  return matchPreflight(resolved.relative, args.globs);
 }

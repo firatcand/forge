@@ -23,7 +23,11 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
 import { loadSettings } from '../../core/settings.ts';
-import { runPreflight, type PreflightResult } from '../../orchestrator/preflight.ts';
+import {
+  resolveRepoRelative,
+  matchPreflight,
+  type PreflightResult,
+} from '../../orchestrator/preflight.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import { leaseFilePath, validateIdSegment } from '../../orchestrator/questions/paths.ts';
 import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
@@ -65,6 +69,25 @@ export function runGuardrailCheck(args: GuardrailCheckArgs): {
     };
   }
 
+  // RepoRoot convention mirrors spec-diff.ts: dirname(forgeDir).
+  // Resolve containment BEFORE loading settings: an out-of-repo / symlink-escape
+  // path must be refused with INVALID_ARGS regardless of settings.yaml state
+  // (Codex 2nd-pass: loading settings first let a bad settings.yaml mask the
+  // OUTSIDE_REPO rejection with SETTINGS_LOAD_ERROR).
+  const repoRoot = path.dirname(args.forgeDir);
+  const resolved = resolveRepoRelative(repoRoot, args.cwd, args.path);
+  if ('error' in resolved) {
+    // The response envelope intentionally does NOT echo the resolved path —
+    // that would leak the repoRoot's depth in the filesystem to envelope
+    // readers (security-auditor on FORGE-97).
+    return {
+      exitCode: emit(
+        fail('INVALID_ARGS', 'path resolves outside the repository (after symlink resolution)', false),
+        { json },
+      ),
+    };
+  }
+
   // Load settings. preflight_globs has a schema default, so a missing field
   // expands to the standard list.
   let preflightGlobs: readonly string[];
@@ -78,27 +101,7 @@ export function runGuardrailCheck(args: GuardrailCheckArgs): {
     };
   }
 
-  // RepoRoot convention mirrors spec-diff.ts: dirname(forgeDir).
-  const repoRoot = path.dirname(args.forgeDir);
-  const outcome = runPreflight({
-    repoRoot,
-    cwd: args.cwd,
-    targetPath: args.path,
-    globs: preflightGlobs,
-  });
-
-  if (outcome.kind === 'outside_repo') {
-    // Refuse to answer for paths outside the repo. The response envelope
-    // intentionally does NOT echo the resolved path — that would leak the
-    // repoRoot's depth in the filesystem to envelope readers
-    // (security-auditor on FORGE-97).
-    return {
-      exitCode: emit(
-        fail('INVALID_ARGS', 'path resolves outside the repository (after symlink resolution)', false),
-        { json },
-      ),
-    };
-  }
+  const outcome = matchPreflight(resolved.relative, preflightGlobs);
   if (outcome.kind === 'invalid_glob') {
     return {
       exitCode: emit(

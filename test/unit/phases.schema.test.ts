@@ -400,6 +400,18 @@ test('FORGE-100 — TaskSchema accepts dropped + paused lifecycle fields', () =>
   assert.equal(paused.success, true);
 });
 
+test('FORGE-65 — TaskSchema accepts an optional per-task question_budget override', () => {
+  const result = TaskSchema.safeParse(baseTask({ question_budget: { soft: 2, hard: 4 } }));
+  assert.equal(result.success, true);
+  const partial = TaskSchema.safeParse(baseTask({ question_budget: { hard: 8 } }));
+  assert.equal(partial.success, true);
+});
+
+test('FORGE-65 — TaskSchema rejects question_budget with hard < soft', () => {
+  const result = TaskSchema.safeParse(baseTask({ question_budget: { soft: 5, hard: 3 } }));
+  assert.equal(result.success, false);
+});
+
 test('FORGE-100 — PHASE_STATUSES accepts "paused"', () => {
   const result = PhaseSchema.safeParse({
     id: 'phase-1',

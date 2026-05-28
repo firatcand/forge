@@ -203,6 +203,43 @@ test('AC8: missing --what-happens-if-unanswered is rejected with MISSING_REQUIRE
   assert.equal(env.error.code, 'MISSING_REQUIRED_FIELD');
 });
 
+test('AC8: --recommended-option-id that is not one of the options → INVALID_RECOMMENDED_OPTION', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    recommendedOptionId: 'maybe', // default options are yes/no
+    whatHappensIfUnanswered: 'Block until resolved.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'INVALID_RECOMMENDED_OPTION');
+});
+
+test('a malformed settings.yaml surfaces SETTINGS_LOAD_ERROR (not silently defaulted)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Present-but-invalid settings.yaml → must surface, not fall back to defaults.
+  writeFileSync(join(ctx.forgeDir, 'settings.yaml'), 'tracker:\n  type: bogus\n', 'utf8');
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:x:y',
+    question: 'Q?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'SETTINGS_LOAD_ERROR');
+});
+
 // --- AC4 / AC5 / AC7: gate outcomes through the verb -------------------------
 
 test('AC4: a second call for an answered decision_key returns outcome=reused, no new file', async (t) => {

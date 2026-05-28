@@ -45,7 +45,7 @@ import {
 import { loadSettings } from '../../core/settings.ts';
 import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { OrchestratorError } from '../../core/errors.ts';
+import { OrchestratorError, SettingsError } from '../../core/errors.ts';
 import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
 import path from 'node:path';
 import { emit, fail, ok } from '../envelope.ts';
@@ -103,6 +103,9 @@ export async function runOrchestrateQuestionWrite(
       ),
     };
   }
+  // Narrowed to string by the guards above.
+  const recommendedOptionId = opts.recommendedOptionId;
+  const whatHappensIfUnanswered = opts.whatHappensIfUnanswered;
 
   // 1. Load options (if --options-file provided; otherwise default to a yes/no).
   let options;
@@ -144,6 +147,24 @@ export async function runOrchestrateQuestionWrite(
       { id: 'yes', label: 'Yes' },
       { id: 'no', label: 'No' },
     ];
+  }
+
+  // recommended_option_id must name an actual option. Validate once, here, so a
+  // bogus id is rejected with a clear error on EVERY outcome — including
+  // forced_autonomous (which logs chosen_option_id) — rather than surfacing as
+  // an opaque SCHEMA_INVALID from writeQuestionAtomic only on the write path
+  // (Codex 2nd-pass).
+  if (!options.some((o) => o.id === recommendedOptionId)) {
+    return {
+      exitCode: emit(
+        fail(
+          'INVALID_RECOMMENDED_OPTION',
+          `--recommended-option-id '${recommendedOptionId}' is not one of the question's options`,
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
   }
 
   // 2. Load classification (or use default), via the standalone validator (AC1).
@@ -203,10 +224,24 @@ export async function runOrchestrateQuestionWrite(
   // 4. Resolve the per-task budget: global default from settings.yaml, with the
   //    dispatcher-supplied per-task override applied on top (FORGE-98 passes the
   //    flags after reading phases.yaml; absent → global default).
-  const budget = resolveBudget(loadGlobalBudget(opts.forgeDir), {
-    soft: opts.questionBudgetSoft,
-    hard: opts.questionBudgetHard,
-  });
+  let budget;
+  try {
+    budget = resolveBudget(loadGlobalBudget(opts.forgeDir), {
+      soft: opts.questionBudgetSoft,
+      hard: opts.questionBudgetHard,
+    });
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof SettingsError ? 'SETTINGS_LOAD_ERROR' : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
 
   // 5. Gate: reuse → block → hard_cap → write.
   const outcome = gateQuestion({
@@ -214,7 +249,7 @@ export async function runOrchestrateQuestionWrite(
     taskId: opts.taskId,
     decisionKey: opts.decisionKey,
     budget,
-    recommendedOptionId: opts.recommendedOptionId,
+    recommendedOptionId,
     defaultAction: classification.default_action,
   });
 
@@ -315,8 +350,8 @@ export async function runOrchestrateQuestionWrite(
     context: '',
     options,
     classification,
-    recommended_option_id: opts.recommendedOptionId,
-    what_happens_if_unanswered: opts.whatHappensIfUnanswered,
+    recommended_option_id: recommendedOptionId,
+    what_happens_if_unanswered: whatHappensIfUnanswered,
   };
 
   // Atomic write.
@@ -414,10 +449,14 @@ function loadGlobalBudget(forgeDir: string): ResolvedBudget {
     const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
     return settings.agents.question_budget;
   } catch (err) {
-    process.stderr.write(
-      `question: could not load settings.yaml for question_budget, using defaults (${DEFAULT_QUESTION_BUDGET.soft}/${DEFAULT_QUESTION_BUDGET.hard}): ${err instanceof Error ? err.message : String(err)}\n`,
-    );
-    return DEFAULT_QUESTION_BUDGET;
+    // Absent settings.yaml → fall back to the schema defaults (3/6): the question
+    // verb must work in a bare tree. But a present-but-malformed settings.yaml is
+    // a real config error and must surface, not be silently defaulted away
+    // (Codex 2nd-pass).
+    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
+      return DEFAULT_QUESTION_BUDGET;
+    }
+    throw err;
   }
 }
 
