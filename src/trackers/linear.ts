@@ -10,6 +10,7 @@ import {
 import { TrackerError } from './errors.ts';
 import {
   assertValidBodyInput,
+  parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
@@ -18,6 +19,7 @@ import type {
   ClaimResult,
   CreateIssuePayload,
   Issue,
+  IssueListPage,
   IssueState,
 } from './types.ts';
 
@@ -33,7 +35,8 @@ export type LinearStateType =
   | 'unstarted'
   | 'started'
   | 'completed'
-  | 'canceled';
+  | 'canceled'
+  | 'duplicate';
 
 export interface LinearIssueLike {
   id: string;
@@ -82,7 +85,9 @@ export interface LinearSdkLike {
   issue(id: string): Promise<LinearIssueLike>;
   listIssues(opts: {
     teamId: string;
-    stateTypes: readonly LinearStateType[];
+    // Omit to fetch issues in ALL states (used by listAllIssues for
+    // orphan-safe reconcile — enumerating types would miss e.g. `duplicate`).
+    stateTypes?: readonly LinearStateType[];
     limit: number;
   }): Promise<LinearIssueLike[]>;
   createIssue(input: LinearCreateIssueInput): Promise<LinearIssueLike>;
@@ -264,12 +269,14 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
     },
 
     async listIssues({ teamId, stateTypes, limit }) {
+      const filter: Record<string, unknown> = { team: { id: { eq: teamId } } };
+      // No stateTypes → no state filter → every state (incl. duplicate/triage).
+      if (stateTypes !== undefined) {
+        filter.state = { type: { in: stateTypes as string[] } };
+      }
       const conn = await client.issues({
         first: Math.min(limit, 250),
-        filter: {
-          team: { id: { eq: teamId } },
-          state: { type: { in: stateTypes as string[] } },
-        },
+        filter,
       });
       return Promise.all(conn.nodes.slice(0, limit).map(flattenIssue));
     },
@@ -526,32 +533,47 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   // ─── Stubs (implemented in subsequent commits) ─────────────────────────────
 
   async listActiveIssues(): Promise<Issue[]> {
+    const page = await this.listByStateTypes(
+      ['triage', 'backlog', 'unstarted', 'started'],
+      'listActiveIssues',
+    );
+    return page.issues;
+  }
+
+  // Every state, including terminal (completed/canceled) AND duplicate/triage —
+  // see Tracker.listAllIssues. Passes no stateTypes filter so no state is ever
+  // missed (enumerating would silently drop tasks bound to unlisted states).
+  async listAllIssues(): Promise<IssueListPage> {
+    return this.listByStateTypes(undefined, 'listAllIssues');
+  }
+
+  private async listByStateTypes(
+    stateTypes: readonly LinearStateType[] | undefined,
+    op: string,
+  ): Promise<IssueListPage> {
     const client = await this.getClient();
     return this.withRetry(
-      'listActiveIssues',
+      op,
       async () => {
         let issues: LinearIssueLike[];
         try {
           issues = await client.listIssues({
             teamId: this.teamId,
-            stateTypes: ['triage', 'backlog', 'unstarted', 'started'],
+            stateTypes,
             limit: LINEAR_LIST_LIMIT,
           });
         } catch (err) {
-          throw this.normalizeError(
-            'listActiveIssues',
-            err,
-            classifyLinearError(err),
-          );
+          throw this.normalizeError(op, err, classifyLinearError(err));
         }
-        if (issues.length === LINEAR_LIST_LIMIT) {
-          this.logger.warn('tracker.listActiveIssues', {
+        const truncated = issues.length >= LINEAR_LIST_LIMIT;
+        if (truncated) {
+          this.logger.warn(`tracker.${op}`, {
             reason: 'limit-hit',
             limit: LINEAR_LIST_LIMIT,
             teamId: this.teamId,
           });
         }
-        return issues.map((i) => toIssue(i));
+        return { issues: issues.map((i) => toIssue(i)), truncated };
       },
       this.retryOpts,
     );
@@ -1385,6 +1407,9 @@ function stringifyDetailMessage(hint: NormalizeErrorHint): string {
 export function deriveStateFromLinearIssue(raw: LinearIssueLike): IssueState {
   if (raw.state.type === 'completed') return 'done';
   if (raw.state.type === 'canceled') return 'cancelled';
+  // Linear's "Duplicate" is a terminal state — treat like cancelled so
+  // reconcile's terminal-skip doesn't surface it as active/unmanaged.
+  if (raw.state.type === 'duplicate') return 'cancelled';
   const labelNames = raw.labels.map((l) => l.name);
   if (labelNames.includes(STATE_OVERLAY_BLOCKED)) return 'blocked';
   if (labelNames.includes(STATE_OVERLAY_IN_REVIEW)) return 'in_review';
@@ -1396,6 +1421,7 @@ export function deriveStateFromLinearIssue(raw: LinearIssueLike): IssueState {
 // Convert a flattened Linear issue into forge's tracker-agnostic Issue.
 export function toIssue(raw: LinearIssueLike): Issue {
   const { forgeTaskId, blockerIds } = parseForgeFooters(raw.description);
+  const claim = parseClaimFooter(raw.description);
   const issue: Issue = {
     id: raw.id,
     identifier: raw.identifier,
@@ -1405,6 +1431,11 @@ export function toIssue(raw: LinearIssueLike): Issue {
     url: raw.url,
   };
   if (forgeTaskId !== undefined) issue.forgeTaskId = forgeTaskId;
+  if (claim) {
+    issue.claimId = claim.claimId;
+    issue.claimGeneration = claim.generation;
+    issue.claimOwnerRunId = claim.ownerRunId;
+  }
   return issue;
 }
 

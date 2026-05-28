@@ -12,6 +12,11 @@
 // Adapter-side validation enforces format at write time.
 
 import { TrackerError } from './errors.ts';
+import {
+  decodeClaimValue,
+  encodeClaimValue,
+  type ClaimFenceData,
+} from './claim-fence.ts';
 
 const FORGE_TASK_RE = /<!--\s*forge:task=([^\s>]+?)\s*-->/;
 const FORGE_BLOCKED_RE = /<!--\s*forge:blockedBy=([^>]*?)\s*-->/;
@@ -33,6 +38,15 @@ const FORGE_ANY_RE = /<!--\s*forge:([A-Za-z][A-Za-z0-9_]*)=([\s\S]*?)\s*-->/g;
 // preservation and would silently double on round-trip. Code-reviewer +
 // codex 2nd-pass converged on this (FORGE-94 review).
 const FORGE_ANY_INPUT_RE = /<!--\s*forge:[A-Za-z]/;
+// forge:claim footer (FORGE-145) — mirrors the local lease identity onto the
+// tracker so gc can detect tracker/local claim divergence. Value is the JSON
+// from claim-fence.ts. Rides the extra-footer machinery (auto-preserved across
+// body rewrites + reconcile --push).
+const FORGE_CLAIM_RE = /<!--\s*forge:claim=([\s\S]*?)\s*-->/;
+// Strip EVERY `<!-- forge:KEY=VALUE -->` footer. Used by upsertClaimFooter to
+// get clean prose before re-serializing (serializeWithForgeFooters only strips
+// task/blockedBy itself, so extras would otherwise double).
+const FORGE_ALL_STRIP_RE = /<!--\s*forge:[A-Za-z][A-Za-z0-9_]*=[\s\S]*?-->\n?/g;
 
 // Reject bare values (forgeTaskId, blockerId) that would break the HTML
 // comment structure if concatenated raw. A `-->` inside a value would
@@ -174,4 +188,46 @@ export function serializeWithForgeFooters(
   for (const extra of extraFooters) lines.push(extra);
   const footer = lines.join('\n');
   return stripped.length > 0 ? `${stripped}\n\n${footer}\n` : `${footer}\n`;
+}
+
+// Parse the forge:claim footer value into a typed claim identity, or null if
+// absent/malformed (never throws). Used by adapter toIssue() to populate
+// Issue.claim* (FORGE-145).
+export function parseClaimFooter(
+  body: string | null | undefined,
+): ClaimFenceData | null {
+  const m = (body ?? '').match(FORGE_CLAIM_RE);
+  if (!m) return null;
+  return decodeClaimValue(m[1]);
+}
+
+// Upsert (data) or remove (null) the forge:claim footer, preserving prose +
+// forge:task / forge:blockedBy + every other extra footer. Read-modify-write on
+// the LATEST body — callers MUST pass the freshest body so non-fence content is
+// never clobbered. Requires a pre-existing forge:task footer (forge-created
+// issue); throws PRECONDITION_FAILED otherwise so a best-effort caller can warn.
+export function upsertClaimFooter(
+  body: string | null | undefined,
+  data: ClaimFenceData | null,
+): string {
+  const existing = body ?? '';
+  const { forgeTaskId, blockerIds } = parseForgeFooters(existing);
+  if (forgeTaskId === undefined) {
+    throw new TrackerError(
+      'PRECONDITION_FAILED',
+      'upsertClaimFooter: body has no forge:task footer; was the issue created outside forge?',
+      {},
+    );
+  }
+  // Keep every extra footer except a prior claim; we re-add (or drop) it below.
+  const extras = parseExtraForgeFooters(existing).filter(
+    (f) => !/^<!--\s*forge:claim=/.test(f),
+  );
+  if (data) {
+    extras.push(`<!-- forge:claim=${encodeClaimValue(data)} -->`);
+  }
+  // Strip ALL forge footers from the prose so serialize re-adds them exactly
+  // once (serializeWithForgeFooters only strips task/blockedBy itself).
+  const cleanProse = existing.replace(FORGE_ALL_STRIP_RE, '');
+  return serializeWithForgeFooters(cleanProse, forgeTaskId, blockerIds, extras);
 }
