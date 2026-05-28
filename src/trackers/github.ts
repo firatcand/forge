@@ -16,9 +16,9 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
-import { parseClaimFence } from './claim-fence.ts';
 import {
   assertValidBodyInput,
+  parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
@@ -915,7 +915,7 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   private toIssue(raw: GhIssueJson): Issue {
     const labels = raw.labels.map((l) => l.name);
     const { forgeTaskId, blockerIds } = parseForgeFooters(raw.body);
-    const claim = parseClaimFence(raw.body);
+    const claim = parseClaimFooter(raw.body);
     const issue: Issue = {
       id: String(raw.number),
       identifier: `#${raw.number}`,

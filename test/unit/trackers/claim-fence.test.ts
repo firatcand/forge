@@ -1,11 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  parseClaimFence,
-  stripClaimFence,
-  upsertClaimFence,
+  encodeClaimValue,
+  decodeClaimValue,
   type ClaimFenceData,
 } from '../../../src/trackers/claim-fence.ts';
+import {
+  parseClaimFooter,
+  upsertClaimFooter,
+  parseForgeFooters,
+  parseExtraForgeFooters,
+} from '../../../src/trackers/footers.ts';
+import { TrackerError } from '../../../src/trackers/errors.ts';
 
 const DATA: ClaimFenceData = {
   claimId: 'claim-abc',
@@ -13,65 +19,73 @@ const DATA: ClaimFenceData = {
   ownerRunId: 'run-xyz',
 };
 
-test('parseClaimFence: round-trips a fence written by upsertClaimFence', () => {
-  const body = upsertClaimFence('Some issue description.', DATA);
-  const parsed = parseClaimFence(body);
-  assert.deepEqual(parsed, DATA);
+// ── value schema (claim-fence.ts) ──
+
+test('encode/decode claim value round-trips', () => {
+  assert.deepEqual(decodeClaimValue(encodeClaimValue(DATA)), DATA);
 });
 
-test('parseClaimFence: returns null when no fence present', () => {
-  assert.equal(parseClaimFence('plain body, no fence'), null);
-  assert.equal(parseClaimFence(''), null);
-  assert.equal(parseClaimFence(null), null);
-  assert.equal(parseClaimFence(undefined), null);
+test('decodeClaimValue: nullish / malformed / missing / typed => null', () => {
+  assert.equal(decodeClaimValue(null), null);
+  assert.equal(decodeClaimValue(undefined), null);
+  assert.equal(decodeClaimValue('not json'), null);
+  assert.equal(decodeClaimValue('{"claim_id":}'), null);
+  assert.equal(decodeClaimValue('{"claim_id":"c","generation":1}'), null);
+  assert.equal(decodeClaimValue('{"claim_id":"c","generation":"1","owner_run_id":"r"}'), null);
+  assert.equal(decodeClaimValue('{"claim_id":"","generation":1,"owner_run_id":"r"}'), null);
+  assert.equal(decodeClaimValue('{"claim_id":"c","generation":-1,"owner_run_id":"r"}'), null);
+  assert.equal(decodeClaimValue('{"claim_id":"c","generation":1.5,"owner_run_id":"r"}'), null);
 });
 
-test('parseClaimFence: malformed JSON => null (never throws)', () => {
-  assert.equal(parseClaimFence('<!-- forge:claim:{not json} -->'), null);
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":} -->'), null);
+// ── footer integration (footers.ts) ──
+
+const TASK_BODY = 'Issue description.\n\n<!-- forge:task=FORGE-1 -->\n';
+
+test('upsertClaimFooter adds a claim footer that parseClaimFooter reads back', () => {
+  const out = upsertClaimFooter(TASK_BODY, DATA);
+  assert.deepEqual(parseClaimFooter(out), DATA);
+  assert.ok(out.includes('Issue description.'));
+  // forge:task footer is preserved.
+  assert.equal(parseForgeFooters(out).forgeTaskId, 'FORGE-1');
 });
 
-test('parseClaimFence: missing/typed fields => null', () => {
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":"c","generation":1} -->'), null);
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":"c","generation":"1","owner_run_id":"r"} -->'), null);
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":"","generation":1,"owner_run_id":"r"} -->'), null);
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":"c","generation":-1,"owner_run_id":"r"} -->'), null);
-  assert.equal(parseClaimFence('<!-- forge:claim:{"claim_id":"c","generation":1.5,"owner_run_id":"r"} -->'), null);
+test('parseClaimFooter: absent / malformed => null', () => {
+  assert.equal(parseClaimFooter(TASK_BODY), null);
+  assert.equal(parseClaimFooter('<!-- forge:claim=not json -->'), null);
+  assert.equal(parseClaimFooter(null), null);
 });
 
-test('upsertClaimFence: preserves existing non-fence body content', () => {
-  const original = '# Title\n\nBody paragraph.\n';
-  const out = upsertClaimFence(original, DATA);
-  assert.ok(out.includes('# Title'));
-  assert.ok(out.includes('Body paragraph.'));
-  assert.deepEqual(parseClaimFence(out), DATA);
+test('upsertClaimFooter replacing does not duplicate the claim footer', () => {
+  const first = upsertClaimFooter(TASK_BODY, DATA);
+  const second = upsertClaimFooter(first, { ...DATA, generation: 4 });
+  assert.equal((second.match(/forge:claim=/g) ?? []).length, 1);
+  assert.equal(parseClaimFooter(second)?.generation, 4);
 });
 
-test('upsertClaimFence: replacing an existing fence does not duplicate it', () => {
-  const first = upsertClaimFence('desc', DATA);
-  const second = upsertClaimFence(first, { ...DATA, generation: 4 });
-  // Only one fence remains, with the new generation.
-  const matches = second.match(/forge:claim:/g) ?? [];
-  assert.equal(matches.length, 1);
-  assert.equal(parseClaimFence(second)?.generation, 4);
-  assert.ok(second.startsWith('desc'));
+test('upsertClaimFooter(null) removes the claim footer, keeps task/blockedBy', () => {
+  const withClaim = upsertClaimFooter(
+    'Desc\n\n<!-- forge:task=FORGE-1 -->\n<!-- forge:blockedBy=FORGE-2 -->\n',
+    DATA,
+  );
+  const cleared = upsertClaimFooter(withClaim, null);
+  assert.equal(parseClaimFooter(cleared), null);
+  assert.equal(parseForgeFooters(cleared).forgeTaskId, 'FORGE-1');
+  assert.deepEqual(parseForgeFooters(cleared).blockerIds, ['FORGE-2']);
 });
 
-test('upsertClaimFence: empty base yields just the fence', () => {
-  const out = upsertClaimFence('', DATA);
-  assert.deepEqual(parseClaimFence(out), DATA);
+test('upsertClaimFooter preserves other extra footers (e.g. ownerType)', () => {
+  const body =
+    'Desc\n\n<!-- forge:task=FORGE-1 -->\n<!-- forge:ownerType=backend -->\n';
+  const out = upsertClaimFooter(body, DATA);
+  const extras = parseExtraForgeFooters(out);
+  assert.ok(extras.some((f) => f.includes('forge:ownerType=backend')));
+  assert.ok(extras.some((f) => f.includes('forge:claim=')));
+  assert.deepEqual(parseClaimFooter(out), DATA);
 });
 
-test('stripClaimFence: removes the fence, leaves the rest', () => {
-  const body = upsertClaimFence('keep this', DATA);
-  const stripped = stripClaimFence(body);
-  assert.equal(parseClaimFence(stripped), null);
-  assert.ok(stripped.includes('keep this'));
-  assert.ok(!stripped.includes('forge:claim'));
-});
-
-test('stripClaimFence: nullish => empty string', () => {
-  assert.equal(stripClaimFence(null), '');
-  assert.equal(stripClaimFence(undefined), '');
-  assert.equal(stripClaimFence(''), '');
+test('upsertClaimFooter throws when the body has no forge:task footer', () => {
+  assert.throws(
+    () => upsertClaimFooter('plain body, no footer', DATA),
+    (err: unknown) => err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
+  );
 });

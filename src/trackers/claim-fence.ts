@@ -1,23 +1,18 @@
-// Forge claim-metadata fence (FORGE-145).
+// Forge claim-metadata value schema (FORGE-145).
 //
-// A hidden HTML comment embedded in a tracker issue body that records which run
-// currently holds the local lease, so `forge orchestrate gc` can answer
-// "is this task claimed in the tracker, and by whom?" across hosts/machines.
+// The claim identity (which run holds the local lease) is mirrored onto the
+// tracker issue as a forge FOOTER: `<!-- forge:claim=<json> -->` — see
+// src/trackers/footers.ts for the comment placement + body read-modify-write,
+// which rides the same machinery as forge:task / forge:blockedBy (so it is
+// auto-preserved across body rewrites + `reconcile --push`).
 //
-// Public, adopter-visible convention — a single comment, invisible when the
-// body is rendered:
-//   <!-- forge:claim:{"claim_id":"...","generation":1,"owner_run_id":"..."} -->
+// This module owns only the VALUE schema — the JSON payload inside the footer:
+// encode + decode/validate. Keys mirror lease.json (claim_id / generation /
+// owner_run_id) so the value maps directly to a lease identity.
 //
-// Authority note: this is ADVISORY metadata only. The authority for lease
-// ownership is always the generation-fenced local lease (lease.json); gc never
-// resurrects ownership from this fence.
-//
-// Concurrency note: tracker bodies expose no etag/CAS to our adapters, so
-// writes are read-modify-write — callers read the LATEST body, then call
-// `upsertClaimFence`, which preserves all non-fence content and replaces only
-// the fence region. A residual race between two concurrent fence writers can
-// still lose an update; in normal flow the claim state machine is the single
-// logical writer (and `reconcile --push` is fence-preserving).
+// Authority note: advisory metadata only. The authority for lease ownership is
+// always the generation-fenced local lease; gc never resurrects ownership from
+// this footer.
 
 export interface ClaimFenceData {
   readonly claimId: string;
@@ -25,28 +20,31 @@ export interface ClaimFenceData {
   readonly ownerRunId: string;
 }
 
-// Matches a single forge:claim comment. Non-greedy JSON capture; tolerant of
-// surrounding whitespace inside the comment. Global flag used for strip().
-const FENCE_RE = /<!--\s*forge:claim:(\{.*?\})\s*-->/;
-const FENCE_RE_GLOBAL = /[ \t]*<!--\s*forge:claim:\{.*?\}\s*-->[ \t]*\n?/g;
+// Serialize to the footer value (compact JSON). The output never contains HTML
+// comment metacharacters (`-->` / `<!--`), so it is safe inside a footer.
+export function encodeClaimValue(data: ClaimFenceData): string {
+  return JSON.stringify({
+    claim_id: data.claimId,
+    generation: data.generation,
+    owner_run_id: data.ownerRunId,
+  });
+}
 
-// Parse the first valid claim fence from a body. Malformed JSON, missing/typed
-// fields, or absent fence all return null ("no claim") — never throws. A
-// hand-edited or corrupted fence is therefore treated as no-claim, not an error.
-export function parseClaimFence(
-  body: string | null | undefined,
+// Parse + validate a footer value. Malformed JSON, missing/wrong-typed fields,
+// or nullish input all return null ("no claim") — never throws. A hand-edited
+// or corrupted value is therefore treated as no-claim, not an error.
+export function decodeClaimValue(
+  raw: string | null | undefined,
 ): ClaimFenceData | null {
-  if (!body) return null;
-  const m = FENCE_RE.exec(body);
-  if (!m) return null;
-  let raw: unknown;
+  if (!raw) return null;
+  let parsed: unknown;
   try {
-    raw = JSON.parse(m[1]);
+    parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (typeof raw !== 'object' || raw === null) return null;
-  const o = raw as Record<string, unknown>;
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
   const claimId = o.claim_id;
   const generation = o.generation;
   const ownerRunId = o.owner_run_id;
@@ -60,26 +58,4 @@ export function parseClaimFence(
   }
   if (typeof ownerRunId !== 'string' || ownerRunId.length === 0) return null;
   return { claimId, generation, ownerRunId };
-}
-
-// Remove every claim fence (and its trailing newline) from a body, leaving all
-// other content intact. Returns '' for empty/nullish input.
-export function stripClaimFence(body: string | null | undefined): string {
-  if (!body) return '';
-  return body.replace(FENCE_RE_GLOBAL, '');
-}
-
-// Read-modify-write helper: given the LATEST body, strip any existing fence and
-// append a fresh one on its own trailing line. Preserves all non-fence content.
-export function upsertClaimFence(
-  body: string | null | undefined,
-  data: ClaimFenceData,
-): string {
-  const base = stripClaimFence(body).replace(/\s+$/, '');
-  const fence = `<!-- forge:claim:${JSON.stringify({
-    claim_id: data.claimId,
-    generation: data.generation,
-    owner_run_id: data.ownerRunId,
-  })} -->`;
-  return base.length > 0 ? `${base}\n\n${fence}\n` : `${fence}\n`;
 }

@@ -8,9 +8,9 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
-import { parseClaimFence } from './claim-fence.ts';
 import {
   assertValidBodyInput,
+  parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
@@ -1397,7 +1397,7 @@ export function deriveStateFromLinearIssue(raw: LinearIssueLike): IssueState {
 // Convert a flattened Linear issue into forge's tracker-agnostic Issue.
 export function toIssue(raw: LinearIssueLike): Issue {
   const { forgeTaskId, blockerIds } = parseForgeFooters(raw.description);
-  const claim = parseClaimFence(raw.description);
+  const claim = parseClaimFooter(raw.description);
   const issue: Issue = {
     id: raw.id,
     identifier: raw.identifier,
