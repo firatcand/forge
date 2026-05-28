@@ -191,7 +191,12 @@ function buildActiveSessions(
   forgeDir: string,
   rows: readonly TaskRow[],
 ): ActiveSession[] {
-  // Group active (in-flight) tasks by the run that owns their lease.
+  // A session is "active" iff it currently owns >=1 in-flight task. Seeding
+  // from every run manifest (Codex review-impl, dashboard.ts active_sessions)
+  // would report long-quiesced runs as active forever — `forge orchestrate run
+  // list` is the verb for the full run inventory. Group in-flight tasks by the
+  // run that owns their lease; an orphaned owner (lease but no manifest) still
+  // surfaces, with an empty started_at.
   const claimedByRun = new Map<string, string[]>();
   for (const row of rows) {
     if (!row.lease || !row.state) continue;
@@ -201,36 +206,22 @@ function buildActiveSessions(
     list.push(row.taskId);
     claimedByRun.set(runId, list);
   }
+  if (claimedByRun.size === 0) return [];
 
-  const sessions = new Map<string, ActiveSession>();
-  // Seed from run manifests (canonical session source — run-list precedent).
+  // Enrich each owning run with started_at from its manifest (when present).
   const runsRoot = path.join(forgeDir, 'orchestrator', 'runs');
-  let runDirs: string[] = [];
-  try {
-    runDirs = readdirSync(runsRoot);
-  } catch {
-    runDirs = [];
-  }
-  for (const runDir of runDirs) {
+  const sessions: ActiveSession[] = [];
+  for (const [runId, claimed] of claimedByRun) {
     const m = ManifestSchema.safeParse(
-      readJsonCapped(path.join(runsRoot, runDir, 'manifest.json')),
+      readJsonCapped(path.join(runsRoot, runId, 'manifest.json')),
     );
-    if (!m.success) continue;
-    sessions.set(m.data.run_id, {
-      run_id: m.data.run_id,
-      started_at: m.data.started_at,
-      claimed_tasks: claimedByRun.get(m.data.run_id) ?? [],
+    sessions.push({
+      run_id: runId,
+      started_at: m.success ? m.data.started_at : '',
+      claimed_tasks: claimed,
     });
   }
-  // Surface runs that own a lease but have no manifest (orphaned owner) so task
-  // attribution is never silently dropped.
-  for (const [runId, claimed] of claimedByRun) {
-    if (sessions.has(runId)) continue;
-    sessions.set(runId, { run_id: runId, started_at: '', claimed_tasks: claimed });
-  }
-  return [...sessions.values()].sort((a, b) =>
-    b.started_at.localeCompare(a.started_at),
-  );
+  return sessions.sort((a, b) => b.started_at.localeCompare(a.started_at));
 }
 
 function computeReadyAndBlocked(

@@ -259,6 +259,14 @@ test('dashboard: claimed task is excluded from ready + attributed to its session
   assert.deepEqual(data.lease_health, [{ task_id: 'FOO-1', status: 'alive' }]);
 });
 
+test('dashboard: a run manifest with no live claims is NOT reported as active', () => {
+  const forgeDir = join(repoRoot(), '.forge');
+  // A run exists on disk but holds no in-flight task.
+  manifestJson(forgeDir, 'run-old', '2025-01-01T00:00:00.000Z', 'quiesced');
+  const data = runJson(forgeDir);
+  assert.deepEqual(data.active_sessions, []);
+});
+
 test('dashboard: lease health buckets (alive / expiring_soon / stale)', () => {
   const forgeDir = join(repoRoot(), '.forge');
   const now = new Date('2026-06-01T12:00:00.000Z');
