@@ -13,6 +13,7 @@ import {
   type NormalizeErrorHint,
   type WithRetryOpts,
 } from './base.ts';
+import type { ClaimFenceData } from './claim-fence.ts';
 import { TrackerError } from './errors.ts';
 import type {
   ClaimResult,
@@ -1015,6 +1016,25 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       `NotionTracker.updateIssueBody is not implemented in this release. ` +
         `Tracked in FORGE-117: refactor NotionTracker to ntn CLI transport. ` +
         `Until then, /reconcile --push and /apply-decision must skip Notion-backed projects.`,
+      { followUpIssue: 'FORGE-117' },
+    );
+  }
+
+  // ─── setClaimFence — NOT_IMPLEMENTED stub (FORGE-167 → FORGE-117) ──────────
+  //
+  // The forge:claim footer write rides the same body read-modify-write as
+  // updateIssueBody, which Notion's content-block model can't do until the
+  // FORGE-117 ntn CLI refactor. Claim/cancel call this best-effort, so a
+  // Notion-backed project simply skips footer mirroring (warn, no failure).
+  async setClaimFence(
+    _issueId: string,
+    _data: ClaimFenceData | null,
+  ): Promise<void> {
+    throw new TrackerError(
+      'NOT_IMPLEMENTED',
+      `NotionTracker.setClaimFence is not implemented in this release. ` +
+        `Tracked in FORGE-117: refactor NotionTracker to ntn CLI transport. ` +
+        `Until then, claim/cancel skip forge:claim footer mirroring for Notion.`,
       { followUpIssue: 'FORGE-117' },
     );
   }

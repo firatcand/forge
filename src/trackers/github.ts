@@ -16,12 +16,14 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
+import type { ClaimFenceData } from './claim-fence.ts';
 import {
   assertValidBodyInput,
   parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
+  upsertClaimFooter,
   type ForgeFooters,
 } from './footers.ts';
 import type {
@@ -921,6 +923,63 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
         err,
         classifyGitHubError(err),
       );
+    }
+  }
+
+  // ─── setClaimFence — forge:claim footer write (FORGE-167) ──────────────────
+  //
+  // View-parse-edit loop mirroring updateIssueBody, except the input is the
+  // claim identity (or null) and the body delta comes from upsertClaimFooter on
+  // the LATEST body. RAW `gh issue edit --body` — NOT updateIssueBody, whose
+  // assertValidBodyInput rejects the forge-footer content. upsertClaimFooter
+  // throws PRECONDITION_FAILED when no forge:task footer is present.
+  async setClaimFence(
+    issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    const number = this.parseIssueNumber(issueId);
+
+    let viewResult: GhExecResult;
+    try {
+      viewResult = await this.gh([
+        'issue',
+        'view',
+        String(number),
+        '--repo',
+        this.repo,
+        '--json',
+        'body',
+      ]);
+    } catch (err) {
+      throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
+    }
+
+    let existing: string;
+    try {
+      const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
+      existing = parsed.body ?? '';
+    } catch (err) {
+      throw this.normalizeError('setClaimFence', err, {
+        code: 'VALIDATION',
+        details: { reason: 'view-parse-failed' },
+      });
+    }
+
+    const newBody = upsertClaimFooter(existing, data);
+
+    try {
+      await this.gh([
+        'issue',
+        'edit',
+        String(number),
+        '--repo',
+        this.repo,
+        '--body',
+        newBody,
+      ]);
+    } catch (err) {
+      throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
     }
   }
 

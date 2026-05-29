@@ -90,6 +90,7 @@ function makeFakeTracker(initial: Issue[]): {
       calls.push(id);
       bodiesById.set(id, body);
     },
+    async setClaimFence() {},
     async createProject() {
       return { id: 'p', url: 'u' };
     },

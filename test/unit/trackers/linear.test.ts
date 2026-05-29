@@ -19,6 +19,7 @@ import {
   type Logger,
 } from '../../../src/trackers/index.ts';
 import { LINEAR_DESCRIPTION_MAX_BYTES } from '../../../src/trackers/linear.ts';
+import { parseClaimFooter } from '../../../src/trackers/footers.ts';
 import {
   DEFAULT_WORKFLOW_STATES,
   LABEL_STATE_IN_REVIEW,
@@ -1573,6 +1574,80 @@ await test('updateIssueBody — VALIDATION on embedded forge footer in input bod
     (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
   );
   assert.equal(issueCalled, false);
+});
+
+// ─── setClaimFence (FORGE-167) ───────────────────────────────────────────────
+
+await test('setClaimFence — stamps forge:claim via RAW updateIssue, preserving forge:task', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-77',
+    description: 'body\n\n<!-- forge:task=FORGE-77 -->\n',
+  });
+  let captured: LinearUpdateIssueInput | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      captured = input;
+      return issue;
+    },
+  });
+  await tracker.setClaimFence('i1', {
+    claimId: 'c-1',
+    generation: 2,
+    ownerRunId: 'run-1',
+  });
+  // RAW write carried the forge:claim footer — updateIssueBody would have
+  // rejected a body containing forge footers, proving we bypass it.
+  assert.deepEqual(parseClaimFooter(captured!.description), {
+    claimId: 'c-1',
+    generation: 2,
+    ownerRunId: 'run-1',
+  });
+  assert.match(captured!.description ?? '', /forge:task=FORGE-77/);
+});
+
+await test('setClaimFence(null) — strips forge:claim, preserves other footers', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    description:
+      'body\n\n<!-- forge:task=FORGE-77 -->\n<!-- forge:blockedBy=b1 -->\n<!-- forge:claim={"claim_id":"old","generation":1,"owner_run_id":"r0"} -->\n',
+  });
+  let captured: LinearUpdateIssueInput | null = null;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      captured = input;
+      return issue;
+    },
+  });
+  await tracker.setClaimFence('i1', null);
+  assert.equal(parseClaimFooter(captured!.description), null);
+  assert.match(captured!.description ?? '', /forge:blockedBy=b1/);
+  assert.match(captured!.description ?? '', /forge:task=FORGE-77/);
+});
+
+await test('setClaimFence — PRECONDITION_FAILED when no forge:task footer (no write)', async () => {
+  const issue = makeIssue({ id: 'i1', description: 'non-forge body' });
+  let updateCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async (_id, input) => {
+      updateCalled = true;
+      return issue;
+    },
+  });
+  await assert.rejects(
+    () =>
+      tracker.setClaimFence('i1', {
+        claimId: 'c',
+        generation: 0,
+        ownerRunId: 'r',
+      }),
+    (e: unknown) =>
+      e instanceof TrackerError && e.code === 'PRECONDITION_FAILED',
+  );
+  assert.equal(updateCalled, false, 'no write after precondition fails');
 });
 
 await test('setBlockedBy — PRECONDITION_FAILED when issue has no forge:task footer', async () => {

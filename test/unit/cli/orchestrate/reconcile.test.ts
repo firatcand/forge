@@ -115,6 +115,7 @@ function fakeTracker(opts: {
       updates.push({ id, body });
       if (opts.update) await opts.update(id, body);
     },
+    async setClaimFence() {},
     async createProject() {
       return { id: 'p', url: 'u' };
     },
