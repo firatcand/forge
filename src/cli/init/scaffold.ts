@@ -10,7 +10,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
-import { SettingsSchema, type Settings } from '../../schemas/index.ts';
+import { SettingsSchema } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import type { InitAnswers } from './prompts.ts';
 import { renderTemplate, resolveTemplatesDir, type TemplateVars } from './templates.ts';
@@ -151,49 +151,6 @@ interface Artifact {
   contents: string;
   // True if this artefact must be written even if the destination exists (settings.yaml is the marker file).
   mustOverwrite?: boolean;
-}
-
-export function toSettingsObject(answers: InitAnswers): Settings {
-  // Construct the minimal Settings POJO. Optional fields are omitted so YAML stays human-friendly;
-  // zod defaults will expand on load.
-  const out: Settings = {
-    version: 1 as const,
-    project: {
-      name: answers.project.name,
-      ...(answers.project.description ? { description: answers.project.description } : {}),
-    },
-    tracker: answers.tracker,
-    secrets: answers.secrets,
-    // Cast: zod's z.object().refine().default() produces a non-undefined output type when parsed,
-    // but Settings's static type still requires the full agents object since we set it explicitly.
-    agents: {
-      max_concurrent: answers.agents.max_concurrent,
-      retry_attempts: answers.agents.retry_attempts,
-      retry_backoff_ms_max: 300_000,
-      poll_interval_ms: 30_000,
-      worktree_root: './.forge/worktrees',
-      on_persistent_failure: 'notify' as const,
-      primary_host_cli: answers.agents.primary_host_cli,
-      review_host_cli: answers.agents.review_host_cli,
-      enabled_root_files: answers.agents.enabled_root_files,
-      // preflight_globs is intentionally omitted — the zod default in
-      // SettingsSchema fills it on load. Keeping it out of the scaffolded
-      // YAML lets future default-list updates ship transparently to
-      // adopters (code-reviewer on FORGE-97).
-    } as Settings['agents'],
-    design: {
-      mode: answers.design.mode,
-      ...(answers.design.reference ? { reference: answers.design.reference } : {}),
-    },
-    // FORGE-105: codex / decisions / doctor blocks. Defaults match SettingsSchema —
-    // duplicated here because Settings is the strict typed shape used by callers,
-    // not the parsed-with-defaults output. toMinimalYamlObject omits these so
-    // adopters get a clean settings.yaml; zod defaults expand on load.
-    codex: { auto_codex_enabled: true, auto_codex_token_cap: 50_000 },
-    decisions: { decision_dir: './spec/decisions', stale_draft_threshold_days: 7 },
-    doctor: { spec_code_check_enabled: true },
-  };
-  return out;
 }
 
 // Minimal YAML projection — only the fields the user explicitly provided.

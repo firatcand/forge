@@ -109,7 +109,3 @@ export class OrchestratorError extends Error {
     this.details = details;
   }
 }
-
-export function isOrchestratorError(err: unknown): err is OrchestratorError {
-  return err instanceof OrchestratorError;
-}
