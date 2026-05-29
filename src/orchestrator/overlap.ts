@@ -237,21 +237,10 @@ export function classifyOverlap(input: ClassifyInput): OverlapResult {
   return { classification: 'no-overlap', offendingGlobs: [], conflictingTaskIds: [] };
 }
 
-// Cheap heuristic: two globs overlap if their materialized probe paths match
-// each other's compiled regex.
-function globsOverlap(a: string, b: string): boolean {
-  if (a === b) return true;
-  const reA = compileGlob(a);
-  const reB = compileGlob(b);
-  const probes = [materialize(a), materialize(b)];
-  return probes.some((p) => reA.test(p) && reB.test(p));
-}
-
 // Exported for unit-test introspection.
 export const __overlapInternals = {
   compileGlob,
   materialize,
-  globsOverlap,
   findIntersections,
   hardLockCategoriesHit,
 };
