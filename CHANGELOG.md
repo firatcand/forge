@@ -6,6 +6,23 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ### Added
 
+- **`settings.verify` + real verification runner** (FORGE-168) — a new optional
+  `verify` block in `.forge/settings.yaml` lets an adopter declare the commands
+  that prove an attempt is good:
+  ```yaml
+  verify:
+    commands:
+      - npm test
+      - npm run lint
+  ```
+  Each entry is a shell command string, run via `shell: true` in the repo root
+  with the **full** environment (real test suites need `NODE_ENV` / DB creds —
+  this is intentionally not routed through the secret-stripping AI-subprocess
+  path). Commands run sequentially; all run even if one fails, and the runner
+  reports an aggregate pass/fail. **Optional:** unset ⇒ verification is skipped
+  with a warning; a present block must declare ≥1 non-empty command. This is the
+  real-verification capability `forge orchestrate complete` previously deferred
+  (it self-attests); consumed next by the gc `reverify_verdict` executor.
 - **Release automation** (FORGE-157) — two GitHub Action workflows that fire on `v*` tag push:
   - `.github/workflows/release.yml` — verifies the tag matches `package.json` version, re-runs the full CI gate (typecheck, test, build, pack-gate, smoke) on the tagged commit, then runs `npm publish --provenance`. The `--provenance` flag attaches a SLSA cryptographic attestation linking the published tarball to its source commit + workflow run; adopters can verify with `npm audit signatures`.
   - `.github/workflows/release-draft.yml` — slices the matching `## [X.Y.Z]` section out of `CHANGELOG.md` and creates a DRAFT GitHub Release pre-filled with those notes; reviewer publishes from the GH UI when ready.
