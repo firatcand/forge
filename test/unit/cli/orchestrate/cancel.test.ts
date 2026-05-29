@@ -10,6 +10,7 @@ import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch
 import { runOrchestrateCancel } from '../../../../src/cli/orchestrate/cancel.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
+import type { ClaimFenceData } from '../../../../src/trackers/claim-fence.ts';
 
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
@@ -26,10 +27,19 @@ function captureStdout(t: { after: (fn: () => void) => void }): string[] {
 
 class StubTracker implements ClaimableTracker {
   readonly type = 'stub';
+  readonly fences: Array<{ issueId: string; data: ClaimFenceData | null }> = [];
+  throwOnFence = false;
   async claim(): Promise<ClaimResult> {
     return { ok: true };
   }
   async releaseClaim(): Promise<void> {}
+  async setClaimFence(
+    issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void> {
+    if (this.throwOnFence) throw new Error('fence boom');
+    this.fences.push({ issueId, data });
+  }
 }
 
 test('cancel transitions state → cancelled and releases lease', async (t) => {
@@ -52,12 +62,16 @@ test('cancel transitions state → cancelled and releases lease', async (t) => {
     json: true,
   });
   stdout.length = 0;
-  const result = await runOrchestrateCancel({
-    taskId: 'FORGE-1',
-    reason: 'unit test cancel',
-    forgeDir,
-    json: true,
-  });
+  const cancelTracker = new StubTracker();
+  const result = await runOrchestrateCancel(
+    {
+      taskId: 'FORGE-1',
+      reason: 'unit test cancel',
+      forgeDir,
+      json: true,
+    },
+    { tracker: cancelTracker },
+  );
   assert.equal(result.exitCode, 0);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.data.state, 'cancelled');
@@ -69,6 +83,10 @@ test('cancel transitions state → cancelled and releases lease', async (t) => {
   // Lease released.
   const leasePath = join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
   assert.ok(!existsSync(leasePath), 'lease.json should be unlinked');
+  // forge:claim footer stripped (data=null) exactly once on cancel.
+  assert.equal(cancelTracker.fences.length, 1);
+  assert.equal(cancelTracker.fences[0]?.issueId, 'FORGE-1');
+  assert.equal(cancelTracker.fences[0]?.data, null);
 });
 
 test('cancel refuses when state is already terminal', async (t) => {
@@ -80,10 +98,42 @@ test('cancel refuses when state is already terminal', async (t) => {
     { taskId: 'FORGE-1', runId, forgeDir, json: true },
     { tracker: new StubTracker(), specRevision: { revision: 'git:a', source: 'git' }, repoRoot },
   );
-  await runOrchestrateCancel({ taskId: 'FORGE-1', forgeDir, json: true });
+  await runOrchestrateCancel(
+    { taskId: 'FORGE-1', forgeDir, json: true },
+    { tracker: new StubTracker() },
+  );
   stdout.length = 0;
-  const result = await runOrchestrateCancel({ taskId: 'FORGE-1', forgeDir, json: true });
+  const result = await runOrchestrateCancel(
+    { taskId: 'FORGE-1', forgeDir, json: true },
+    { tracker: new StubTracker() },
+  );
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'INVALID_STATE');
+});
+
+test('cancel succeeds even when setClaimFence(null) throws (best-effort strip)', async (t) => {
+  const stdout = captureStdout(t);
+  const repoRoot = mkdtempSync(join(tmpdir(), 'forge-cancel-fence-'));
+  const forgeDir = join(repoRoot, '.forge');
+  const runId = uuidv7();
+  await runOrchestrateClaim(
+    { taskId: 'FORGE-1', runId, forgeDir, json: true },
+    { tracker: new StubTracker(), specRevision: { revision: 'git:a', source: 'git' }, repoRoot },
+  );
+  stdout.length = 0;
+  const cancelTracker = new StubTracker();
+  cancelTracker.throwOnFence = true;
+  const result = await runOrchestrateCancel(
+    { taskId: 'FORGE-1', forgeDir, json: true },
+    { tracker: cancelTracker },
+  );
+  // Strip failure must NOT fail the cancel — state is already cancelled.
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.state, 'cancelled');
+  assert.ok(
+    !existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')),
+    'lease still released despite fence failure',
+  );
 });
