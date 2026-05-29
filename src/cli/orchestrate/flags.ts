@@ -41,22 +41,6 @@ export function firstPositional(rest: readonly string[]): string | undefined {
   return undefined;
 }
 
-export function nthPositional(rest: readonly string[], n: number): string | undefined {
-  let seen = 0;
-  for (let i = 0; i < rest.length; i += 1) {
-    const a = rest[i] ?? '';
-    if (a.startsWith('--')) {
-      if (!a.includes('=') && i + 1 < rest.length && !rest[i + 1]?.startsWith('--')) {
-        i += 1;
-      }
-      continue;
-    }
-    if (seen === n) return a;
-    seen += 1;
-  }
-  return undefined;
-}
-
 // Resolve --forge-dir flag with a sensible default rooted at the caller's cwd.
 export function resolveForgeDir(rest: readonly string[], cwd: string): string {
   return parseFlag(rest, 'forge-dir') ?? `${cwd}/.forge`;
