@@ -511,6 +511,8 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
     doctor: {
       spec_code_check_enabled: boolean;
     };
+    // FORGE-168: optional — `{ commands: string[] } | undefined`, never widened.
+    verify?: { commands: string[] };
   };
 });
 
@@ -692,4 +694,50 @@ test('FORGE-152 — enabled_root_files: explicit [] promotes to [primary_host_cl
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.deepEqual(result.data.agents.enabled_root_files, ['codex']);
+});
+
+// FORGE-168: settings.verify — optional adopter-declared verification commands.
+// unset ⇒ skip (verify is undefined); present ⇒ must declare ≥1 non-empty cmd.
+
+const verifyBase = {
+  version: 1 as const,
+  project: { name: 'x' },
+  tracker: { type: 'linear' as const, config: { team_id: 'T' } },
+  secrets: { manager: 'env_file' as const },
+};
+
+test('FORGE-168 — verify omitted: parses, verify is undefined (skip signal)', () => {
+  const result = SettingsSchema.safeParse({ ...verifyBase });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.verify, undefined);
+});
+
+test('FORGE-168 — verify present with commands: parses and preserves order', () => {
+  const result = SettingsSchema.safeParse({
+    ...verifyBase,
+    verify: { commands: ['npm test', 'npm run lint'] },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.verify, { commands: ['npm test', 'npm run lint'] });
+});
+
+test('FORGE-168 — verify present but commands empty: rejected (misconfig, not silent skip)', () => {
+  const result = SettingsSchema.safeParse({
+    ...verifyBase,
+    verify: { commands: [] },
+  });
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const issue = result.error.issues.find((i) => i.path.includes('commands'));
+  assert.ok(issue, `expected issue at verify.commands; got ${JSON.stringify(result.error.issues)}`);
+});
+
+test('FORGE-168 — verify command empty string: rejected', () => {
+  const result = SettingsSchema.safeParse({
+    ...verifyBase,
+    verify: { commands: ['npm test', ''] },
+  });
+  assert.equal(result.success, false);
 });

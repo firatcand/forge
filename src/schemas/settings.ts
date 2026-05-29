@@ -238,6 +238,21 @@ const DoctorSchema = z
   })
   .default({});
 
+// FORGE-168: adopter-declared verification commands. Each entry is a shell
+// command string run via `shell: true` in the repo root with the FULL
+// environment (src/orchestrator/verify-runner.ts) — these are the adopter's own
+// trusted test/lint commands, unlike the AI-subprocess path (src/harnesses/
+// subprocess.ts) which strips env to a safe allowlist to avoid leaking secrets
+// to an external model API. Do NOT "harden" this onto that allowlist: real
+// integration tests need NODE_ENV / DB creds.
+//
+// OPTIONAL on SettingsSchema: unset ⇒ verification is skipped with a warning.
+// A PRESENT block must declare ≥1 non-empty command — an empty block is a
+// misconfiguration, not a silent skip (so `undefined` is the only skip signal).
+const VerifySchema = z.object({
+  commands: z.array(z.string().min(1)).min(1),
+});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -251,9 +266,12 @@ export const SettingsSchema = z.object({
   codex: CodexSchema,
   decisions: DecisionsSchema,
   doctor: DoctorSchema,
+  // FORGE-168: optional — unset ⇒ skip verification with a warning.
+  verify: VerifySchema.optional(),
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
+export type Verify = z.infer<typeof VerifySchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;
