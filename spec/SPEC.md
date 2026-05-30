@@ -14,11 +14,11 @@ Driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode
 | Section | Status |
 |---|---|
 | §Precedence rules (6-level chain) | **Superseded** — replaced with authority-by-field (see below) |
-| §ADR layer (ephemeral) | **Deferred to v0.5 opt-in** — not in v0.4 scope |
-| §`/update-spec --apply` journal | **Deferred to v0.5** with the ADR layer |
-| §Module layout: `apply-decision.ts`, `amend-roadmap.ts` | **Deferred to v0.5** — remove from required src/cli/orchestrate/ surface |
-| §Key flows: Flow 2 drift-routing block, "routing_hint" references | **Superseded** — no drift events, no routing in v0.4 |
-| §Doctor enforcement: ADR-drafts and apply-journal scopes | **Dropped** — doctor scoped to SPEC↔code only |
+| §ADR layer (ephemeral) | **Shipped (FORGE-95, 2026-05-30)** — apply mechanics live; the `/update-spec --draft` skill that authors ADRs/journals is FORGE-93 (still v0.5) |
+| §`/update-spec --apply` journal | **Shipped (FORGE-95)** — payload-complete, resumable; see the updated schema below |
+| §Module layout: `apply-decision.ts` | **Shipped (FORGE-95)**. `amend-roadmap.ts` remains v0.5 (FORGE-101) |
+| §Key flows: Flow 2 drift-routing block, "routing_hint" references | **Superseded** — no drift events, no routing in v0.4 (unchanged by FORGE-95) |
+| §Doctor enforcement: ADR-drafts and apply-journal scopes | **Still dropped** — the `apply-decision` verb shipped, but the doctor stale-journal scope is a separate follow-up; doctor stays SPEC↔code only |
 
 **Sections that stay as written:**
 
@@ -87,9 +87,7 @@ The single forge-side assist (informational, not gating): workers stamp `spec_re
 
 ### Out of scope for v0.4 (re-listed for clarity)
 
-- `templates/adr.template.md` + ephemeral ADR convention
-- `/update-spec --draft` and `/update-spec --apply` skills
-- `forge orchestrate apply-decision` verb + journal
+- `/update-spec --draft` and `/update-spec --apply` skills (FORGE-93) — the verb (`apply-decision`) they wrap shipped in FORGE-95, but the skill layer is still v0.5
 - `/amend-roadmap` skill + verb
 - `forge orchestrate worktree-drift-guard` verb
 - Drift events, drift-routed questions, `QuestionIndex.drift_event_id`, `QuestionIndex.routing_hint`
@@ -607,7 +605,7 @@ test/
   e2e/                        // examples/ as fixture projects
 ```
 
-**v0.5 module additions** (`apply-decision.ts`, `amend-roadmap.ts`, `worktree-drift-guard.ts` under `src/cli/orchestrate/`; `adr.ts` + `precedence.ts` under `src/orchestrator/`; `adr.ts` + `apply-journal.ts` under `src/schemas/`) are removed from the v0.4 module surface per §21 Amendments. They will reappear in this layout when their owning tickets ship — FORGE-93 (`/update-spec --draft|--apply`), FORGE-95 (`apply-decision` verb), FORGE-101 (`/amend-roadmap`). The `templates/adr.template.md` scaffold above ships as v0.4 prep under FORGE-92; the ADR feature itself remains v0.5.
+**Shipped under FORGE-95 (2026-05-30):** `apply-decision.ts` + `markdown-section.ts` (`src/cli/orchestrate/` and `src/orchestrator/`), `adr.ts` (`src/orchestrator/` + `src/schemas/`), `apply-journal.ts` (`src/schemas/`), and `factory.ts` (`src/trackers/`, extracted from `reconcile.ts`). **Still v0.5:** `amend-roadmap.ts` + `worktree-drift-guard.ts` (`src/cli/orchestrate/`) and `precedence.ts` (`src/orchestrator/`) — owning tickets FORGE-101 (`/amend-roadmap`) and the deferred drift/precedence work; FORGE-93 (`/update-spec --draft|--apply` skill) wraps the now-shipped verb. The `templates/adr.template.md` scaffold shipped under FORGE-92.
 
 ### Worktree location convention
 
@@ -842,7 +840,7 @@ To intervene on active work:
 
 ## ADR layer (ephemeral — added 2026-05-17, simplified)
 
-> **Deferred to v0.5.** Only the template scaffold (`templates/adr.template.md`) ships in v0.4 (FORGE-92) as preparation; the lifecycle, Zod schema, and `/update-spec --apply` journal described below are v0.5 features. In v0.4, architectural decisions are propagated to SPEC via standard `git commit && git push` (see §SPEC changes — no contradiction gate in v0.4). See §21 Amendments for the rationale.
+> **Apply mechanics shipped in FORGE-95 (2026-05-30).** The ADR frontmatter schema (`src/schemas/adr.ts`), the payload-complete resumable journal (`src/schemas/apply-journal.ts`), and the `forge orchestrate apply-decision` verb are live. The `/update-spec --draft|--apply` *skill* that authors ADRs + journals and runs `git commit` remains **v0.5 (FORGE-93)** — until it lands, journals are authored by hand or by a fixture. Decisions made without the skill still propagate to SPEC via standard `git commit && git push` (see §SPEC changes — no contradiction gate in v0.4). Durable-rationale + INDEX conventions: see "FORGE-95 — apply-decision" amendment.
 
 Architectural Decision Records (ADRs) are **ephemeral staging artifacts** for in-flight decisions. They live in `spec/decisions/` only while drafted and pending review. After `/update-spec --apply <slug>` propagates the decision to SPEC + PRD + phases + tracker, the ADR file is **DELETED**; rationale lives in the propagation commit message body.
 
@@ -919,45 +917,39 @@ Note: no `id`, `supersedes`, or `superseded_by` fields. Ephemeral ADRs don't nee
 
 `/update-spec --apply <slug>` requires `status: accepted`; refuses otherwise.
 
-### `/update-spec --apply` journal (resumable — Codex C2)
+### `/update-spec --apply` journal (resumable — shipped FORGE-95)
 
-The apply operation mutates 4 artifact classes (SPEC, PRD, phases.yaml, tracker bodies). To survive partial failures, the operation is journaled at `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`:
+The apply operation mutates 4 artifact classes (SPEC, PRD, phases.yaml, tracker bodies). To survive partial failures it is journaled at `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`. **The verb is a mechanical applier — each entry carries its full PAYLOAD** (the exact bytes/value to write), so the verb never synthesises content and a `--resume` retry is idempotent. The journal is authored upstream by `/update-spec --draft` (FORGE-93, v0.5) or, until that ships, by hand/fixture. Canonical schema: `src/schemas/apply-journal.ts`.
 
 ```ts
-type ApplyJournalSchema = {
+type ApplyJournal = {
   version: 1;
-  slug: string;
+  slug: string;                  // kebab
   started_at: string;            // ISO 8601
-  spec_sections: Array<{
-    ref: string;                 // e.g., "spec/SPEC.md#cli-surface"
-    status: 'pending' | 'applied' | 'failed';
-    applied_at?: string;
-    error?: string;
-  }>;
-  prd_sections: Array<{ ref: string; status: 'pending' | 'applied' | 'failed'; applied_at?: string; error?: string }>;
-  phases_tasks: Array<{ id: string; status: 'pending' | 'applied' | 'failed'; applied_at?: string; error?: string }>;
-  tracker_issues: Array<{
-    id: string;
-    status: 'pending' | 'applied' | 'failed';
-    applied_at?: string;
-    error?: string;
-    retries: number;
-  }>;
-  completed_at?: string;          // set when ALL entries are 'applied'; ADR file is deleted at this point
+  // SPEC/PRD: marker-block section replacement; new_body is the full section.
+  spec_sections: Array<{ ref: string; new_body: string; status: EntryStatus; applied_at?: string; error?: string }>;
+  prd_sections:  Array<{ ref: string; new_body: string; status: EntryStatus; applied_at?: string; error?: string }>;
+  // phases.yaml: resolve-by-id; only description/acceptance are amendable.
+  phases_tasks:  Array<{ id: string; field: 'description' | 'acceptance'; value: string | string[]; status: EntryStatus; applied_at?: string; error?: string }>;
+  tracker_issues: Array<{ id: string; new_body: string; retries: number; status: EntryStatus; applied_at?: string; error?: string }>;
+  // Journaled finalize phase — world-state-idempotent (see workflow step 3).
+  finalize: { commit_msg_written: boolean; index_appended: boolean; adr_deleted: boolean; archived: boolean };
+  completed_at?: string;
 };
+// EntryStatus = 'pending' | 'applied' | 'failed'
 ```
 
 Workflow:
 
-1. `/update-spec --apply <slug>` reads journal if it exists, else creates new
-2. For each entry with `status: 'pending'`, perform the mutation, update entry to `applied` (or `failed` with error)
-3. After all entries are `applied`, set `completed_at`, delete ADR file from `spec/decisions/`, archive journal under `.forge/orchestrator/global/update-spec-apply-journal/completed/<slug>.json`
-4. `--resume` skips entries with `status: applied`; retries `pending` and `failed`
-5. `--dry-run` shows the diff per artifact without writing journal or mutations
+1. `apply-decision --adr <slug>` reads the journal (must exist + be payload-complete → else `MISSING_JOURNAL`). The ADR frontmatter is a coverage check + `accepted` gate, NOT a content source. If any tracker entry needs applying, a tracker-capability **preflight** fails (`TRACKER_INCAPABLE`) BEFORE any local mutation (Notion `updateIssueBody` is NOT_IMPLEMENTED until FORGE-117) so the repo is never left half-applied.
+2. For each `pending`/`failed` entry in order [spec, prd, phases, tracker]: write-ahead (entry already `pending` on disk) → apply the payload → set `applied`/`failed` → persist. Stop at the first failure (re-run `--resume`).
+3. After all entries are `applied`, run the **journaled finalize** — each step is world-state-idempotent, not flag-only (flag-set and side-effect aren't atomic): (a) write `<slug>.commit-msg.txt` (overwrite); (b) **upsert** the `spec/decisions/INDEX.md` line keyed by slug (no duplicate on resume); (c) delete the ADR (unlink-ignoring-ENOENT) — only after rationale is durable in SPEC + INDEX; (d) archive the journal to `completed/<slug>.json` (last, so the active journal stays recoverable). The verb does **not** `git commit` (skill↔verb contract — the skill/user commits the message file).
+4. `--resume` skips `applied`; retries `pending`/`failed`; resumes finalize from the first incomplete step (accepted-gate skipped when resuming an all-applied journal, since the ADR may already be gone).
+5. `--dry-run` shows the per-artifact plan without writing journal, mutations, or finalize.
 
-### Doctor checks for ADR layer (deferred to v0.5)
+### Doctor checks for ADR layer (still a follow-up)
 
-The stale-draft and pending-apply-journal scopes documented here belong to the v0.5 closed-loop drift workflow, not v0.4. See SPEC §21 for the architectural amendment; the v0.4 contract lives in §Doctor enforcement (v0.4) below. When the ADR template (P2.5-T01 / FORGE-92) and `apply-decision` verb (P2.5-T04 / FORGE-95) ship, this section will be revived to document the additional doctor scopes that build on those features.
+The `apply-decision` verb shipped (FORGE-95), but the doctor stale-draft / pending-apply-journal *scopes* did not — they remain a separate follow-up. `forge orchestrate doctor` stays SPEC↔code-only (`--scope apply-journal` is still rejected; see §Doctor enforcement). When that follow-up lands it will add a check that warns on an unfinished journal (entries `applied` but `finalize.archived: false`) or a stale rejected/accepted-but-unapplied ADR.
 
 ---
 
@@ -1025,7 +1017,7 @@ Forge ships two parallel surfaces: **skills** (user-invoked via slash commands i
 | Layer | Owns | Examples |
 |---|---|---|
 | **Skills** | UX, conversation, prompts, diff previews, user confirmation, multi-step orchestration | `/forge`, `/draft-prd`, `/pickup-task`, `/reconcile`, `/ship`; `/update-spec` *(v0.5)*, `/amend-roadmap` *(v0.5)* |
-| **CLI verbs** | Deterministic state machine, atomic operations, machine-parseable I/O, no human prompts | `forge orchestrate claim`, `dispatch`, `heartbeat`, `complete`, `reconcile`; `apply-decision` *(v0.5)*; `worktree-drift-guard` *(dropped 2026-05-17)* |
+| **CLI verbs** | Deterministic state machine, atomic operations, machine-parseable I/O, no human prompts | `forge orchestrate claim`, `dispatch`, `heartbeat`, `complete`, `reconcile`, `apply-decision` *(shipped FORGE-95)*; `worktree-drift-guard` *(dropped 2026-05-17)* |
 
 ### The pattern
 
