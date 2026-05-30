@@ -16,7 +16,7 @@ Driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode
 | §Feature 6 — Mid-flight roadmap mutation (lines ~361-410) | **Deferred to v0.5 opt-in** — only `/reconcile` ships in v0.4 (FORGE-100); `/amend-roadmap` lands in v0.5 (FORGE-101); `worktree-drift-guard` is dropped (FORGE-103 canceled) |
 | §Acceptance criteria — Closed-loop drift contract bullet (line ~428) | **Deferred to v0.5** with the drift workflow |
 | §Acceptance criteria — Precedence enforcement bullet (line ~430) | **Superseded** — replaced with authority-by-field (see below); no worker drift events in v0.4 |
-| §Acceptance criteria — Resumable apply bullet (line ~431) | **Deferred to v0.5** with the `/update-spec --apply` journal |
+| §Acceptance criteria — Resumable apply bullet (line ~431) | **Shipped (FORGE-95, 2026-05-30)** — the resumable apply-journal + `apply-decision` verb; the `/update-spec` skill that drives it is still v0.5 (FORGE-93) |
 | §Locked architectural decisions — Decision 10 (artifact precedence) | **Superseded** — replaced with authority-by-field (see below and CLAUDE.md) |
 | §Locked architectural decisions — Decision 11 (ephemeral ADRs) | **Deferred to v0.5** — only template scaffold ships in v0.4 (FORGE-92) |
 | §Precedence rules (lines ~540-573, 6-level chain) | **Superseded 2026-05-17 PM** — see §Authority by field below |
@@ -52,8 +52,7 @@ The 6-level linear precedence rule (`user > SPEC > PRD > phases > tracker > atte
 
 ### Out of scope for v0.4 (re-listed for clarity)
 
-- `/update-spec --draft` and `/update-spec --apply` skills
-- `forge orchestrate apply-decision` verb + apply-journal
+- `/update-spec --draft` and `/update-spec --apply` skills (FORGE-93) — the `apply-decision` verb + apply-journal they wrap **shipped in FORGE-95 (2026-05-30)**; only the skill layer is still v0.5
 - `/amend-roadmap` skill + verb
 - `forge orchestrate worktree-drift-guard` verb (FORGE-103 canceled — dropped, not deferred)
 - Drift events, drift-routed questions, `QuestionIndex.drift_event_id`, `QuestionIndex.routing_hint`
@@ -68,7 +67,7 @@ The ADR template scaffold (`templates/adr.template.md`) does ship in v0.4 (FORGE
 
 **What changes vs the morning amendment below:**
 
-- **Feature 5 (Drift workflow + ephemeral ADRs)** — **deferred to v0.5 opt-in.** No `/update-spec --draft`, no `/update-spec --apply`, no `apply-decision` verb in v0.4. SPEC changes flow through standard git (`git commit && git push`). Other engineers `git pull` and adapt their in-flight work. Forge does not mediate.
+- **Feature 5 (Drift workflow + ephemeral ADRs)** — **deferred to v0.5 opt-in**, except the `apply-decision` verb + apply-journal which **shipped in FORGE-95 (2026-05-30)**. No `/update-spec --draft|--apply` skill in v0.4 (FORGE-93). SPEC changes flow through standard git (`git commit && git push`). Other engineers `git pull` and adapt their in-flight work. Forge does not mediate.
 - **Feature 6 (Mid-flight roadmap mutation)** — **deferred to v0.5 opt-in.** No `/amend-roadmap`, no `worktree-drift-guard`. v0.4 uses direct tracker edit + `/reconcile --pull` for scope changes.
 - **§Precedence rules** — the 6-level linear chain is replaced with **authority-by-field** (see table above).
 - **No contradiction gate** on SPEC pushes. The morning's `/update-spec --apply` propagation and the briefly-considered `forge spec-push --affects` flag are both dropped. Forge provides mechanism (scaffold + dispatch + sync), not policy (review rituals, conflict resolution, PR enforcement). Team coordination is the team's responsibility.
