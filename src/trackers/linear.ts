@@ -8,12 +8,14 @@ import {
   type WithRetryOpts,
 } from './base.ts';
 import { TrackerError } from './errors.ts';
+import type { ClaimFenceData } from './claim-fence.ts';
 import {
   assertValidBodyInput,
   parseClaimFooter,
   parseExtraForgeFooters,
   parseForgeFooters,
   serializeWithForgeFooters,
+  upsertClaimFooter,
 } from './footers.ts';
 import type {
   ClaimResult,
@@ -1072,6 +1074,48 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
         classifyLinearError(err),
       );
     }
+  }
+
+  // ─── setClaimFence — forge:claim footer write (FORGE-167) ──────────────────
+  //
+  // Read-modify-write on the LATEST description: upsertClaimFooter stamps (data)
+  // or strips (null) the `forge:claim` footer, preserving prose + forge:task +
+  // forge:blockedBy + every other footer. RAW write via client.updateIssue —
+  // NOT updateIssueBody, whose assertValidBodyInput rejects the forge-footer
+  // content upsertClaimFooter produces. upsertClaimFooter throws
+  // PRECONDITION_FAILED when no forge:task footer is present.
+  async setClaimFence(
+    issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    const client = await this.getClient();
+    return this.withRetry(
+      'setClaimFence',
+      async () => {
+        let issue: LinearIssueLike;
+        try {
+          issue = await client.issue(issueId);
+        } catch (err) {
+          throw this.normalizeError(
+            'setClaimFence',
+            err,
+            classifyLinearError(err),
+          );
+        }
+        const newDescription = upsertClaimFooter(issue.description, data);
+        try {
+          await client.updateIssue(issueId, { description: newDescription });
+        } catch (err) {
+          throw this.normalizeError(
+            'setClaimFence',
+            err,
+            classifyLinearError(err),
+          );
+        }
+      },
+      this.retryOpts,
+    );
   }
 
   // ─── Internal helpers used by subsequent commits ───────────────────────────

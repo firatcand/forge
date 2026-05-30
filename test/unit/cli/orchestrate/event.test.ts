@@ -30,6 +30,7 @@ class StubTracker implements ClaimableTracker {
     return { ok: true };
   }
   async releaseClaim(): Promise<void> {}
+  async setClaimFence(): Promise<void> {}
 }
 
 async function setupDispatched(stdout: string[]): Promise<{ forgeDir: string; attemptId: string }> {

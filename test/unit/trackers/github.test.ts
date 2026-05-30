@@ -14,7 +14,10 @@ import {
   type GhExecResult,
   type Logger,
 } from '../../../src/trackers/index.ts';
-import { assertValidBodyInput } from '../../../src/trackers/footers.ts';
+import {
+  assertValidBodyInput,
+  parseClaimFooter,
+} from '../../../src/trackers/footers.ts';
 import { GH_ISSUE_BODY_MAX_BYTES } from '../../../src/trackers/github.ts';
 import type { GithubTrackerConfig } from '../../../src/schemas/settings.ts';
 import {
@@ -894,6 +897,56 @@ test('updateIssueBody VALIDATION on embedded forge footer (no I/O issued)', asyn
     (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
   );
   assert.equal(mock.calls.length, 0);
+});
+
+// ─── setClaimFence (GitHub adapter, FORGE-167) ───────────────────────────────
+
+test('setClaimFence stamps forge:claim via RAW gh edit, preserving forge:task', async () => {
+  const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
+  await tracker.setClaimFence('42', {
+    claimId: 'c-1',
+    generation: 2,
+    ownerRunId: 'run-1',
+  });
+  const edit = mock.calls[1];
+  const newBody = edit?.[edit.indexOf('--body') + 1] ?? '';
+  // RAW edit carried the forge:claim footer (updateIssueBody rejects such input).
+  assert.deepEqual(parseClaimFooter(newBody), {
+    claimId: 'c-1',
+    generation: 2,
+    ownerRunId: 'run-1',
+  });
+  assert.match(newBody, /forge:task=FORGE-99/);
+});
+
+test('setClaimFence(null) strips forge:claim, preserves blockedBy + task', async () => {
+  const bodyWithClaim = {
+    body:
+      'b\n\n<!-- forge:task=FORGE-9 -->\n<!-- forge:blockedBy=10 -->\n' +
+      '<!-- forge:claim={"claim_id":"old","generation":1,"owner_run_id":"r0"} -->\n',
+  };
+  const { tracker, mock } = makeTracker([ok(bodyWithClaim), ok()]);
+  await tracker.setClaimFence('42', null);
+  const edit = mock.calls[1];
+  const newBody = edit?.[edit.indexOf('--body') + 1] ?? '';
+  assert.equal(parseClaimFooter(newBody), null);
+  assert.match(newBody, /forge:blockedBy=10/);
+  assert.match(newBody, /forge:task=FORGE-9/);
+});
+
+test('setClaimFence PRECONDITION_FAILED when no forge:task footer (no edit issued)', async () => {
+  const { tracker, mock } = makeTracker([ok(ghIssueViewBodyMissingFooter)]);
+  await assert.rejects(
+    () =>
+      tracker.setClaimFence('42', {
+        claimId: 'c',
+        generation: 0,
+        ownerRunId: 'r',
+      }),
+    (e: unknown) =>
+      e instanceof TrackerError && e.code === 'PRECONDITION_FAILED',
+  );
+  assert.equal(mock.calls.length, 1, 'view only; no edit after precondition');
 });
 
 test('setBlockedBy preserves unknown forge:* footers (ownerType)', async () => {

@@ -25,6 +25,19 @@ test('encode/decode claim value round-trips', () => {
   assert.deepEqual(decodeClaimValue(encodeClaimValue(DATA)), DATA);
 });
 
+test('encodeClaimValue rejects HTML comment metacharacters in string fields (FORGE-167)', () => {
+  for (const field of ['claimId', 'ownerRunId'] as const) {
+    for (const bad of ['a-->b', '<!--x']) {
+      assert.throws(
+        () => encodeClaimValue({ ...DATA, [field]: bad }),
+        (err: unknown) =>
+          err instanceof TrackerError && err.code === 'VALIDATION',
+        `${field}=${JSON.stringify(bad)} must be rejected`,
+      );
+    }
+  }
+});
+
 test('decodeClaimValue: nullish / malformed / missing / typed => null', () => {
   assert.equal(decodeClaimValue(null), null);
   assert.equal(decodeClaimValue(undefined), null);

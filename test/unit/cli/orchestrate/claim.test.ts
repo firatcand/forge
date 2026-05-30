@@ -8,6 +8,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
+import type { ClaimFenceData } from '../../../../src/trackers/claim-fence.ts';
 
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
@@ -31,8 +32,10 @@ class StubTracker implements ClaimableTracker {
   readonly type = 'stub';
   readonly claims: Array<{ issueId: string; runId: string }> = [];
   readonly releases: Array<{ issueId: string; runId: string }> = [];
+  readonly fences: Array<{ issueId: string; data: ClaimFenceData | null }> = [];
   readonly result: ClaimResult;
   readonly throwOnClaim: boolean;
+  throwOnFence = false;
   constructor(result: ClaimResult = { ok: true }, throwOnClaim = false) {
     this.result = result;
     this.throwOnClaim = throwOnClaim;
@@ -44,6 +47,13 @@ class StubTracker implements ClaimableTracker {
   }
   async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.releases.push({ issueId, runId });
+  }
+  async setClaimFence(
+    issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void> {
+    if (this.throwOnFence) throw new Error('fence boom');
+    this.fences.push({ issueId, data });
   }
 }
 
@@ -78,6 +88,12 @@ test('claim succeeds: writes lease + state, returns claim_id', async (t) => {
   // Tracker recorded the claim, not the release.
   assert.equal(tracker.claims.length, 1);
   assert.equal(tracker.releases.length, 0);
+  // forge:claim footer stamped exactly once with the committed lease identity.
+  assert.equal(tracker.fences.length, 1);
+  assert.equal(tracker.fences[0]?.issueId, 'FORGE-1');
+  assert.equal(tracker.fences[0]?.data?.claimId, env.data.claim_id);
+  assert.equal(tracker.fences[0]?.data?.generation, 0);
+  assert.ok(tracker.fences[0]?.data?.ownerRunId, 'ownerRunId stamped');
 });
 
 test('claim fails ALREADY_CLAIMED when tracker refuses', async (t) => {
@@ -192,6 +208,9 @@ test('claim rolls back tracker + lease when writeTaskState fails (Codex 2nd-pass
   const { existsSync } = await import('node:fs');
   assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')));
   assert.equal(env.error.details.rolled_back, true);
+  // forge:claim is stamped only AFTER a committed state write, so the
+  // rollback path never stamped it — nothing to un-stamp (plan Decision 3).
+  assert.equal(tracker.fences.length, 0);
 });
 
 test('claim surfaces tracker exception as TRACKER_ERROR (retriable)', async (t) => {
@@ -206,4 +225,26 @@ test('claim surfaces tracker exception as TRACKER_ERROR (retriable)', async (t) 
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'TRACKER_ERROR');
   assert.equal(env.error.retriable, true);
+});
+
+test('claim succeeds even when setClaimFence throws (best-effort footer)', async (t) => {
+  const stdout = captureStdout(t);
+  const { forgeDir, repoRoot } = tmpRoot();
+  const tracker = new StubTracker();
+  tracker.throwOnFence = true;
+  const result = await runOrchestrateClaim(
+    { taskId: 'FORGE-1', runId: uuidv7(), forgeDir, json: true },
+    {
+      tracker,
+      specRevision: { revision: 'git:abc1234', source: 'git' },
+      repoRoot,
+    },
+  );
+  // Fence failure must NOT fail the claim — it exits 0 with the lease.
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, true);
+  assert.ok(env.data.claim_id);
+  // Lease + state still committed.
+  assert.ok(existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')));
 });
