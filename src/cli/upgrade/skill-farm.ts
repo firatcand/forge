@@ -389,3 +389,80 @@ function isForgeOwnedSymlink(dest: string, src: string): boolean {
   const expectedTarget = relative(dirname(dest), src);
   return safeReadlink(dest) === expectedTarget;
 }
+
+export interface FarmProvenanceCounts {
+  /** Symlinks whose target matches the bundled forge source (provenance-verified). */
+  readonly forgeOwned: number;
+  /** Present entries that are NOT forge-owned: real files/dirs, symlinks pointing
+   *  elsewhere, or entries whose name isn't in the bundled set (a user's own skill). */
+  readonly userOwned: number;
+  /** Dangling symlinks (target no longer exists). */
+  readonly broken: number;
+}
+
+/**
+ * FORGE-159: read-only provenance census of a single host's skill or agent farm
+ * directory (e.g. `.claude/skills/`). Powers `forge status`. Uses the SAME
+ * `isForgeOwnedSymlink` check `pruneHostFarm` relies on, so "forge-owned" means
+ * the same thing whether we're reporting or deleting — single source of truth.
+ *
+ * Returns all-zero counts when the farm dir is absent. `.bak` backup entries
+ * (created by applyOne on refresh) are skipped so they don't inflate userOwned.
+ *
+ * Windows/copy-mode caveat (same as pruneHostFarm): copies are indistinguishable
+ * from user content without a manifest, so on copy-mode farms forge-installed
+ * entries count as userOwned. The default POSIX/dogfood path is symlink mode,
+ * where provenance is exact.
+ *
+ * Same-install caveat: "forge-owned" means the symlink points at THIS package's
+ * `skills/`/`agents/`. A farm created by a DIFFERENT forge install (e.g. a global
+ * npm install) and inspected by a local dev build resolves a different
+ * `packageRoot`, so its symlinks read as userOwned. This is intentional — it's
+ * the same conservative definition pruneHostFarm uses to decide what's safe to
+ * delete. In a normal adopter project (one forge install throughout) the counts
+ * are exact.
+ */
+export function classifyHostFarm(opts: {
+  readonly cwd: string;
+  readonly packageRoot: string;
+  readonly host: AgentKind;
+  readonly kind: 'skills' | 'agents';
+}): FarmProvenanceCounts {
+  const cwd = canonicalizeIfExists(opts.cwd);
+  const packageRoot = canonicalizeIfExists(opts.packageRoot);
+  const hostDirs = HOST_DIRS[opts.host];
+  const farmDir = resolve(cwd, opts.kind === 'skills' ? hostDirs.skills : hostDirs.agents);
+  const srcRoot = resolve(packageRoot, opts.kind);
+  const bundled = new Set(
+    opts.kind === 'skills' ? listBundledSkills(srcRoot) : listBundledAgents(srcRoot),
+  );
+
+  let forgeOwned = 0;
+  let userOwned = 0;
+  let broken = 0;
+
+  let entries: string[];
+  try {
+    entries = readdirSync(farmDir);
+  } catch {
+    return { forgeOwned: 0, userOwned: 0, broken: 0 };
+  }
+
+  for (const name of entries) {
+    if (name.endsWith('.bak')) continue;
+    const dest = resolve(farmDir, name);
+    // Order matters: a dangling forge symlink is "broken", not "forge-owned".
+    if (isBrokenSymlink(dest)) {
+      broken += 1;
+      continue;
+    }
+    const src = resolve(srcRoot, name);
+    if (bundled.has(name) && isForgeOwnedSymlink(dest, src)) {
+      forgeOwned += 1;
+    } else {
+      userOwned += 1;
+    }
+  }
+
+  return { forgeOwned, userOwned, broken };
+}
