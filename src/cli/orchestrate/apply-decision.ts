@@ -27,7 +27,7 @@ import { ApplyError } from '../../core/errors.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { validateUnderRoot } from '../../core/workspace.ts';
-import { createTracker, trackerSupportsBodyMutation } from '../../trackers/factory.ts';
+import { createTracker, trackerSupportsBodyMutation } from './tracker-factory.ts';
 import type { Logger, Tracker } from '../../trackers/base.ts';
 import {
   resolveAdrPath,

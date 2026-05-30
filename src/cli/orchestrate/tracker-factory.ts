@@ -109,6 +109,14 @@ export function createTracker(settings: Settings, logger: Logger): TrackerHandle
   }
 }
 
+// Whether `updateIssueBody` is implemented for this tracker. Notion's is a
+// NOT_IMPLEMENTED stub until FORGE-117 lands the `ntn` transport; apply-decision
+// (FORGE-95) preflights this so it fails BEFORE any local mutation rather than
+// half-applying. FORGE-117: flip to always-true once NotionTracker.updateIssueBody ships.
+export function trackerSupportsBodyMutation(tracker: Pick<Tracker, 'type'>): boolean {
+  return tracker.type !== 'notion';
+}
+
 // Silent logger for CLI tracker construction. Claim/cancel call setClaimFence
 // best-effort and surface their own warnings via the verb's logger, so the
 // adapter-internal retry chatter stays quiet here.
