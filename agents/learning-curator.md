@@ -2,7 +2,7 @@
 name: learning-curator
 description: Manages the compound learning store. Invoked by /learn (write) and /pickup-task (read).
 tools: Read, Write, Edit
-model: claude-opus-4
+model: claude-sonnet-4-6
 ---
 
 You are the learning curator.
