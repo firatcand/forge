@@ -37,6 +37,24 @@ export type {
   ManifestFarmEntry,
 } from './manifest.ts';
 
+export {
+  ApplyJournalSchema,
+  MarkdownSectionEntrySchema,
+  PhasesTaskEntrySchema,
+  TrackerIssueEntrySchema,
+  FinalizeStateSchema,
+  EntryStatusSchema,
+  ENTRY_STATUSES,
+} from './apply-journal.ts';
+export type {
+  ApplyJournal,
+  MarkdownSectionEntry,
+  PhasesTaskEntry,
+  TrackerIssueEntry,
+  FinalizeState,
+  EntryStatus,
+} from './apply-journal.ts';
+
 export { SettingsSchema, TrackerConfigSchema, SecretsSchema } from './settings.ts';
 export type {
   Settings,
