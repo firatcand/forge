@@ -6,6 +6,30 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ### Added
 
+- **`forge eject` — reversible clean uninstall** (FORGE-158) — one command to
+  remove forge from a project. Strips the forge-managed marker block from each
+  agent root file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`), preserving your own
+  content byte-for-byte; reverses the `.gitignore` block and the
+  `.eslintignore` / `.prettierignore` lines; removes the host skill/agent farms
+  and the `.forge/` directory. `spec/`, `plans/`, `CRITICAL.md`, and your source
+  are left untouched.
+  ```
+  forge eject                  # dry-run plan (default)
+  forge eject --confirm        # apply
+  forge eject --confirm --no-backup
+  forge eject --restore <dir>  # undo a recent eject
+  ```
+  Safety: dry-run by default; takes a restorable backup snapshot
+  (`.forge.eject-backup-<ISO>/`) before deleting; refuses while an active
+  worktree or a non-terminal task state exists, or when a forge-managed file has
+  uncommitted git changes. Reversal is driven by a new `.forge/manifest.json`
+  (written by `forge init`, refreshed by `forge upgrade`) that records exactly
+  what forge wrote — so version-drift orphans and Windows copy-mode farm entries
+  are handled. Projects predating the manifest fall back to a best-effort derived
+  mode with a warning. Exposed as a top-level verb only (not `forge orchestrate
+  eject`) — eject is a project-lifecycle command, not an orchestrator state
+  transition.
+
 - **`settings.verify` + real verification runner** (FORGE-168) — a new optional
   `verify` block in `.forge/settings.yaml` lets an adopter declare the commands
   that prove an attempt is good:

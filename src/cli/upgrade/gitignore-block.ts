@@ -31,6 +31,9 @@ const MARKER_CLOSE = '# <<< forge-managed <<<';
 const BLOCK_BODY = [
   '/.forge/*',
   '!/.forge/settings.yaml',
+  // FORGE-158: transient eject backup snapshots (sibling of .forge/, so not
+  // covered by /.forge/*). Local-only rollback artifact — never committed.
+  '/.forge.eject-backup-*/',
   '/.claude/skills/',
   '/.claude/agents/',
   '/.codex/skills/',
@@ -67,4 +70,32 @@ export function applyGitignoreBlock(contents: string): string {
 
 export function hasGitignoreBlock(contents: string): boolean {
   return blockRegex.test(contents);
+}
+
+// FORGE-158: inverse of applyGitignoreBlock's append path, for `forge eject`.
+//
+// applyGitignoreBlock(prior) === prior + sep + FULL_BLOCK, where
+//   sep = prior.endsWith('\n') ? '\n' : '\n\n'   (only when prior is non-empty)
+// Removing just the marker-to-marker span leaves that inserted `sep` behind as
+// orphaned blank lines — and worse, two different priors collapse to the same
+// post-install bytes ("X\n" and "X" both yield "X\n\nBLOCK"), so the inverse is
+// genuinely ambiguous without knowing the prior's trailing-newline state.
+// `priorEndedWithNewline` (recorded in the manifest at write time) resolves it.
+//
+// Returns the pre-install content byte-exactly when `contents` still ends with
+// forge's exact appended suffix. If the user edited around the block since
+// install (suffix no longer matches), falls back to a block-strip + collapse of
+// any run of blank lines the removal would leave at EOF — best-effort, since a
+// byte-exact reversal is no longer defined.
+export function removeGitignoreBlock(
+  contents: string,
+  opts: { priorEndedWithNewline: boolean },
+): string {
+  const sep = opts.priorEndedWithNewline ? '\n' : '\n\n';
+  const appended = `${sep}${FULL_BLOCK}`;
+  if (contents.endsWith(appended)) {
+    return contents.slice(0, contents.length - appended.length);
+  }
+  if (contents === FULL_BLOCK) return '';
+  return contents.replace(blockRegex, '').replace(/\n{2,}$/, '\n');
 }
