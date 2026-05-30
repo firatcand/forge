@@ -31,7 +31,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { execaSync } from 'execa';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import {
@@ -170,6 +170,22 @@ export function eject(opts: EjectOptions): EjectResult {
 // --- guard ------------------------------------------------------------------
 
 function guard(cwd: string, forgeDir: string, manifest: ForgeManifest): string | null {
+  // Path containment: a corrupted or hand-edited manifest must never drive a
+  // delete outside the project (Codex impl #2). Refuse loudly on any escaping
+  // path rather than silently skipping — escaping paths signal tampering.
+  const escaping = [
+    ...manifest.rootFiles.map((r) => r.path),
+    ...manifest.ignoreFiles.map((i) => i.path),
+    ...manifest.farmEntries.map((f) => f.path),
+  ].filter((rel) => within(cwd, rel) === null);
+  if (escaping.length > 0) {
+    return [
+      'forge eject: refusing — .forge/manifest.json references paths outside the project:',
+      ...escaping.map((p) => `  - ${p}`),
+      'The manifest appears corrupted or edited. Remove it and re-run (eject will fall back to derived mode).',
+    ].join('\n');
+  }
+
   // Active worktrees.
   const worktreesDir = join(forgeDir, 'worktrees');
   if (existsSync(worktreesDir)) {
@@ -183,28 +199,39 @@ function guard(cwd: string, forgeDir: string, manifest: ForgeManifest): string |
     }
   }
 
-  // Non-terminal task state.
+  // Non-terminal task state. Fail SAFE (Codex impl #3): a state.json that is
+  // unreadable, malformed, or a future schema version is treated as possibly
+  // active — we cannot prove it's inert, so we block rather than risk deleting
+  // .forge/ over live work.
   const tasksDir = join(forgeDir, 'orchestrator', 'tasks');
   const active: string[] = [];
   if (existsSync(tasksDir)) {
     for (const entry of readdirSync(tasksDir)) {
       const statePath = join(tasksDir, entry, 'state.json');
       if (!existsSync(statePath)) continue;
+      let parsedState: string | null = null;
       try {
         const parsed = TaskStateSchema.safeParse(JSON.parse(readFileSync(statePath, 'utf8')));
-        if (parsed.success && BLOCKING_TASK_STATES.has(parsed.data.state)) {
-          active.push(`${parsed.data.task_id} (${parsed.data.state})`);
+        if (!parsed.success) {
+          active.push(`${entry} (unrecognized state.json — schema mismatch?)`);
+          continue;
         }
+        parsedState = parsed.data.state;
       } catch {
-        // Unreadable/garbage state file — don't block eject on it.
+        active.push(`${entry} (unreadable state.json)`);
+        continue;
+      }
+      if (BLOCKING_TASK_STATES.has(parsedState)) {
+        active.push(`${entry} (${parsedState})`);
       }
     }
   }
   if (active.length > 0) {
     return [
-      'forge eject: refusing — tasks are still active:',
+      'forge eject: refusing — tasks may still be active:',
       ...active.map((a) => `  - ${a}`),
-      'Ship or cancel them first (`forge orchestrate complete` / `cancel`).',
+      'Ship or cancel them first (`forge orchestrate complete` / `cancel`),',
+      'or remove a stale/corrupt .forge/orchestrator/tasks/<id>/ directory.',
     ].join('\n');
   }
 
@@ -253,18 +280,21 @@ function computePlan(cwd: string, manifest: ForgeManifest): EjectPlanItem[] {
   const plan: EjectPlanItem[] = [];
 
   for (const rf of manifest.rootFiles) {
-    if (!existsSync(resolve(cwd, rf.path))) continue;
+    const p = within(cwd, rf.path);
+    if (!p || !existsSync(p)) continue;
     plan.push({ action: rf.forgeCreated ? 'delete-file' : 'strip-block', path: rf.path });
   }
   for (const ig of manifest.ignoreFiles) {
-    if (!existsSync(resolve(cwd, ig.path))) continue;
+    const p = within(cwd, ig.path);
+    if (!p || !existsSync(p)) continue;
     plan.push({
       action: ig.created ? 'delete-file' : ig.kind === 'block' ? 'strip-block' : 'remove-line',
       path: ig.path,
     });
   }
   for (const fe of manifest.farmEntries) {
-    if (!pathPresent(resolve(cwd, fe.path))) continue;
+    const p = within(cwd, fe.path);
+    if (!p || !pathPresent(p)) continue;
     plan.push({ action: 'remove-farm', path: fe.path });
   }
   plan.push({ action: 'remove-dir', path: '.forge' });
@@ -276,39 +306,40 @@ function computePlan(cwd: string, manifest: ForgeManifest): EjectPlanItem[] {
 function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPlanItem[]): void {
   // Root files.
   for (const rf of manifest.rootFiles) {
-    const p = resolve(cwd, rf.path);
-    if (!existsSync(p)) continue;
+    const p = within(cwd, rf.path);
+    if (!p || !existsSync(p)) continue;
     if (rf.forgeCreated) {
       unlinkSync(p);
       continue;
     }
-    const stripped = bodyWithoutPrefixBlock(readFileSync(p, 'utf8'));
-    if (stripped.trim().length === 0) unlinkSync(p);
-    else writeAtomic(p, stripped);
+    // forge only STAMPED a marker onto a pre-existing user file — strip the
+    // block and keep the file even if the residual is empty (it's the user's
+    // file; deleting it would be data loss — Codex impl #1).
+    writeAtomic(p, bodyWithoutPrefixBlock(readFileSync(p, 'utf8')));
   }
 
   // Ignore files.
   for (const ig of manifest.ignoreFiles) {
-    const p = resolve(cwd, ig.path);
-    if (!existsSync(p)) continue;
+    const p = within(cwd, ig.path);
+    if (!p || !existsSync(p)) continue;
     if (ig.created) {
       unlinkSync(p);
       continue;
     }
+    // Pre-existing user file — reverse forge's modification, never delete.
     const before = readFileSync(p, 'utf8');
     const after =
       ig.kind === 'block'
         ? removeGitignoreBlock(before, { priorEndedWithNewline: ig.priorEndedWithNewline })
         : removeAppendedLine(before, ig.line ?? '', ig.priorEndedWithNewline);
-    if (after.trim().length === 0) unlinkSync(p);
-    else writeAtomic(p, after);
+    writeAtomic(p, after);
   }
 
   // Farm entries (manifest-recorded — covers symlink + copy modes).
   const farmParents = new Set<string>();
   for (const fe of manifest.farmEntries) {
-    const p = resolve(cwd, fe.path);
-    if (!pathPresent(p)) continue;
+    const p = within(cwd, fe.path);
+    if (!p || !pathPresent(p)) continue;
     // For symlink mode, only remove if it's still a symlink (a user replacement
     // with a real file at the same path is left alone).
     if (fe.mode === 'symlink' && !isSymlink(p)) continue;
@@ -408,6 +439,14 @@ function restore(cwd: string, backupArg: string): EjectResult {
 }
 
 // --- fs helpers -------------------------------------------------------------
+
+/** Resolve `rel` under `cwd`, returning the absolute path only if it stays
+ * strictly inside the project (never cwd itself). null = escapes / is cwd. */
+function within(cwd: string, rel: string): string | null {
+  const root = resolve(cwd);
+  const abs = resolve(root, rel);
+  return abs.startsWith(root + sep) ? abs : null;
+}
 
 /** Like existsSync but true for broken symlinks too (lstat, not stat). */
 function pathPresent(p: string): boolean {

@@ -453,7 +453,10 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   // Shared with Phase B's forge upgrade — both call applyGitignoreBlock so the
   // block is byte-identical regardless of which path wrote it.
   const giPath = resolve(opts.cwd, '.gitignore');
-  const existingGi = existsSync(giPath) ? readFileSync(giPath, 'utf8') : '';
+  // `created` must mean "forge made the file", not "the file was empty" — a user
+  // can own an empty .gitignore, and eject must not delete it (Codex impl #1).
+  const giExisted = existsSync(giPath);
+  const existingGi = giExisted ? readFileSync(giPath, 'utf8') : '';
   const newGi = applyGitignoreBlock(existingGi);
   // FORGE-158: manifest entries describing exactly what forge wrote, so eject
   // can reverse them byte-exactly.
@@ -464,7 +467,7 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     ignoreFiles.push({
       path: '.gitignore',
       kind: 'block',
-      created: existingGi.length === 0,
+      created: !giExisted,
       priorEndedWithNewline: existingGi.endsWith('\n'),
     });
   } else {

@@ -218,6 +218,47 @@ test('eject: noop when no .forge directory', () => {
   assert.equal(res.exitCode, 0);
 });
 
+test('eject: never deletes a user-owned file even if reversal empties it (Codex impl #1)', () => {
+  const cwd = project();
+  // User owns an empty .gitignore; forge appended its block (created=false).
+  writeFileSync(join(cwd, '.gitignore'), '');
+  const block = '\n# >>> forge-managed (do not edit between markers) >>>\n/.forge/*\n# <<< forge-managed <<<\n';
+  writeFileSync(join(cwd, '.gitignore'), block.trimStart());
+  writeManifest(
+    cwd,
+    baseManifest({
+      ignoreFiles: [{ path: '.gitignore', kind: 'block', created: false, priorEndedWithNewline: false }],
+    }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0);
+  assert.ok(existsSync(join(cwd, '.gitignore')), 'user .gitignore preserved (not deleted) even when emptied');
+});
+
+test('eject: refuses a manifest path that escapes the project (Codex impl #2)', () => {
+  const cwd = project();
+  writeManifest(cwd, baseManifest({ rootFiles: [{ path: '../evil.txt', forgeCreated: true }] }));
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 1);
+  assert.equal(res.mode, 'refused');
+  assert.match(res.stderr, /outside the project/i);
+  assert.ok(existsSync(join(cwd, '.forge')), '.forge untouched on containment refusal');
+});
+
+test('eject: refuses on an unreadable/malformed state.json (Codex impl #3)', () => {
+  const cwd = project();
+  const taskDir = join(cwd, '.forge/orchestrator/tasks/FORGE-9');
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(join(taskDir, 'state.json'), '{ not valid json');
+  writeManifest(cwd, baseManifest());
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 1);
+  assert.match(res.stderr, /unreadable|unrecognized|active/i);
+  assert.ok(existsSync(join(cwd, '.forge')), '.forge untouched — fail safe on unknown state');
+});
+
 test('eject: backup snapshot dir is created at repo root', () => {
   const cwd = project();
   writeFileSync(join(cwd, 'CLAUDE.md'), `${MARKER}\n`);
