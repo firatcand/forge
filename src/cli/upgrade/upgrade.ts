@@ -19,6 +19,13 @@ import { dirname, resolve } from 'node:path';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
+import {
+  MANIFEST_RELPATH,
+  farmEntriesFromResult,
+  readManifest,
+  refreshManifest,
+  writeManifest,
+} from '../manifest.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import {
   ROOT_FILE_BY_AGENT,
@@ -278,6 +285,33 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   });
   for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
   for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
+
+  // 10. FORGE-158: refresh .forge/manifest.json so `forge eject` has an
+  //     up-to-date record. Preserves install-time truth (ignoreFiles + each
+  //     root file's forgeCreated flag) from the prior manifest; recomputes the
+  //     rest. recentlyWritten holds any root file --add-agent just created.
+  //
+  //     Idempotency: only write when the manifest actually changes. And never
+  //     CREATE a missing manifest on an otherwise-clean run — that would turn a
+  //     no-op upgrade of a pre-manifest repo into a write. A missing manifest is
+  //     materialized the next time upgrade changes something (or by init); eject
+  //     handles its absence via the legacy fallback.
+  const priorManifest = readManifest(cwd);
+  const desiredManifest = refreshManifest(priorManifest, {
+    cwd,
+    forgeVersion: bundledVersion,
+    enabledHosts: settings.agents.enabled_root_files,
+    farmEntries: farmEntriesFromResult(cwd, farm),
+    createdRootFiles: [...recentlyWritten],
+  });
+  const manifestDiffers =
+    priorManifest === null
+      ? changed.length > 0
+      : JSON.stringify(priorManifest) !== JSON.stringify(desiredManifest);
+  if (manifestDiffers) {
+    if (!opts.dryRun) writeManifest(cwd, desiredManifest);
+    changed.push(MANIFEST_RELPATH);
+  }
 
   return { exitCode: 0, filesChanged: changed, stderr: '' };
 }
