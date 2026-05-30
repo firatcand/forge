@@ -14,6 +14,7 @@ import { v7 as uuidv7 } from 'uuid';
 import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
+import type { ClaimFenceData } from '../../../../src/trackers/claim-fence.ts';
 
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
@@ -43,6 +44,12 @@ class StubTracker implements ClaimableTracker {
   }
   async releaseClaim(issueId: string, runId: string): Promise<void> {
     this.releases.push({ issueId, runId });
+  }
+  async setClaimFence(
+    _issueId: string,
+    _data: ClaimFenceData | null,
+  ): Promise<void> {
+    // overlap-gate tests don't assert footer behavior
   }
 }
 

@@ -1,4 +1,5 @@
 import type { TrackerConfig } from '../schemas/settings.ts';
+import type { ClaimFenceData } from './claim-fence.ts';
 import {
   TrackerError,
   isRetriableTrackerErrorCode,
@@ -57,6 +58,18 @@ export interface Tracker {
   // Added 2026-05-17 for /apply-decision + /reconcile propagation (FORGE-94).
   updateIssueBody(issueId: string, body: string): Promise<void>;
 
+  // Mirror the local lease identity onto the tracker issue as a `forge:claim`
+  // body footer (read-modify-write the LATEST body via upsertClaimFooter, then a
+  // RAW body write — NOT updateIssueBody, which rejects forge-footer input).
+  // `data=null` strips the footer. Throws PRECONDITION_FAILED when the issue has
+  // no forge:task footer (created outside forge).
+  //
+  // Concurrency: no CAS — caller must hold the issue's claim (single-writer).
+  // Callers invoke this best-effort (warn on failure, never fail the claim);
+  // the authority for lease ownership is always the generation-fenced local
+  // lease, never this advisory footer. Added FORGE-167 (part 2 of FORGE-145).
+  setClaimFence(issueId: string, data: ClaimFenceData | null): Promise<void>;
+
   createProject(name: string, description?: string): Promise<{ id: string; url: string }>;
   createIssue(payload: CreateIssuePayload): Promise<Issue>;
   setBlockedBy(issueId: string, blockerId: string): Promise<void>;
@@ -102,6 +115,10 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   abstract updateState(issueId: string, state: IssueState): Promise<void>;
   abstract comment(issueId: string, body: string): Promise<void>;
   abstract updateIssueBody(issueId: string, body: string): Promise<void>;
+  abstract setClaimFence(
+    issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void>;
   abstract createProject(
     name: string,
     description?: string,

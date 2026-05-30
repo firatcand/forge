@@ -38,6 +38,7 @@ class StubTracker implements ClaimableTracker {
     return { ok: true };
   }
   async releaseClaim(): Promise<void> {}
+  async setClaimFence(): Promise<void> {}
 }
 
 function setupRepo(): { repoRoot: string; forgeDir: string } {
