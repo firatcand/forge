@@ -262,14 +262,24 @@ export async function runOrchestrateApplyDecision(
     // 2. ADR gate. When resuming an all-applied journal into finalize the ADR may
     //    already be deleted — only re-read it if the rationale (commit-msg) is
     //    not yet written (ordering guarantees the ADR still exists then).
+    // Gate on acceptance whenever the ADR file EXISTS on disk — never trust the
+    // journal's finalize flags to imply a prior gate (a hand-authored journal
+    // can set commit_msg_written=true without ever gating; Codex confirmation
+    // pass). The only legitimate skip is a genuinely-absent ADR while resuming
+    // an all-applied journal (a prior finalize already deleted it).
     let adr: ParsedAdr | null = null;
-    const needAdr = !finalizing || !journal.finalize.commit_msg_written;
-    if (needAdr) {
-      adr = parseAdr(resolveAdrPath(repoRoot, opts.slug));
-      // Gate on acceptance WHENEVER the ADR is in hand — including a resume into
-      // finalize on a pre-marked-applied journal (Codex impl-review #1). The only
-      // case we can't re-check is when the ADR is already deleted (commit-msg
-      // written), and reaching that state required passing this gate earlier.
+    let adrPath: string | null = null;
+    try {
+      adrPath = resolveAdrPath(repoRoot, opts.slug);
+    } catch (err) {
+      if (err instanceof ApplyError && err.code === 'ADR_NOT_FOUND' && finalizing) {
+        adrPath = null; // resume past a prior delete — acceptable
+      } else {
+        throw err;
+      }
+    }
+    if (adrPath) {
+      adr = parseAdr(adrPath);
       assertAccepted(adr);
       if (!finalizing) assertCoverage(adr, journal);
     }
