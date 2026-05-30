@@ -206,8 +206,10 @@ async function stripClaimFence(opts: CancelArgs, deps: CancelDeps): Promise<void
   try {
     await t.setClaimFence(opts.taskId, null);
   } catch (err) {
+    // Truncate untrusted tracker error text (FORGE-167 review: sec L2).
+    const detail = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     process.stderr.write(
-      `warning: setClaimFence(null) failed for ${opts.taskId} on cancel (tracker footer not cleared): ${err instanceof Error ? err.message : String(err)}\n`,
+      `warning: setClaimFence(null) failed for ${opts.taskId} on cancel (tracker footer not cleared): ${detail}\n`,
     );
   } finally {
     if (close) {

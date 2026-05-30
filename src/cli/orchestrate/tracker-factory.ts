@@ -151,11 +151,15 @@ export function resolveTrackerForCLI(forgeDir: string): TrackerLookupResult {
     const settings = loadSettings(settingsPath);
     const handle = createTracker(settings, silentLogger());
     return { ok: true, tracker: handle.tracker, close: handle.close };
-  } catch (err) {
+  } catch {
+    // Do NOT interpolate err.message: loadSettings/zod errors embed the
+    // absolute settings.yaml path + raw issue list, which would leak into the
+    // CLI JSON envelope on stdout (FORGE-167 review: security-auditor M1).
     return {
       ok: false,
       code: 'TRACKER_INIT_FAILED',
-      message: `failed to construct tracker from settings.yaml: ${err instanceof Error ? err.message : String(err)}`,
+      message:
+        'failed to construct tracker from .forge/settings.yaml (check tracker.type + config)',
     };
   }
 }

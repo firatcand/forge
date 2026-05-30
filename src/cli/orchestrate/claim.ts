@@ -280,8 +280,11 @@ async function runClaimWithTracker(
       ownerRunId: opts.runId,
     });
   } catch (err) {
+    // Truncate: err.message from a network lib is untrusted content (FORGE-167
+    // review: security-auditor L2).
+    const detail = (err instanceof Error ? err.message : String(err)).slice(0, 200);
     process.stderr.write(
-      `warning: setClaimFence failed for ${opts.taskId} (claim succeeded; tracker footer not mirrored): ${err instanceof Error ? err.message : String(err)}\n`,
+      `warning: setClaimFence failed for ${opts.taskId} (claim succeeded; tracker footer not mirrored): ${detail}\n`,
     );
   }
 
