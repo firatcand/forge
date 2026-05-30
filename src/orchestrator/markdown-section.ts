@@ -81,16 +81,28 @@ export function replaceManagedSection(md: string, anchor: string, newBody: strin
     throw new ApplyError('SECTION_NOT_FOUND', `marker block for '${anchor}' is half-present (corrupt)`, { anchor });
   }
 
-  // First touch: locate the heading by anchor and wrap its section.
+  // First touch: locate the heading by anchor and wrap its section. Scan the
+  // whole document so an ambiguous anchor (two headings slugify the same — we
+  // don't emulate GitHub's -1/-2 dedup suffixes) is rejected rather than
+  // silently editing the first match (Codex impl-review #4).
   let headingIdx = -1;
   let headingLevel = 0;
+  let matchCount = 0;
   for (let i = 0; i < lines.length; i += 1) {
     const m = HEADING_RE.exec(lines[i]!);
     if (m && slugifyHeading(m[2]!) === anchor) {
-      headingIdx = i;
-      headingLevel = m[1]!.length;
-      break;
+      matchCount += 1;
+      if (headingIdx < 0) {
+        headingIdx = i;
+        headingLevel = m[1]!.length;
+      }
     }
+  }
+  if (matchCount > 1) {
+    throw new ApplyError('SECTION_NOT_FOUND', `anchor '${anchor}' matches ${matchCount} headings (ambiguous)`, {
+      anchor,
+      matchCount,
+    });
   }
   if (headingIdx < 0) {
     throw new ApplyError('SECTION_NOT_FOUND', `no heading matches anchor '${anchor}'`, { anchor });

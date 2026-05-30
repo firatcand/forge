@@ -264,6 +264,39 @@ test('happy path applies all 4 artifact classes + finalizes', async (t) => {
   assert.equal(existsSync(repo.journalPath), false);
 });
 
+test('non-accepted ADR is gated even when the journal is pre-marked all-applied (Codex impl-review #1)', async (t) => {
+  const repo = setupRepo({
+    adrStatus: 'proposed',
+    journal: {
+      spec_sections: [{ ref: 'spec/SPEC.md#cli-surface', new_body: '## CLI surface\n\nX', status: 'applied' }],
+      prd_sections: [{ ref: 'spec/PRD.md#feature-2', new_body: '## Feature 2\n\nX', status: 'applied' }],
+      phases_tasks: [{ id: 'P2.5-T04', field: 'acceptance', value: ['x'], status: 'applied' }],
+      tracker_issues: [{ id: 'FORGE-95', new_body: 'x', retries: 0, status: 'applied' }],
+      finalize: { commit_msg_written: false, index_appended: false, adr_deleted: false, archived: false },
+    },
+  });
+  const buf = captureStdout(t);
+  await runOrchestrateApplyDecision(baseArgs(repo, { resume: true }));
+  const env = lastJson(buf);
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'ADR_NOT_ACCEPTED');
+  assert.equal(existsSync(repo.adrPath), true); // not deleted
+  assert.equal(existsSync(repo.commitMsgPath), false); // not finalized
+});
+
+test('coverage compares file#anchor, not anchor alone (Codex impl-review #2)', async (t) => {
+  // Journal entry targets the right anchor but the WRONG file → must not satisfy
+  // the ADR-declared spec/SPEC.md section.
+  const repo = setupRepo({
+    journal: { spec_sections: [{ ref: 'spec/OTHER.md#cli-surface', new_body: '## CLI surface\n\nX', status: 'pending' }] },
+  });
+  const buf = captureStdout(t);
+  await runOrchestrateApplyDecision(baseArgs(repo), { trackerOverride: fakeTracker() });
+  const env = lastJson(buf);
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'JOURNAL_COVERAGE_MISMATCH');
+});
+
 test('re-running an already-applied decision is an idempotent no-op', async (t) => {
   const repo = setupRepo();
   await runOrchestrateApplyDecision(baseArgs(repo), { trackerOverride: fakeTracker() });

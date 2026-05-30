@@ -103,13 +103,19 @@ function allEntriesApplied(j: ApplyJournal): boolean {
 // authoritative (Codex 2nd-pass round-2 improvement; see FORGE-95 plan).
 function assertCoverage(adr: ParsedAdr, j: ApplyJournal): void {
   const missing: string[] = [];
-  const specAnchors = new Set(j.spec_sections.map((e) => parseSectionRef(e.ref).anchor));
+  // Key by file#anchor, not anchor alone — an entry for the wrong file must not
+  // satisfy an ADR-declared section that shares an anchor name (Codex impl-review #2).
+  const refKey = (ref: string): string => {
+    const r = parseSectionRef(ref);
+    return `${r.file}#${r.anchor}`;
+  };
+  const specRefs = new Set(j.spec_sections.map((e) => refKey(e.ref)));
   for (const ref of adr.frontmatter.affected_spec_sections) {
-    if (!specAnchors.has(parseSectionRef(ref).anchor)) missing.push(`spec:${ref}`);
+    if (!specRefs.has(refKey(ref))) missing.push(`spec:${ref}`);
   }
-  const prdAnchors = new Set(j.prd_sections.map((e) => parseSectionRef(e.ref).anchor));
+  const prdRefs = new Set(j.prd_sections.map((e) => refKey(e.ref)));
   for (const ref of adr.frontmatter.affected_prd_sections) {
-    if (!prdAnchors.has(parseSectionRef(ref).anchor)) missing.push(`prd:${ref}`);
+    if (!prdRefs.has(refKey(ref))) missing.push(`prd:${ref}`);
   }
   const taskIds = new Set(j.phases_tasks.map((e) => e.id));
   for (const id of adr.frontmatter.affected_phases_tasks) {
@@ -223,6 +229,16 @@ export async function runOrchestrateApplyDecision(
   try {
     // 0. Already fully applied? (completed archive present ⇒ idempotent no-op.)
     if (existsSync(paths.completed)) {
+      // A crash between the archive write and the active unlink (finalize step 4)
+      // can leave a stale active journal; the archive is authoritative, so clean
+      // it up here rather than leaving it to linger (Codex impl-review #3).
+      if (existsSync(paths.active)) {
+        try {
+          unlinkSync(paths.active);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+        }
+      }
       return { exitCode: emit(ok({ slug: opts.slug, already_applied: true }), { json }) };
     }
 
@@ -250,10 +266,12 @@ export async function runOrchestrateApplyDecision(
     const needAdr = !finalizing || !journal.finalize.commit_msg_written;
     if (needAdr) {
       adr = parseAdr(resolveAdrPath(repoRoot, opts.slug));
-      if (!finalizing) {
-        assertAccepted(adr);
-        assertCoverage(adr, journal);
-      }
+      // Gate on acceptance WHENEVER the ADR is in hand — including a resume into
+      // finalize on a pre-marked-applied journal (Codex impl-review #1). The only
+      // case we can't re-check is when the ADR is already deleted (commit-msg
+      // written), and reaching that state required passing this gate earlier.
+      assertAccepted(adr);
+      if (!finalizing) assertCoverage(adr, journal);
     }
 
     // 3. Dry-run: report the plan, write nothing.

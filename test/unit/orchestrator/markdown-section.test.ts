@@ -92,6 +92,14 @@ b body
   assert.ok(out.includes('b body'));
 });
 
+test('ambiguous anchor (two headings slugify the same) throws rather than guessing', () => {
+  const doc = `## CLI surface\n\na\n\n## CLI surface\n\nb\n`;
+  assert.throws(
+    () => replaceManagedSection(doc, 'cli-surface', '## CLI surface\n\nnew'),
+    (e) => e instanceof ApplyError && e.code === 'SECTION_NOT_FOUND' && /ambiguous/.test(e.message),
+  );
+});
+
 test('half-present markers are treated as corrupt', () => {
   const corrupt = `${markerStart('cli-surface')}\n## CLI surface\nx\n`;
   assert.throws(
