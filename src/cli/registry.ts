@@ -110,6 +110,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'Bi-directional phases.yaml ↔ tracker sync (--pull | --push).',
   },
   {
+    name: 'apply-decision',
+    summary: 'Apply an accepted ephemeral ADR across SPEC/PRD/phases/tracker via a resumable journal.',
+  },
+  {
     name: 'gc',
     summary: 'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
   },

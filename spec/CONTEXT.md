@@ -14,7 +14,7 @@ Driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode
 | Section | Status |
 |---|---|
 | §v-next scope: "six features" header + Feature 5 + Feature 6 | **Partially superseded** — v0.4 ships four features; Features 5 + 6 deferred to v0.5 |
-| §The closed-loop drift workflow (lines ~53-80) | **Deferred to v0.5** — entire section describes v0.5 features (drift workflow, ephemeral ADRs, /update-spec, drift events, apply-decision verb) |
+| §The closed-loop drift workflow (lines ~53-80) | **Mostly v0.5** — drift workflow, ephemeral ADR *lifecycle*, `/update-spec` skill, drift events remain v0.5. **Exception:** the `apply-decision` verb + apply-journal shipped in FORGE-95 (2026-05-30) |
 | §Locked architectural decisions Q12 (6-level precedence) | **Superseded** — replaced with authority-by-field (see below and CLAUDE.md §Source of truth) |
 | §Locked architectural decisions Q13 (ephemeral ADRs) | **Deferred to v0.5** — only templates/adr.template.md ships in v0.4 (FORGE-92); full lifecycle lands in v0.5 |
 | §Module layout: v0.5-deferred file paths | **Stripped** (per FORGE-132 audit) — see updated layout below for the authoritative v0.4 surface |
@@ -50,8 +50,7 @@ The morning's linear precedence rule (`user > SPEC > PRD > phases > tracker > at
 
 ### Out of scope for v0.4 (re-listed for clarity)
 
-- `/update-spec --draft` and `/update-spec --apply` skills
-- `forge orchestrate apply-decision` verb + apply-journal
+- `/update-spec --draft` and `/update-spec --apply` skills (FORGE-93) — the `apply-decision` verb + apply-journal they wrap **shipped in FORGE-95 (2026-05-30)**; only the skill layer is still v0.5
 - `/amend-roadmap` skill + verb
 - `forge orchestrate worktree-drift-guard` verb
 - Drift events, drift-routed questions, `QuestionIndex.drift_event_id`, `QuestionIndex.routing_hint`
@@ -167,7 +166,7 @@ Skills own UX (diff previews, user confirmation, conversation); CLI verbs own de
 | HC | Two-host review | primary writes, secondary reviews; both required |
 | Q11 | Suggest-don't-force (added 2026-05-17) | CLI verbs split into read-only vs user-approved-mutate; no verb silently claims or mutates; skill-end nudges are the only "suggestion" mechanism (no host hooks installed) |
 | Q12 | Artifact precedence (added 2026-05-17 — **superseded 2026-05-17 PM**) | ~~6 levels: user > SPEC > PRD > phases.yaml > tracker body > attempts.~~ Replaced with **authority by field** (see §Amendments above and [CLAUDE.md §Source of truth](../CLAUDE.md)). No linear chain; each artifact owns specific concerns. |
-| Q13 | Ephemeral ADRs (added 2026-05-17 — **deferred to v0.5**) | Only `templates/adr.template.md` ships in v0.4 (FORGE-92) as preparation. The full lifecycle (`/update-spec --draft|--apply`, `apply-decision` verb, apply-journal, ADR-file-deleted-on-apply semantics) lands in v0.5 (FORGE-93, FORGE-95). |
+| Q13 | Ephemeral ADRs (added 2026-05-17) | `templates/adr.template.md` shipped in FORGE-92; the `apply-decision` verb + apply-journal + ADR-file-deleted-on-apply semantics shipped in **FORGE-95 (2026-05-30)**. The `/update-spec --draft|--apply` skill that authors ADRs and drives the verb is FORGE-93 (still v0.5). |
 
 ## Stack summary
 
@@ -238,10 +237,10 @@ templates/
 test/{unit,integration,schemas,orchestrator,fixtures,helpers}/
 ```
 
-> **Deferred to v0.5 (not on disk):** `src/orchestrator/{apply-decision,amend-roadmap,worktree-drift-guard,adr,precedence}.ts`,
-> `src/cli/orchestrate/{apply-decision,amend-roadmap,worktree-drift-guard}.ts`,
-> `src/schemas/{adr,apply-journal}.ts`, `skills/{update-spec,amend-roadmap}/`.
-> Only the ADR template scaffold (`templates/adr.template.md`) ships in v0.4 as preparation. See SPEC §21 for the architectural rationale.
+> **Shipped FORGE-95 (2026-05-30):** `src/cli/orchestrate/apply-decision.ts`, `src/orchestrator/{adr,markdown-section}.ts`, `src/schemas/{adr,apply-journal}.ts`, `src/trackers/factory.ts`.
+> **Still v0.5 (not on disk):** `src/orchestrator/{amend-roadmap,worktree-drift-guard,precedence}.ts`,
+> `src/cli/orchestrate/{amend-roadmap,worktree-drift-guard}.ts`, `skills/{update-spec,amend-roadmap}/`.
+> The ADR template scaffold (`templates/adr.template.md`) shipped in FORGE-92. See SPEC §21 for the architectural rationale.
 
 ## Migration sequence (the seed for /decompose)
 
