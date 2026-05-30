@@ -55,6 +55,9 @@ export type {
   EntryStatus,
 } from './apply-journal.ts';
 
+export { AdrFrontmatterSchema, AdrStatusSchema, ADR_STATUSES } from './adr.ts';
+export type { AdrFrontmatter, AdrStatus } from './adr.ts';
+
 export { SettingsSchema, TrackerConfigSchema, SecretsSchema } from './settings.ts';
 export type {
   Settings,
