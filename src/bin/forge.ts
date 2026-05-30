@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInit } from '../cli/init.ts';
 import { runCodexSuggest } from '../cli/codex-suggest.ts';
+import { runProjectStatus } from '../cli/project-status.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 import { upgrade } from '../cli/upgrade/upgrade.ts';
 import {
@@ -42,6 +43,7 @@ function printHelp(version: string): void {
     'Usage:',
     '  forge --version       Print the installed version',
     '  forge --help          Show this help',
+    '  forge status [--json] Report this project\'s forge state (read-only)',
     '',
     `v${version} ships the schemas, core utilities, and skill/agent assets.`,
     'The full command surface (init, orchestrate, doctor, etc.) lands',
@@ -144,6 +146,12 @@ if (command === 'init') {
     const result = await dispatchOrchestrate(args.slice(1), { cwd: process.cwd() });
     process.exit(result.exitCode);
   })();
+} else if (command === 'status') {
+  // FORGE-159: read-only project-state report. Distinct from
+  // `forge orchestrate status` (orchestrator run-state). Synchronous + never
+  // writes; always exits 0 (a non-forge dir or degraded section is information).
+  const result = runProjectStatus({ cwd: process.cwd(), rest: args.slice(1) });
+  process.exit(result.exitCode);
 } else if (command === 'codex-suggest') {
   // FORGE-105: in-skill auto-codex hint emitter. Synchronous + stateless;
   // safe to call from /plan-task and /ship at skill end.

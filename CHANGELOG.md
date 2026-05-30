@@ -6,6 +6,19 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ### Added
 
+- **`forge status` verb** (FORGE-159) — a read-only, top-level command that reports
+  a forge-managed project's state in one round-trip: methodology version drift
+  (bundled vs on-disk), agent root files (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`
+  marker presence + user-content byte size), symlink-farm provenance counts
+  (forge-owned vs user-owned vs broken under `.claude/`, `.codex/`, `.gemini/`),
+  spec placeholder-section counts, `plans/phases.yaml` phase/task counts, and
+  tracker/secrets config. Supports `--json` for a machine-parseable `{ ok, data }`
+  envelope (same shape as the orchestrate verbs) and a human-readable default.
+  Distinct from `forge orchestrate status` (which reports orchestrator run-state).
+  Never writes; a non-forge directory returns `managedByForge: false` and exits 0.
+  Farm provenance reuses the same ownership check `forge upgrade --remove-agent`
+  relies on (`skill-farm.ts`), so "forge-owned" means the same thing whether
+  reporting or pruning.
 - **`settings.verify` + real verification runner** (FORGE-168) — a new optional
   `verify` block in `.forge/settings.yaml` lets an adopter declare the commands
   that prove an attempt is good:
