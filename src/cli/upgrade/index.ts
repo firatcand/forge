@@ -15,7 +15,7 @@ export {
 } from './agent-root-files.ts';
 export type { AgentKind, PrefixBlockInput } from './agent-root-files.ts';
 
-export { applyGitignoreBlock, hasGitignoreBlock } from './gitignore-block.ts';
+export { applyGitignoreBlock, hasGitignoreBlock, removeGitignoreBlock } from './gitignore-block.ts';
 
 export {
   checkVersionDrift,

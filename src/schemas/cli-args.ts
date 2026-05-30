@@ -255,3 +255,25 @@ export const SecondOpinionArgsSchema = z.object({
   json: JsonFlag,
 });
 export type SecondOpinionArgs = z.infer<typeof SecondOpinionArgsSchema>;
+
+// `forge orchestrate apply-decision` (FORGE-95 / P2.5-T04) — propagate an
+// accepted ephemeral ADR across SPEC/PRD/phases.yaml/tracker via a resumable
+// journal. The verb is the mechanical applier wrapped by `/update-spec --apply`
+// (FORGE-93). `--adr <slug>` selects spec/decisions/<...>-<slug>.md; the journal
+// (payload-complete) is read from .forge/orchestrator/global/update-spec-apply-
+// journal/<slug>.json.
+export const ApplyDecisionArgsSchema = z.object({
+  // The ADR slug (kebab). Resolves the decision file + the journal filename.
+  slug: z.string().regex(/^[a-z0-9-]+$/, 'slug uses lowercase a-z 0-9 and hyphens'),
+  // Skip per-artifact confirmation (the skill prompts; the verb is non-interactive).
+  yesAll: z.boolean().default(false),
+  // Resume a partially-applied journal: skip applied entries, retry pending/failed.
+  resume: z.boolean().default(false),
+  // Show per-artifact diff without writing journal, mutations, or finalize.
+  dryRun: z.boolean().default(false),
+  // Repo root containing spec/ and plans/. Defaults to forgeDir's parent in the verb.
+  repoRoot: z.string().min(1).optional(),
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type ApplyDecisionArgs = z.infer<typeof ApplyDecisionArgsSchema>;

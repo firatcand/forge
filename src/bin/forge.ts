@@ -7,6 +7,7 @@ import { runCodexSuggest } from '../cli/codex-suggest.ts';
 import { runProjectStatus } from '../cli/project-status.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 import { upgrade } from '../cli/upgrade/upgrade.ts';
+import { eject as ejectRun, type EjectResult } from '../cli/eject/eject.ts';
 import {
   checkVersionDrift,
   formatDriftWarning,
@@ -230,8 +231,46 @@ if (command === 'init') {
       process.exit(1);
     }
   })();
+} else if (command === 'eject') {
+  // FORGE-158: clean uninstall. Top-level verb only (not under orchestrate —
+  // it's a project-lifecycle command, not an orchestrator state transition).
+  const flags = args.slice(1);
+  const restoreParse = readFlagValue(flags, '--restore');
+  if (restoreParse === 'MISSING_VALUE') {
+    console.error('forge eject: --restore requires a backup directory path');
+    process.exit(1);
+  }
+  const result = ejectRun({
+    cwd: process.cwd(),
+    confirm: flags.includes('--confirm'),
+    noBackup: flags.includes('--no-backup'),
+    ...(restoreParse !== null ? { restore: restoreParse } : {}),
+  });
+  process.stdout.write(`${renderEject(result, flags.includes('--confirm'))}\n`);
+  process.exit(result.exitCode);
 } else {
   failUnknown(command, version);
+}
+
+function renderEject(result: EjectResult, confirm: boolean): string {
+  const out: string[] = [];
+  if (result.mode === 'noop') {
+    return result.stderr;
+  }
+  if (result.mode === 'refused') {
+    return result.stderr;
+  }
+  if (result.mode === 'restored') {
+    out.push(`forge eject --restore: restored ${result.planned.length} path(s) from ${result.backupDir}`);
+    for (const p of result.planned) out.push(`  restored: ${p.path}`);
+  } else {
+    const verb = result.mode === 'applied' ? 'Removed' : 'Would remove';
+    out.push(confirm ? 'forge eject: done.' : 'forge eject (dry-run — pass --confirm to apply):');
+    for (const p of result.planned) out.push(`  ${verb.toLowerCase()}: [${p.action}] ${p.path}`);
+    if (result.backupDir) out.push(`Backup snapshot: ${result.backupDir} (restore via \`forge eject --restore ${result.backupDir}\`)`);
+  }
+  for (const w of result.warnings) out.push(`⚠ ${w}`);
+  return out.join('\n');
 }
 
 // Returns: the flag's value (string), 'MISSING_VALUE' sentinel if the flag is

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   applyGitignoreBlock,
   hasGitignoreBlock,
+  removeGitignoreBlock,
 } from '../../../../src/cli/upgrade/gitignore-block.ts';
 
 test('applyGitignoreBlock: appends block to empty gitignore', () => {
@@ -66,4 +67,23 @@ test('hasGitignoreBlock: true when marker present, false when absent', () => {
   assert.equal(hasGitignoreBlock(''), false);
   assert.equal(hasGitignoreBlock('node_modules\n'), false);
   assert.equal(hasGitignoreBlock(applyGitignoreBlock('')), true);
+});
+
+// FORGE-158: removeGitignoreBlock is the byte-exact inverse of the append path.
+test('removeGitignoreBlock: round-trips apply for representative priors', () => {
+  const cases = [
+    { prior: 'node_modules\n', endedWithNewline: true },
+    { prior: 'node_modules\ndist\n', endedWithNewline: true },
+    { prior: 'node_modules', endedWithNewline: false },
+  ];
+  for (const { prior, endedWithNewline } of cases) {
+    const applied = applyGitignoreBlock(prior);
+    const restored = removeGitignoreBlock(applied, { priorEndedWithNewline: endedWithNewline });
+    assert.equal(restored, prior, `round-trip for prior=${JSON.stringify(prior)}`);
+  }
+});
+
+test('removeGitignoreBlock: a block-only file (forge-created) reduces to empty', () => {
+  const applied = applyGitignoreBlock('');
+  assert.equal(removeGitignoreBlock(applied, { priorEndedWithNewline: false }), '');
 });

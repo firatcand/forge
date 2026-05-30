@@ -74,6 +74,42 @@ export class PhasesError extends Error {
   }
 }
 
+// `forge orchestrate apply-decision` (FORGE-95) domain errors. Verb-level
+// failures (bad flags) use the envelope `fail()` with string codes directly;
+// these are thrown by the adr/apply modules and mapped to envelopes by the verb.
+export type ApplyErrorCode =
+  | 'ADR_NOT_FOUND'            // no spec/decisions file matching the slug
+  | 'ADR_AMBIGUOUS'           // more than one decisions file matches the slug
+  | 'ADR_PARSE_ERROR'         // missing/!malformed frontmatter fence or invalid YAML
+  | 'ADR_NOT_ACCEPTED'        // frontmatter status != 'accepted'
+  | 'MISSING_JOURNAL'         // no payload-complete journal for the slug
+  | 'JOURNAL_PARSE_ERROR'     // journal file is not valid JSON
+  | 'JOURNAL_INVALID'         // journal failed schema validation
+  | 'JOURNAL_COVERAGE_MISMATCH' // an ADR affected_* ref has no covering journal entry
+  | 'TRACKER_INCAPABLE'       // tracker cannot updateIssueBody (e.g. Notion pre-FORGE-117)
+  | 'SECTION_NOT_FOUND'       // a SPEC/PRD section anchor matched no heading
+  | 'PHASES_TASK_NOT_FOUND'   // a phases_tasks entry id matched no task in phases.yaml
+  | 'IO_ERROR';
+
+export class ApplyError extends Error {
+  readonly code: ApplyErrorCode;
+  readonly details: Record<string, unknown>;
+  readonly retriable: boolean;
+
+  constructor(
+    code: ApplyErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown; retriable?: boolean },
+  ) {
+    super(message, options);
+    this.name = 'ApplyError';
+    this.code = code;
+    this.details = details;
+    this.retriable = options?.retriable ?? false;
+  }
+}
+
 export type OrchestratorErrorCode =
   | 'LEASE_EXISTS'          // lease.json already present; concurrent acquire lost
   | 'LEASE_STOLEN'          // caller's (claim_id, generation) does not match stored lease

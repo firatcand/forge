@@ -16,6 +16,11 @@ import type {
   TrackerType,
 } from '../../../src/trackers/index.ts';
 import type { TrackerConfig } from '../../../src/schemas/settings.ts';
+import {
+  parseClaimFooter,
+  upsertClaimFooter,
+} from '../../../src/trackers/footers.ts';
+import type { ClaimFenceData } from '../../../src/trackers/claim-fence.ts';
 
 const githubConfig: TrackerConfig = {
   type: 'github',
@@ -48,6 +53,15 @@ class TestTracker extends BaseTracker {
   async updateState(_issueId: string, _state: IssueState): Promise<void> {}
   async comment(_issueId: string, _body: string): Promise<void> {}
   async updateIssueBody(_issueId: string, _body: string): Promise<void> {}
+  // In-memory body so setClaimFence exercises a real read-modify-write
+  // (store-what-you-receive), not a structural placebo.
+  public body = '';
+  async setClaimFence(
+    _issueId: string,
+    data: ClaimFenceData | null,
+  ): Promise<void> {
+    this.body = upsertClaimFooter(this.body, data);
+  }
   async createProject(
     _name: string,
     _description?: string,
@@ -215,6 +229,49 @@ test('withRetry respects max attempts and rejects with final error', async () =>
       e.message === 'attempt 3',
   );
   assert.equal(calls, 3);
+});
+
+test('setClaimFence round-trip: stamp then strip, preserving task/blockedBy/other footers', async () => {
+  const t = makeTracker();
+  t.body = [
+    'Some prose about the task.',
+    '',
+    '<!-- forge:task=FORGE-1 -->',
+    '<!-- forge:blockedBy=FORGE-2,FORGE-3 -->',
+    '<!-- forge:ownerType=backend-dev -->',
+  ].join('\n');
+
+  const data: ClaimFenceData = {
+    claimId: 'c-1',
+    generation: 4,
+    ownerRunId: 'run-1',
+  };
+  await t.setClaimFence('X-1', data);
+
+  // Footer present with the exact decoded identity.
+  assert.deepEqual(parseClaimFooter(t.body), data);
+  // Other footers + prose preserved.
+  assert.match(t.body, /<!-- forge:task=FORGE-1 -->/);
+  assert.match(t.body, /<!-- forge:blockedBy=FORGE-2,FORGE-3 -->/);
+  assert.match(t.body, /<!-- forge:ownerType=backend-dev -->/);
+  assert.match(t.body, /Some prose about the task\./);
+
+  await t.setClaimFence('X-1', null);
+
+  // Footer gone; everything else intact; no duplicate footers.
+  assert.equal(parseClaimFooter(t.body), null);
+  assert.equal((t.body.match(/<!-- forge:task=/g) ?? []).length, 1);
+  assert.match(t.body, /<!-- forge:blockedBy=FORGE-2,FORGE-3 -->/);
+  assert.match(t.body, /<!-- forge:ownerType=backend-dev -->/);
+});
+
+test('setClaimFence throws PRECONDITION_FAILED when no forge:task footer', async () => {
+  const t = makeTracker();
+  t.body = 'A body created outside forge — no footers.';
+  await assert.rejects(
+    () => t.setClaimFence('X-1', { claimId: 'c', generation: 0, ownerRunId: 'r' }),
+    (e: unknown) => e instanceof TrackerError && e.code === 'PRECONDITION_FAILED',
+  );
 });
 
 test('assertNonEmpty rejects empty / whitespace / newline strings with VALIDATION', () => {

@@ -99,8 +99,11 @@ export async function runOrchestrateClaim(
     }
   }
 
-  // Resolve tracker (injected for tests, NoopTracker for bootstrap, real one elsewhere).
+  // Resolve tracker (injected for tests, NoopTracker for bootstrap, real one
+  // elsewhere). Real adapters may hand back a `close` (Notion MCP child); tear
+  // it down in a finally so no early-return path leaks the transport.
   let t: ClaimableTracker;
+  let closeTracker: (() => Promise<void>) | undefined;
   if (deps.tracker) {
     t = deps.tracker;
   } else {
@@ -109,8 +112,30 @@ export async function runOrchestrateClaim(
       return { exitCode: emit(resolved.error, { json: opts.json }) };
     }
     t = resolved.tracker;
+    closeTracker = resolved.close;
   }
 
+  try {
+    return await runClaimWithTracker(opts, t, deps);
+  } finally {
+    if (closeTracker) {
+      try {
+        await closeTracker();
+      } catch {
+        // best-effort teardown of the tracker transport (Notion MCP child)
+      }
+    }
+  }
+}
+
+// Post-resolution claim sequence (tracker claim → lease → state → best-effort
+// forge:claim footer). Extracted so runOrchestrateClaim can wrap it in a
+// try/finally that tears down the tracker transport on every exit path.
+async function runClaimWithTracker(
+  opts: ClaimArgs,
+  t: ClaimableTracker,
+  deps: ClaimDeps,
+): Promise<{ exitCode: number }> {
   // 1. Tracker claim.
   let claimRes;
   try {
@@ -243,6 +268,26 @@ export async function runOrchestrateClaim(
     };
   }
 
+  // Best-effort: mirror the committed lease identity onto the tracker issue as
+  // a forge:claim footer. Advisory only — gc never resurrects ownership from it.
+  // Stamped AFTER the state write, so no rollback path above has to un-stamp.
+  // A failure here (transient network, Notion NOT_IMPLEMENTED, issue created
+  // outside forge → PRECONDITION_FAILED) must NOT fail the claim.
+  try {
+    await t.setClaimFence(opts.taskId, {
+      claimId: lease.claim_id,
+      generation: lease.generation,
+      ownerRunId: opts.runId,
+    });
+  } catch (err) {
+    // Truncate: err.message from a network lib is untrusted content (FORGE-167
+    // review: security-auditor L2).
+    const detail = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    process.stderr.write(
+      `warning: setClaimFence failed for ${opts.taskId} (claim succeeded; tracker footer not mirrored): ${detail}\n`,
+    );
+  }
+
   return {
     exitCode: emit(
       ok({
@@ -320,7 +365,7 @@ function mapClaimReasonToCode(reason: string): string {
 }
 
 function resolveTrackerOrFail(opts: ClaimArgs):
-  | { tracker: ClaimableTracker }
+  | { tracker: ClaimableTracker; close?: () => Promise<void> }
   | { error: ReturnType<typeof fail> } {
   const result = resolveTrackerForCLI(opts.forgeDir);
   if (!result.ok) {
@@ -328,7 +373,7 @@ function resolveTrackerOrFail(opts: ClaimArgs):
       error: fail(result.code, result.message, false),
     };
   }
-  return { tracker: result.tracker };
+  return { tracker: result.tracker, close: result.close };
 }
 
 export const claimHandler: VerbHandler = {

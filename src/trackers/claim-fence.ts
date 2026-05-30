@@ -14,15 +14,36 @@
 // always the generation-fenced local lease; gc never resurrects ownership from
 // this footer.
 
+import { TrackerError } from './errors.ts';
+
 export interface ClaimFenceData {
   readonly claimId: string;
   readonly generation: number;
   readonly ownerRunId: string;
 }
 
+// Defense-in-depth: reject string fields containing HTML comment metacharacters
+// before they reach the `<!-- forge:claim=... -->` footer. Today claimId /
+// ownerRunId are schema-enforced UUIDv7 (no `-->`/`<!--` possible) and
+// serializeWithForgeFooters' assertExtraFooterSafe is a downstream backstop —
+// but locking the invariant at encode time means a future field whose type
+// allows arbitrary strings can't silently break out of the comment.
+// (FORGE-167 review: Codex/security-auditor defense-in-depth.)
+function assertNoCommentMeta(value: string, field: string): void {
+  if (value.includes('-->') || value.includes('<!--')) {
+    throw new TrackerError(
+      'VALIDATION',
+      `${field} contains HTML comment metacharacters ('-->' or '<!--'); cannot encode in forge:claim footer`,
+      { field, valuePreview: value.slice(0, 40) },
+    );
+  }
+}
+
 // Serialize to the footer value (compact JSON). The output never contains HTML
 // comment metacharacters (`-->` / `<!--`), so it is safe inside a footer.
 export function encodeClaimValue(data: ClaimFenceData): string {
+  assertNoCommentMeta(data.claimId, 'claimId');
+  assertNoCommentMeta(data.ownerRunId, 'ownerRunId');
   return JSON.stringify({
     claim_id: data.claimId,
     generation: data.generation,

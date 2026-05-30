@@ -45,6 +45,7 @@ const fakeAdapter: Tracker = {
   updateState: async () => {},
   comment: async () => {},
   updateIssueBody: async () => {},
+  setClaimFence: async () => {},
   createProject: async (_name: string) => ({
     id: 'p_1',
     url: 'https://github.com/foo/bar',

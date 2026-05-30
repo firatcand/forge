@@ -19,6 +19,47 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
   Farm provenance reuses the same ownership check `forge upgrade --remove-agent`
   relies on (`skill-farm.ts`), so "forge-owned" means the same thing whether
   reporting or pruning.
+- **`forge orchestrate apply-decision` verb** (FORGE-95) — the mechanical applier
+  behind `/update-spec --apply`. Given an **accepted** ephemeral ADR and a
+  payload-complete journal at
+  `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`, it
+  propagates the decision across SPEC §sections + PRD §sections (marker-block
+  replacement), `phases.yaml` task fields (`description`/`acceptance`), and
+  tracker issue bodies — journaling each mutation so a partial failure is
+  resumable with `--resume`. Flags: `--adr <slug> [--yes-all] [--resume]
+  [--dry-run]`. On full success it writes a durable rationale (a
+  `spec/decisions/INDEX.md` line + a `<slug>.commit-msg.txt` body), deletes the
+  ephemeral ADR, and archives the journal. The verb never runs `git` (the
+  skill/user commits the message file). Trackers that cannot update issue bodies
+  (Notion, until FORGE-117) fail a **preflight** before any local mutation, so
+  the repo is never left half-applied. Folds in FORGE-163 (durable decision
+  rationale via `spec/decisions/INDEX.md`). The `/update-spec --draft|--apply`
+  skill that authors journals is FORGE-93 (still pending) — until then journals
+  are authored by hand or fixture.
+- **`forge eject` — reversible clean uninstall** (FORGE-158) — one command to
+  remove forge from a project. Strips the forge-managed marker block from each
+  agent root file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`), preserving your own
+  content byte-for-byte; reverses the `.gitignore` block and the
+  `.eslintignore` / `.prettierignore` lines; removes the host skill/agent farms
+  and the `.forge/` directory. `spec/`, `plans/`, `CRITICAL.md`, and your source
+  are left untouched.
+  ```
+  forge eject                  # dry-run plan (default)
+  forge eject --confirm        # apply
+  forge eject --confirm --no-backup
+  forge eject --restore <dir>  # undo a recent eject
+  ```
+  Safety: dry-run by default; takes a restorable backup snapshot
+  (`.forge.eject-backup-<ISO>/`) before deleting; refuses while an active
+  worktree or a non-terminal task state exists, or when a forge-managed file has
+  uncommitted git changes. Reversal is driven by a new `.forge/manifest.json`
+  (written by `forge init`, refreshed by `forge upgrade`) that records exactly
+  what forge wrote — so version-drift orphans and Windows copy-mode farm entries
+  are handled. Projects predating the manifest fall back to a best-effort derived
+  mode with a warning. Exposed as a top-level verb only (not `forge orchestrate
+  eject`) — eject is a project-lifecycle command, not an orchestrator state
+  transition.
+
 - **`settings.verify` + real verification runner** (FORGE-168) — a new optional
   `verify` block in `.forge/settings.yaml` lets an adopter declare the commands
   that prove an attempt is good:

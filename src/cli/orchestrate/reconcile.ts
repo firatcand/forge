@@ -19,15 +19,11 @@ import { computeSpecRevision } from '../../core/spec-revision.ts';
 import { validateUnderRoot } from '../../core/workspace.ts';
 import { PhasesSchema, type Phases, type Source } from '../../schemas/phases.ts';
 import type { Logger, Tracker } from '../../trackers/base.ts';
-import { GitHubTracker } from '../../trackers/github.ts';
-import { LinearTracker } from '../../trackers/linear.ts';
-import { NotionTracker } from '../../trackers/notion.ts';
-import { createStdioMcpCall, type StdioMcpHandle } from '../../trackers/notion-mcp-transport.ts';
 import {
   TrackerError,
   type TrackerErrorCode,
 } from '../../trackers/errors.ts';
-import type { Settings } from '../../schemas/settings.ts';
+import { createTracker } from './tracker-factory.ts';
 import {
   applyPlanToDocument,
   diffPull,
@@ -142,57 +138,6 @@ function noopLogger(): Logger {
     warn: () => {},
     error: () => {},
   };
-}
-
-interface TrackerHandle {
-  readonly tracker: Tracker;
-  readonly close?: () => Promise<void>;
-}
-
-// Threat model for createTracker:
-//
-// settings.yaml is treated as TRUSTED EXECUTABLE CONFIG (same trust level as
-// package.json scripts or a Makefile). The Notion launcher accepts an
-// arbitrary `mcp_command` because that's the customization point for users
-// who want a different Notion MCP server build/version. An earlier review
-// suggested allowlisting `mcp_command[0]` to {npx, node}, but Codex 2nd-pass
-// pointed out that `node -e '...'` or `npx -y <attacker-pkg>` are still
-// arbitrary code execution — argv[0] is not a meaningful boundary. So
-// allowlisting was security theater.
-//
-// Honest mitigation: settings.yaml must be repo-tracked and review-gated
-// (branch protection, CODEOWNERS). The same applies to package.json, Makefile,
-// and any other dev-time config that names a binary forge will run. CI
-// systems that allow PR contributors to mutate settings.yaml without review
-// have a broader trust-model issue that this allowlist would not have
-// resolved either.
-function createTracker(settings: Settings, logger: Logger): TrackerHandle {
-  const t = settings.tracker;
-  switch (t.type) {
-    case 'linear':
-      return { tracker: new LinearTracker(t, logger) };
-    case 'github':
-      return { tracker: new GitHubTracker(t, logger) };
-    case 'notion': {
-      const [command, ...args] = t.config.mcp_command;
-      if (!command) {
-        throw new Error('notion tracker: mcp_command must be non-empty');
-      }
-      const handle: StdioMcpHandle = createStdioMcpCall({
-        command,
-        args,
-        env: t.config.mcp_env,
-      });
-      return {
-        tracker: new NotionTracker(t, logger, { mcp: handle.call }),
-        close: () => handle.close(),
-      };
-    }
-    default: {
-      const exhaustive: never = t;
-      throw new Error(`unreachable tracker type: ${JSON.stringify(exhaustive)}`);
-    }
-  }
 }
 
 function loadPhasesWithDocument(absPath: string): {

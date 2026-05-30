@@ -29,6 +29,37 @@ export type { Lease } from './lease.ts';
 export { VerdictSchema, ReviewVerdictSchema } from './verdict.ts';
 export type { Verdict, ReviewVerdict } from './verdict.ts';
 
+export { ForgeManifestSchema, MANIFEST_VERSION } from './manifest.ts';
+export type {
+  ForgeManifest,
+  ManifestRootFile,
+  ManifestIgnoreFile,
+  ManifestFarmEntry,
+} from './manifest.ts';
+
+export {
+  ApplyJournalSchema,
+  MarkdownSectionEntrySchema,
+  PhasesTaskEntrySchema,
+  TrackerIssueEntrySchema,
+  FinalizeStateSchema,
+  EntryStatusSchema,
+  ENTRY_STATUSES,
+  PhasesFieldSchema,
+  PHASES_AMENDABLE_FIELDS,
+} from './apply-journal.ts';
+export type {
+  ApplyJournal,
+  MarkdownSectionEntry,
+  PhasesTaskEntry,
+  TrackerIssueEntry,
+  FinalizeState,
+  EntryStatus,
+} from './apply-journal.ts';
+
+export { AdrFrontmatterSchema, AdrStatusSchema, ADR_STATUSES } from './adr.ts';
+export type { AdrFrontmatter, AdrStatus } from './adr.ts';
+
 export { SettingsSchema, TrackerConfigSchema, SecretsSchema } from './settings.ts';
 export type {
   Settings,

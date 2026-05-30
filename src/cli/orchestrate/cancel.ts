@@ -20,7 +20,16 @@ import { OrchestratorError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import {
+  resolveTrackerForCLI,
+  type ClaimableTracker,
+} from './tracker-factory.ts';
 import type { VerbHandler } from './index.ts';
+
+export interface CancelDeps {
+  // Test seam: inject a tracker instead of resolving one from settings.yaml.
+  readonly tracker?: ClaimableTracker;
+}
 
 const CANCELLABLE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   'claimed',
@@ -30,7 +39,10 @@ const CANCELLABLE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   'awaiting_respawn',
 ]);
 
-export async function runOrchestrateCancel(args: CancelArgs): Promise<{ exitCode: number }> {
+export async function runOrchestrateCancel(
+  args: CancelArgs,
+  deps: CancelDeps = {},
+): Promise<{ exitCode: number }> {
   const parsed = CancelArgsSchema.safeParse(args);
   if (!parsed.success) {
     return { exitCode: emit(fail('INVALID_ARGS', parsed.error.message, false), { json: args.json }) };
@@ -158,12 +170,56 @@ export async function runOrchestrateCancel(args: CancelArgs): Promise<{ exitCode
     // Best-effort lease release; state is already cancelled which is the source of truth.
   }
 
+  // 6. Best-effort: strip the forge:claim footer from the tracker issue. The
+  //    lease is gone; a lingering footer would make gc see tracker-claim-
+  //    without-local-lease divergence. Never fail the cancel on tracker error.
+  await stripClaimFence(opts, deps);
+
   return {
     exitCode: emit(
       ok({ state: 'cancelled', released_lease: true, reason: opts.reason ?? null }),
       { json: opts.json },
     ),
   };
+}
+
+// Resolve a tracker (injected or from settings.yaml) and clear the forge:claim
+// footer best-effort. Swallows every failure (warns to stderr) — the cancel has
+// already committed; footer cleanup is advisory. Tears down the tracker
+// transport (Notion MCP child) in a finally.
+async function stripClaimFence(opts: CancelArgs, deps: CancelDeps): Promise<void> {
+  let t: ClaimableTracker;
+  let close: (() => Promise<void>) | undefined;
+  if (deps.tracker) {
+    t = deps.tracker;
+  } else {
+    const resolved = resolveTrackerForCLI(opts.forgeDir);
+    if (!resolved.ok) {
+      process.stderr.write(
+        `warning: cancel could not resolve a tracker to clear the forge:claim footer (${resolved.code}); continuing\n`,
+      );
+      return;
+    }
+    t = resolved.tracker;
+    close = resolved.close;
+  }
+  try {
+    await t.setClaimFence(opts.taskId, null);
+  } catch (err) {
+    // Truncate untrusted tracker error text (FORGE-167 review: sec L2).
+    const detail = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+    process.stderr.write(
+      `warning: setClaimFence(null) failed for ${opts.taskId} on cancel (tracker footer not cleared): ${detail}\n`,
+    );
+  } finally {
+    if (close) {
+      try {
+        await close();
+      } catch {
+        // best-effort teardown of the tracker transport (Notion MCP child)
+      }
+    }
+  }
 }
 
 function readLease(forgeDir: string, taskId: string): Lease {

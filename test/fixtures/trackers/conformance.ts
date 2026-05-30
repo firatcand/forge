@@ -37,6 +37,12 @@ export interface ConformanceInputs {
    * Default: 'works'.
    */
   expectUpdateIssueBody?: 'works' | 'not_implemented';
+  /**
+   * Expected outcome for setClaimFence (FORGE-167), same semantics as
+   * expectUpdateIssueBody: 'works' rides the body read-modify-write, Notion is
+   * 'not_implemented' until FORGE-117. Default: 'works'.
+   */
+  expectSetClaimFence?: 'works' | 'not_implemented';
 }
 
 /**
@@ -131,6 +137,30 @@ export async function runTrackerConformance(
       (err: unknown) =>
         err instanceof TrackerError && err.code === 'NOT_IMPLEMENTED',
       'expected updateIssueBody to throw TrackerError(NOT_IMPLEMENTED)',
+    );
+  }
+
+  // 11. setClaimFence — void when supported (stamp then strip the forge:claim
+  //     footer); NOT_IMPLEMENTED for Notion until FORGE-117.
+  const expectClaim = inputs.expectSetClaimFence ?? 'works';
+  if (expectClaim === 'works') {
+    await tracker.setClaimFence(inputs.existingIssueId, {
+      claimId: 'conf-claim',
+      generation: 0,
+      ownerRunId: runId,
+    });
+    await tracker.setClaimFence(inputs.existingIssueId, null);
+  } else {
+    await assert.rejects(
+      () =>
+        tracker.setClaimFence(inputs.existingIssueId, {
+          claimId: 'conf-claim',
+          generation: 0,
+          ownerRunId: runId,
+        }),
+      (err: unknown) =>
+        err instanceof TrackerError && err.code === 'NOT_IMPLEMENTED',
+      'expected setClaimFence to throw TrackerError(NOT_IMPLEMENTED)',
     );
   }
 

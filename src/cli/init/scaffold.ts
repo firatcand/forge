@@ -11,7 +11,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 import { SettingsSchema } from '../../schemas/index.ts';
+import type { ForgeManifest, ManifestFarmEntry } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import {
+  buildManifest,
+  farmEntriesFromResult,
+  writeManifest,
+  MANIFEST_RELPATH,
+} from '../manifest.ts';
 import type { InitAnswers } from './prompts.ts';
 import { renderTemplate, resolveTemplatesDir, type TemplateVars } from './templates.ts';
 // FORGE-152: integration points for the new CLAUDE.md split layout.
@@ -50,6 +57,9 @@ export interface ToolingExcludeResult {
   written: string[];
   skipped: string[];
   warned: ToolingExcludeWarning[];
+  // FORGE-158: flat-ignore lines forge actually appended this run, with enough
+  // detail for `forge eject` to reverse them byte-exactly.
+  appendedLines: { name: string; line: string; priorEndedWithNewline: boolean }[];
 }
 
 const STAGING_DIR = '.forge/.init-staging';
@@ -207,21 +217,22 @@ function injectBriefGoal(briefRaw: string, goal: string): string {
 export function appendLineIfMissing(
   filePath: string,
   line: string,
-): { existed: boolean; appended: boolean } {
+): { existed: boolean; appended: boolean; priorEndedWithNewline: boolean } {
   const content = safeReadConfig(filePath);
   if (content === null) {
-    return { existed: false, appended: false };
+    return { existed: false, appended: false, priorEndedWithNewline: false };
   }
+  const priorEndedWithNewline = content.length === 0 || content.endsWith('\n');
   // Exact-line match against newline-split entries — avoids false positives from
   // substring matches (e.g. a comment that mentions the path). CRLF-normalized
   // so Windows-style files don't double-append on re-run.
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   if (lines.includes(line)) {
-    return { existed: true, appended: false };
+    return { existed: true, appended: false, priorEndedWithNewline };
   }
-  const sep = content.length === 0 || content.endsWith('\n') ? '' : '\n';
+  const sep = priorEndedWithNewline ? '' : '\n';
   writeAtomic(filePath, content + sep + line + '\n');
-  return { existed: true, appended: true };
+  return { existed: true, appended: true, priorEndedWithNewline };
 }
 
 /**
@@ -238,7 +249,7 @@ export function appendLineIfMissing(
  * `.forge/init-warnings.md` rather than risk corrupting the user's config.
  */
 export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
-  const result: ToolingExcludeResult = { written: [], skipped: [], warned: [] };
+  const result: ToolingExcludeResult = { written: [], skipped: [], warned: [], appendedLines: [] };
 
   // Flat-ignore files — safe to append.
   for (const name of ['.eslintignore', '.prettierignore'] as const) {
@@ -246,6 +257,11 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
     const r = appendLineIfMissing(p, TOOLING_EXCLUDE_LINE);
     if (r.appended) {
       result.written.push(name);
+      result.appendedLines.push({
+        name,
+        line: TOOLING_EXCLUDE_LINE,
+        priorEndedWithNewline: r.priorEndedWithNewline,
+      });
     } else if (r.existed) {
       result.skipped.push(name);
     }
@@ -437,11 +453,23 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   // Shared with Phase B's forge upgrade — both call applyGitignoreBlock so the
   // block is byte-identical regardless of which path wrote it.
   const giPath = resolve(opts.cwd, '.gitignore');
-  const existingGi = existsSync(giPath) ? readFileSync(giPath, 'utf8') : '';
+  // `created` must mean "forge made the file", not "the file was empty" — a user
+  // can own an empty .gitignore, and eject must not delete it (Codex impl #1).
+  const giExisted = existsSync(giPath);
+  const existingGi = giExisted ? readFileSync(giPath, 'utf8') : '';
   const newGi = applyGitignoreBlock(existingGi);
+  // FORGE-158: manifest entries describing exactly what forge wrote, so eject
+  // can reverse them byte-exactly.
+  const ignoreFiles: ForgeManifest['ignoreFiles'] = [];
   if (newGi !== existingGi) {
     writeAtomic(giPath, newGi);
     written.push('.gitignore');
+    ignoreFiles.push({
+      path: '.gitignore',
+      kind: 'block',
+      created: !giExisted,
+      priorEndedWithNewline: existingGi.endsWith('\n'),
+    });
   } else {
     skipped.push('.gitignore');
   }
@@ -451,12 +479,22 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   const tooling = appendToolingExcludes(opts.cwd);
   for (const f of tooling.written) written.push(f);
   for (const f of tooling.skipped) skipped.push(f);
+  for (const a of tooling.appendedLines) {
+    ignoreFiles.push({
+      path: a.name,
+      kind: 'line',
+      created: false, // appendLineIfMissing only appends to pre-existing files
+      priorEndedWithNewline: a.priorEndedWithNewline,
+      line: a.line,
+    });
+  }
 
   // 4.5) Per-host skill + agent farm (FORGE-156). Materializes
   //      .claude/skills/ + .claude/agents/ (and same for codex/gemini if
   //      enabled) as symlinks (POSIX) or copies (Windows) into the bundled
   //      npm package. Without this, host-side slash commands and subagents
   //      don't resolve in a freshly-initialized project.
+  let farmEntries: ManifestFarmEntry[] = [];
   try {
     const farm = applySkillFarm({
       cwd: opts.cwd,
@@ -473,6 +511,8 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
       const rel = p.startsWith(`${opts.cwd}/`) ? p.slice(opts.cwd.length + 1) : p;
       written.push(rel);
     }
+    // FORGE-158: record exact farm entries (path + mode) for eject.
+    farmEntries = farmEntriesFromResult(opts.cwd, farm);
   } catch (err) {
     // Farm materialization failure must not abort init — the rest of the
     // scaffold is correct. Surface a warning via the existing init-warnings
@@ -492,6 +532,25 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     warningsPath = p;
     written.push('.forge/init-warnings.md');
   }
+
+  // 5.5) FORGE-158: write .forge/manifest.json — forge's record of what it
+  //      wrote, so `forge eject` can reverse the install byte-exactly. Every
+  //      root file forge wrote at init is forge-created (scaffold only writes
+  //      when the file did not pre-exist).
+  const enabledRootPaths = new Set(
+    opts.answers.agents.enabled_root_files.map((a) => ROOT_FILE_BY_AGENT[a]),
+  );
+  const createdRootFiles = written.filter((p) => enabledRootPaths.has(p));
+  const manifest = buildManifest({
+    cwd: opts.cwd,
+    forgeVersion: readPackageVersion(),
+    enabledHosts: opts.answers.agents.enabled_root_files,
+    createdRootFiles,
+    ignoreFiles,
+    farmEntries,
+  });
+  writeManifest(opts.cwd, manifest);
+  written.push(MANIFEST_RELPATH);
 
   // 6) Cleanup staging dir.
   rmSync(stagingRoot, { recursive: true, force: true });
