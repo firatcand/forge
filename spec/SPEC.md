@@ -126,6 +126,8 @@ Drafted in `spec/decisions/2026-05-21-claudemd-methodology-split.md` (in-flight 
 - **Per-agent root files (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`) are tracked, product-owned.** Forge owns only a marker-delimited prefix block at the top (breadcrumb + import/read directive). Claude uses native `@.forge/CONTEXT.md` import; Codex/Gemini use prose directives ("read `.forge/CONTEXT.md` before any work").
 - **`forge init` asks which agents to support.** Multi-select prompt; writes only selected root files. Stored as `agents.enabled_root_files[]` in tracked `.forge/settings.yaml`.
 - **`forge upgrade` is the explicit re-sync verb.** Never auto-runs on `npm install`/`npm update`. Strict edit detection refuses to overwrite user edits; `--force` overrides with `.bak`.
+- **`.forge/manifest.json` records what forge wrote** (FORGE-158). Gitignored (regenerable, like `.version`). Written by `forge init`, refreshed idempotently by `forge upgrade`. Captures created-vs-appended state for root files and ignore files, plus exact host-farm entries — the authoritative input to `forge eject`. Absence is tolerated: eject falls back to settings + provenance derivation with a warning.
+- **`forge eject` is the reversible clean-uninstall verb** (FORGE-158). Top-level only (not under `orchestrate`). Dry-run by default; `--confirm` applies; `--no-backup` skips the snapshot; `--restore <dir>` undoes an eject. Reverses root-file marker blocks (preserving user content byte-for-byte), the `.gitignore`/`.eslintignore`/`.prettierignore` modifications, the host farms, and `.forge/` itself. Leaves `spec/`, `plans/`, `CRITICAL.md`, and source untouched. Refuses while an active worktree or non-terminal task state exists, or a forge-managed file is dirty in git.
 - **CLI drift warning** on every `forge` invocation when `.forge/.version` differs from bundled methodology version. `FORGE_QUIET=1` or `--quiet` suppresses.
 - **Legacy migration:** one-shot `forge upgrade --migrate-claudemd`, strict-match-only against a pinned v0.4 fixture; bails to manual recipe on any drift; saves `CLAUDE.md.pre-migration.bak`.
 - **`.gitignore` marker block** ignores `/.forge/*` except `!/.forge/settings.yaml`; written/replaced by shared `gitignore-block.ts` (used by init + upgrade).
@@ -519,7 +521,10 @@ src/
     init.ts                   // `forge init` flow
     init/                     // (added FORGE-152) prompts, scaffold, validate split out from init.ts
       prompts.ts              // collectAnswers() — multi-agent selection question added
-      scaffold.ts             // writes per-agent root files + .forge/CONTEXT.md + .forge/.version + .gitignore marker block
+      scaffold.ts             // writes per-agent root files + .forge/CONTEXT.md + .forge/.version + .gitignore marker block + .forge/manifest.json
+    manifest.ts               // (added FORGE-158) read/write .forge/manifest.json — forge's record of what it wrote; shared by init/upgrade/eject
+    eject/                    // (added FORGE-158) `forge eject` verb — reversible clean uninstall
+      eject.ts                // plan → active-work guard → backup → reverse install (manifest-driven); --restore path
     registry.ts               // (added FORGE-152) CLI_VERBS + SLASH_COMMANDS — single source of truth for the CLI surface rendered into .forge/CONTEXT.md
     upgrade/                  // (added FORGE-152) `forge upgrade` verb + supporting modules
       render-context.ts       // pure fn (template, registry) → CONTEXT.md content
