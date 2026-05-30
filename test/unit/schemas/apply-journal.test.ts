@@ -54,7 +54,7 @@ test('ApplyJournalSchema accepts a fully-populated, payload-complete journal', (
       { ref: 'spec/PRD.md#feature-2', new_body: '## Feature 2\nnew', status: 'applied' as const, applied_at: ISO },
     ],
     phases_tasks: [
-      { id: 'P2.5-T04', set_path: ['phases', '0', 'tasks', '3', 'acceptance'], set_value: ['a', 'b'], status: 'pending' as const },
+      { id: 'P2.5-T04', field: 'acceptance' as const, value: ['a', 'b'], status: 'pending' as const },
     ],
     tracker_issues: [
       { id: 'FORGE-95', new_body: 'updated body', retries: 1, status: 'failed' as const, error: 'timeout' },
@@ -74,17 +74,34 @@ test('MarkdownSectionEntrySchema requires ref + new_body', () => {
   );
 });
 
-test('PhasesTaskEntrySchema requires a non-empty set_path and a string|string[] value', () => {
+test('PhasesTaskEntrySchema enforces field↔value type pairing + task-id shape', () => {
+  // acceptance requires string[]
   assert.equal(
-    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', set_path: [], set_value: 'x', status: 'pending' }).success,
+    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', field: 'acceptance', value: 'x', status: 'pending' }).success,
     false,
   );
+  // description requires string
   assert.equal(
-    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', set_path: ['a'], set_value: { nope: 1 }, status: 'pending' }).success,
+    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', field: 'description', value: ['x'], status: 'pending' }).success,
     false,
   );
+  // unknown field rejected
   assert.equal(
-    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', set_path: ['a'], set_value: ['x'], status: 'pending' }).success,
+    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', field: 'title', value: 'x', status: 'pending' }).success,
+    false,
+  );
+  // malformed task id rejected
+  assert.equal(
+    PhasesTaskEntrySchema.safeParse({ id: 'nope', field: 'description', value: 'x', status: 'pending' }).success,
+    false,
+  );
+  // happy paths
+  assert.equal(
+    PhasesTaskEntrySchema.safeParse({ id: 'P2.5-T04', field: 'acceptance', value: ['x'], status: 'pending' }).success,
+    true,
+  );
+  assert.equal(
+    PhasesTaskEntrySchema.safeParse({ id: 'P1-T1', field: 'description', value: 'new desc', status: 'pending' }).success,
     true,
   );
 });

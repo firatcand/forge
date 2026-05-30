@@ -88,6 +88,7 @@ export type ApplyErrorCode =
   | 'JOURNAL_COVERAGE_MISMATCH' // an ADR affected_* ref has no covering journal entry
   | 'TRACKER_INCAPABLE'       // tracker cannot updateIssueBody (e.g. Notion pre-FORGE-117)
   | 'SECTION_NOT_FOUND'       // a SPEC/PRD section anchor matched no heading
+  | 'PHASES_TASK_NOT_FOUND'   // a phases_tasks entry id matched no task in phases.yaml
   | 'IO_ERROR';
 
 export class ApplyError extends Error {

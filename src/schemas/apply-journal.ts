@@ -34,14 +34,23 @@ export const MarkdownSectionEntrySchema = z.object({
 });
 export type MarkdownSectionEntry = z.infer<typeof MarkdownSectionEntrySchema>;
 
-// phases.yaml task amendment: a deterministic `doc.setIn(set_path, set_value)`
-// against the parsed YAML document (comment-preserving). `id` is the task id.
-export const PhasesTaskEntrySchema = z.object({
-  id: z.string().min(1).max(64),
-  set_path: z.array(z.string().min(1)).min(1),
-  set_value: z.union([z.string(), z.array(z.string())]),
-  ...entryBase,
-});
+// phases.yaml task amendment. Addressed by task `id` + `field` (resolve-by-id,
+// robust to phase/task index drift — the applier finds the task in the parsed
+// document and sets the field comment-preservingly). Only the two amendable
+// fields are allowed; `description` takes a string, `acceptance` a string[].
+export const PHASES_AMENDABLE_FIELDS = ['description', 'acceptance'] as const;
+export const PhasesFieldSchema = z.enum(PHASES_AMENDABLE_FIELDS);
+export const PhasesTaskEntrySchema = z
+  .object({
+    id: z.string().regex(/^P\d+(\.\d+)?-T\d+[a-z]?$/),
+    field: PhasesFieldSchema,
+    value: z.union([z.string(), z.array(z.string().min(1)).min(1)]),
+    ...entryBase,
+  })
+  .refine((e) => (e.field === 'acceptance' ? Array.isArray(e.value) : typeof e.value === 'string'), {
+    message: "field 'acceptance' requires a string[]; 'description' requires a string",
+    path: ['value'],
+  });
 export type PhasesTaskEntry = z.infer<typeof PhasesTaskEntrySchema>;
 
 // Tracker issue body replacement. `id` is the tracker issue id; `new_body` is

@@ -45,6 +45,8 @@ export {
   FinalizeStateSchema,
   EntryStatusSchema,
   ENTRY_STATUSES,
+  PhasesFieldSchema,
+  PHASES_AMENDABLE_FIELDS,
 } from './apply-journal.ts';
 export type {
   ApplyJournal,
