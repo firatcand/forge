@@ -14,15 +14,22 @@ Implements the `Tracker` interface (`src/trackers/base.ts`) against Linear's Gra
 2. Section **Personal API keys** → **New API key**
 3. Name it (e.g. `forge-orchestrator`), copy the key (`lin_api_...`)
 
-### 2. Export the key
+### 2. Provide the key
 
-Add to your shell profile or `.env.local`:
+Add it to the per-repo `.forge/.env` (git-ignored, scaffolded by `forge init`):
 
-```bash
-export LINEAR_API_KEY=lin_api_xxxxxxxxxxxxx
+```dotenv
+# .forge/.env
+LINEAR_API_KEY=lin_api_xxxxxxxxxxxxx
 ```
 
-`forge init` validates the env var is set when `tracker.type: linear`. If missing, init shows a non-fatal probe failure with a link back here.
+forge loads `.forge/.env` at startup and seeds an allowlisted set of tracker keys
+(`LINEAR_API_KEY`, `NOTION_TOKEN`, `GITHUB_TOKEN`, `GH_TOKEN`, `FORGE_NOTION_PARENT_PAGE_ID`)
+into the environment. The Linear key is workspace-scoped, so it belongs per-repo
+rather than in a global profile. An already-exported shell var or CI-injected value
+always wins over `.forge/.env`, so `export LINEAR_API_KEY=...` still works for one-offs.
+
+`forge init` validates the key is resolvable when `tracker.type: linear`. If missing, init shows a non-fatal probe failure with a link back here.
 
 ### 3. Configure team
 

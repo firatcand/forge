@@ -186,8 +186,10 @@ export async function runInit(opts: InitOptions = {}): Promise<InitResult> {
   kv({
     'spec dir': 'spec/',
     'settings': '.forge/settings.yaml',
+    'tracker auth': '.forge/.env',
     ...(scaffold.warningsPath ? { 'warnings': '.forge/init-warnings.md' } : {}),
   });
+  step('Add your tracker API key to `.forge/.env` (e.g. `LINEAR_API_KEY=`). It stays git-ignored.', 'pass');
   step('Run `claude` then `/forge` to draft your BRIEF.', 'pass');
 
   return {

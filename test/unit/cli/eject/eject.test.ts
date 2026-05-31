@@ -167,6 +167,25 @@ test('eject: backup + restore round-trips', () => {
   assert.ok(existsSync(join(cwd, '.forge')), '.forge restored');
 });
 
+test('eject: a real .forge/.env secret survives backup + restore', () => {
+  const cwd = project();
+  const secret = 'LINEAR_API_KEY=lin_api_real_secret\n';
+  writeFileSync(join(cwd, '.forge/.env'), secret);
+  writeManifest(cwd, baseManifest());
+
+  const ej = eject({ cwd, confirm: true });
+  assert.equal(ej.exitCode, 0);
+  assert.ok(!existsSync(join(cwd, '.forge')), '.forge (incl. .env) removed by eject');
+
+  const re = eject({ cwd, restore: ej.backupDir! });
+  assert.equal(re.exitCode, 0, `restore failed: ${re.stderr}`);
+  assert.equal(
+    readFileSync(join(cwd, '.forge/.env'), 'utf8'),
+    secret,
+    'the credential file is restored byte-exact',
+  );
+});
+
 test('eject --restore: refuses a directory without the backup marker', () => {
   const cwd = project();
   const notABackup = mkdtempSync(join(tmpdir(), 'not-a-backup-'));

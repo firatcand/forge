@@ -471,7 +471,7 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
       if (apiKey === undefined || apiKey.trim().length === 0) {
         throw new TrackerError(
           'AUTH',
-          'LINEAR_API_KEY not set (export a Linear Personal API Key — see docs/adapters/linear.md)',
+          'LINEAR_API_KEY not set. Add it to .forge/.env or export a Linear Personal API Key in your shell (see docs/adapters/linear.md).',
         );
       }
       return wrapLinearClient(new LinearClient({ apiKey }));

@@ -316,6 +316,17 @@ const TEMPLATE_BY_AGENT: Readonly<Record<AgentKind, string>> = {
   gemini: 'GEMINI.project.template.md',
 } as const;
 
+// Seed contents for .forge/.env. forge loads only the allowlisted tracker-auth
+// keys from this file (see src/core/forge-env.ts); everything else is ignored.
+const FORGE_ENV_PLACEHOLDER = [
+  '# forge tracker credentials — git-ignored, never commit this file.',
+  '# forge loads only these keys (already-set shell/CI vars win):',
+  '#   LINEAR_API_KEY, NOTION_TOKEN, GITHUB_TOKEN, GH_TOKEN, FORGE_NOTION_PARENT_PAGE_ID',
+  '#',
+  '# LINEAR_API_KEY=lin_api_xxxxxxxxxxxxxxxx',
+  '',
+].join('\n');
+
 function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   const templatesDir = opts.templatesDir ?? resolveTemplatesDir();
   const yamlContent = yamlStringify(toMinimalYamlObject(opts.answers), { lineWidth: 0 });
@@ -360,6 +371,11 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
     { relPath: 'plans/tasks/.gitkeep', contents: '' },
     { relPath: '.forge/CONTEXT.md', contents: renderedContext },
     { relPath: '.forge/.version', contents: `${methodologyVersion}\n` },
+    // Per-repo tracker credentials. Git-ignored by the .forge/* block below;
+    // no mustOverwrite, so re-running init / forge upgrade never clobbers a
+    // user's real key (the promote loop skips existing files). Only the keys
+    // in TRACKER_ENV_ALLOWLIST (src/core/forge-env.ts) are actually loaded.
+    { relPath: '.forge/.env', contents: FORGE_ENV_PLACEHOLDER },
     // settings.yaml is the last to land — proves init succeeded.
     { relPath: '.forge/settings.yaml', contents: yamlContent, mustOverwrite: true },
   ];

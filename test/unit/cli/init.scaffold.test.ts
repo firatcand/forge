@@ -59,6 +59,27 @@ test('scaffoldProject writes all expected artefacts', () => {
   assert.ok(result.written.includes('.gitignore'));
 });
 
+test('scaffold writes a .forge/.env credentials seed with the allowlisted keys', () => {
+  const cwd = tmp();
+  const result = scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  const envPath = resolve(cwd, '.forge/.env');
+  assert.ok(existsSync(envPath), 'expected .forge/.env');
+  assert.ok(result.written.includes('.forge/.env'));
+  const env = readFileSync(envPath, 'utf8');
+  assert.match(env, /LINEAR_API_KEY/);
+  assert.match(env, /git-ignored/);
+});
+
+test('scaffold never clobbers an existing .forge/.env (create-once — real secret survives)', () => {
+  const cwd = tmp();
+  mkdirSync(resolve(cwd, '.forge'), { recursive: true });
+  const real = 'LINEAR_API_KEY=lin_real_user_secret\n';
+  writeFileSync(resolve(cwd, '.forge/.env'), real, 'utf8');
+  const result = scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  assert.equal(readFileSync(resolve(cwd, '.forge/.env'), 'utf8'), real, 'user secret must be preserved');
+  assert.ok(result.skipped.includes('.forge/.env'), '.forge/.env should be skipped when it already exists');
+});
+
 test('scaffolded settings.yaml round-trips through SettingsSchema', () => {
   const cwd = tmp();
   scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
