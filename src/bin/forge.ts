@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadForgeEnv } from '../core/forge-env.ts';
 import { runInit } from '../cli/init.ts';
 import { runCodexSuggest } from '../cli/codex-suggest.ts';
 import { runProjectStatus } from '../cli/project-status.ts';
@@ -125,6 +126,10 @@ function maybeWarnDrift(cmd: string): void {
   }
 }
 maybeWarnDrift(command);
+
+// FORGE per-repo tracker credentials: seed process.env from .forge/.env (if any)
+// before any command dispatches. Allowlisted + no-override; best-effort.
+loadForgeEnv(process.cwd());
 
 if (command === 'init') {
   // No top-level await: the CJS build target (dist/bin/forge.cjs) doesn't support it.

@@ -70,6 +70,9 @@ npx @firatcand/forge
 mkdir my-product && cd my-product
 npx @firatcand/forge init
 
+# Add your tracker API key to the git-ignored .forge/.env (e.g. for Linear)
+echo 'LINEAR_API_KEY=lin_api_...' >> .forge/.env
+
 # Open your AI coding tool — see Cross-tool support below for per-host invocation
 claude
 > /forge          # discovery interview → spec/BRIEF.md
