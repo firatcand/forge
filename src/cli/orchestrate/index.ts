@@ -301,13 +301,3 @@ function nestedUsage(name: string, sub: Map<string, VerbHandler>): string {
   lines.push('');
   return `${lines.join('\n')}\n`;
 }
-
-// Internal hook so subsequent step files (Step 3, 4, 5) can register their
-// verbs without re-exporting the whole registry. The signature is intentionally
-// narrow: a verb registration cannot mutate an existing entry.
-export function registerVerb(name: string, handler: VerbHandler | Map<string, VerbHandler>): void {
-  if (VERBS.has(name)) {
-    throw new Error(`forge orchestrate registry: '${name}' already registered`);
-  }
-  VERBS.set(name, handler);
-}

@@ -58,6 +58,10 @@ export interface WorkerPromptContext {
   // decision-classifier.computeTaskBudget + buildSoftCapWarning and passes it in;
   // absent → the {{BUDGET_WARNING}} slot renders "(none)".
   readonly softCapWarning?: string;
+  readonly questionBudget?: {
+    readonly soft: number;
+    readonly hard: number;
+  };
 }
 
 // Allowlisted placeholder tokens. Adding a new token requires touching this
@@ -74,6 +78,7 @@ const PLACEHOLDERS = new Set([
   'PRIOR_ATTEMPTS',
   'ANSWERED_QUESTIONS',
   'BUDGET_WARNING',
+  'QUESTION_BUDGET_FLAGS',
 ]);
 
 function renderAcceptance(criteria: readonly string[]): string {
@@ -98,6 +103,13 @@ function renderAnsweredQuestions(answers: readonly AnsweredQuestionSummary[]): s
 
 function renderBudgetWarning(warning?: string): string {
   return warning && warning.length > 0 ? warning : '(none)';
+}
+
+function renderQuestionBudgetFlags(
+  budget?: { readonly soft: number; readonly hard: number },
+): string {
+  if (!budget) return '';
+  return `--question-budget-soft ${budget.soft} --question-budget-hard ${budget.hard}`;
 }
 
 function stripOtherHostBlocks(template: string, host: WorkerHost): string {
@@ -151,6 +163,7 @@ export function renderWorkerPrompt(template: string, ctx: WorkerPromptContext): 
     ['PRIOR_ATTEMPTS', renderPriorAttempts(ctx.priorAttempts)],
     ['ANSWERED_QUESTIONS', renderAnsweredQuestions(ctx.answeredQuestions)],
     ['BUDGET_WARNING', renderBudgetWarning(ctx.softCapWarning)],
+    ['QUESTION_BUDGET_FLAGS', renderQuestionBudgetFlags(ctx.questionBudget)],
   ]);
 
   return substitutePlaceholders(stripped, values);

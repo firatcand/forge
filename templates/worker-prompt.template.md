@@ -70,8 +70,11 @@ Use the standard question verb:
 
 ```
 forge orchestrate question {{TASK_ID}} --attempt {{ATTEMPT_ID}} \
+  {{QUESTION_BUDGET_FLAGS}} \
   --decision-key "authority-collision:<field>:<short-slug>" \
-  --question "<one paragraph: what artifacts seem to disagree; what each implies; what you'd do under each>"
+  --question "<one paragraph: what artifacts seem to disagree; what each implies; what you'd do under each>" \
+  --recommended-option-id "yes" \
+  --what-happens-if-unanswered "<one line: the safe default if nobody answers>"
 ```
 
 Then pause: return to parent with "Blocked on question <ID>: <one-line summary>." The supervisor sees a regular open question and resolves it via `/answer`.
@@ -204,6 +207,7 @@ The verb logs a `guardrail_checked` event to your attempt's event stream. A fort
 1. Run:
    ```
    forge orchestrate question {{TASK_ID}} --attempt {{ATTEMPT_ID}} \
+     {{QUESTION_BUDGET_FLAGS}} \
      --decision-key "<stable-dedupe-key>" \
      --question "<one paragraph>" \
      --recommended-option-id "<id of the option you recommend>" \

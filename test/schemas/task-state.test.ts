@@ -87,6 +87,22 @@ test('schemas/task-state: failure_reason rejects unknown value', () => {
   assert.equal(result.success, false);
 });
 
+test('schemas/task-state: last_failed_at is optional and accepts ISO datetime', () => {
+  const absent = TaskStateSchema.safeParse(baseTaskState({ state: 'running' }));
+  assert.equal(absent.success, true);
+  const present = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'running', last_failed_at: '2026-06-03T12:00:00.000Z' }),
+  );
+  assert.equal(present.success, true);
+});
+
+test('schemas/task-state: last_failed_at rejects non-datetime values', () => {
+  const result = TaskStateSchema.safeParse(
+    baseTaskState({ state: 'running', last_failed_at: 'yesterday' }),
+  );
+  assert.equal(result.success, false);
+});
+
 test('schemas/task-state: TaskStateSchema accepts current_attempt_id as non-null string', () => {
   const result = TaskStateSchema.safeParse(
     baseTaskState({ current_attempt_id: 'attempt-001', state: 'claimed' }),

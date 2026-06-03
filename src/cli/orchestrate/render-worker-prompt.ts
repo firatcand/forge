@@ -8,12 +8,14 @@
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
 
 import {
   PhaseSchema,
   RenderWorkerPromptArgsSchema,
   type RenderWorkerPromptArgs,
 } from '../../schemas/cli-args.ts';
+import { QuestionBudgetSchema } from '../../schemas/settings.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import {
@@ -30,7 +32,16 @@ import {
   type AnsweredQuestionSummary,
 } from '../../orchestrator/render-worker-prompt.ts';
 import { loadPhases } from '../../core/phases.ts';
+import {
+  buildSoftCapWarning,
+  computeTaskBudget,
+  resolveBudget,
+  type PerTaskBudgetOverride,
+  type ResolvedBudget,
+} from '../../orchestrator/decision-classifier.ts';
 import type { VerbHandler } from './index.ts';
+
+const DEFAULT_QUESTION_BUDGET: ResolvedBudget = { soft: 3, hard: 6 };
 
 export interface RenderWorkerPromptResult {
   readonly exitCode: number;
@@ -89,7 +100,11 @@ class RenderError extends Error {
 function findTaskInPhases(
   repoRoot: string,
   trackerIssueId: string,
-): { description: string; acceptance: readonly string[] } {
+): {
+  description: string;
+  acceptance: readonly string[];
+  questionBudget?: PerTaskBudgetOverride;
+} {
   const phasesPath = path.join(repoRoot, 'plans', 'phases.yaml');
   if (!existsSync(phasesPath)) {
     throw new RenderError(
@@ -100,8 +115,12 @@ function findTaskInPhases(
   const { phases } = loadPhases(phasesPath);
   for (const phase of phases.phases) {
     for (const task of phase.tasks) {
-      if (task.tracker_issue_id === trackerIssueId) {
-        return { description: task.description, acceptance: task.acceptance };
+      if (task.tracker_issue_id === trackerIssueId || task.id === trackerIssueId) {
+        return {
+          description: task.description,
+          acceptance: task.acceptance,
+          ...(task.question_budget ? { questionBudget: task.question_budget } : {}),
+        };
       }
     }
   }
@@ -133,7 +152,38 @@ function readHost(forgeDir: string): WorkerHost {
   // Cheap line-scan: avoid taking a yaml dep just for one field.
   const match = raw.match(/^\s*primary_host_cli:\s*['"]?([a-z]+)['"]?/m);
   const value = match?.[1] ?? 'claude';
-  return value === 'codex' ? 'codex' : 'claude';
+  if (value === 'codex' || value === 'gemini') return value;
+  return 'claude';
+}
+
+function loadGlobalQuestionBudget(forgeDir: string): ResolvedBudget {
+  const settingsPath = path.join(forgeDir, 'settings.yaml');
+  if (!existsSync(settingsPath)) return DEFAULT_QUESTION_BUDGET;
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(settingsPath, 'utf8'));
+  } catch (err) {
+    throw new RenderError(
+      'SETTINGS_INVALID',
+      `failed to parse settings at ${settingsPath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  const agents =
+    parsed && typeof parsed === 'object'
+      ? (parsed as { agents?: unknown }).agents
+      : undefined;
+  const questionBudget =
+    agents && typeof agents === 'object'
+      ? (agents as { question_budget?: unknown }).question_budget
+      : undefined;
+  const result = QuestionBudgetSchema.safeParse(questionBudget);
+  if (!result.success) {
+    throw new RenderError(
+      'SETTINGS_INVALID',
+      `settings at ${settingsPath} has invalid agents.question_budget: ${result.error.message}`,
+    );
+  }
+  return result.data;
 }
 
 function readPriorAttempts(
@@ -217,11 +267,20 @@ export async function runOrchestrateRenderWorkerPrompt(
 
   try {
     const manifest = readManifest(opts.forgeDir, opts.taskId, opts.attemptId);
-    const { description, acceptance } = findTaskInPhases(repoRoot, opts.taskId);
+    const { description, acceptance, questionBudget } = findTaskInPhases(repoRoot, opts.taskId);
     const conventions = readConventions(repoRoot);
     const host = readHost(opts.forgeDir);
     const priorAttempts = readPriorAttempts(opts.forgeDir, opts.taskId, opts.attemptId);
     const answeredQuestions = readAnsweredQuestions(opts.forgeDir, opts.taskId);
+    const budget = resolveBudget(loadGlobalQuestionBudget(opts.forgeDir), questionBudget);
+    const budgetState = computeTaskBudget({
+      forgeDir: opts.forgeDir,
+      taskId: opts.taskId,
+      budget,
+    });
+    const softCapWarning = budgetState.softExceeded
+      ? buildSoftCapWarning(budgetState)
+      : undefined;
 
     const templatePath = path.join(repoRoot, 'templates', 'worker-prompt.template.md');
     if (!existsSync(templatePath)) {
@@ -244,6 +303,8 @@ export async function runOrchestrateRenderWorkerPrompt(
       host,
       priorAttempts,
       answeredQuestions,
+      questionBudget: budget,
+      ...(softCapWarning ? { softCapWarning } : {}),
     };
 
     const prompt = renderWorkerPrompt(template, ctx);
@@ -257,6 +318,9 @@ export async function runOrchestrateRenderWorkerPrompt(
           run_id: ctx.runId,
           task_id: ctx.taskId,
           attempt_id: ctx.attemptId,
+          question_budget: budget,
+          question_count: budgetState.count,
+          ...(softCapWarning ? { soft_cap_warning: softCapWarning } : {}),
         }),
         { json: opts.json },
       ),

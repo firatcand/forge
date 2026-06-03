@@ -217,3 +217,33 @@ phases:
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.data.tasks.length, 2);
 });
+
+test('phases --ready excludes running tasks until retry backoff elapses', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo, forgeDir } = makeRepoWithPhases(ONE_TASK);
+  const taskDir = join(forgeDir, 'orchestrator/tasks/FOO-1');
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(
+    join(taskDir, 'state.json'),
+    JSON.stringify({
+      version: 1,
+      task_id: 'FOO-1',
+      state: 'running',
+      state_version: 2,
+      attempt_count: 1,
+      current_attempt_id: null,
+      last_failed_at: new Date(Date.now() + 60_000).toISOString(),
+      updated_at: new Date().toISOString(),
+      updated_by: { run_id: 'run', claim_id: 'claim', generation: 0 },
+    }),
+    'utf8',
+  );
+  const result = await runOrchestratePhases({
+    ready: true,
+    forgeDir: join(repo, '.forge'),
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.tasks.length, 0);
+});

@@ -7,16 +7,14 @@
 //
 // Spec: `event accepts --type drift with --data JSON payload`.
 
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-
 import { EventArgsSchema, type EventArgs } from '../../schemas/cli-args.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import type { Lease } from '../../schemas/lease.ts';
 import { AttemptEventSchema, type AttemptEvent } from '../../schemas/attempt.ts';
 import { OrchestratorError } from '../../core/errors.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateEvent(args: EventArgs): Promise<{ exitCode: number }> {
@@ -70,11 +68,7 @@ export async function runOrchestrateEvent(args: EventArgs): Promise<{ exitCode: 
       forgeDir: opts.forgeDir,
       taskId: opts.taskId,
       attemptId: opts.attemptId,
-      caller: {
-        run_id: lease.owner_run_id,
-        claim_id: lease.claim_id,
-        generation: lease.generation,
-      },
+      caller: callerFromLease(lease),
     });
   } catch (err) {
     return {
@@ -100,29 +94,6 @@ function buildEventRecord(
   // The schema is a discriminated union — `type` must match a legal literal.
   // The caller supplies the type-specific fields via --data.
   return { type, ts, ...data } as AttemptEvent;
-}
-
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
-  try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
-  }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 export const eventHandler: VerbHandler = {

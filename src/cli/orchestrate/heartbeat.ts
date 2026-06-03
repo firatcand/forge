@@ -6,8 +6,6 @@
 //
 // Returns LEASE_STOLEN envelope (retriable=false) when generation has moved.
 
-import path from 'node:path';
-
 import { HeartbeatArgsSchema, type HeartbeatArgs } from '../../schemas/cli-args.ts';
 import { OrchestratorError } from '../../core/errors.ts';
 import {
@@ -18,10 +16,10 @@ import {
   writeTaskState,
 } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
-import { readFileSync } from 'node:fs';
+import type { Lease } from '../../schemas/lease.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateHeartbeat(
@@ -61,11 +59,7 @@ export async function runOrchestrateHeartbeat(
     renewed = renewLease({
       forgeDir: opts.forgeDir,
       taskId: opts.taskId,
-      caller: {
-        run_id: lease.owner_run_id,
-        claim_id: lease.claim_id,
-        generation: lease.generation,
-      },
+      caller: callerFromLease(lease),
     });
   } catch (err) {
     if (err instanceof OrchestratorError && err.code === 'LEASE_STOLEN') {
@@ -106,11 +100,7 @@ export async function runOrchestrateHeartbeat(
             generation: renewed.generation,
           },
         },
-        {
-          run_id: renewed.owner_run_id,
-          claim_id: renewed.claim_id,
-          generation: renewed.generation,
-        },
+        callerFromLease(renewed),
       );
       firstHeartbeat = true;
     }
@@ -141,11 +131,7 @@ export async function runOrchestrateHeartbeat(
         forgeDir: opts.forgeDir,
         taskId: opts.taskId,
         attemptId: opts.attemptId,
-        caller: {
-          run_id: renewed.owner_run_id,
-          claim_id: renewed.claim_id,
-          generation: renewed.generation,
-        },
+        caller: callerFromLease(renewed),
       },
     );
   } catch {
@@ -163,29 +149,6 @@ export async function runOrchestrateHeartbeat(
       { json: opts.json },
     ),
   };
-}
-
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
-  try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
-  }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 export const heartbeatHandler: VerbHandler = {

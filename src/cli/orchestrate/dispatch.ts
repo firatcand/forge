@@ -6,6 +6,7 @@
 // to 'dispatched'. Emits the 'attempt_started' event.
 
 import { mkdirSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
 
 import { DispatchArgsSchema, type DispatchArgs } from '../../schemas/cli-args.ts';
@@ -17,12 +18,11 @@ import {
 import { assertLeaseOwnership } from '../../orchestrator/leases.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import { manifestFilePath } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
+import type { Lease } from '../../schemas/lease.ts';
 import type { TaskStateRecord } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateDispatch(
@@ -149,11 +149,7 @@ export async function runOrchestrateDispatch(
         forgeDir: opts.forgeDir,
         taskId: opts.taskId,
         attemptId,
-        caller: {
-          run_id: opts.runId,
-          claim_id: opts.claimId,
-          generation: lease.generation,
-        },
+        caller: callerFromLease(lease),
       },
     );
   } catch (err) {
@@ -206,29 +202,6 @@ export async function runOrchestrateDispatch(
   }
 
   return { exitCode: emit(ok({ attempt_id: attemptId, manifest_path: manifestPath }), { json: opts.json }) };
-}
-
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
-  try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
-  }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 // Then. assertLeaseOwnership-style fence — kept as a separate import for parity with leases.ts call sites.

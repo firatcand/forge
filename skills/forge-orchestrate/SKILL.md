@@ -102,6 +102,11 @@ RENDER_OUT=$(forge orchestrate render-worker-prompt \
 # On TEMPLATE_NOT_FOUND / PHASES_NOT_FOUND: same pattern — surface, suggest cancel, move on.
 ```
 
+Parse `data.question_budget` from the render response. The rendered prompt
+already injects the matching `--question-budget-soft` / `--question-budget-hard`
+flags into its `forge orchestrate question` examples, plus a soft-cap warning
+when the task has crossed its soft budget. Do not strip or rewrite those lines.
+
 **3e. Spawn the worker subagent via the host's Task tool.**
 
 The CLI does NOT spawn — it only writes the manifest and renders the prompt.

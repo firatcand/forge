@@ -42,14 +42,21 @@ import {
   resolveBudget,
   type ResolvedBudget,
 } from '../../orchestrator/decision-classifier.ts';
+import {
+  classifyError,
+  nextRetryState,
+  DEFAULT_RETRY_POLICY,
+  type RetryPolicy,
+} from '../../orchestrator/retry.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import { OrchestratorError, SettingsError } from '../../core/errors.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import type { Lease } from '../../schemas/lease.ts';
 import path from 'node:path';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 const QUESTION_EXPIRY_HOURS_DEFAULT = 24;
@@ -244,14 +251,23 @@ export async function runOrchestrateQuestionWrite(
   }
 
   // 5. Gate: reuse → block → hard_cap → write.
-  const outcome = gateQuestion({
-    forgeDir: opts.forgeDir,
-    taskId: opts.taskId,
-    decisionKey: opts.decisionKey,
-    budget,
-    recommendedOptionId,
-    defaultAction: classification.default_action,
-  });
+  let outcome;
+  try {
+    outcome = gateQuestion({
+      forgeDir: opts.forgeDir,
+      taskId: opts.taskId,
+      decisionKey: opts.decisionKey,
+      budget,
+      recommendedOptionId,
+      defaultAction: classification.default_action,
+      maxAttempts: extras.maxAttempts ?? 3,
+    });
+  } catch (err) {
+    if (err instanceof OrchestratorError && err.code === 'DECISION_KEY_EXHAUSTED') {
+      return markDecisionKeyExhausted(opts, lease, err);
+    }
+    throw err;
+  }
 
   if (outcome.kind === 'reuse') {
     return {
@@ -298,11 +314,7 @@ export async function runOrchestrateQuestionWrite(
           forgeDir: opts.forgeDir,
           taskId: opts.taskId,
           attemptId: opts.attemptId,
-          caller: {
-            run_id: lease.owner_run_id,
-            claim_id: lease.claim_id,
-            generation: lease.generation,
-          },
+          caller: callerFromLease(lease),
         },
       );
     } catch (err) {
@@ -341,7 +353,7 @@ export async function runOrchestrateQuestionWrite(
     task_id: opts.taskId,
     agent_id: 'worker',
     decision_key: opts.decisionKey,
-    attempt: 1,
+    attempt: outcome.attempt,
     max_attempts: extras.maxAttempts ?? 3,
     created_at: now.toISOString(),
     expires_at: expiresAt.toISOString(),
@@ -380,17 +392,13 @@ export async function runOrchestrateQuestionWrite(
         question_id: questionId,
         decision_key: opts.decisionKey,
       },
-      {
-        forgeDir: opts.forgeDir,
-        taskId: opts.taskId,
-        attemptId: opts.attemptId,
-        caller: {
-          run_id: lease.owner_run_id,
-          claim_id: lease.claim_id,
-          generation: lease.generation,
+        {
+          forgeDir: opts.forgeDir,
+          taskId: opts.taskId,
+          attemptId: opts.attemptId,
+          caller: callerFromLease(lease),
         },
-      },
-    );
+      );
   } catch {
     // Best-effort audit trail.
   }
@@ -406,17 +414,9 @@ export async function runOrchestrateQuestionWrite(
           state: 'blocked_on_question',
           state_version: state.state_version + 1,
           updated_at: new Date().toISOString(),
-          updated_by: {
-            run_id: lease.owner_run_id,
-            claim_id: lease.claim_id,
-            generation: lease.generation,
-          },
+          updated_by: callerFromLease(lease),
         },
-        {
-          run_id: lease.owner_run_id,
-          claim_id: lease.claim_id,
-          generation: lease.generation,
-        },
+        callerFromLease(lease),
       );
     }
   } catch {
@@ -435,6 +435,59 @@ export async function runOrchestrateQuestionWrite(
         ...(outcome.softCapWarning ? { soft_cap_warning: outcome.softCapWarning } : {}),
         ...(opts.driftEventId ? { drift_event_id: opts.driftEventId } : {}),
         ...(opts.routingHint ? { routing_hint: opts.routingHint } : {}),
+      }),
+      { json: opts.json },
+    ),
+  };
+}
+
+function markDecisionKeyExhausted(
+  opts: QuestionWriteArgs,
+  lease: Lease,
+  err: OrchestratorError,
+): { exitCode: number } {
+  const errorClass = classifyError(err);
+  const decision = nextRetryState(
+    Number.POSITIVE_INFINITY,
+    errorClass,
+    loadRetryPolicy(opts.forgeDir),
+  );
+  try {
+    const state = readTaskState(opts.forgeDir, opts.taskId);
+    writeTaskState(
+      opts.forgeDir,
+      {
+        ...state,
+        state: 'failed',
+        state_version: state.state_version + 1,
+        failure_reason: decision.failure_reason ?? 'decision_key_budget',
+        last_failed_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        updated_by: callerFromLease(lease),
+      },
+        callerFromLease(lease),
+      );
+  } catch (stateErr) {
+    return {
+      exitCode: emit(
+        fail(
+          stateErr instanceof OrchestratorError ? stateErr.code : 'IO_ERROR',
+          stateErr instanceof Error ? stateErr.message : String(stateErr),
+          true,
+          { decision_key: opts.decisionKey, original_code: err.code },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+  return {
+    exitCode: emit(
+      ok({
+        outcome: 'decision_key_exhausted',
+        decision_key: opts.decisionKey,
+        next_state: 'failed',
+        failure_reason: decision.failure_reason ?? 'decision_key_budget',
+        details: err.details,
       }),
       { json: opts.json },
     ),
@@ -460,27 +513,19 @@ function loadGlobalBudget(forgeDir: string): ResolvedBudget {
   }
 }
 
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
+function loadRetryPolicy(forgeDir: string): RetryPolicy {
   try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return {
+      retry_attempts: settings.agents.retry_attempts,
+      retry_backoff_ms_max: settings.agents.retry_backoff_ms_max,
+    };
+  } catch (err) {
+    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
+      return DEFAULT_RETRY_POLICY;
+    }
+    throw err;
   }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 export const questionWriteHandler: VerbHandler = {

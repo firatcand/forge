@@ -6,6 +6,7 @@ import type { LinearTrackerConfig } from '../../../src/schemas/settings.ts';
 import {
   LinearTracker,
   classifyLinearError,
+  wrapLinearClient,
   TrackerError,
   parseForgeFooters,
   type LinearCreateIssueInput,
@@ -108,6 +109,28 @@ function makeTracker(overrides: Partial<LinearSdkLike> = {}): {
     retry: { sleep: async () => {} },
   });
   return { tracker, client, logger };
+}
+
+function makeWrappedSdkIssue(
+  labels: readonly LinearLabelLike[],
+): {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  url: string;
+  state: Promise<LinearWorkflowStateLike>;
+  labels: () => Promise<{ nodes: readonly LinearLabelLike[] }>;
+} {
+  return {
+    id: 'i1',
+    identifier: 'FOR-1',
+    title: 'Issue',
+    description: null,
+    url: 'https://linear.app/test/issue/FOR-1',
+    state: Promise.resolve(STATE_TODO),
+    labels: async () => ({ nodes: labels }),
+  };
 }
 
 // ─── healthCheck — never throws ──────────────────────────────────────────────
@@ -480,6 +503,12 @@ await test('classifyLinearError — NOT_FOUND on 404', () => {
   assert.equal(hint.code, 'NOT_FOUND');
 });
 
+await test('classifyLinearError — preserves normalized TrackerError code', () => {
+  const err = new TrackerError('NOT_FOUND', 'provider hid the issue');
+  const hint = classifyLinearError(err);
+  assert.equal(hint.code, 'NOT_FOUND');
+});
+
 await test('classifyLinearError — VALIDATION on 422', () => {
   const hint = classifyLinearError(makeLinearValidationError());
   assert.equal(hint.code, 'VALIDATION');
@@ -582,6 +611,41 @@ await test('claim — initial read transient → transient_error', async () => {
   if (!result.ok) assert.equal(result.reason, 'transient_error');
 });
 
+await test('claim — wrapped initial read transient retries then succeeds', async () => {
+  const myLabel = makeClaimLabel('me');
+  let issueCalls = 0;
+  let added = false;
+  const rawClient = {
+    async issue() {
+      issueCalls++;
+      if (issueCalls === 1) throw makeLinearTransportError();
+      return makeWrappedSdkIssue(added ? [myLabel] : []);
+    },
+    async issueLabels() {
+      return { nodes: [] };
+    },
+    async createIssueLabel({ name }: { name: string }) {
+      return {
+        success: true,
+        issueLabel: Promise.resolve({ id: `label-${name}`, name }),
+      };
+    },
+    async updateIssue() {
+      added = true;
+      return {
+        success: true,
+        issue: Promise.resolve(makeWrappedSdkIssue([myLabel])),
+      };
+    },
+  };
+  const tracker = new LinearTracker(linearConfig, noopLogger(), {
+    client: wrapLinearClient(rawClient as unknown as import('@linear/sdk').LinearClient),
+    retry: { sleep: async () => {} },
+  });
+  assert.deepEqual(await tracker.claim('i1', 'me'), { ok: true });
+  assert.ok(issueCalls > 1, `claim.read should retry (got ${issueCalls} issue calls)`);
+});
+
 await test('claim — addLabel NOT_FOUND → version_conflict', async () => {
   const issue = makeIssue({ id: 'i1', labels: [] });
   const { tracker } = makeTracker({
@@ -657,6 +721,42 @@ await test('claim — recheck transient → transient_error (label release attem
   const result = await tracker.claim('i1', 'me');
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, 'transient_error');
+});
+
+await test('claim — wrapped recheck transient retries then succeeds', async () => {
+  const myLabel = makeClaimLabel('me');
+  let issueCalls = 0;
+  let added = false;
+  const rawClient = {
+    async issue() {
+      issueCalls++;
+      if (issueCalls === 1) return makeWrappedSdkIssue([]);
+      if (issueCalls === 2) throw makeLinearTransportError();
+      return makeWrappedSdkIssue(added ? [myLabel] : []);
+    },
+    async issueLabels() {
+      return { nodes: [] };
+    },
+    async createIssueLabel({ name }: { name: string }) {
+      return {
+        success: true,
+        issueLabel: Promise.resolve({ id: `label-${name}`, name }),
+      };
+    },
+    async updateIssue() {
+      added = true;
+      return {
+        success: true,
+        issue: Promise.resolve(makeWrappedSdkIssue([myLabel])),
+      };
+    },
+  };
+  const tracker = new LinearTracker(linearConfig, noopLogger(), {
+    client: wrapLinearClient(rawClient as unknown as import('@linear/sdk').LinearClient),
+    retry: { sleep: async () => {} },
+  });
+  assert.deepEqual(await tracker.claim('i1', 'me'), { ok: true });
+  assert.equal(issueCalls, 3, 'initial read plus retried recheck should call issue 3 times');
 });
 
 await test('claim — tiebreak: I win when my label is lexicographic first', async () => {
