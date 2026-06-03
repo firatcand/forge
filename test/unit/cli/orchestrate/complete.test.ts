@@ -109,6 +109,27 @@ test('complete with verdict=ready_for_review + phase=implement → state ready_f
   assert.ok(vv.verified_by);
 });
 
+test('complete with verdict=changes_needed records last_failed_at and loops to running', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const verdictFile = writeVerdict(ctx.repoRoot, 'changes_needed');
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile,
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'running');
+  assert.equal(typeof state.last_failed_at, 'string');
+  assert.equal(state.failure_reason, undefined);
+});
+
 test('complete --phase ship from running refuses with INVALID_STATE_FOR_PHASE', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);

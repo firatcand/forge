@@ -139,10 +139,44 @@ function isErrorLike(err: unknown): err is ErrorLike {
   return typeof err === 'object' && err !== null;
 }
 
+function normalizeLinearWrapperError(
+  op: string,
+  err: unknown,
+  hint: NormalizeErrorHint,
+): TrackerError {
+  if (err instanceof TrackerError) return err;
+  const details: Record<string, unknown> = { ...(hint.details ?? {}) };
+  const rawMessage =
+    err instanceof Error
+      ? err.message
+      : err === null
+        ? 'null'
+        : err === undefined
+          ? 'undefined'
+          : typeof err === 'string'
+            ? err
+            : String(err);
+  const detail = hint.code === 'AUTH'
+    ? 'LINEAR_API_KEY rejected'
+    : (rawMessage.length > 0 ? rawMessage : hint.code.toLowerCase());
+  return new TrackerError(
+    hint.code,
+    `tracker.${op}: ${hint.code} — ${detail}`,
+    details,
+    { cause: err },
+  );
+}
+
 // Branch order is load-bearing — same care as classifyGitHubError:
 //   AUTH before NOT_FOUND (some 403s look like 404s)
 //   VALIDATION before CONFLICT ("already exists" can appear in 422 body)
 export function classifyLinearError(err: unknown): NormalizeErrorHint {
+  if (err instanceof TrackerError) {
+    return {
+      code: err.code,
+      ...(err.details !== undefined ? { details: err.details } : {}),
+    };
+  }
   if (!isErrorLike(err)) return { code: 'UNKNOWN' };
   const message = String(err.message ?? '');
   const status = typeof err.status === 'number' ? err.status : -1;
@@ -266,8 +300,12 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
     },
 
     async issue(id) {
-      const issue = await client.issue(id);
-      return flattenIssue(issue);
+      try {
+        const issue = await client.issue(id);
+        return flattenIssue(issue);
+      } catch (err) {
+        throw normalizeLinearWrapperError('linear.issue', err, classifyLinearError(err));
+      }
     },
 
     async listIssues({ teamId, stateTypes, limit }) {

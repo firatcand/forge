@@ -26,8 +26,10 @@ import {
 import {
   countTaskQuestions,
   findAnsweredQuestionByDecisionKey,
+  findLatestQuestionByDecisionKey,
   findOpenQuestionByDecisionKey,
 } from './questions/lookup.ts';
+import { OrchestratorError } from '../core/errors.ts';
 
 // ---------------------------------------------------------------------------
 // AC1 — classification validation
@@ -126,7 +128,7 @@ export type GateOutcome =
       readonly reason: string;
       readonly chosenOptionId: string | null;
     }
-  | { readonly kind: 'write'; readonly softCapWarning?: string };
+  | { readonly kind: 'write'; readonly softCapWarning?: string; readonly attempt: number };
 
 export interface GateArgs {
   readonly forgeDir: string;
@@ -137,6 +139,8 @@ export interface GateArgs {
   readonly recommendedOptionId?: string;
   /** classification.default_action — used in the autonomous justification. */
   readonly defaultAction?: string;
+  /** Per-decision_key respawn cap; distinct from the per-task question budget. */
+  readonly maxAttempts?: number;
 }
 
 export function gateQuestion(args: GateArgs): GateOutcome {
@@ -159,6 +163,25 @@ export function gateQuestion(args: GateArgs): GateOutcome {
     return { kind: 'block_on_existing', question: open };
   }
 
+  const maxAttempts = args.maxAttempts ?? 3;
+  const latest = findLatestQuestionByDecisionKey(args.decisionKey, {
+    forgeDir: args.forgeDir,
+    taskId: args.taskId,
+  });
+  const nextAttempt = latest ? latest.attempt + 1 : 1;
+  if (nextAttempt > maxAttempts) {
+    throw new OrchestratorError(
+      'DECISION_KEY_EXHAUSTED',
+      `decision_key '${args.decisionKey}' exhausted max_attempts=${maxAttempts}`,
+      {
+        task_id: args.taskId,
+        decision_key: args.decisionKey,
+        attempt_count: latest?.attempt ?? 0,
+        max_attempts: maxAttempts,
+      },
+    );
+  }
+
   // 3. Budget: hard cap reached → force an autonomous decision (logged).
   const state = computeTaskBudget({
     forgeDir: args.forgeDir,
@@ -179,6 +202,6 @@ export function gateQuestion(args: GateArgs): GateOutcome {
   // 4. Budget OK → write. Once soft is crossed, carry the warning for the next
   //    attempt's prompt.
   return state.softExceeded
-    ? { kind: 'write', softCapWarning: buildSoftCapWarning(state) }
-    : { kind: 'write' };
+    ? { kind: 'write', softCapWarning: buildSoftCapWarning(state), attempt: nextAttempt }
+    : { kind: 'write', attempt: nextAttempt };
 }

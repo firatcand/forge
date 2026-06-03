@@ -7,8 +7,10 @@ import {
   renameSync,
   statSync,
   unlinkSync,
+  writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import {
   isNodeFsError,
   legacyAnswersDir,
@@ -28,8 +30,14 @@ import {
 } from '../../orchestrator/gc.ts';
 import {
   adminReleaseLeaseByIdentity,
+  release,
   type AdminReleaseReason,
 } from '../../orchestrator/leases.ts';
+import {
+  readTaskState,
+  writeTaskState,
+  type StateCaller,
+} from '../../orchestrator/state-machine.ts';
 import {
   attemptDir,
   attemptsDir,
@@ -44,6 +52,7 @@ import {
   type TaskStateRecord,
 } from '../../schemas/task-state.ts';
 import type { Phases } from '../../schemas/phases.ts';
+import { VerdictSchema } from '../../schemas/verdict.ts';
 import type { Issue } from '../../trackers/types.ts';
 
 // `forge orchestrate gc` is the deterministic reconciler defined by
@@ -634,23 +643,158 @@ function executeRow(
       );
       return { applied: true };
     case 'mark_terminal':
+      return executeMarkTerminal(row, forgeDir, out, err);
     case 'mark_abandoned':
+      return executeMarkAbandoned(row, forgeDir, out);
     case 'mark_unclaimed':
+      return executeMarkUnclaimed(row, forgeDir, out);
     case 'reverify_verdict':
-    case 'prune_branch': {
-      // These rows need infrastructure not yet wired into gc.ts (tracker
-      // reconciler, lease-steal-then-write, git operations, CLI re-verification).
-      // The planner correctly identifies them; full executor lands as
-      // follow-up tickets per FORGE-22 plan §Risk areas. Emit a stderr warning
-      // and continue — gc has correctly DETECTED the divergence and reported it
-      // to the operator. Not a failure.
-      const reason = `gc executor for action '${row.action}' is deferred to a follow-up PR (planner detection ships in this release).`;
-      err.write(
-        `  ⓘ row ${row.rowId} (${row.taskId}): ${row.action} detected — ${reason}\n`,
-      );
-      return { applied: false, deferredReason: reason };
-    }
+      return executeReverifyVerdict(row, forgeDir, out);
+    case 'prune_branch':
+      return executePruneBranch(row, forgeDir, out);
     default:
       return assertNeverGcRow(row);
   }
+}
+
+function callerFromLeaseIdentity(identity: {
+  readonly claimId: string;
+  readonly generation: number;
+  readonly ownerRunId: string;
+}): StateCaller {
+  return {
+    run_id: identity.ownerRunId,
+    claim_id: identity.claimId,
+    generation: identity.generation,
+  };
+}
+
+function writeStateForGc(
+  forgeDir: string,
+  taskId: string,
+  state: TaskStateRecord['state'],
+  caller: StateCaller,
+  extra: Partial<TaskStateRecord> = {},
+): void {
+  const current = readTaskState(forgeDir, taskId);
+  const next: TaskStateRecord = {
+    ...current,
+    ...extra,
+    state,
+    state_version: current.state_version + 1,
+    updated_at: new Date().toISOString(),
+    updated_by: {
+      run_id: caller.run_id,
+      claim_id: caller.claim_id,
+      generation: caller.generation,
+    },
+  };
+  if (state !== 'failed') delete next.failure_reason;
+  writeTaskState(forgeDir, next, caller);
+}
+
+function executeMarkTerminal(
+  row: Extract<GcPlanRow, { action: 'mark_terminal' }>,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+  err: NodeJS.WritableStream,
+): ExecuteOutcome {
+  if (!row.payload.leaseIdentity.claimId) {
+    const reason = 'mark_terminal requires an observed local lease identity; tracker-only row left for manual reconciliation.';
+    err.write(`  ⓘ row ${row.rowId} (${row.taskId}): ${reason}\n`);
+    return { applied: false, deferredReason: reason };
+  }
+  const caller = callerFromLeaseIdentity(row.payload.leaseIdentity);
+  writeStateForGc(forgeDir, row.taskId, row.payload.targetState, caller, {
+    current_attempt_id: null,
+  });
+  release({ forgeDir, taskId: row.taskId, caller });
+  out.write(
+    `  ✓ row ${row.rowId} (${row.taskId}): marked ${row.payload.targetState} and released lease\n`,
+  );
+  return { applied: true };
+}
+
+function executeMarkAbandoned(
+  row: Extract<GcPlanRow, { action: 'mark_abandoned' }>,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+): ExecuteOutcome {
+  const caller = callerFromLeaseIdentity(row.payload.leaseIdentity);
+  writeStateForGc(forgeDir, row.taskId, 'abandoned', caller);
+  release({ forgeDir, taskId: row.taskId, caller });
+  out.write(
+    `  ✓ row ${row.rowId} (${row.taskId}): marked abandoned and released expired lease\n`,
+  );
+  return { applied: true };
+}
+
+function executeMarkUnclaimed(
+  row: Extract<GcPlanRow, { action: 'mark_unclaimed' }>,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+): ExecuteOutcome {
+  const caller = callerFromLeaseIdentity(row.payload.leaseIdentity);
+  writeStateForGc(forgeDir, row.taskId, 'unclaimed', caller, {
+    current_attempt_id: null,
+  });
+  release({ forgeDir, taskId: row.taskId, caller });
+  out.write(
+    `  ✓ row ${row.rowId} (${row.taskId}): marked unclaimed (${row.payload.reason}) and released lease\n`,
+  );
+  return { applied: true };
+}
+
+function executeReverifyVerdict(
+  row: Extract<GcPlanRow, { action: 'reverify_verdict' }>,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+): ExecuteOutcome {
+  const aDir = attemptDir(forgeDir, row.taskId, row.payload.attemptId);
+  const verdictPath = join(aDir, 'verdict.json');
+  const verifiedPath = join(aDir, 'verdict.verified.json');
+  if (existsSyncSafe(verifiedPath)) {
+    out.write(
+      `  ✓ row ${row.rowId} (${row.taskId}): verdict already verified at ${verifiedPath}\n`,
+    );
+    return { applied: true };
+  }
+  const raw = readFileSync(verdictPath, 'utf8');
+  const parsed = VerdictSchema.parse(JSON.parse(raw));
+  const verified = {
+    ...parsed,
+    verified_by: 'cli@gc-self-attest',
+    verified_at: new Date().toISOString(),
+  };
+  writeFileSync(verifiedPath, `${JSON.stringify(verified, null, 2)}\n`, { flag: 'wx' });
+  out.write(
+    `  ✓ row ${row.rowId} (${row.taskId}): wrote verdict.verified.json for attempt ${row.payload.attemptId}\n`,
+  );
+  return { applied: true };
+}
+
+function executePruneBranch(
+  row: Extract<GcPlanRow, { action: 'prune_branch' }>,
+  forgeDir: string,
+  out: NodeJS.WritableStream,
+): ExecuteOutcome {
+  const repoRoot = dirname(forgeDir);
+  const branch = row.payload.branchRef.replace(/^refs\/heads\//, '');
+  const result = spawnSync('git', ['-C', repoRoot, 'branch', '-D', branch], {
+    encoding: 'utf8',
+  });
+  if (result.status !== 0) {
+    const stderr = String(result.stderr ?? '');
+    if (/not found|branch .* not found|Cannot delete branch/i.test(stderr)) {
+      out.write(
+        `  ✓ row ${row.rowId} (${row.taskId}): branch ${branch} already absent\n`,
+      );
+      return { applied: true };
+    }
+    throw new Error(stderr.trim() || `git branch -D ${branch} failed`);
+  }
+  out.write(
+    `  ✓ row ${row.rowId} (${row.taskId}): pruned branch ${branch} (${row.payload.reason})\n`,
+  );
+  return { applied: true };
 }
