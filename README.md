@@ -1,9 +1,9 @@
 ![banner](forge-cover-v1--horizon-banner-3x1@2x.png)
 # 🔨 Forge
 
-> A lightweight Claude Code framework that takes you from idea to production with structure, not friction.
+> A lightweight coding agent framework that takes you from idea to production with structure, not friction.
 
-Forge is for solo founders and small teams who want to ship real products with Claude Code — not just experiment with it. It gives you a structured workflow for the parts that matter (ideation, decomposition, phase gates, learning capture) and stays out of your way for the parts where Claude Code already shines (planning, implementing, reviewing).
+Forge is for solo founders and small teams who want to ship real products with coding agents — not just experiment with it. It gives you a structured workflow for the parts that matter (ideation, decomposition, phase gates, learning capture) and stays out of your way for the parts where Claude Code already shines (planning, implementing, reviewing).
 
 ## What it is
 
