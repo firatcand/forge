@@ -215,6 +215,63 @@ test('orchestrate gc apply: row 13 (multiple leases) → older-generation lease 
   }
 });
 
+// ── Apply mode: row 2 ──
+
+test('orchestrate gc apply: row 2 (expired running lease) → abandoned + lease released', () => {
+  const fd = freshForgeDir();
+  const { stdout, stderr, out } = capture();
+  try {
+    writeState(fd, 'TASK-EXP', { state: 'running' });
+    writeLease(fd, 'TASK-EXP', { task_id: 'TASK-EXP', claim_id: 'claim-EXP' });
+
+    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.reconcilerRows?.some((r) => r.rowId === 2 && r.action === 'mark_abandoned'));
+    assert.equal(existsSync(leaseFilePath(fd, 'TASK-EXP')), false);
+    const state = JSON.parse(readFileSync(stateFilePath(fd, 'TASK-EXP'), 'utf8'));
+    assert.equal(state.state, 'abandoned');
+    assert.match(out(), /marked abandoned/);
+  } finally {
+    rmSync(fd, { recursive: true, force: true });
+  }
+});
+
+// ── Apply mode: row 8 ──
+
+test('orchestrate gc apply: row 8 (verdict without verified copy) → writes verdict.verified.json', () => {
+  const fd = freshForgeDir();
+  const { stdout, stderr, out } = capture();
+  try {
+    const taskId = 'TASK-V';
+    const attemptId = 'att-001';
+    writeState(fd, taskId, { state: 'running' });
+    const aDir = attemptDir(fd, taskId, attemptId);
+    mkdirSync(aDir, { recursive: true });
+    writeFileSync(
+      join(aDir, 'verdict.json'),
+      JSON.stringify({
+        version: 1,
+        verdict: 'changes_needed',
+        summary: 'Needs another pass',
+        tests: { ran: true, passed: 0, failed: 1, skipped: 0, duration_ms: 100, output_excerpt: 'fail' },
+        lint: { ran: true, clean: true, violations: 1, output_excerpt: 'lint' },
+        branch: 'feat/task-v',
+        save_point: 'checkpoint',
+      }),
+    );
+
+    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.reconcilerRows?.some((r) => r.rowId === 8 && r.action === 'reverify_verdict'));
+    const verified = JSON.parse(readFileSync(join(aDir, 'verdict.verified.json'), 'utf8'));
+    assert.equal(verified.verdict, 'changes_needed');
+    assert.equal(verified.verified_by, 'cli@gc-self-attest');
+    assert.match(out(), /wrote verdict\.verified\.json/);
+  } finally {
+    rmSync(fd, { recursive: true, force: true });
+  }
+});
+
 // ── Apply mode: row 11 (archive question on terminal attempt) ──
 
 test('orchestrate gc apply: row 11 — question file on terminal attempt is archived', () => {
@@ -230,6 +287,7 @@ test('orchestrate gc apply: row 11 — question file on terminal attempt is arch
     writeFileSync(join(qDir, 'q1.json'), '{"question":"are we shipping?"}');
     // Mark attempt terminal by dropping a verdict.json
     writeFileSync(join(aDir, 'verdict.json'), '{"verdict":"ready_for_review"}');
+    writeFileSync(join(aDir, 'verdict.verified.json'), '{"verdict":"ready_for_review"}');
 
     const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0, `stderr: ${err()}, stdout: ${out()}`);
@@ -265,7 +323,8 @@ test('orchestrate gc apply: multiple rows in one plan execute deterministically'
     const aDir = attemptDir(fd, taskId, attemptId);
     mkdirSync(join(aDir, 'questions'), { recursive: true });
     writeFileSync(join(aDir, 'questions', 'q.json'), '{}');
-    writeFileSync(join(aDir, 'verdict.json'), '{}');
+    writeFileSync(join(aDir, 'verdict.json'), '{"verdict":"ready_for_review"}');
+    writeFileSync(join(aDir, 'verdict.verified.json'), '{"verdict":"ready_for_review"}');
 
     const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);

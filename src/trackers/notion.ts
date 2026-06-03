@@ -1141,14 +1141,6 @@ function errToString(err: unknown): string {
   return String(err);
 }
 
-function extractCreatedPage(raw: unknown): unknown {
-  if (raw === null || typeof raw !== 'object') return raw;
-  const obj = raw as Record<string, unknown>;
-  if (Array.isArray(obj.pages) && obj.pages.length > 0) return obj.pages[0];
-  if (Array.isArray(obj.results) && obj.results.length > 0) return obj.results[0];
-  return raw;
-}
-
 function buildIssueChildren(
   payload: CreateIssuePayload,
 ): Array<Record<string, unknown>> {
@@ -1199,6 +1191,3 @@ function defaultDatabaseProperties(): Record<string, unknown> {
     [PROP_ACCEPTANCE]: { rich_text: {} },
   };
 }
-
-// Re-export for tests that want to construct error fixtures.
-export { z };

@@ -18,12 +18,19 @@ import { CompleteArgsSchema, type CompleteArgs } from '../../schemas/cli-args.ts
 import { VerdictSchema } from '../../schemas/verdict.ts';
 import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import type { Lease } from '../../schemas/lease.ts';
 import { attemptDir } from '../../orchestrator/questions/paths.ts';
-import { OrchestratorError } from '../../core/errors.ts';
+import { OrchestratorError, SettingsError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
+import { loadSettings } from '../../core/settings.ts';
+import {
+  DEFAULT_RETRY_POLICY,
+  nextRetryState,
+  type RetryPolicy,
+} from '../../orchestrator/retry.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateComplete(
@@ -183,11 +190,7 @@ export async function runOrchestrateComplete(
         forgeDir: opts.forgeDir,
         taskId: opts.taskId,
         attemptId: opts.attemptId,
-        caller: {
-          run_id: lease.owner_run_id,
-          claim_id: lease.claim_id,
-          generation: lease.generation,
-        },
+        caller: callerFromLease(lease),
       },
     );
   } catch {
@@ -196,13 +199,42 @@ export async function runOrchestrateComplete(
 
   // 5. State transition.
   let nextState: TaskState | null = null;
+  let failureReason: 'decision_key_budget' | 'retries_exhausted' | 'fatal' | undefined;
+  let lastFailedAt: string | undefined;
   if (verdict.data.verdict === 'ready_for_review') {
     if (opts.phase === 'implement') nextState = 'ready_for_review';
     else if (opts.phase === 'review') nextState = 'reviewed';
     else if (opts.phase === 'ship') nextState = 'shipped';
   } else if (verdict.data.verdict === 'changes_needed' || verdict.data.verdict === 'blocked') {
-    // Loop back to running so a re-dispatch can pick up.
-    nextState = 'running';
+    // Failed attempt. Use the retry policy to decide whether to loop back or
+    // mark terminal failure; phases --ready enforces the backoff via last_failed_at.
+    lastFailedAt = new Date().toISOString();
+    try {
+      const state = readTaskState(opts.forgeDir, opts.taskId);
+      const decision = nextRetryState(
+        state.attempt_count,
+        'transient',
+        loadRetryPolicy(opts.forgeDir),
+      );
+      if (decision.state === 'retry') {
+        nextState = 'running';
+      } else {
+        nextState = 'failed';
+        failureReason = decision.failure_reason;
+      }
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+            err instanceof Error ? err.message : String(err),
+            true,
+            { hint: 'verdict written; retry classification failed — run forge orchestrate gc' },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
   }
   if (nextState) {
     try {
@@ -213,6 +245,8 @@ export async function runOrchestrateComplete(
           ...state,
           state: nextState,
           state_version: state.state_version + 1,
+          ...(failureReason ? { failure_reason: failureReason } : {}),
+          ...(lastFailedAt ? { last_failed_at: lastFailedAt } : {}),
           updated_at: new Date().toISOString(),
           updated_by: {
             run_id: lease.owner_run_id,
@@ -220,11 +254,7 @@ export async function runOrchestrateComplete(
             generation: lease.generation,
           },
         },
-        {
-          run_id: lease.owner_run_id,
-          claim_id: lease.claim_id,
-          generation: lease.generation,
-        },
+        callerFromLease(lease),
       );
     } catch (err) {
       return {
@@ -253,27 +283,19 @@ export async function runOrchestrateComplete(
   };
 }
 
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
+function loadRetryPolicy(forgeDir: string): RetryPolicy {
   try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return {
+      retry_attempts: settings.agents.retry_attempts,
+      retry_backoff_ms_max: settings.agents.retry_backoff_ms_max,
+    };
+  } catch (err) {
+    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
+      return DEFAULT_RETRY_POLICY;
+    }
+    throw err;
   }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 export const completeHandler: VerbHandler = {

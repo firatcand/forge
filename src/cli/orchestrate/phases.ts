@@ -24,6 +24,12 @@ import type { VerbHandler } from './index.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { detectCheapDivergences } from './gc.ts';
+import { readTaskState } from '../../orchestrator/state-machine.ts';
+import {
+  DEFAULT_RETRY_POLICY,
+  nextEligibleAt,
+  type RetryPolicy,
+} from '../../orchestrator/retry.ts';
 
 export interface ReadyTaskOut {
   readonly task_id: string;
@@ -151,13 +157,30 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   const activeAttempts = collectActiveAttempts(opts.forgeDir, tasks);
   // FORGE-170: honor settings.agents.hard_lock_globs override (default list otherwise).
   let hardLockGlobs: readonly string[] | undefined;
+  let retryPolicy: RetryPolicy = DEFAULT_RETRY_POLICY;
   try {
-    hardLockGlobs = loadSettings(path.join(opts.forgeDir, 'settings.yaml')).agents.hard_lock_globs;
+    const settings = loadSettings(path.join(opts.forgeDir, 'settings.yaml'));
+    hardLockGlobs = settings.agents.hard_lock_globs;
+    retryPolicy = {
+      retry_attempts: settings.agents.retry_attempts,
+      retry_backoff_ms_max: settings.agents.retry_backoff_ms_max,
+    };
   } catch {
     hardLockGlobs = undefined;
   }
 
-  const out: ReadyTaskOut[] = candidates.map(({ task, phaseId }) => {
+  const retryEligible = candidates.filter(({ task }) => {
+    const taskId = task.tracker_issue_id ?? task.id;
+    try {
+      const state = readTaskState(opts.forgeDir, taskId);
+      if (state.state !== 'running' || !state.last_failed_at) return true;
+      return nextEligibleAt(state.attempt_count, state.last_failed_at, retryPolicy) <= new Date();
+    } catch {
+      return true;
+    }
+  });
+
+  const out: ReadyTaskOut[] = retryEligible.map(({ task, phaseId }) => {
     const overlap = classifyOverlap({
       activeAttempts,
       candidate: { taskId: task.id, writeGlobs: task.write_globs ?? [] },

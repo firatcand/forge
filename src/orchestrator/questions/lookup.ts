@@ -271,6 +271,47 @@ export interface AnsweredQuestionMatch {
   readonly answer: Answer;
 }
 
+export function findLatestQuestionByDecisionKey(
+  decisionKey: string,
+  opts: DecisionKeyLookupOptions,
+): Question | null {
+  const taskId = validateIdSegment(opts.taskId, 'taskId');
+  let attempts: readonly string[];
+  try {
+    attempts = listSubdirs(attemptsDir(opts.forgeDir, taskId));
+  } catch (err) {
+    if (err instanceof QuestionChannelError && err.code === 'INVALID_ID') {
+      return null;
+    }
+    throw err;
+  }
+  let best: Question | null = null;
+  for (const attemptId of attempts) {
+    const qDir = join(
+      tasksRootDir(opts.forgeDir),
+      taskId,
+      'attempts',
+      attemptId,
+      'questions',
+    );
+    for (const id of listJsonIds(qDir)) {
+      let q: Question;
+      try {
+        q = readQuestion(id, { forgeDir: opts.forgeDir, taskId, attemptId });
+      } catch (err) {
+        if (err instanceof QuestionChannelError) {
+          opts.onSkip?.(join(qDir, `${id}.json`), err);
+          continue;
+        }
+        throw err;
+      }
+      if (q.decision_key !== decisionKey) continue;
+      if (best === null || q.created_at > best.created_at) best = q;
+    }
+  }
+  return best;
+}
+
 // Find the most recent ANSWERED question with the given decision_key across
 // all attempts of a single task. Used by respawned workers to reuse a prior
 // architectural decision without re-asking the supervisor.

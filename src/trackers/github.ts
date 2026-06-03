@@ -24,7 +24,6 @@ import {
   parseForgeFooters,
   serializeWithForgeFooters,
   upsertClaimFooter,
-  type ForgeFooters,
 } from './footers.ts';
 import type {
   ClaimResult,
@@ -209,10 +208,6 @@ function parseRetryAfter(stderr: string): number | undefined {
   const seconds = Number(match[1]);
   return Number.isFinite(seconds) ? seconds * 1000 : undefined;
 }
-
-// Re-export footer helpers for back-compat (callers import from './github.ts').
-export { parseForgeFooters, serializeWithForgeFooters };
-export type { ForgeFooters };
 
 // ─── State mapping ───────────────────────────────────────────────────────────
 

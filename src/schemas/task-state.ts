@@ -36,6 +36,7 @@ export const TaskStateSchema = z
     attempt_count: z.number().int().min(0),
     current_attempt_id: z.string().min(1).max(64).nullable(),
     failure_reason: z.enum(FAILURE_REASONS).optional(),
+    last_failed_at: z.string().datetime().optional(),
     updated_at: z.string().datetime(),
     updated_by: z.object({
       run_id: z.string().min(1).max(64),

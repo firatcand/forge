@@ -37,12 +37,14 @@ test('renderer: substitutes all allowlisted placeholders', () => {
     'prior={{PRIOR_ATTEMPTS}}',
     'ans={{ANSWERED_QUESTIONS}}',
     'bw={{BUDGET_WARNING}}',
+    'qb={{QUESTION_BUDGET_FLAGS}}',
   ].join('\n');
-  const out = renderWorkerPrompt(tmpl, baseCtx());
+  const out = renderWorkerPrompt(tmpl, baseCtx({ questionBudget: { soft: 2, hard: 4 } }));
   assert.match(out, /task=FORGE-1/);
   assert.match(out, /attempt=attempt-abc/);
   assert.match(out, /phase=IMPLEMENT/);
   assert.match(out, /ac=- Bullet A\n- Bullet B/);
+  assert.match(out, /qb=--question-budget-soft 2 --question-budget-hard 4/);
   // No surviving {{...}} placeholders.
   assert.doesNotMatch(out, /{{[A-Z_]+}}/);
 });
@@ -60,6 +62,10 @@ test('renderer: {{BUDGET_WARNING}} renders (none) when no soft-cap warning is se
   const tmpl = '{{BUDGET_WARNING}}';
   assert.equal(renderWorkerPrompt(tmpl, baseCtx()), '(none)');
   assert.equal(renderWorkerPrompt(tmpl, baseCtx({ softCapWarning: '' })), '(none)');
+});
+
+test('renderer: {{QUESTION_BUDGET_FLAGS}} renders empty when no budget is set', () => {
+  assert.equal(renderWorkerPrompt('{{QUESTION_BUDGET_FLAGS}}', baseCtx()), '');
 });
 
 test('renderer: throws UnknownPlaceholderError on unrecognized token', () => {

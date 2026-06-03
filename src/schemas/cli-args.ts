@@ -28,9 +28,6 @@ export const ClaimIdSchema = z
 export const AttemptIdSchema = z
   .string()
   .regex(UUIDV7_REGEX, 'attempt_id must be a UUIDv7');
-export const QuestionIdSchema = z
-  .string()
-  .regex(UUIDV7_REGEX, 'question_id must be a UUIDv7');
 
 // Decision keys are author-chosen short identifiers used for dedup across
 // concurrent worker attempts. spec §Question lifecycle.

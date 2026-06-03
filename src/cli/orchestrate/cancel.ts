@@ -5,9 +5,6 @@
 // (terminal), appends 'attempt_cancelled' event if there's a current attempt,
 // and releases the lease so the next claim attempt can proceed.
 
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-
 import { CancelArgsSchema, type CancelArgs } from '../../schemas/cli-args.ts';
 import {
   readTaskState,
@@ -15,7 +12,7 @@ import {
 } from '../../orchestrator/state-machine.ts';
 import { release as releaseLease } from '../../orchestrator/leases.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import type { Lease } from '../../schemas/lease.ts';
 import { OrchestratorError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
@@ -24,6 +21,7 @@ import {
   resolveTrackerForCLI,
   type ClaimableTracker,
 } from './tracker-factory.ts';
+import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
 export interface CancelDeps {
@@ -109,11 +107,7 @@ export async function runOrchestrateCancel(
           forgeDir: opts.forgeDir,
           taskId: opts.taskId,
           attemptId: state.current_attempt_id,
-          caller: {
-            run_id: lease.owner_run_id,
-            claim_id: lease.claim_id,
-            generation: lease.generation,
-          },
+          caller: callerFromLease(lease),
         },
       );
     } catch {
@@ -136,11 +130,7 @@ export async function runOrchestrateCancel(
           generation: lease.generation,
         },
       },
-      {
-        run_id: lease.owner_run_id,
-        claim_id: lease.claim_id,
-        generation: lease.generation,
-      },
+      callerFromLease(lease),
     );
   } catch (err) {
     return {
@@ -160,11 +150,7 @@ export async function runOrchestrateCancel(
     releaseLease({
       forgeDir: opts.forgeDir,
       taskId: opts.taskId,
-      caller: {
-        run_id: lease.owner_run_id,
-        claim_id: lease.claim_id,
-        generation: lease.generation,
-      },
+      caller: callerFromLease(lease),
     });
   } catch {
     // Best-effort lease release; state is already cancelled which is the source of truth.
@@ -220,29 +206,6 @@ async function stripClaimFence(opts: CancelArgs, deps: CancelDeps): Promise<void
       }
     }
   }
-}
-
-function readLease(forgeDir: string, taskId: string): Lease {
-  const leasePath = path.join(forgeDir, 'orchestrator', 'tasks', taskId, 'lease.json');
-  let raw: string;
-  try {
-    raw = readFileSync(leasePath, 'utf8');
-  } catch {
-    throw new OrchestratorError(
-      'LEASE_NOT_FOUND',
-      `lease.json not found for task ${taskId}`,
-      { taskId, path: leasePath },
-    );
-  }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
-    );
-  }
-  return parsed.data;
 }
 
 export const cancelHandler: VerbHandler = {

@@ -51,11 +51,6 @@ export function writeManifest(cwd: string, manifest: ForgeManifest): void {
   writeAtomic(manifestPath(cwd), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 
-/** The static .forge/ files that currently exist on disk (for plan + backup). */
-export function existingStaticPaths(cwd: string): string[] {
-  return STATIC_FORGE_FILES.filter((rel) => existsSync(resolve(cwd, rel)));
-}
-
 export interface BuildManifestInput {
   readonly cwd: string;
   readonly forgeVersion: string;

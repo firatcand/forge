@@ -324,6 +324,58 @@ test('AC5: a second call for an open decision_key returns outcome=blocked_on_exi
   assert.equal(readdirSync(qDir).length, 1);
 });
 
+test('DECISION_KEY_EXHAUSTED: prior closed max attempt marks task failed', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const first = await runOrchestrateQuestionWrite(
+    {
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      decisionKey: 'arch:exhaust',
+      question: 'First ask?',
+      ...REQUIRED,
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { maxAttempts: 1 },
+  );
+  assert.equal(first.exitCode, 0);
+  const env1 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const qPath = join(
+    ctx.forgeDir,
+    'orchestrator/tasks/FORGE-1/attempts',
+    ctx.attemptId,
+    'questions',
+    `${env1.data.question_id}.json`,
+  );
+  const qData = JSON.parse(readFileSync(qPath, 'utf8'));
+  writeFileSync(qPath, JSON.stringify({ ...qData, status: 'expired' }), 'utf8');
+
+  const second = await runOrchestrateQuestionWrite(
+    {
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      decisionKey: 'arch:exhaust',
+      question: 'Second ask?',
+      ...REQUIRED,
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { maxAttempts: 1 },
+  );
+  assert.equal(second.exitCode, 0);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.data.outcome, 'decision_key_exhausted');
+  assert.equal(env2.data.failure_reason, 'decision_key_budget');
+
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'failed');
+  assert.equal(state.failure_reason, 'decision_key_budget');
+  assert.equal(typeof state.last_failed_at, 'string');
+});
+
 test('AC7: hard_cap reached → outcome=forced_autonomous + autonomous_decision event logged', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);

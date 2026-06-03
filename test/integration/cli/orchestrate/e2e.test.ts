@@ -1,4 +1,4 @@
-import { test, before } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   mkdtempSync,
@@ -12,31 +12,20 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tsxBin, forgeBinEntry as entry } from '../../../helpers/spawn-tsx.ts';
 
-// End-to-end test: spawn dist/bin/forge.cjs as a subprocess and drive the
+// End-to-end test: spawn src/bin/forge.ts via tsx as a subprocess and drive the
 // full v2 orchestrate lifecycle against a 3-task fixture. Asserts on the
 // JSON envelope returned by each verb invocation, mirroring the spec
 // acceptance criterion "3-task fixture run end-to-end via CLI verbs from
-// shell script". The actual shell is `node`; spawnSync drives it.
+// shell script". Running source avoids stale dist false-greens.
 //
 // FORGE_NOOP_TRACKER=1 forces NoopTracker on every claim call so the test
 // is hermetic (no Linear/GitHub/Notion dependencies).
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..', '..');
-const distBin = resolve(repoRoot, 'dist', 'bin', 'forge.cjs');
 const fixturePath = resolve(repoRoot, 'test', 'fixtures', 'orchestrator', '3-task-phases.yaml');
-
-before(() => {
-  if (!existsSync(distBin)) {
-    // Build if the artifact is missing. spawnSync inherits stdio so build output
-    // surfaces in the test runner.
-    const build = spawnSync('npm', ['run', 'build'], { cwd: repoRoot, stdio: 'inherit' });
-    if (build.status !== 0) {
-      throw new Error(`npm run build failed (status ${build.status})`);
-    }
-  }
-});
 
 function runVerb(args: readonly string[], cwd: string, extraEnv: Record<string, string> = {}): {
   envelope: Record<string, unknown>;
@@ -49,7 +38,7 @@ function runVerb(args: readonly string[], cwd: string, extraEnv: Record<string, 
     FORGE_NOOP_TRACKER: '1',
     ...extraEnv,
   };
-  const res = spawnSync('node', [distBin, ...args, '--json'], {
+  const res = spawnSync(tsxBin, [entry, ...args, '--json'], {
     cwd,
     env,
     encoding: 'utf8',
