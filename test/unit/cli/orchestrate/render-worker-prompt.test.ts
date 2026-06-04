@@ -285,3 +285,61 @@ test('render-worker-prompt: malformed task_id rejected by schema (INVALID_ARGS)'
   const env = lastEnvelope(lines);
   assert.equal(env.error.code, 'INVALID_ARGS');
 });
+
+// FORGE-65 / #243: the CLI verb must resolve the question budget (global
+// settings, overridable per-task), count prior questions, and surface the
+// soft-cap warning + counts in the envelope. Covers the verb-level
+// budget-resolution branch directly (library-level coverage exists separately).
+test('render-worker-prompt: soft cap exceeded surfaces soft_cap_warning + counts in envelope', async (t) => {
+  const fix = buildFixture();
+  const { lines } = captureStdout(t);
+  t.after(fix.cleanup);
+
+  // Lower the global soft cap to 1, then seed one prior question on this attempt
+  // so count(1) >= soft(1) → softExceeded.
+  writeFileSync(
+    join(fix.forgeDir, 'settings.yaml'),
+    "primary_host_cli: 'claude'\nagents:\n  question_budget:\n    soft: 1\n    hard: 2\n",
+  );
+  const questionsDir = join(
+    fix.forgeDir, 'orchestrator', 'tasks', fix.taskId, 'attempts', fix.attemptId, 'questions',
+  );
+  mkdirSync(questionsDir, { recursive: true });
+  writeFileSync(join(questionsDir, '01900000-0000-7000-8000-000000000099.json'), '{}');
+
+  const result = await runOrchestrateRenderWorkerPrompt({
+    taskId: fix.taskId,
+    attemptId: fix.attemptId,
+    forgeDir: fix.forgeDir,
+    repoRoot: fix.repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.ok, true);
+  assert.equal(env.data.question_count, 1);
+  assert.equal(env.data.question_budget.soft, 1);
+  assert.equal(env.data.question_budget.hard, 2);
+  assert.match(env.data.soft_cap_warning, /Question budget/);
+  assert.match(env.data.soft_cap_warning, /soft cap 1/);
+});
+
+test('render-worker-prompt: below soft cap omits soft_cap_warning', async (t) => {
+  // Default budget (soft 3 / hard 6) with zero prior questions → no warning.
+  const fix = buildFixture();
+  const { lines } = captureStdout(t);
+  t.after(fix.cleanup);
+
+  const result = await runOrchestrateRenderWorkerPrompt({
+    taskId: fix.taskId,
+    attemptId: fix.attemptId,
+    forgeDir: fix.forgeDir,
+    repoRoot: fix.repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.ok, true);
+  assert.equal(env.data.question_count, 0);
+  assert.equal(env.data.soft_cap_warning, undefined);
+});

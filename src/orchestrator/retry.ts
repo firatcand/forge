@@ -70,9 +70,9 @@ export function nextRetryState(
   return { state: 'retry' };
 }
 
-// Classify an error into a retry class. Producer for DECISION_KEY_EXHAUSTED
-// is deferred (see FORGE-22 plan §Scope) — until it ships, decision_key_budget
-// classification is dormant.
+// Classify an error into a retry class. DECISION_KEY_EXHAUSTED is produced by
+// gateQuestion (question-write verb) when a decision_key exceeds max_attempts;
+// it classifies to decision_key_budget → terminal 'failed' (no retry).
 export function classifyError(err: unknown): ErrorClass {
   if (err instanceof OrchestratorError) {
     if (err.code === 'DECISION_KEY_EXHAUSTED') return 'decision_key_budget';
