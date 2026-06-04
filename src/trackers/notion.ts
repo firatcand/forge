@@ -1,5 +1,3 @@
-import { z } from 'zod';
-
 import type { NotionTrackerConfig } from '../schemas/settings.ts';
 import {
   NotionDatabaseQueryResponseSchema,
