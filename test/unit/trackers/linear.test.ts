@@ -1732,7 +1732,7 @@ await test('setClaimFence — PRECONDITION_FAILED when no forge:task footer (no 
   let updateCalled = false;
   const { tracker } = makeTracker({
     issue: async () => issue,
-    updateIssue: async (_id, input) => {
+    updateIssue: async (_id, _input) => {
       updateCalled = true;
       return issue;
     },

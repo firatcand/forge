@@ -12,14 +12,13 @@
 // Read-only: never writes. Every section degrades independently — a missing or
 // malformed input is reported as absent, never thrown.
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { ok } from './envelope.ts';
 import { hasFlag, resolveForgeDir } from './orchestrate/flags.ts';
 import { loadSettings } from '../core/settings.ts';
 import {
-  checkVersionDrift,
   compareVersions,
   readBundledMethodologyVersion,
 } from './upgrade/version-check.ts';

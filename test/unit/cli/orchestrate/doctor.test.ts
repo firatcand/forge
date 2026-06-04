@@ -119,7 +119,7 @@ test('doctor --scope spec-code exits 2 when SPEC mentions a missing src path', a
   assert.equal(env.data.drift[0].target, 'src/orchestrator/leases.ts');
 });
 
-test('doctor --scope all returns identical envelope data to --scope spec-code', async (t) => {
+test('doctor --scope all returns identical envelope data to --scope spec-code', async (_t) => {
   const { repo, forgeDir } = makeRepoWithSpec(
     'See `src/cli/init.ts`.\n',
     ['src/cli/init.ts'],

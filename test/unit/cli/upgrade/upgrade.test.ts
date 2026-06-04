@@ -37,18 +37,6 @@ function bootstrap(opts: BootstrapOpts = {}): string {
   mkdirSync(join(cwd, '.forge'));
 
   // settings.yaml — minimal valid shape matching SettingsSchema.
-  const settings = {
-    version: 1,
-    project: { name: 'test-project' },
-    tracker: { type: 'github', config: { repo: 'org/repo' } },
-    secrets: { manager: 'env_file', env_file_path: './.env.local' },
-    agents: {
-      primary_host_cli: primary,
-      review_host_cli: primary === 'codex' ? 'gemini' : 'codex',
-      enabled_root_files: enabled,
-    },
-    design: { mode: 'project_owned' },
-  };
   // Schema constraint: review_host_cli must differ from primary AND must not
   // be 'gemini' unless FORGE_GEMINI_EXPERIMENTAL=1. Pick the other non-gemini
   // value to keep this safely portable across test environments.

@@ -6,7 +6,6 @@ import { join } from 'node:path';
 
 import {
   runOrchestrateApplyDecision,
-  type ApplyDecisionDeps,
 } from '../../../../src/cli/orchestrate/apply-decision.ts';
 import type { Tracker } from '../../../../src/trackers/base.ts';
 import type { TrackerType } from '../../../../src/trackers/types.ts';

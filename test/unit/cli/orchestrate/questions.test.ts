@@ -66,14 +66,6 @@ function writeAnswerRaw(
   writeFileSync(join(dir, `${questionId}.json`), body);
 }
 
-function readStream(s: PassThrough): string {
-  const chunks: Buffer[] = [];
-  s.on('data', (c: Buffer) => chunks.push(c));
-  return chunks.length === 0
-    ? ((s as unknown as { read(): Buffer | null }).read()?.toString('utf8') ?? '')
-    : Buffer.concat(chunks).toString('utf8');
-}
-
 function captureStreams(): {
   stdout: PassThrough;
   stderr: PassThrough;

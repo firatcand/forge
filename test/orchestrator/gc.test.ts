@@ -4,7 +4,6 @@ import {
   CHEAP_ROW_IDS,
   planGc,
   type GcPlanRow,
-  type GcRowId,
   type OrchestratorSnapshot,
   type TaskSnapshot,
   type LeaseAtPath,
@@ -104,16 +103,6 @@ function mkSnapshot(overrides: Partial<OrchestratorSnapshot> = {}): Orchestrator
     mode: 'full',
     ...overrides,
   };
-}
-
-function rowsByRowId(plan: ReturnType<typeof planGc>): Map<GcRowId, GcPlanRow[]> {
-  const m = new Map<GcRowId, GcPlanRow[]>();
-  for (const r of plan.rows) {
-    const list = m.get(r.rowId) ?? [];
-    list.push(r);
-    m.set(r.rowId, list);
-  }
-  return m;
 }
 
 // ---- cheap-set partition ----

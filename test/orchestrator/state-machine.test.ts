@@ -12,7 +12,6 @@ import {
 import { OrchestratorError } from '../../src/core/errors.ts';
 import type { TaskState, TaskStateRecord } from '../../src/schemas/task-state.ts';
 import { leaseFilePath, stateFilePath } from '../../src/orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../src/schemas/lease.ts';
 
 // ---- Helpers ----
 
