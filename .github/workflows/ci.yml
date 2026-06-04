@@ -28,6 +28,11 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run typecheck
+      # Non-blocking: surfaces lint findings in the job log without gating
+      # merges. Warnings don't fail the step; continue-on-error keeps even a
+      # future error-level rule from blocking until the team opts in.
+      - run: npm run lint
+        continue-on-error: true
 
   test:
     name: test
