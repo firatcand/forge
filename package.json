@@ -21,7 +21,7 @@
   },
   "scripts": {
     "build": "tsdown",
-    "lint": "npm run typecheck",
+    "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "node --test --import tsx 'test/**/*.test.ts'",
     "test:pack": "node scripts/test-pack.mjs",
@@ -68,8 +68,10 @@
   "devDependencies": {
     "@types/node": "22.17.2",
     "@types/uuid": "^10.0.0",
+    "eslint": "^10.4.1",
     "tsdown": "0.22.0",
     "tsx": "4.21.0",
-    "typescript": "6.0.3"
+    "typescript": "6.0.3",
+    "typescript-eslint": "^8.60.1"
   }
 }
