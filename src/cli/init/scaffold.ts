@@ -64,11 +64,6 @@ export interface ToolingExcludeResult {
 
 const STAGING_DIR = '.forge/.init-staging';
 
-// FORGE-152: the `forge` GitHub URL used in the breadcrumb marker block. Lives
-// here (not in agent-root-files.ts) because that module is generic over the
-// repoUrl input — the URL is a deployment-level constant.
-const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
-
 /**
  * Read forge's own package.json version. Used to stamp .forge/.version at
  * init time so Phase B's drift-warning pre-hook can compare the on-disk

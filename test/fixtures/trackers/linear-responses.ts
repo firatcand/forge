@@ -5,7 +5,6 @@
 import type {
   LinearIssueLike,
   LinearLabelLike,
-  LinearStateType,
   LinearWorkflowStateLike,
 } from '../../../src/trackers/linear.ts';
 

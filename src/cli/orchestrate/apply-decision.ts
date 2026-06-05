@@ -21,7 +21,6 @@ import {
   type ApplyJournal,
   type MarkdownSectionEntry,
   type PhasesTaskEntry,
-  type TrackerIssueEntry,
 } from '../../schemas/apply-journal.ts';
 import { ApplyError } from '../../core/errors.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';

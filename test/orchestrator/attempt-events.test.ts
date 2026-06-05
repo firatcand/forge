@@ -10,7 +10,7 @@ import {
 } from '../../src/orchestrator/attempt-events.ts';
 import { acquire } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
-import { eventsFilePath, leaseFilePath } from '../../src/orchestrator/questions/paths.ts';
+import { eventsFilePath } from '../../src/orchestrator/questions/paths.ts';
 import type { AttemptEvent } from '../../src/schemas/attempt.ts';
 
 let tmpDir: string;
@@ -150,7 +150,6 @@ test('attempt-events: invalid event throws SCHEMA_INVALID before any I/O', () =>
     (err) => err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID',
   );
   // No file should have been created
-  const evPath = eventsFilePath(fd, 'TASK-AE6', 'att-1');
   // We can't check existence without importing existsSync here, but we can
   // verify readAttemptEvents returns empty (file absent)
   const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AE6', attemptId: 'att-1' });

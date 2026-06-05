@@ -5,7 +5,7 @@
 // a non-empty notifications.jsonl OR any task is in a non-terminal state with
 // run_id matching this run (cheap heuristic; gc is the authoritative reaper).
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
 

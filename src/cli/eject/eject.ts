@@ -44,7 +44,6 @@ import {
   removeGitignoreBlock,
 } from '../upgrade/index.ts';
 import {
-  MANIFEST_RELPATH,
   readManifest,
   readEnabledHostsFromSettings,
 } from '../manifest.ts';

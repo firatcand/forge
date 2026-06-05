@@ -1,5 +1,4 @@
 import {
-  existsSync,
   linkSync,
   mkdirSync,
   readFileSync,
@@ -42,11 +41,10 @@ import {
   attemptDir,
   attemptsDir,
   leaseFilePath,
-  stateFilePath,
   tasksRootDir,
   validateIdSegment,
 } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import { LeaseSchema } from '../../schemas/lease.ts';
 import {
   TaskStateSchema,
   type TaskStateRecord,

@@ -404,7 +404,6 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   const defaultReview =
     (reviewChoices as readonly string[]).find((c) => c !== primaryHostCli) ?? 'none';
   let reviewHostCli: 'codex' | 'gemini' | null;
-  // eslint-disable-next-line no-constant-condition
   while (true) {
     const reviewChoice = (await loggerPrompt('Review host CLI (second-opinion)?', {
       choices: reviewChoices as unknown as readonly string[],

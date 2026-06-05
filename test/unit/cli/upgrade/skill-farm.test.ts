@@ -6,7 +6,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  readlinkSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -17,7 +16,6 @@ import { resolve, sep } from 'node:path';
 import {
   applySkillFarm,
   pruneHostFarm,
-  type FarmMode,
 } from '../../../../src/cli/upgrade/skill-farm.ts';
 
 // Build a fake forge package layout under `root`:
