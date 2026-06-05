@@ -19,7 +19,7 @@
 - Build: `npm run build`
 - Test: `npm test`
 - Type check: `npm run typecheck`
-- Lint: `npm run lint`
+- Lint: `npm run lint` (if your project defines one)
 - Dev: `npm run dev`
 
 ## Conventions

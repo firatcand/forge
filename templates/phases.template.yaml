@@ -1,6 +1,9 @@
 project: "{{PROJECT_NAME}}"
 tracker_url: ""          # populated by /push-to-tracker
-gate_check_command: "npm run e2e && npm run typecheck && npm run lint"
+# Default gate. typecheck is the hard requirement; e2e and lint use
+# --if-present so a project that hasn't defined those scripts isn't blocked.
+# Edit this to match your project's actual verification commands.
+gate_check_command: "npm run e2e --if-present && npm run typecheck && npm run lint --if-present"
 
 # Source provenance: written by /reconcile --pull on every regeneration.
 # /push-to-tracker bootstraps source.project_id on first sync; do not
