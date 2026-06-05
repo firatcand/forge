@@ -83,6 +83,31 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
   - Required GitHub secret: `NPM_TOKEN` (granular automation token, scoped to the `@firatcand/forge` package, publish permission only). Setup recipe in `CONTRIBUTING.md` §Releasing.
 - **Adopter release templates** at `templates/github-workflows/release.yml` and `templates/github-workflows/release-draft.yml` — generic versions (no forge-specific smoke step) that adopter projects can copy into their own `.github/workflows/` manually. Auto-scaffolding by `forge init` is deferred — adopter projects aren't always npm packages, so the npm-vs-other-publishing prompt design needs more work before we wire scaffold integration.
 
+### Changed
+
+- **`npm run lint` now runs ESLint** (#264, #265) — forge's repo gained a minimal,
+  non-blocking ESLint setup (flat config: `@typescript-eslint/no-unused-vars`,
+  `no-unreachable`, `no-constant-condition`, all as **warnings**). The `lint`
+  script previously aliased to `typecheck`, which can't flag unused imports/vars
+  (the repo omits `noUnusedLocals`) — exactly the gap that let a dead import slip
+  through review. Warnings-only keeps it non-blocking; CI runs it via a
+  `continue-on-error` step, and all 23 pre-existing warnings were cleared.
+  Contributor-facing dev tooling only — forge ships no linter config, so adopters
+  are unaffected.
+
+### Fixed
+
+- **Scaffolded lint/e2e gate steps no longer fail when the script is absent**
+  (#267) — the templates `forge init` writes referenced `npm run lint` (CI
+  workflow + the default `phases.yaml` `gate_check_command`) and `npm run e2e`
+  (gate) unconditionally, so a project that hadn't defined those scripts hit
+  `Missing script` failures in CI and at the phase gate. They now use
+  `npm run lint --if-present` / `npm run e2e --if-present`; `typecheck` stays the
+  hard requirement, and the `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` command lists
+  annotate Lint as "(if your project defines one)". Forge still imposes no
+  linter — the references just stop hard-failing when absent. Adopter-side mirror
+  of the forge-repo lint-script fix (#256).
+
 ## [0.3.0] — 2026-05-25
 
 First release of the post-v0.2.2 line. **Contains breaking changes** to the CLI verb surface, `plans/phases.yaml` schema, and `CLAUDE.md` layout. Existing v0.2.x adopters should run `forge upgrade` after upgrading, and `forge upgrade --migrate-claudemd` if they have a v0.2.x-shape combined `CLAUDE.md`.
