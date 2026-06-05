@@ -14,5 +14,8 @@ jobs:
           cache: 'npm'
       - run: npm ci
       - run: npm run typecheck
-      - run: npm run lint
+      # Optional: --if-present makes this a no-op (exit 0) when the project
+      # defines no `lint` script, so the workflow doesn't fail for adopters
+      # who haven't set up a linter.
+      - run: npm run lint --if-present
       - run: npm test
