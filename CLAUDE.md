@@ -27,7 +27,7 @@
 - Build: `npm run build`
 - Test: `npm test`
 - Type check: `npm run typecheck`
-- Lint: `npm run lint`
+- Lint: `npm run lint` (ESLint — unused vars/imports + unreachable; non-blocking, warnings only)
 - Dev: `npm run dev`
 - Render methodology context (one-shot, until Phase B's `forge upgrade` ships): `npm run forge:render-context`
 
