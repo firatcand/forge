@@ -1008,6 +1008,16 @@ The original Feature 7 design installed Claude Code SessionStart/Stop/UserPrompt
 
 If host-hook re-grounding becomes valuable later (e.g., for team workflows), it can be added as a separate feature without changing the v0.4 core.
 
+## Plan-mode enforcement + parked-decision inbox (v0.5 — FORGE-194–197)
+
+A v0.5 "I0.5" foundation under Autopilot (FORGE-183) that is **also independently useful in interactive use**. Three pieces, deliberately designed to NOT reintroduce behavioral host hooks (see *Why no host hooks*, above):
+
+1. **Enforced read-only planning (FORGE-194).** `/plan-task` enters the host's **native** read-only mode as its first step — Claude `EnterPlanMode`, Codex `--sandbox read-only` — so no code is edited before the plan is approved. This is a **"plan-context" host-adapter capability**, NOT a Forge-installed hook (Claude filled in; Codex via read-only sandbox; Codex lacks a native approval *card*, so its async approval arrives with the FORGE-190 plan-approval queue). Architectural forks still surface to the user via `AskUserQuestion` (HITL, non-negotiable); research/draft subagents run read-only (encoded in the subagent prompt, since the `tools:` frontmatter is advisory only). Approval remains the existing committed `plans/tasks/{ID}.plan.md` — no new lock file.
+
+2. **Parked-decision inbox (FORGE-195/196).** A read-band verb `forge orchestrate inbox --json` lists `blocked_on_question` tasks with their open questions, tagged by `classification`; the `/inbox` skill drains them (digest → pick → deep-dive → `answer`). Reuses the existing question/answer machinery and a `collectTasksByState` scanner shared with `review-queue` (FORGE-185). Honors the skill↔verb contract — the skill never writes orchestrator state directly.
+
+3. **Allowed host-settings exception: display-only `statusLine` (FORGE-197).** Forge writes ONE display-only `statusLine` entry into `~/.claude/settings.json` (opt-in, non-clobbering) to show the parked-decision count. **This is the only host-settings Forge writes, and it is explicitly NOT a behavioral hook** — a status line cannot intercept, block, or alter execution, so it carries none of the cross-version fragility that retired Feature 7. Behavioral host hooks (`PreToolUse`/`SessionStart`/`Stop`) remain dropped. Codex has no `statusLine` equivalent; Codex users get the count via `/inbox` and skill footers.
+
 ---
 
 ## Skill ↔ verb contract (added 2026-05-17 per Codex I5)

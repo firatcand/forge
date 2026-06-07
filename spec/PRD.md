@@ -525,6 +525,21 @@ First-class skills to mutate the roadmap mid-build without violating the artifac
 
 ---
 
+### Plan-mode enforcement + parked-decision inbox (v0.5 — FORGE-194–197)
+
+**Problem.** `/plan-task` only *asks* the agent to plan read-only; nothing prevents edits before approval. And when a task parks on a question (`blocked_on_question`), there's no surface to notice or answer it.
+
+**Behavior.**
+- **Enforced planning:** `/plan-task` puts the session in the host's native read-only mode (Claude Plan Mode; Codex `--sandbox read-only`) for the whole planning pass. The agent researches read-only (fanning out to read-only subagents), surfaces architectural forks to the user via `AskUserQuestion` (human-in-the-loop is never delegated to a subagent), and ends with the native approval card. Only on approval does `/implement` unlock. Useful standalone day one.
+- **`/inbox`:** one command lists every parked decision (tagged plan / architecture / review, with age), lets the user pick one and answer it inline; the answer routes through the existing `answer` verb.
+- **Status badge (Claude, opt-in):** a display-only `statusLine` shows the count of decisions waiting on the user (e.g. `forge ◆ 2 to answer`). Codex users get the count via `/inbox` and skill footers.
+
+**User value.** Architecture stays human-in-the-loop by construction; nothing edits code before you approve a plan; parked decisions never get lost.
+
+**Non-goals (this feature).** Remote answering via tracker comments / Slack / OS push; the autonomous watcher loop (FORGE-190); behavioral host hooks.
+
+---
+
 ## Acceptance criteria (overall v-next)
 
 End-to-end criteria that prove v-next ships:
