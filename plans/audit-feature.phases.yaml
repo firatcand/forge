@@ -1,0 +1,115 @@
+# Standalone feature plan for the generic `/audit` feature (GitHub umbrella #273).
+# NOTE: this is NOT forge's Linear-synced cache (plans/phases.yaml). It is a
+# self-contained decomposition of the approved plan
+# (~/.claude/plans/misty-waddling-knuth.md), used to create GitHub sub-issues
+# under #273. Tracker = GitHub (sub-issues of #273), not the configured Linear.
+project: "forge"
+umbrella_issue: "https://github.com/firatcand/forge/issues/273"
+gate_check_command: "npm run typecheck && npm run lint && npm test && npm run build"
+
+phases:
+  - id: phase-1
+    name: "Core read-only audit (plan + collect)"
+    status: pending
+    goal: >
+      `/audit` runs N read-only subagents and produces a work-order of findings,
+      writing NO source. Scope + protected-surface enforcement is in CODE,
+      driven by adopter config + auto-discovery — zero hardcoded forge paths.
+    gate_criteria:
+      - "`forge orchestrate audit plan --json` resolves config (verify/preflight_globs/CRITICAL.md/review_host_cli) + auto-discovers scope when unset"
+      - "`forge orchestrate audit collect` validates findings, runs the code-level scope+protected filter (reusing matchPreflight), writes work-order.md + work-order.json under .forge/audits/<ts>/"
+      - "git status clean except .forge/audits/** after a run (provably read-only)"
+      - "no forge file paths in shipped src/ + skills/audit/ + templates/audit-principles.md"
+      - "npm run typecheck && npm run lint && npm test && npm run build green"
+    tasks:
+      - id: P1-T1
+        description: >
+          Build the `/audit` read-only core: `forge orchestrate audit plan`
+          + `audit collect` verbs (register in src/cli/orchestrate/index.ts),
+          src/schemas/audit.ts (Finding/WorkOrder, 6-way classification),
+          minimal AuditSchema in src/schemas/settings.ts, scope auto-discovery
+          (git ls-files segment ranking — never hardcode src/) + CRITICAL.md
+          parser, templates/audit-principles.md (path-free guardrails),
+          skills/audit/SKILL.md (UX + host Task-tool subagent fan-out, mirror
+          skills/forge-orchestrate). Reuse loadSettings, matchPreflight/
+          resolveRepoRelative, envelope ok/fail/emit, flags.ts.
+        acceptance:
+          - "audit plan renders one read-only subagent prompt per (scope × dimension); injects audit-principles + resolved protected globs"
+          - "audit collect's filter drops out-of-scope/protected/absolute/traversal paths (unit-tested predicates, like the prototype's 9/9 cases)"
+          - "collect writes only the two artifacts under .forge/audits/; asserted by test"
+          - "no hardcoded REPO_TOPS/PROTECTED/subsystem names anywhere shipped"
+        depends_on: []
+        owner: backend-dev
+
+  - id: phase-2
+    name: "Issue creation (--create-issues)"
+    status: pending
+    goal: >
+      Turn a work-order into one tracker issue per finding via the adopter's
+      CONFIGURED tracker adapter — no new tracker code.
+    gate_criteria:
+      - "`forge orchestrate audit create-issues --work-order <json>` files per-finding issues via resolveTrackerForCLI/createIssue"
+      - "classification → label applied out-of-band by the skill (CreateIssuePayload shape unchanged)"
+      - "optional umbrella issue; hard-refuses on NoopTracker (NO_TRACKER_CONFIGURED)"
+    tasks:
+      - id: P2-T1
+        description: >
+          Implement `audit create-issues` verb + skill wiring. Reuse
+          resolveTrackerForCLI (tracker-factory.ts), createIssue +
+          CreateIssuePayload (trackers/base.ts, trackers/types.ts). Map
+          classification→label out-of-band (gh/MCP per tracker). Optional
+          parent umbrella + sub-issues (the #261 pattern). Tests for the
+          mapping + NoopTracker refusal.
+        acceptance:
+          - "one issue per finding on the configured tracker, body = rendered finding block (evidence/whySafe/proposedChange/blastRadius/file:line)"
+          - "refuses with NO_TRACKER_CONFIGURED when tracker is Noop"
+        depends_on: [P1-T1]
+        owner: backend-dev
+
+  - id: phase-3
+    name: "Forge dogfood migration + docs"
+    status: pending
+    goal: >
+      Forge becomes 'just another adopter': its own specifics live in ITS
+      CRITICAL.md + settings.verify; the shipped feature carries none of them.
+    gate_criteria:
+      - "forge CRITICAL.md adds the remaining DO-NOT-SIMPLIFY paths (glob-match.ts, overlap.ts, questions/writer.ts, status.ts, logger.ts)"
+      - "forge .forge/settings.yaml verify.commands holds the full gate"
+      - "prior-art docs committed; /audit added to spec/CONTEXT.md CLI surface; CHANGELOG Unreleased entry"
+    tasks:
+      - id: P3-T1
+        description: >
+          Migrate forge's audit specifics into its own config (CRITICAL.md +
+          settings.verify). Commit docs/dev/simplification-playbook.md +
+          docs/audits/refactoring-audit-agent-prompt.md (forge-internal) and
+          the generalized templates/audit-principles.md. Add /audit to
+          spec/CONTEXT.md CLI surface + a CHANGELOG Unreleased entry.
+        acceptance:
+          - "grep of shipped src/ + skills/audit/ + templates/audit-principles.md finds zero forge-specific paths (leases, classify*Error, forge.cjs, src/orchestrator)"
+          - "forge's own /audit run reads its protected set from forge's CRITICAL.md, not from code"
+        depends_on: [P1-T1]
+        owner: backend-dev
+
+  - id: phase-4
+    name: "Repo-agnostic + read-only validation tests"
+    status: pending
+    goal: >
+      Prove the feature is genuinely repo-agnostic and read-only, and that the
+      'audit + gate must be a pair' lesson is enforced.
+    gate_criteria:
+      - "integration test runs audit plan+collect on a NON-forge fixture (e.g. .py/go.mod dir w/ its own .forge/settings.yaml + CRITICAL.md)"
+      - "asserts: auto-discover works without assuming src/; rendered prompts + work-order contain NO forge strings; protected globs come only from the fixture"
+      - "asserts read-only (git status clean except .forge/audits)"
+      - "asserts: verify unset → work-order + issues warn 'findings unverifiable — no gate configured'"
+    tasks:
+      - id: P4-T1
+        description: >
+          Add test/integration/audit-repo-agnostic.test.ts (non-forge fixture,
+          grep-absent forge strings), the provably-read-only assertion, and the
+          audit+gate-pair warning test. Wire CLI smoke `forge orchestrate audit
+          --help`.
+        acceptance:
+          - "repo-agnostic test green; no forge assumption leaks for a non-JS fixture"
+          - "read-only + gate-pair-warning tests green; full gate green"
+        depends_on: [P1-T1, P2-T1]
+        owner: qa-engineer
