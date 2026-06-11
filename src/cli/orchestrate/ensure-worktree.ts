@@ -28,19 +28,29 @@ export async function runOrchestrateEnsureWorktree(
   }
   const opts = parsed.data;
 
+  // FORGE-140 — anchor for resolving a RELATIVE repoRoot. The dispatcher injects
+  // opts.cwd (the same anchor every other flag honors); fall back to
+  // process.cwd() when absent so direct callers keep working. Resolving against
+  // process.cwd() implicitly (the old behavior) silently misplaced the worktree
+  // whenever the injected cwd diverged from the process cwd.
+  const baseCwd = opts.cwd ? path.resolve(opts.cwd) : process.cwd();
+
   // Resolve repo root. If not provided, use `git rev-parse --git-common-dir`
   // from the cwd implied by forgeDir's parent — mirrors /pickup-task's anchor
   // on the main checkout (not the current worktree, which would nest).
   let repoRoot: string;
   if (opts.repoRoot) {
-    repoRoot = path.resolve(opts.repoRoot);
+    repoRoot = path.resolve(baseCwd, opts.repoRoot);
   } else {
     try {
       const { stdout } = await execa('git', ['rev-parse', '--git-common-dir'], {
         cwd: path.dirname(opts.forgeDir),
         reject: true,
       });
-      repoRoot = path.resolve(path.dirname(stdout.trim()));
+      // A relative git-common-dir (the common case: '.git') must anchor on
+      // the cwd the git COMMAND ran in — not process.cwd() (the same FORGE-140
+      // failure mode the --repo-root flag had; Codex batch-1 round 2).
+      repoRoot = path.resolve(path.dirname(opts.forgeDir), path.dirname(stdout.trim()));
     } catch (err) {
       return {
         exitCode: emit(
@@ -203,6 +213,9 @@ export const ensureWorktreeHandler: VerbHandler = {
       taskId,
       forgeDir,
       json,
+      // FORGE-140 — forward the injected cwd so a relative --repo-root resolves
+      // against the dispatcher's anchor, not the implicit process.cwd().
+      cwd: opts.cwd,
       ...(branch ? { branch } : {}),
       ...(base ? { base } : {}),
       ...(repoRoot ? { repoRoot } : {}),

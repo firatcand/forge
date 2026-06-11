@@ -69,11 +69,54 @@ subagent: learning-curator
    ID. Abort with the error message and instruct the user to `git worktree remove`
    the stale path or pick a different ticket.
 
-6. Delegate to `learning-curator` to retrieve relevant learnings (runs AFTER step 5
+6. **Install dependencies in the fresh worktree.** `git worktree add` checks out
+   tracked files only, and `node_modules/` is gitignored — it is NOT placed by
+   `git worktree add` and NOT hydrated by `ensure-worktree`. Without this step the
+   first `/plan-task` → build/test/lint commands fail with missing-module errors.
+
+   Detect the package manager from the lockfile present in the worktree root and
+   run the deterministic (frozen) install **inside the worktree**:
+
+   | Lockfile (in worktree root) | Install command |
+   |-----------------------------|-----------------|
+   | `package-lock.json`         | `npm ci` |
+   | `pnpm-lock.yaml`            | `pnpm install --frozen-lockfile` |
+   | `yarn.lock`                 | `yarn install --immutable` |
+   | `bun.lockb`                 | `bun install` |
+
+   ```bash
+   cd "${WORKTREE_PATH}"
+   if   [ -f package-lock.json ]; then npm ci
+   elif [ -f pnpm-lock.yaml ];   then pnpm install --frozen-lockfile
+   elif [ -f yarn.lock ];        then yarn install --immutable
+   elif [ -f bun.lockb ];        then bun install
+   fi
+   ```
+
+   **Same-machine speed alternative:** instead of a full install you may symlink
+   the main checkout's already-installed dependencies:
+
+   ```bash
+   ln -s "$(git -C "${WORKTREE_PATH}" rev-parse --git-common-dir)/../node_modules" \
+     "${WORKTREE_PATH}/node_modules"
+   ```
+
+   This is faster but ties the worktree's deps to the main checkout's lockfile
+   state — prefer a real `npm ci` when the task touches `package.json`.
+
+   **Cleanup / `/wrap-up` interaction (FORGE-116 gc):** a symlinked OR installed
+   `node_modules` is gitignored, so `forge orchestrate gc --remove-worktrees`
+   (which calls `workspace.cleanup()` with no `--force`) will REFUSE the worktree
+   with `GITIGNORED_LOSS` when it sees the `node_modules` symlink/dir, because that
+   path is not in the hydration manifest. Pre-cleanup step: remove the
+   `node_modules` symlink (or the installed tree) from the worktree **before**
+   running `/wrap-up`. Handle both shapes: `[ -L node_modules ] && rm node_modules || rm -rf node_modules` (run INSIDE the worktree — never against the main checkout).
+   `/wrap-up` surfaces the verbatim `GITIGNORED_LOSS` guidance if you forget.
+7. Delegate to `learning-curator` to retrieve relevant learnings (runs AFTER step 5
    hydration so the curator sees the just-copied learnings tree, not an empty one):
    - Tags matching task type
    - Created in last 90 days
-7. Output:
+8. Output:
 
 ```
 ✓ Worktree created: .forge/worktrees/TLOG-101

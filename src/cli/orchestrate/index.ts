@@ -119,7 +119,7 @@ const attachHandler: VerbHandler = {
 const gcHandler: VerbHandler = {
   band: 'mutate',
   synopsis:
-    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans); --remove-worktrees [--task <id>] removes terminal-task worktrees.',
+    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans); --remove-worktrees [--task <id>] [--prune-merged-branches] removes terminal-task worktrees.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const dryRun = hasFlag(rest, 'dry-run');
@@ -134,6 +134,8 @@ const gcHandler: VerbHandler = {
         'dry-run',
         'json',
         'forge-dir',
+        // FORGE-139 — opt-in safe merged-branch reclaim (`git branch -d`).
+        'prune-merged-branches',
       ]);
       for (const arg of rest) {
         if (!arg.startsWith('--')) continue;
@@ -142,7 +144,7 @@ const gcHandler: VerbHandler = {
           const envelope = fail(
             'INVALID_ARGS',
             `forge orchestrate gc --remove-worktrees: unknown or incompatible flag '--${name}'. ` +
-              `In this mode only --task <id>, --dry-run, and --json are accepted.`,
+              `In this mode only --task <id>, --dry-run, --json, and --prune-merged-branches are accepted.`,
             false,
           );
           return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
@@ -210,6 +212,7 @@ const gcHandler: VerbHandler = {
         dryRun,
         removeWorktrees: true,
         json: hasFlag(rest, 'json'),
+        ...(hasFlag(rest, 'prune-merged-branches') ? { pruneMergedBranches: true } : {}),
         ...(scopedTask !== undefined ? { removeWorktreesTask: scopedTask } : {}),
       });
       return { exitCode: result.exitCode };

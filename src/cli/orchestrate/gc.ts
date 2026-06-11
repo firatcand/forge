@@ -104,6 +104,11 @@ export interface OrchestrateGcOptions {
   // terminal-state worktree (batch mode).
   readonly removeWorktrees?: boolean;
   readonly removeWorktreesTask?: string;
+  // FORGE-139 — opt-in: after a worktree is removed, reclaim its branch IF it is
+  // fully merged (safe `git branch -d` via cleanup({ deleteMergedBranch: true })).
+  // Unmerged branches are retained, never force-deleted. The verb still NEVER
+  // runs `-D`. Default (flag absent) preserves FORGE-116 behavior: branch survives.
+  readonly pruneMergedBranches?: boolean;
   // Emit the JSON envelope the /wrap-up SKILL consumes instead of human text.
   readonly json?: boolean;
 }
@@ -159,6 +164,12 @@ export interface RemoveWorktreesResult {
   // 'error' — cleanup() threw something other than NOT_FOUND/GITIGNORED_LOSS.
   readonly outcome: 'removed' | 'noop' | 'refused' | 'error';
   readonly reason?: string;
+  // FORGE-139 — populated only when --prune-merged-branches is active AND the
+  // worktree was removed. `branchDeleted: true` → branch was fully merged and
+  // safely `-d` deleted; `branchRetained` carries git's reason when the branch
+  // was kept (not fully merged, or already absent).
+  readonly branchDeleted?: boolean;
+  readonly branchRetained?: string;
 }
 
 export interface RemoveWorktreesAbsent {
@@ -708,12 +719,29 @@ async function runRemoveWorktrees(
       continue;
     }
     try {
-      await cleanup(cand.task_id, {
+      const cleanupResult = await cleanup(cand.task_id, {
         root: worktreesRoot,
-        deleteBranch: false, // delta 6 — verb removes worktrees only.
+        deleteBranch: false, // delta 6 — verb NEVER force-deletes (`-D`).
+        // FORGE-139 — opt-in safe merged-only reclaim (`-d`). Unmerged branches
+        // are retained, surfaced via branchRetained; never force-deleted.
+        ...(opts.pruneMergedBranches ? { deleteMergedBranch: true, branch: cand.branch } : {}),
         // No force — delta 2. GITIGNORED_LOSS surfaces verbatim with guidance.
       });
-      results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'removed' });
+      results.push({
+        task_id: cand.task_id,
+        worktree_path: cand.worktree_path,
+        branch: cand.branch,
+        state: cand.state,
+        outcome: 'removed',
+        ...(opts.pruneMergedBranches
+          ? {
+              branchDeleted: cleanupResult.branchDeleted,
+              ...(cleanupResult.branchRetainedReason
+                ? { branchRetained: cleanupResult.branchRetainedReason }
+                : {}),
+            }
+          : {}),
+      });
     } catch (e) {
       if (e instanceof WorkspaceError && e.code === 'NOT_FOUND') {
         // delta 8 — worktree vanished between plan and execute → noop, not error.
@@ -789,6 +817,11 @@ function formatRemoveResults(
   for (const r of results) {
     if (r.outcome === 'removed') {
       out.write(`  ✓ ${r.task_id}: removed worktree ${r.worktree_path}\n`);
+      if (r.branchDeleted) {
+        out.write(`      ↳ pruned merged branch ${r.branch}\n`);
+      } else if (r.branchRetained) {
+        out.write(`      ↳ retained branch ${r.branch} (${r.branchRetained})\n`);
+      }
     } else if (r.outcome === 'noop') {
       out.write(`  ✓ ${r.task_id}: ${r.reason ?? 'worktree already absent'}\n`);
     } else {

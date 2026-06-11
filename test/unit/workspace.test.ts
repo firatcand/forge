@@ -836,3 +836,118 @@ test('create — tracked files reflect base, gitignored files reflect main (FORG
     rmrf(repoDir);
   }
 });
+
+// FORGE-142 — hydration must NOT recurse into a git submodule. A submodule is a
+// directory whose `.git` is a FILE (a `gitdir:` pointer). The pre-fix walk
+// copied the submodule's `.git` pointer + working tree into the new worktree,
+// producing a broken, mis-located checkout. Post-fix: the whole submodule
+// directory is skipped.
+test('create — hydration skips a git submodule directory under plans/ (FORGE-142)', async () => {
+  const repoDir = tmpdir('create-submodule');
+  try {
+    await initRepo(repoDir);
+
+    writeFileSync(path.join(repoDir, '.gitignore'), '/plans/**\n/.forge/\n');
+    await execa('git', ['add', '.gitignore'], { cwd: repoDir, reject: true });
+    await execa('git', ['commit', '-m', 'gitignore'], { cwd: repoDir, reject: true });
+
+    // Gitignored project meta in plans/ that SHOULD hydrate.
+    mkdirSync(path.join(repoDir, 'plans'), { recursive: true });
+    writeFileSync(path.join(repoDir, 'plans', 'phases.yaml'), 'phases: []\n');
+
+    // Simulate a git submodule under plans/: a directory whose `.git` is a FILE
+    // (the gitdir pointer git writes for submodules), plus a working file.
+    const subDir = path.join(repoDir, 'plans', 'vendor-sub');
+    mkdirSync(subDir, { recursive: true });
+    writeFileSync(path.join(subDir, '.git'), 'gitdir: ../../.git/modules/plans/vendor-sub\n');
+    writeFileSync(path.join(subDir, 'README.md'), '# submodule content\n');
+    mkdirSync(path.join(subDir, 'src'), { recursive: true });
+    writeFileSync(path.join(subDir, 'src', 'index.ts'), 'export const x = 1;\n');
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    const result = await create('FD-SUB', { root, base: 'main', mainWorktree: repoDir });
+
+    // The non-submodule meta hydrated.
+    assert.equal(
+      readFileSync(path.join(result.path, 'plans', 'phases.yaml'), 'utf8'),
+      'phases: []\n',
+      'plans/phases.yaml (non-submodule) must hydrate',
+    );
+
+    // NONE of the submodule's contents were copied.
+    assert.equal(
+      existsSync(path.join(result.path, 'plans', 'vendor-sub', '.git')),
+      false,
+      'submodule .git pointer must NOT be copied',
+    );
+    assert.equal(
+      existsSync(path.join(result.path, 'plans', 'vendor-sub', 'README.md')),
+      false,
+      'submodule working file must NOT be copied',
+    );
+    assert.equal(
+      existsSync(path.join(result.path, 'plans', 'vendor-sub', 'src', 'index.ts')),
+      false,
+      'submodule nested file must NOT be copied',
+    );
+
+    // Manifest must not reference any submodule path.
+    const manifest = JSON.parse(readFileSync(result.manifestPath!, 'utf8'));
+    assert.ok(
+      !manifest.files.some((f: string) => f.includes('vendor-sub')),
+      'manifest must not list any submodule path',
+    );
+    assert.ok(
+      manifest.files.includes(path.join('plans', 'phases.yaml')),
+      'manifest must list the non-submodule meta file',
+    );
+  } finally {
+    try {
+      await execa(
+        'git',
+        ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-SUB')],
+        { cwd: repoDir },
+      );
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+  }
+});
+
+// FORGE-139 — cleanup({ deleteMergedBranch: true }) safely reclaims a fully
+// merged orphan branch via `git branch -d`, but RETAINS an unmerged branch
+// (never `-D`). Reported via branchDeleted / branchRetainedReason.
+test('cleanup — deleteMergedBranch deletes a merged branch, retains an unmerged one (FORGE-139)', async () => {
+  const repoDir = tmpdir('cleanup-merged');
+  try {
+    await initRepo(repoDir);
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    // Case A — branch with NO new commits beyond main → fully merged.
+    await create('FD-MERGED', { root, base: 'main', copyMeta: false, mainWorktree: repoDir });
+    const merged = await cleanup('FD-MERGED', { root, deleteMergedBranch: true });
+    assert.equal(merged.branchDeleted, true, 'merged branch should be -d deleted');
+    assert.equal(merged.branchRetainedReason, undefined);
+    const listMerged = await execa('git', ['branch', '--list', 'feat/FD-MERGED'], { cwd: repoDir });
+    assert.equal(listMerged.stdout.trim(), '', 'merged branch must be gone');
+
+    // Case B — branch with an UNMERGED commit → must be retained, not -D'd.
+    const wt = await create('FD-UNMERGED', { root, base: 'main', copyMeta: false, mainWorktree: repoDir });
+    writeFileSync(path.join(wt.path, 'extra.txt'), 'unmerged work\n');
+    await execa('git', ['add', 'extra.txt'], { cwd: wt.path, reject: true });
+    await execa('git', ['commit', '-m', 'unmerged commit'], { cwd: wt.path, reject: true });
+
+    const retained = await cleanup('FD-UNMERGED', { root, deleteMergedBranch: true });
+    assert.equal(retained.removed, true, 'worktree still removed');
+    assert.equal(retained.branchDeleted, false, 'unmerged branch must NOT be deleted');
+    assert.match(retained.branchRetainedReason ?? '', /not fully merged/);
+    const listUnmerged = await execa('git', ['branch', '--list', 'feat/FD-UNMERGED'], { cwd: repoDir });
+    assert.match(listUnmerged.stdout, /feat\/FD-UNMERGED/, 'unmerged branch must survive');
+  } finally {
+    rmrf(repoDir);
+  }
+});

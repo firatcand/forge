@@ -973,3 +973,113 @@ test('fix4 positional: no positionals + valid flags passes (not rejected)', asyn
     rmSync(fx.repoDir, { recursive: true, force: true });
   }
 });
+
+// ── FORGE-139: gc --remove-worktrees --prune-merged-branches ──────────────────
+// Opt-in safe reclaim of orphaned MERGED branches via `git branch -d` (never
+// `-D`). Default behavior (flag absent) still leaves branches in place.
+
+test('remove-worktrees --prune-merged-branches: merged branch is reclaimed (-d)', async () => {
+  const fx = await setupRepoFixture('prune-merged');
+  const { stdout, stderr } = captureStreams();
+  try {
+    const wtPath = await makeWorktree(fx, 'WT-PM1', 'shipped');
+    assert.ok(existsSync(wtPath));
+    const result = await runOrchestrateGc({
+      forgeDir: fx.forgeDir,
+      removeWorktrees: true,
+      removeWorktreesTask: 'WT-PM1',
+      pruneMergedBranches: true,
+      stdout,
+      stderr,
+      now: fixedNowWt,
+    });
+    assert.equal(result.exitCode, 0);
+    const r0 = result.removeWorktrees?.results?.[0];
+    assert.equal(r0?.outcome, 'removed');
+    assert.equal(r0?.branchDeleted, true, 'merged branch reclaimed');
+    assert.equal(existsSync(wtPath), false);
+    // Branch is GONE now (opt-in pruning).
+    const branches = await execa('git', ['branch', '--list', 'feat/WT-PM1'], { cwd: fx.repoDir });
+    assert.equal(branches.stdout.trim(), '', 'merged branch pruned');
+  } finally {
+    rmSync(fx.repoDir, { recursive: true, force: true });
+  }
+});
+
+test('remove-worktrees --prune-merged-branches: unmerged branch is RETAINED (never -D)', async () => {
+  const fx = await setupRepoFixture('prune-unmerged');
+  const { stdout, stderr } = captureStreams();
+  try {
+    const wtPath = await makeWorktree(fx, 'WT-PM2', 'shipped');
+    // Add an unmerged commit on the worktree branch.
+    writeFileSync(join(wtPath, 'extra.txt'), 'unmerged\n');
+    await execa('git', ['add', 'extra.txt'], { cwd: wtPath, reject: true });
+    await execa('git', ['commit', '-m', 'unmerged work'], { cwd: wtPath, reject: true });
+
+    const result = await runOrchestrateGc({
+      forgeDir: fx.forgeDir,
+      removeWorktrees: true,
+      removeWorktreesTask: 'WT-PM2',
+      pruneMergedBranches: true,
+      stdout,
+      stderr,
+      now: fixedNowWt,
+    });
+    // Worktree removed, but branch retained (not an error → exit 0).
+    assert.equal(result.exitCode, 0);
+    const r0 = result.removeWorktrees?.results?.[0];
+    assert.equal(r0?.outcome, 'removed');
+    assert.equal(r0?.branchDeleted, false, 'unmerged branch not deleted');
+    assert.match(r0?.branchRetained ?? '', /not fully merged/);
+    assert.equal(existsSync(wtPath), false);
+    const branches = await execa('git', ['branch', '--list', 'feat/WT-PM2'], { cwd: fx.repoDir });
+    assert.match(branches.stdout, /feat\/WT-PM2/, 'unmerged branch survives');
+  } finally {
+    rmSync(fx.repoDir, { recursive: true, force: true });
+  }
+});
+
+test('remove-worktrees: WITHOUT --prune-merged-branches, merged branch still SURVIVES (default)', async () => {
+  const fx = await setupRepoFixture('no-prune');
+  const { stdout, stderr } = captureStreams();
+  try {
+    const wtPath = await makeWorktree(fx, 'WT-PM3', 'shipped');
+    const result = await runOrchestrateGc({
+      forgeDir: fx.forgeDir,
+      removeWorktrees: true,
+      removeWorktreesTask: 'WT-PM3',
+      // pruneMergedBranches NOT set
+      stdout,
+      stderr,
+      now: fixedNowWt,
+    });
+    assert.equal(result.exitCode, 0);
+    const r0 = result.removeWorktrees?.results?.[0];
+    assert.equal(r0?.outcome, 'removed');
+    assert.equal(r0?.branchDeleted, undefined, 'no branch field when flag absent');
+    assert.equal(existsSync(wtPath), false);
+    const branches = await execa('git', ['branch', '--list', 'feat/WT-PM3'], { cwd: fx.repoDir });
+    assert.match(branches.stdout, /feat\/WT-PM3/, 'branch survives by default');
+  } finally {
+    rmSync(fx.repoDir, { recursive: true, force: true });
+  }
+});
+
+// CLI-level flag parsing: --prune-merged-branches is accepted in --remove-worktrees
+// mode and threads through to pruneMergedBranches.
+test('gc dispatcher: --prune-merged-branches accepted (no INVALID_ARGS)', async () => {
+  const fx = await setupRepoFixture('cli-flag');
+  try {
+    await makeWorktree(fx, 'WT-CLI', 'shipped');
+    const result = await dispatchOrchestrate(
+      ['gc', '--remove-worktrees', '--task', 'WT-CLI', '--prune-merged-branches', '--json', '--forge-dir', fx.forgeDir],
+      { cwd: fx.repoDir },
+    );
+    // Removed + merged-branch reclaimed → exit 0.
+    assert.equal(result.exitCode, 0);
+    const branches = await execa('git', ['branch', '--list', 'feat/WT-CLI'], { cwd: fx.repoDir });
+    assert.equal(branches.stdout.trim(), '', 'CLI path pruned the merged branch');
+  } finally {
+    rmSync(fx.repoDir, { recursive: true, force: true });
+  }
+});
