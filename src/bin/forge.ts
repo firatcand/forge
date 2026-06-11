@@ -8,6 +8,7 @@ import { runCodexSuggest } from '../cli/codex-suggest.ts';
 import { runProjectStatus } from '../cli/project-status.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 import { upgrade } from '../cli/upgrade/upgrade.ts';
+import { runMigrate } from '../cli/migrate/migrate.ts';
 import { eject as ejectRun, type EjectResult } from '../cli/eject/eject.ts';
 import {
   checkVersionDrift,
@@ -46,6 +47,7 @@ function printHelp(version: string): void {
     '  forge --version       Print the installed version',
     '  forge --help          Show this help',
     '  forge status [--json] Report this project\'s forge state (read-only)',
+    '  forge migrate [--dry-run|--yes]  Migrate a v0.2.x project to v0.4 conventions',
     '',
     `v${version} ships the schemas, core utilities, and skill/agent assets.`,
     'The full command surface (init, orchestrate, doctor, etc.) lands',
@@ -114,7 +116,9 @@ const command = args[0] ?? '';
 // - Failures are swallowed silently. The pre-hook is a courtesy; never let it
 //   break unrelated commands (e.g., when cwd has no .forge/ at all).
 function maybeWarnDrift(cmd: string): void {
-  if (cmd === 'upgrade') return;
+  // migrate is suppressed for the same reason as upgrade: telling the user to
+  // "run forge upgrade" mid-migration is noise — migrate IS the fix path.
+  if (cmd === 'upgrade' || cmd === 'migrate') return;
   if (process.env.FORGE_QUIET === '1') return;
   try {
     const drift = checkVersionDrift({ cwd: process.cwd(), currentVersion: version });
@@ -233,6 +237,19 @@ if (command === 'init') {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`forge upgrade failed: ${msg}`);
+      process.exit(1);
+    }
+  })();
+} else if (command === 'migrate') {
+  // FORGE-109: v0.2.x → v0.4 project migration. Top-level verb (like eject —
+  // a project-lifecycle command, not an orchestrator state transition).
+  void (async () => {
+    try {
+      const result = await runMigrate({ cwd: process.cwd(), argv: args.slice(1) });
+      process.exit(result.exitCode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`forge migrate failed: ${msg}`);
       process.exit(1);
     }
   })();
