@@ -30,6 +30,16 @@ Forge projects are multi-artifact. Each artifact OWNS specific fields. When two 
 | Tracker body (Linear / GitHub / Notion) | Live execution truth: status, assignee, sequencing, blockers, ownership. |
 | Source code | Implementation. |
 
+Some fields appear in more than one artifact; use this lookup instead of improvising:
+
+| Ambiguous field | Authority |
+|---|---|
+| task readiness / status | tracker |
+| sequencing / dependencies / assignment | tracker |
+| task acceptance criteria | PRD / phases.yaml snapshot |
+| architectural constraints written into task text | SPEC |
+| architecture / non-functional requirements | SPEC |
+
 **Rule for AI agents:** any "is this task done?" / "what's the active queue?" / "what's ready to pick up?" question MUST be answered by querying the tracker directly — `mcp__linear-server__get_issue` / `list_issues` for Linear, `gh issue view/list` for GitHub, `ntn` for Notion. Never grep `plans/phases.yaml` for status or for the dependency graph. `phases.yaml` is a local cache of both; only the tracker is authoritative.
 
 ## Branch strategy

@@ -502,7 +502,6 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
     };
     codex: {
       auto_codex_enabled: boolean;
-      auto_codex_token_cap: number;
     };
     decisions: {
       decision_dir: string;
@@ -528,7 +527,6 @@ test('FORGE-105 — codex block: defaults expand when block omitted', () => {
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.equal(result.data.codex.auto_codex_enabled, true);
-  assert.equal(result.data.codex.auto_codex_token_cap, 50_000);
 });
 
 test('FORGE-105 — codex block: explicit values preserved', () => {
@@ -537,23 +535,11 @@ test('FORGE-105 — codex block: explicit values preserved', () => {
     project: { name: 'x' },
     tracker: { type: 'linear', config: { team_id: 'T' } },
     secrets: { manager: 'env_file' },
-    codex: { auto_codex_enabled: false, auto_codex_token_cap: 0 },
+    codex: { auto_codex_enabled: false },
   });
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.equal(result.data.codex.auto_codex_enabled, false);
-  assert.equal(result.data.codex.auto_codex_token_cap, 0);
-});
-
-test('FORGE-105 — codex block: negative token cap rejected', () => {
-  const result = SettingsSchema.safeParse({
-    version: 1,
-    project: { name: 'x' },
-    tracker: { type: 'linear', config: { team_id: 'T' } },
-    secrets: { manager: 'env_file' },
-    codex: { auto_codex_token_cap: -1 },
-  });
-  assert.equal(result.success, false);
 });
 
 test('FORGE-105 — codex block: non-boolean enabled rejected', () => {
@@ -567,15 +553,22 @@ test('FORGE-105 — codex block: non-boolean enabled rejected', () => {
   assert.equal(result.success, false);
 });
 
-test('FORGE-105 — codex block: non-integer token cap rejected', () => {
+test('codex block: legacy auto_codex_token_cap key tolerated (FORGE-124)', () => {
+  // Decision A: the field was dropped from the schema. Legacy settings.yaml
+  // files that still carry it must parse cleanly (zod strips unknown keys by
+  // default — no .strict() on CodexSchema) and the key must NOT appear in
+  // the parsed output.
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
     tracker: { type: 'linear', config: { team_id: 'T' } },
     secrets: { manager: 'env_file' },
-    codex: { auto_codex_token_cap: 1.5 },
+    codex: { auto_codex_enabled: true, auto_codex_token_cap: 50_000 },
   });
-  assert.equal(result.success, false);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.codex.auto_codex_enabled, true);
+  assert.ok(!('auto_codex_token_cap' in result.data.codex), 'legacy key must be absent from parsed output');
 });
 
 test('FORGE-105 — decisions block: defaults expand when omitted', () => {

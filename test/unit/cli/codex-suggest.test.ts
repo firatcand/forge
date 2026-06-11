@@ -30,13 +30,13 @@ function capture(): {
   return { stdout, stderr };
 }
 
-function writeSettings(cwd: string, codex: { auto_codex_enabled?: boolean; auto_codex_token_cap?: number } | null): void {
+function writeSettings(cwd: string, codex: { auto_codex_enabled?: boolean } | null): void {
   const dir = join(cwd, '.forge');
   mkdirSync(dir, { recursive: true });
   const codexYaml =
     codex === null
       ? ''
-      : `\ncodex:\n  auto_codex_enabled: ${codex.auto_codex_enabled ?? true}\n  auto_codex_token_cap: ${codex.auto_codex_token_cap ?? 50000}\n`;
+      : `\ncodex:\n  auto_codex_enabled: ${codex.auto_codex_enabled ?? true}\n`;
   const yaml = `version: 1
 project:
   name: test-codex-suggest
