@@ -209,14 +209,13 @@ const DesignSchema = z
 
 // Added 2026-05-18 (FORGE-105 P2.5-T13) — closed-loop workflow control.
 // auto_codex_enabled is the disable lever consumed by `forge codex-suggest`.
-// auto_codex_token_cap is RESERVED — defined in SPEC §Auto-codex skill-level
-// hooks but NOT enforced by codex-suggest. Passive suggestions bound nothing
-// meaningful; the field is kept here so settings.yaml stays SPEC-compliant.
-// Follow-up: amend SPEC to either drop the field or build session accounting.
+// Decision A (FORGE-124): the token-cap field was dropped — passive suggestions
+// bound nothing meaningful; budget enforcement deferred indefinitely.
+// Legacy settings.yaml files that still carry the stale key are silently
+// stripped by zod (CodexSchema has no .strict() — unknown keys are ignored).
 const CodexSchema = z
   .object({
     auto_codex_enabled: z.boolean().default(true),
-    auto_codex_token_cap: z.number().int().nonnegative().default(50_000),
   })
   .default({});
 

@@ -519,7 +519,7 @@ test('clean v0.4 project: exit 0, "no drift" message, no writes', async () => {
   mkdirSync(join(cwd, 'templates'), { recursive: true });
   writeFileSync(
     join(cwd, '.forge', 'settings.yaml'),
-    `${STALE_SETTINGS}codex:\n  auto_codex_enabled: true\n  auto_codex_token_cap: 50000\ndecisions:\n  decision_dir: ./spec/decisions\n  stale_draft_threshold_days: 7\ndoctor:\n  spec_code_check_enabled: true\n`,
+    `${STALE_SETTINGS}codex:\n  auto_codex_enabled: true\ndecisions:\n  decision_dir: ./spec/decisions\n  stale_draft_threshold_days: 7\ndoctor:\n  spec_code_check_enabled: true\n`,
     'utf8',
   );
   writeFileSync(join(cwd, 'templates', 'adr.template.md'), '# ADR\n', 'utf8');

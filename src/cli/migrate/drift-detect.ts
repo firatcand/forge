@@ -81,7 +81,7 @@ export const SCAN_MAX_ENTRIES = 50_000;
 // the unit tests assert this equality against SettingsSchema.parse output so
 // the two can never drift apart silently.
 export const SETTINGS_DEFAULT_BLOCKS: Record<string, Record<string, unknown>> = {
-  codex: { auto_codex_enabled: true, auto_codex_token_cap: 50_000 },
+  codex: { auto_codex_enabled: true },
   decisions: { decision_dir: './spec/decisions', stale_draft_threshold_days: 7 },
   doctor: { spec_code_check_enabled: true },
 };

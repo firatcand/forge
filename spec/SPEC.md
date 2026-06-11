@@ -311,7 +311,6 @@ export const SettingsSchema = z.object({
   codex: z
     .object({
       auto_codex_enabled: z.boolean().default(true),         // in-skill auto-suggest at /plan-task end, ADR draft, pre-/ship
-      auto_codex_token_cap: z.number().int().nonnegative().default(50_000),
     })
     .default({}),
   decisions: z
@@ -332,43 +331,75 @@ export type Settings = z.infer<typeof SettingsSchema>;
 
 ### `phases.yaml` schema (zod)
 
-> **Note (2026-05-17):** the canonical schema lives in `src/schemas/phases.ts`; the snippet below predates the FORGE-96 task-lifecycle additions and the FORGE-113 `source` block. See §`phases.yaml` is a derived snapshot above for the `source` block schema and freshness summary semantics. Broader refresh is filed as a follow-up.
-
 ```ts
+// Provenance stanza written by /reconcile --pull when phases.yaml is
+// regenerated from upstream tracker state.
+export const SourceSchema = z
+  .object({
+    tracker: z.enum(['linear', 'github', 'notion']),
+    project_id: z.string().min(1),
+    synced_at: z.string().datetime({ offset: true }),
+    spec_revision: z.string().min(1),
+  })
+  .strict();
+
 export const TaskSchema = z.object({
-  id: z.string(),                    // forge-internal stable ID, e.g. "P1-T03"
-  title: z.string(),
-  description: z.string().optional(),
-  owner_type: z.enum(['frontend', 'backend', 'db', 'devops', 'qa', 'security', 'design', 'integration']),
-  acceptance: z.array(z.string()),   // testable bullets
-  depends_on: z.array(z.string()).default([]),  // other task IDs
-  estimate: z.string().optional(),   // free text
-
-  // Optional: file globs this task is expected to write. Enables
-  // overlap detection at dispatch time. See ORCHESTRATOR.md "File-glob
-  // declarations + overlap detection". When omitted, the orchestrator
-  // assumes worst-case overlap and serializes more conservatively.
-  write_globs: z.array(z.string()).optional(),
-
-  // Optional: per-task question budget override.
-  question_budget: z.object({
-    soft: z.number().int().nonnegative(),
-    hard: z.number().int().nonnegative(),
-  }).optional(),
+  id: z.string().regex(/^P\d+(\.\d+)?-T\d+[a-z]?$/),
+  tracker_issue_id: z.string().optional(),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  type: z.enum(['foundation', 'data', 'backend', 'integration', 'content', 'infra', 'skill', 'docs']),
+  priority: z.enum(['P0', 'P1', 'P2']),
+  depends_on: z.array(z.string().min(1)).default([]),
+  estimate: z.enum(['S', 'M', 'L', 'XL']),
+  owner_type: z.enum(['frontend-dev', 'backend-dev', 'db-architect', 'devops-engineer', 'qa-engineer', 'security-auditor', 'design-engineer', 'integration']),
+  acceptance: z.array(z.string().min(1)).min(1),
+  split_into: z.array(z.string().min(1)).optional(),
+  status: z.enum(['active', 'paused', 'done', 'deferred-v0.5', 'dropped']).optional(),
+  write_globs: z.array(z.string().min(1)).optional(),
+  // Per-task override of agents.question_budget; hard must be >= soft when both set.
+  question_budget: z
+    .object({
+      soft: z.number().int().positive().optional(),
+      hard: z.number().int().positive().optional(),
+    })
+    .refine((b) => b.soft === undefined || b.hard === undefined || b.hard >= b.soft, {
+      message: 'question_budget.hard must be >= question_budget.soft',
+    })
+    .optional(),
+  // Free-form lifecycle metadata.
+  deferred_at: z.string().optional(),
+  deferred_reason: z.string().optional(),
+  dropped_at: z.string().optional(),
+  dropped_reason: z.string().optional(),
+  paused_at: z.string().optional(),
+  paused_reason: z.string().optional(),
 });
 
 export const PhaseSchema = z.object({
-  number: z.number().int().positive(),
-  name: z.string(),
-  gate_criteria: z.array(z.string()),
-  tasks: z.array(TaskSchema),
+  id: z.string().regex(/^phase-\d+(\.\d+)?$/),
+  tracker_milestone_id: z.string().optional(),
+  name: z.string().min(1),
+  status: z.enum(['active', 'blocked', 'done', 'paused']),
+  blocked_by: z.string().optional(),
+  goal: z.string().min(1),
+  gate_criteria: z.array(z.string().min(1)).min(1),
+  tasks: z.array(TaskSchema).min(1),
 });
 
-export const PhasesSchema = z.object({
-  version: z.literal(1),
-  phases: z.array(PhaseSchema),
-});
+export const PhasesSchema = z
+  .object({
+    project: z.string().min(1),
+    tracker_url: z.string().optional(),
+    gate_check_command: z.string().optional(),
+    source: SourceSchema.optional(),
+    phases: z.array(PhaseSchema).min(1),
+  })
+  // .superRefine body elided for brevity — see src/schemas/phases.ts for full implementation.
+  .superRefine(/* ... */);
 ```
+
+The schema's `.superRefine` validates duplicate phase/task IDs, unknown `blocked_by`/`depends_on` targets, and DAG cycles (reporting the cycle path). `src/schemas/phases.ts` remains canonical — the snippet above is a documentation mirror.
 
 ### Tracker adapter interface (TypeScript)
 
@@ -561,6 +592,14 @@ src/
     workspace.ts              // worktree create / cleanup / sanitize-id; canonical worktree path is `.forge/worktrees/<sanitized-id>/`
     logger.ts                 // chalk stdout + JSONL append
     secrets.ts                // dispatch to secret manager adapter
+  harnesses/                  // (added FORGE-88) host-CLI subprocess abstractions
+    base.ts                   // IHarness contract + Subagent{Handle,Result}/HealthResult types + HarnessError
+    claude.ts                 // ClaudeHarness (primary-only; runReview NOT_SUPPORTED)
+    codex.ts                  // CodexHarness (primary or review; codex exec subprocess)
+    gemini.ts                 // GeminiHarness (experimental, env-gated)
+    index.ts                  // barrel + createHarness(host) factory
+    subprocess.ts             // execa wrapper (timeout/stdout-cap/error classification)
+    verdict-parser.ts         // fenced-JSON ReviewVerdict extractor + schema validation
   orchestrator/
     state-machine.ts          // task / attempt / run state transitions (CLI-owned)
     leases.ts                 // claim, heartbeat, steal-after-expiry
@@ -996,7 +1035,7 @@ Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026
 
 Each suggestion is a printed line at skill end: `"💡 Suggested next: /second-opinion review-decision (run with FORGE_AUTO_CODEX=0 to disable)"`. User types or skips. No automatic execution. The `forge codex-suggest` CLI verb, `codex.auto_codex_enabled` settings field, and `FORGE_AUTO_CODEX` env var keep their `codex`-prefixed names in v0.4 (rename deferred to v0.5 per FORGE-89 plan §7 to avoid a settings-schema migration).
 
-Bounded by `codex.auto_codex_token_cap` in settings.yaml (RESERVED — default 50000 tokens/session; budget enforcement deferred to v0.5). Env var `FORGE_AUTO_CODEX=0` disables suggestions entirely.
+Env var `FORGE_AUTO_CODEX=0` disables suggestions entirely.
 
 ### Why no host hooks
 

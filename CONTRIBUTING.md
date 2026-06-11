@@ -79,6 +79,27 @@ done
 
 All must pass cleanly.
 
+### Pre-push smoke (catches packaging bugs the regular checks miss)
+
+Regular checks run against a `devDependencies`-populated `node_modules`; end users get only runtime deps because `tsdown` marks `dependencies` external. A chalk packaging bug shipped exactly this way in FORGE-67 — `--version` worked but any command that rendered colored output crashed at runtime. The smoke test catches this class of regression before it reaches npm.
+
+```bash
+npm run build
+rm -rf node_modules
+npm ci --omit=dev
+node dist/bin/forge.cjs --version
+node dist/bin/forge.cjs --help
+node dist/bin/forge.cjs migrate --dry-run
+```
+
+`--version` and `--help` verify the bundle loads at all under a production-only install — missing runtime dependencies fail at module load, since the CJS bundle imports them at startup. They print plain text, though, so they never reach the colored-output code paths. `migrate --dry-run` (read-only — plans changes, writes nothing) renders the chalk-colored migration report, which is exactly the path that broke in FORGE-67: chalk v5 is pure ESM and the CJS bundle's interop can double-wrap it, so it only fails when colored output actually renders.
+
+Restore dev dependencies afterwards:
+
+```bash
+npm ci
+```
+
 ## PR description template
 
 ```markdown

@@ -370,7 +370,6 @@ design:
 # Added 2026-05-17 (closed-loop workflow control — minimal surface after dropping Feature 7)
 codex:
   auto_codex_enabled: true          # auto-suggest /second-opinion at /plan-task exit, ADR draft, pre-/ship (settings field keeps the `codex` name in v0.4; rename deferred to v0.5)
-  auto_codex_token_cap: 50000       # max tokens per session for auto-codex (0 disables)
 # decisions: — v0.5 only (no v0.4 consumer; block reserved in schema for forward compatibility)
 decisions:
   decision_dir: ./spec/decisions    # where draft ADRs live (ephemeral; deleted on --apply) [v0.5]
