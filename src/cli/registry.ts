@@ -119,7 +119,7 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
   },
   {
     name: 'gc',
-    summary: 'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
+    summary: 'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans); --remove-worktrees [--task <id>] removes terminal-task worktrees for /wrap-up.',
   },
   {
     name: 'second-opinion',
@@ -188,6 +188,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'ship',
     summary: 'Push the branch, run final gates (tests, secrets scan, conventional commit), open the PR.',
+  },
+  {
+    name: 'wrap-up',
+    summary: 'End-of-task housekeeping after a PR merges: remove the worktree, delete the local branch, reconcile, and return to a clean main.',
   },
   // ── Diagnostics & recovery ──
   {
