@@ -130,7 +130,9 @@ test('second-opinion: malformed taskId → INVALID_ARGS', async (t) => {
   const { lines } = captureStdout(t);
   t.after(cleanup);
   const result = await runOrchestrateSecondOpinion({
-    taskId: 'lowercase-1',
+    // FORGE-130: lowercase ids (e.g. `lowercase-1`) are now valid under the
+    // unified task-id shape. Use a `#`-prefixed id, which the shape rejects.
+    taskId: '#42',
     diffPath,
     promptPath,
     forgeDir,

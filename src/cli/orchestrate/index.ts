@@ -6,6 +6,7 @@
 // classification table cannot drift from the implementation.
 
 import { fail, emit } from '../envelope.ts';
+import { TASK_ID_RE as SHARED_TASK_ID_RE } from '../../schemas/task-id.ts';
 import { hasFlag, resolveForgeDir } from './flags.ts';
 import { runOrchestrateAnswer } from './answer.ts';
 import { runOrchestrateAttach } from './attach.ts';
@@ -179,7 +180,9 @@ const gcHandler: VerbHandler = {
       // --task, if present, must carry a value that passes the task-id format.
       // Fix 1 (FORGE-116): validate BEFORE any path construction so that a value
       // like `../..` is rejected with INVALID_ARGS rather than escaping .forge/worktrees.
-      const TASK_ID_RE = /^(?:[A-Z][A-Z0-9]*-\d+|P\d+(?:\.\d+)?-T\d+[a-z]?)$/;
+      // Single source of truth (FORGE-130) — the handler pre-validates with
+      // the SAME shape the verb enforces; no local regex.
+      const TASK_ID_RE = SHARED_TASK_ID_RE;
       let scopedTask: string | undefined;
       if (hasFlag(rest, 'task')) {
         const value = parseFlag(rest, 'task');
@@ -195,7 +198,7 @@ const gcHandler: VerbHandler = {
           const envelope = fail(
             'INVALID_ARGS',
             `forge orchestrate gc --remove-worktrees: --task value '${value}' is not a valid task id. ` +
-              `Expected format: TRACKER-123 (e.g. FORGE-116) or P1-T3 (phases shape).`,
+              `Expected: a path-safe id — alphanumeric start, then letters/digits/./_/- (max 64); see src/schemas/task-id.ts.`,
             false,
           );
           return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };

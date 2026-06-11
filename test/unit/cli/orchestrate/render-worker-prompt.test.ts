@@ -275,7 +275,10 @@ test('render-worker-prompt: malformed task_id rejected by schema (INVALID_ARGS)'
   t.after(fix.cleanup);
 
   const result = await runOrchestrateRenderWorkerPrompt({
-    taskId: 'not-a-tracker-id',
+    // FORGE-130: the unified task-id shape accepts lowercase/hyphenated ids
+    // (e.g. `not-a-tracker-id` is now valid). Use a genuinely path-unsafe id
+    // (contains `/`) to exercise the INVALID_ARGS rejection.
+    taskId: '../escape',
     attemptId: fix.attemptId,
     forgeDir: fix.forgeDir,
     repoRoot: fix.repoRoot,

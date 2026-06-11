@@ -8,13 +8,12 @@ import { z } from 'zod';
 
 // ── Shared primitives ────────────────────────────────────────────────────────
 
-// Task IDs follow tracker conventions: prefix letters + hyphen + digits.
-// Linear/GitHub: FORGE-96, ABC-1234. Notion: same shape via tracker-id.
-export const TaskIdSchema = z
-  .string()
-  .min(3)
-  .max(64)
-  .regex(/^[A-Z][A-Z0-9]*-\d+$/, 'task_id must match /^[A-Z][A-Z0-9]*-\\d+$/');
+// Task IDs: the unified shape lives in ./task-id.ts (FORGE-130). Re-exported
+// here so every verb schema below references the single source of truth.
+// Widened from the old Linear-only `/^[A-Z][A-Z0-9]*-\d+$/`: phases ids
+// (P2.5-T07), normalized GitHub ids (GH-42), lowercase, and UUIDs now pass.
+export { TaskIdSchema } from './task-id.ts';
+import { TaskIdSchema } from './task-id.ts';
 
 // UUIDv7 string: 36 chars, version nibble == 7.
 // Zod's built-in .uuid() does not pin a version, so use a regex.

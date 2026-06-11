@@ -4,6 +4,31 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Changed
+
+- **Unified task-id schema (FORGE-130).** All task-id validation now flows through
+  one primitive (`src/schemas/task-id.ts`, `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`):
+  alphanumeric start, then letters/digits/`.`/`_`/`-`, max 64 chars, no `#`, `/`,
+  `\`, or whitespace. The CLI args schema, the questions/paths segment validator,
+  `workspace.sanitizeIssueId`, and the gc worktree-id check all wrap this single
+  source of truth (each keeps its own error codes). This **widens** the prior
+  Linear-only CLI shape — lowercase ids, no-hyphen ids, phases ids (`P2.5-T07`),
+  normalized GitHub ids (`GH-42`), and UUIDs now pass. Two **narrowings** vs the
+  prior per-site validators: a leading `.` (old `workspace` pattern) and a
+  leading `_`/`-` (old `questions/paths` pattern) are now rejected — both are
+  leading-punctuation path hazards no live id namespace used.
+- **GitHub issue identifier normalized to `GH-<n>` (FORGE-130).** The GitHub
+  adapter now emits the path-safe `GH-42` identifier instead of the legacy `#42`
+  (which the unified shape rejects). `parseIssueNumber()` reverse-maps `GH-42`,
+  `#42`, bare `42`, and issue URLs back to the bare number across **every** native
+  call site (claim, releaseClaim, updateState, comment, createIssue, setBlockedBy,
+  updateIssueBody, setClaimFence), so the legacy `#42` shape is still **accepted on
+  read** — existing `plans/phases.yaml` bindings keep working. `setBlockedBy`'s
+  blocker input is widened the same way (footer still stores the bare number).
+  `reconcile` seeds legacy aliases (`#<n>` + bare `<n>`) for GitHub issues so
+  `--pull` never false-removes a task bound by an old shape and `--push` resolves
+  body targets through the same aliases.
+
 ## [0.4.0] - 2026-06-11
 
 v0.4.0 ships the **closed-loop / ephemeral-ADR workflow**: the `apply-decision`

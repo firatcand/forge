@@ -779,13 +779,22 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   async setBlockedBy(issueId: string, blockerId: string): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     this.assertNonEmpty(blockerId, 'blockerId');
-    if (!/^\d+$/.test(blockerId)) {
+    // FORGE-130: widen the public input to accept GH-42 / #42 / 42 (and URLs)
+    // via the same central reverse-map used for issueId — callers (reconcile,
+    // push-to-tracker) may hold the normalized `GH-<n>` identifier. The footer
+    // stores the BARE number (canonical wire form, stable across the migration:
+    // pre-FORGE-130 footers already carried bare numbers like `10,11`).
+    let blockerNumber: number;
+    try {
+      blockerNumber = this.parseIssueNumber(blockerId);
+    } catch {
       throw new TrackerError(
         'VALIDATION',
-        `blockerId must be a numeric GitHub issue number, got: ${blockerId}`,
+        `blockerId must be a GitHub issue reference (GH-42, #42, 42, or URL), got: ${blockerId}`,
         { blockerId },
       );
     }
+    const blockerNumberStr = String(blockerNumber);
     const number = this.parseIssueNumber(issueId);
 
     let viewResult: GhExecResult;
@@ -823,11 +832,11 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
       );
     }
 
-    if (blockerIds.includes(blockerId)) return; // dedup
+    if (blockerIds.includes(blockerNumberStr)) return; // dedup
 
     const newBody = serializeWithForgeFooters(body, forgeTaskId, [
       ...blockerIds,
-      blockerId,
+      blockerNumberStr,
     ]);
 
     try {
@@ -980,15 +989,24 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
 
   // ─── helpers ───────────────────────────────────────────────────────────────
 
+  // Central reverse-map for every native call site (claim / releaseClaim /
+  // updateState / comment / setBlockedBy / updateIssueBody / setClaimFence /
+  // createIssue). Accepts the canonical normalized identifier `GH-42`, the
+  // legacy `#42` shape (so phases.yaml bindings written before FORGE-130 keep
+  // working), a bare `42`, and full issue URLs. The GitHub REST/`gh` API only
+  // ever speaks the bare number, so this is the sole place that strips the
+  // wrapper. Case-insensitive on the `GH-` prefix.
   private parseIssueNumber(idOrUrl: string): number {
     const trimmed = idOrUrl.trim();
+    const ghMatch = trimmed.match(/^GH-(\d+)$/i);
+    if (ghMatch) return Number(ghMatch[1]);
     const hashMatch = trimmed.match(/^#?(\d+)$/);
     if (hashMatch) return Number(hashMatch[1]);
     const urlMatch = trimmed.match(/\/issues\/(\d+)(?:[/?#]|$)/);
     if (urlMatch) return Number(urlMatch[1]);
     throw new TrackerError(
       'VALIDATION',
-      `Could not parse GitHub issue number from: ${idOrUrl}`,
+      `Could not parse GitHub issue number from: ${idOrUrl} (expected GH-42, #42, 42, or an issue URL)`,
       { issueId: idOrUrl },
     );
   }
@@ -999,7 +1017,12 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     const claim = parseClaimFooter(raw.body);
     const issue: Issue = {
       id: String(raw.number),
-      identifier: `#${raw.number}`,
+      // FORGE-130: emit the path-safe `GH-<n>` identifier (replacing the legacy
+      // `#<n>`, which the unified task-id shape rejects — `#` is not a valid
+      // path segment char). parseIssueNumber reverse-maps GH-42/#42/42/URLs
+      // back to the bare number for native gh calls, so existing phases.yaml
+      // bindings in any of those shapes keep resolving.
+      identifier: `GH-${raw.number}`,
       title: raw.title,
       state: deriveGitHubState(raw, labels),
       blockerIds,

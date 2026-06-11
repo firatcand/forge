@@ -96,6 +96,24 @@ function buildTaskIndex(phases: Phases): TaskIndex {
   return { byTrackerId, byTaskId, trackerIdToTaskId };
 }
 
+// FORGE-130: phases.yaml may bind a GitHub issue under any of three historical
+// shapes — the normalized `GH-42` identifier (current), the legacy `#42`
+// identifier (emitted before FORGE-130), or a bare `42` (hand-entered / the
+// issue.id). All three denote the same issue. This returns every alias an issue
+// could be stored under so the orphan sweep doesn't false-remove a task bound by
+// an old shape, and so --push body targeting resolves regardless of which shape
+// the local task recorded. Linear/Notion identifiers (FORGE-90, UUIDs) have no
+// numeric alias, so this is a no-op widening for them (just id + identifier).
+function trackerIdAliases(issue: Issue): string[] {
+  const aliases = new Set<string>([issue.id, issue.identifier]);
+  const gh = issue.identifier.match(/^GH-(\d+)$/i);
+  if (gh) {
+    aliases.add(`#${gh[1]}`);
+    aliases.add(gh[1]);
+  }
+  return [...aliases];
+}
+
 function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -116,7 +134,15 @@ function mapBlockerIdsToTaskIds(
 ): readonly string[] {
   const out = new Set<string>();
   for (const trackerId of blockerIds) {
-    const taskId = idx.trackerIdToTaskId.get(trackerId);
+    // Direct lookup, then GitHub legacy aliases (FORGE-130): a GitHub
+    // forge:blockedBy footer stores the BARE issue number (e.g. `42`), but the
+    // blocker task may bind tracker_issue_id under the normalized `GH-42` (or
+    // legacy `#42`) shape. Try every alias of a bare-number blockerId so the
+    // dependency resolves regardless of which shape the local task recorded.
+    const taskId =
+      idx.trackerIdToTaskId.get(trackerId) ??
+      idx.trackerIdToTaskId.get(`GH-${trackerId}`) ??
+      idx.trackerIdToTaskId.get(`#${trackerId}`);
     if (taskId) out.add(taskId);
   }
   return [...out].sort();
@@ -176,20 +202,24 @@ export function diffPull(
 
   for (const issue of issues) {
     // phases.yaml may bind tracker_issue_id to EITHER the tracker's internal
-    // id (a UUID on Linear) OR the human identifier ("FORGE-90"). Seed both
-    // namespaces so the orphan sweep below — which compares the stored
+    // id (a UUID on Linear) OR the human identifier ("FORGE-90"). For GitHub it
+    // may additionally be a legacy `#42` or bare `42` (FORGE-130). Seed every
+    // alias so the orphan sweep below — which compares the stored
     // tracker_issue_id key — recognizes this issue as seen regardless of which
-    // form the local task recorded. Seeding the unmatched case too is
-    // harmless: nothing in byTrackerId will key on it.
-    seenTrackerIds.add(issue.id);
-    seenTrackerIds.add(issue.identifier);
+    // form the local task recorded. Seeding unmatched aliases is harmless:
+    // nothing in byTrackerId keys on them.
+    const aliases = trackerIdAliases(issue);
+    for (const alias of aliases) seenTrackerIds.add(alias);
 
     // Primary match: a local task that binds this issue via tracker_issue_id.
-    // Try the internal id first, then the human identifier. This explicit
-    // binding wins even when the issue carries no forge:task footer — a
-    // recorded tracker_issue_id is a stronger link than the footer.
-    let local: { phase: Phase; task: Task } | undefined =
-      idx.byTrackerId.get(issue.id) ?? idx.byTrackerId.get(issue.identifier);
+    // Try every alias (internal id, normalized identifier, legacy #/bare).
+    // This explicit binding wins even when the issue carries no forge:task
+    // footer — a recorded tracker_issue_id is a stronger link than the footer.
+    let local: { phase: Phase; task: Task } | undefined;
+    for (const alias of aliases) {
+      local = idx.byTrackerId.get(alias);
+      if (local) break;
+    }
 
     const forgeTaskId = issue.forgeTaskId;
 
@@ -302,8 +332,16 @@ export function renderTaskBody(task: Task, phase: Phase): string {
 }
 
 export function diffPush(phases: Phases, issues: readonly Issue[]): PushPlan {
+  // Key each issue under every alias it could be stored as in phases.yaml
+  // (id, normalized identifier, and — for GitHub — legacy `#42` / bare `42`),
+  // so a task whose tracker_issue_id is `GH-42` (or `#42`, or `42`) resolves to
+  // the same issue rather than being reported as an orphan. (FORGE-130.)
   const issueById = new Map<string, Issue>();
-  for (const i of issues) issueById.set(i.id, i);
+  for (const i of issues) {
+    for (const alias of trackerIdAliases(i)) {
+      if (!issueById.has(alias)) issueById.set(alias, i);
+    }
+  }
 
   const bodies: PushBody[] = [];
   const skipped: PushSkip[] = [];

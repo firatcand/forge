@@ -250,7 +250,7 @@ test('listActiveIssues parses 3 issues with mixed footers and states', async () 
   assert.equal(issues.length, 3);
 
   assert.equal(issues[0]?.id, '42');
-  assert.equal(issues[0]?.identifier, '#42');
+  assert.equal(issues[0]?.identifier, 'GH-42'); // FORGE-130: normalized from #42
   assert.equal(issues[0]?.state, 'in_progress');
   assert.equal(issues[0]?.forgeTaskId, 'FORGE-T1');
   assert.deepEqual(issues[0]?.blockerIds, ['10', '11']);
@@ -665,7 +665,7 @@ test('createIssue posts body w/ footers, hydrates via view, returns Issue', asyn
     dependsOn: [],
   });
   assert.equal(issue.id, '42');
-  assert.equal(issue.identifier, '#42');
+  assert.equal(issue.identifier, 'GH-42'); // FORGE-130: normalized from #42
   assert.equal(issue.forgeTaskId, 'FORGE-99');
 
   // verify the create call carried the footer
@@ -729,6 +729,76 @@ test('setBlockedBy PRECONDITION_FAILED when no forge:task footer', async () => {
     (err: unknown) =>
       err instanceof TrackerError && err.code === 'PRECONDITION_FAILED',
   );
+});
+
+// ─── FORGE-130: GH-<n> normalization + reverse-map round-trip ─────────────────
+
+test('FORGE-130: toIssue emits GH-<n> identifier (not legacy #<n>)', async () => {
+  const { tracker } = makeTracker([ok(ghIssueListOpen)]);
+  const issues = await tracker.listActiveIssues();
+  assert.equal(issues[0]?.id, '42');
+  assert.equal(issues[0]?.identifier, 'GH-42');
+  assert.equal(issues[1]?.identifier, 'GH-43');
+  assert.equal(issues[2]?.identifier, 'GH-44');
+});
+
+test('FORGE-130: parseIssueNumber reverse-maps GH-42 / #42 / 42 / URL to bare number on native calls', async () => {
+  // Each accepted issueId shape must drive the SAME native gh call (`comment 42`).
+  for (const issueId of ['GH-42', '#42', '42', 'gh-42', 'https://github.com/firatcand/forge-test/issues/42']) {
+    const { tracker, mock } = makeTracker([ok()]);
+    await tracker.comment(issueId, 'hi');
+    const args = mock.calls[0]!;
+    // gh issue comment <number> --repo ...
+    assert.equal(args[0], 'issue');
+    assert.equal(args[1], 'comment');
+    assert.equal(args[2], '42', `issueId ${issueId} should reverse-map to bare 42`);
+  }
+});
+
+test('FORGE-130: legacy #42 shape still drives claim (back-compat for stored bindings)', async () => {
+  const { tracker, mock } = makeTracker([
+    ok(ghIssueViewLabelsEmpty), // initial read
+    ok(), // ensureLabelExists (label create)
+    ok(), // add-label
+    ok(ghIssueViewLabelsClaimedMe), // recheck
+  ]);
+  const result = await tracker.claim('#42', 'me');
+  assert.equal(result.ok, true);
+  // every native call carries the bare number 42 (no #).
+  for (const c of mock.calls) {
+    if (c.includes('edit') || c.includes('view')) {
+      assert.ok(c.includes('42') && !c.includes('#42'));
+    }
+  }
+});
+
+test('FORGE-130: parseIssueNumber rejects an unparseable id with VALIDATION', async () => {
+  const { tracker } = makeTracker([]);
+  await assert.rejects(
+    () => tracker.comment('not-an-issue', 'x'),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});
+
+test('FORGE-130: setBlockedBy widened input — GH-11 / #11 resolve to bare 11 in footer', async () => {
+  for (const blockerRef of ['GH-11', '#11', '11']) {
+    const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
+    await tracker.setBlockedBy('GH-42', blockerRef);
+    const edit = mock.calls[1]!;
+    const bodyArgIdx = edit.indexOf('--body');
+    const body = bodyArgIdx >= 0 ? edit[bodyArgIdx + 1] : '';
+    // footer stores BARE numbers; existing 10 plus new 11.
+    assert.match(body ?? '', /forge:blockedBy=10,11/, `blockerRef ${blockerRef}`);
+    // native edit call targets bare 42.
+    assert.equal(edit[2], '42');
+  }
+});
+
+test('FORGE-130: setBlockedBy dedup recognizes GH-10 against stored bare 10', async () => {
+  const { tracker, mock } = makeTracker([ok(ghIssueViewBodyOnly)]); // body has blockedBy=10
+  await tracker.setBlockedBy('GH-42', 'GH-10');
+  const edits = mock.calls.filter((c) => c.includes('edit'));
+  assert.equal(edits.length, 0, 'GH-10 should dedup against stored 10');
 });
 
 // ─── assertValidBodyInput (shared helper, exercised via GitHub for convenience) ─

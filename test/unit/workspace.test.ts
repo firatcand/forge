@@ -86,6 +86,22 @@ test('sanitizeIssueId — rejects 65-char overflow with TOO_LONG', () => {
   }
 });
 
+test('sanitizeIssueId — FORGE-130 narrowing: rejects leading dot `.foo` with INVALID_CHAR', () => {
+  // Documented narrowing (FORGE-130 delta 1): the pre-unification ALLOWED_PATTERN
+  // `/^[A-Za-z0-9._-]+$/` accepted a leading `.` (dotfile path hazard). The
+  // unified shape requires a leading alphanumeric, so this now fails the charset
+  // check (INVALID_CHAR — the leading-dash branch only fires for `-`). No
+  // worktree dir name or fixture relied on a leading dot.
+  assert.equal(/^[A-Za-z0-9._-]+$/.test('.foo'), true, 'sanity: old pattern allowed it');
+  try {
+    sanitizeIssueId('.foo');
+    assert.fail('expected throw');
+  } catch (err) {
+    assert.ok(err instanceof WorkspaceError);
+    assert.equal((err as WorkspaceError).code, 'INVALID_CHAR');
+  }
+});
+
 test('sanitizeIssueId — rejects leading dash with LEADING_DASH', () => {
   try {
     sanitizeIssueId('-leading-dash');

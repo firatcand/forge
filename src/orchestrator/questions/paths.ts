@@ -1,14 +1,19 @@
 import { join } from 'node:path';
 import { QuestionChannelError } from './errors.ts';
+import { TASK_ID_RE, TASK_ID_MAX_LEN } from '../../schemas/task-id.ts';
 
 // task_id, attempt_id, and question_id are interpolated into filesystem paths.
 // Untrusted segments could escape the orchestrator subtree (`../../etc/passwd`)
 // or trip cross-platform path semantics (NUL bytes, leading dots on POSIX,
-// reserved names on Windows). The narrow regex below is the same shape used by
-// UUIDv7 IDs (lower-hex + hyphens) plus the broader Linear/GitHub issue-id
-// shape (FORGE-73, repo#123 once tokenized to alnum). Reject everything else.
-const ID_SEGMENT_REGEX = /^[A-Za-z0-9_-]+$/;
-const ID_SEGMENT_MAX_LEN = 64;
+// reserved names on Windows). Validation delegates to the unified task-id
+// primitive (FORGE-130, src/schemas/task-id.ts), which is the same shape used by
+// UUIDv7 run/attempt/question segments (lower-hex + hyphens, leading alnum) and
+// the Linear/GitHub/phases issue-id shapes. This WRAPS the primitive: it keeps
+// the QuestionChannelError INVALID_ID code and the (length / empty / charset)
+// message granularity callers already depend on. Note this narrows the prior
+// `/^[A-Za-z0-9_-]+$/` by rejecting a leading `_`/`-` and adding `.` — no
+// run/attempt/question id (all UUID-shaped, leading hex) relied on that.
+const ID_SEGMENT_MAX_LEN = TASK_ID_MAX_LEN;
 
 export function validateIdSegment(value: string, fieldName: string): string {
   if (typeof value !== 'string' || value.length === 0) {
@@ -25,10 +30,10 @@ export function validateIdSegment(value: string, fieldName: string): string {
       { fieldName, length: value.length },
     );
   }
-  if (!ID_SEGMENT_REGEX.test(value)) {
+  if (!TASK_ID_RE.test(value)) {
     throw new QuestionChannelError(
       'INVALID_ID',
-      `${fieldName} contains characters outside [A-Za-z0-9_-]`,
+      `${fieldName} must match /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/ (alphanumeric start; letters, digits, . _ -)`,
       { fieldName, value },
     );
   }

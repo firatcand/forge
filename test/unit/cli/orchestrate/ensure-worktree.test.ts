@@ -82,6 +82,35 @@ test('ensure-worktree: fresh create writes worktree + marker + hydrates CLAUDE.m
   assert.equal(marker.taskId, 'FORGE-200');
 });
 
+test('FORGE-130: ensure-worktree accepts a normalized GitHub id (GH-42) and binds the worktree', async (t) => {
+  // Drives the GitHub-style id through the same validation seam claim + dispatch
+  // use (TaskIdSchema → sanitizeIssueId). Proves the wider unified shape lets a
+  // GH-<n> id flow into a real worktree dir + marker — the claim→ensure-worktree
+  // →dispatch path (FORGE-130 test requirement).
+  const { repoRoot, forgeDir, cleanup } = await freshRepo();
+  const { lines } = captureStdout(t);
+  t.after(cleanup);
+
+  const result = await runOrchestrateEnsureWorktree({
+    taskId: 'GH-42',
+    forgeDir,
+    repoRoot,
+    json: true,
+    base: 'main',
+  });
+  assert.equal(result.exitCode, 0, 'GH-42 must be a valid task id');
+  const env = lastJsonEnvelope(lines);
+  assert.equal(env.ok, true);
+  const data = env.data as Record<string, unknown>;
+  assert.equal(data.created, true);
+  const wtPath = data.worktree_path as string;
+  assert.ok(wtPath.endsWith('GH-42'), 'worktree dir name is the GH-42 id');
+  assert.ok(existsSync(wtPath));
+  const marker = JSON.parse(readFileSync(join(wtPath, '.forge', 'worktree-task.json'), 'utf8'));
+  assert.equal(marker.taskId, 'GH-42');
+  assert.equal(marker.branch, 'feat/GH-42');
+});
+
 test('ensure-worktree: second call with same task_id is idempotent (no-op exit 0)', async (t) => {
   const { repoRoot, forgeDir, cleanup } = await freshRepo();
   const { lines } = captureStdout(t);
