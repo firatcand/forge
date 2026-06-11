@@ -3,29 +3,34 @@ import { test } from 'node:test';
 
 import {
   CLAIM_SETTLE_MS,
+  NOTION_API_VERSION,
+  NOTION_BODY_MAX_BYTES,
   NOTION_LIST_LIMIT,
   NOTION_RAW_PAGE_CAP,
   NotionTracker,
   TrackerError,
-  classifyNotionError,
+  bodyToParagraphBlocks,
+  classifyNotionExecError,
+  isRetriableTrackerErrorCode,
   parseNotionPageId,
   readRichText,
   readStatus,
   readTitle,
   type Logger,
-  type McpCall,
-  type McpToolResult,
+  type NtnExec,
+  type NtnExecResult,
 } from '../../../src/trackers/index.ts';
 import type { NotionTrackerConfig } from '../../../src/schemas/settings.ts';
 import {
   DATA_SOURCE_ID,
+  blockChildren,
   buildPage,
   databaseInfo,
   databaseQueryActive,
   databaseQueryPaged1,
   databaseQueryPaged2,
   errorResult,
-  makeMcpError,
+  makeSpawnError,
   newDatabase,
   okEmpty,
   okResult,
@@ -35,6 +40,8 @@ import {
   pageEmpty,
   pageWithFooters,
   pageWithoutForgeTaskId,
+  timeoutResult,
+  transportError,
 } from '../../fixtures/trackers/notion-responses.ts';
 
 // ─── Test infra ──────────────────────────────────────────────────────────────
@@ -43,11 +50,7 @@ const DB_ID = '99999999-aaaa-bbbb-cccc-dddddddddddd';
 
 const notionConfig: NotionTrackerConfig = {
   type: 'notion',
-  config: {
-    database_id: DB_ID,
-    mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
-    mcp_env: {},
-  },
+  config: { database_id: DB_ID },
 };
 
 function noopLogger(): Logger & {
@@ -65,17 +68,26 @@ function noopLogger(): Logger & {
   };
 }
 
-type MockStep = McpToolResult | Error;
+type MockStep = NtnExecResult | Error;
 
-class MockMcp {
+interface RecordedCall {
+  args: string[];
+  input?: string;
+}
+
+class MockNtn {
   private idx = 0;
-  readonly calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
+  readonly calls: RecordedCall[] = [];
   constructor(private readonly steps: MockStep[]) {}
-  call: McpCall = async (tool, args) => {
-    this.calls.push({ tool, args });
+  exec: NtnExec = async (args, opts) => {
+    const call: RecordedCall = { args: [...args] };
+    if (opts?.input !== undefined) call.input = opts.input;
+    this.calls.push(call);
     const step = this.steps[this.idx++];
     if (step === undefined) {
-      throw new Error(`MockMcp: unexpected call #${this.idx}: ${tool}`);
+      throw new Error(
+        `MockNtn: unexpected call #${this.idx}: ntn ${args.join(' ')}`,
+      );
     }
     if (step instanceof Error) throw step;
     return step;
@@ -83,11 +95,11 @@ class MockMcp {
 }
 
 function makeTracker(steps: MockStep[]) {
-  const mock = new MockMcp(steps);
+  const mock = new MockNtn(steps);
   const logger = noopLogger();
   const sleepCalls: number[] = [];
   const tracker = new NotionTracker(notionConfig, logger, {
-    mcp: mock.call,
+    ntn: mock.exec,
     retry: { sleep: async () => {} },
     sleep: async (ms) => {
       sleepCalls.push(ms);
@@ -96,114 +108,188 @@ function makeTracker(steps: MockStep[]) {
   return { tracker, mock, logger, sleepCalls };
 }
 
-// ─── classifyNotionError ─────────────────────────────────────────────────────
+// Decompose an argv into { path, method }. Method defaults to GET (no -X).
+function apiOf(call: RecordedCall): { path: string; method: string } {
+  assert.equal(call.args[0], 'api', `expected 'api' verb, got: ${call.args.join(' ')}`);
+  const path = call.args[1]!;
+  const xIdx = call.args.indexOf('-X');
+  const method = xIdx >= 0 ? call.args[xIdx + 1]! : 'GET';
+  return { path, method };
+}
 
-test('classifyNotionError: unauthorized → AUTH', () => {
-  const hint = classifyNotionError({ code: 'unauthorized', message: 'bad token' });
+function inputJson(call: RecordedCall): Record<string, unknown> {
+  assert.ok(call.input !== undefined, 'expected a stdin body on this call');
+  return JSON.parse(call.input!) as Record<string, unknown>;
+}
+
+function assertVersionPinned(call: RecordedCall): void {
+  const idx = call.args.indexOf('--notion-version');
+  assert.ok(idx >= 0, `--notion-version missing: ntn ${call.args.join(' ')}`);
+  assert.equal(call.args[idx + 1], NOTION_API_VERSION);
+}
+
+// ─── classifyNotionExecError ─────────────────────────────────────────────────
+
+test('classifyNotionExecError: ENOENT spawn error → TRANSPORT with install hint', () => {
+  const hint = classifyNotionExecError(
+    makeSpawnError('ENOENT', 'spawn ntn ENOENT'),
+  );
+  assert.equal(hint.code, 'TRANSPORT');
+  assert.equal(hint.details?.reason, 'ntn-not-installed');
+  assert.match(String(hint.details?.hint ?? ''), /ntn login/);
+});
+
+test('classifyNotionExecError: unauthorized → AUTH', () => {
+  const hint = classifyNotionExecError(
+    errorResult({ code: 'unauthorized', message: 'bad token' }),
+  );
   assert.equal(hint.code, 'AUTH');
 });
 
-test('classifyNotionError: restricted_resource → AUTH (before NOT_FOUND)', () => {
-  const hint = classifyNotionError({
-    code: 'restricted_resource',
-    message: 'access denied',
-  });
+test('classifyNotionExecError: restricted_resource → AUTH (before NOT_FOUND)', () => {
+  const hint = classifyNotionExecError(
+    errorResult({ code: 'restricted_resource', message: 'access denied' }),
+  );
   assert.equal(hint.code, 'AUTH');
 });
 
-test('classifyNotionError: object_not_found → NOT_FOUND', () => {
-  const hint = classifyNotionError({
-    code: 'object_not_found',
-    message: 'page gone',
-  });
+test('classifyNotionExecError: object_not_found → NOT_FOUND', () => {
+  const hint = classifyNotionExecError(
+    errorResult({ code: 'object_not_found', message: 'page gone' }),
+  );
   assert.equal(hint.code, 'NOT_FOUND');
 });
 
-test('classifyNotionError: rate_limited carries retryAfterMs from retry_after', () => {
-  const hint = classifyNotionError({
-    code: 'rate_limited',
-    message: 'slow down',
-    retry_after: 5,
-  });
+test('classifyNotionExecError: rate_limited carries retryAfterMs from retry_after', () => {
+  const hint = classifyNotionExecError(
+    errorResult({ code: 'rate_limited', message: 'slow down', retry_after: 5 }),
+  );
   assert.equal(hint.code, 'RATE_LIMITED');
   assert.equal(hint.details?.retryAfterMs, 5000);
 });
 
-test('classifyNotionError: validation_error → VALIDATION (before CONFLICT)', () => {
-  const hint = classifyNotionError({
-    code: 'validation_error',
-    message: 'thing already exists',
+test('classifyNotionExecError: official transient codes stay retriable (Codex impl-review)', () => {
+  // database_connection_unavailable → TRANSPORT (5xx-class outage)
+  assert.equal(
+    classifyNotionExecError(
+      errorResult({ code: 'database_connection_unavailable', message: 'db down' }),
+    ).code,
+    'TRANSPORT',
+  );
+  // gateway_timeout → TIMEOUT (504-class)
+  assert.equal(
+    classifyNotionExecError(
+      errorResult({ code: 'gateway_timeout', message: 'upstream timeout' }),
+    ).code,
+    'TIMEOUT',
+  );
+  // service_overload → RATE_LIMITED ("slow down" semantics, retry_after honored)
+  const overload = classifyNotionExecError(
+    errorResult({ code: 'service_overload', message: 'overloaded', retry_after: 30 }),
+  );
+  assert.equal(overload.code, 'RATE_LIMITED');
+  assert.equal(overload.details?.retryAfterMs, 30_000);
+});
+
+test('classifyNotionExecError: validation family → VALIDATION (before CONFLICT)', () => {
+  for (const code of [
+    'validation_error',
+    'invalid_request',
+    'invalid_json',
+    'invalid_request_url',
+  ]) {
+    const hint = classifyNotionExecError(
+      errorResult({ code, message: 'thing already exists' }),
+    );
+    assert.equal(hint.code, 'VALIDATION', `notion code ${code}`);
+  }
+});
+
+test('classifyNotionExecError: conflict family → CONFLICT', () => {
+  for (const code of ['conflict_error', 'concurrent_edit']) {
+    const hint = classifyNotionExecError(
+      errorResult({ code, message: 'concurrent edit' }),
+    );
+    assert.equal(hint.code, 'CONFLICT', `notion code ${code}`);
+  }
+});
+
+test('classifyNotionExecError: 5xx provider codes → TRANSPORT (retriable)', () => {
+  for (const code of [
+    'internal_server_error',
+    'service_unavailable',
+    'bad_gateway',
+  ]) {
+    const hint = classifyNotionExecError(
+      errorResult({ code, message: 'upstream sad' }),
+    );
+    assert.equal(hint.code, 'TRANSPORT', `notion code ${code}`);
+  }
+});
+
+test('classifyNotionExecError: timeouts → TIMEOUT (returned and thrown shapes)', () => {
+  assert.equal(classifyNotionExecError(timeoutResult()).code, 'TIMEOUT');
+  assert.equal(
+    classifyNotionExecError(makeSpawnError('ETIMEDOUT', 'it died')).code,
+    'TIMEOUT',
+  );
+  assert.equal(
+    classifyNotionExecError(new Error('request timed out')).code,
+    'TIMEOUT',
+  );
+});
+
+test('classifyNotionExecError: connection failures → TRANSPORT fallback', () => {
+  assert.equal(classifyNotionExecError(transportError()).code, 'TRANSPORT');
+  assert.equal(
+    classifyNotionExecError({ exitCode: 1, stdout: '', stderr: 'connection refused' }).code,
+    'TRANSPORT',
+  );
+});
+
+test('classifyNotionExecError: unknown nonzero exit → UNKNOWN (not retriable TRANSPORT)', () => {
+  const hint = classifyNotionExecError({
+    exitCode: 1,
+    stdout: '',
+    stderr: 'something inscrutable happened',
   });
-  assert.equal(hint.code, 'VALIDATION');
+  assert.equal(hint.code, 'UNKNOWN');
 });
 
-test('classifyNotionError: conflict_error → CONFLICT', () => {
-  const hint = classifyNotionError({
-    code: 'conflict_error',
-    message: 'concurrent edit',
-  });
-  assert.equal(hint.code, 'CONFLICT');
+test('classifyNotionExecError: unknown notion error code → UNKNOWN', () => {
+  const hint = classifyNotionExecError(
+    errorResult({ code: 'mystery_code', message: 'new in some future API' }),
+  );
+  assert.equal(hint.code, 'UNKNOWN');
+  assert.equal(hint.details?.notionCode, 'mystery_code');
 });
 
-test('classifyNotionError: JSON-RPC ConnectionClosed → TRANSPORT', () => {
-  const hint = classifyNotionError(makeMcpError(-32000, 'closed'));
-  assert.equal(hint.code, 'TRANSPORT');
-});
-
-test('classifyNotionError: JSON-RPC RequestTimeout → TIMEOUT', () => {
-  const hint = classifyNotionError(makeMcpError(-32001, 'timeout'));
-  assert.equal(hint.code, 'TIMEOUT');
-});
-
-test('classifyNotionError: JSON-RPC ParseError → VALIDATION', () => {
-  const hint = classifyNotionError(makeMcpError(-32700, 'parse'));
-  assert.equal(hint.code, 'VALIDATION');
-});
-
-test('classifyNotionError: timeout in message → TIMEOUT fallback', () => {
-  const hint = classifyNotionError(new Error('request timed out'));
-  assert.equal(hint.code, 'TIMEOUT');
-});
-
-test('classifyNotionError: ECONNRESET in message → TRANSPORT fallback', () => {
-  const hint = classifyNotionError(new Error('socket ECONNRESET'));
-  assert.equal(hint.code, 'TRANSPORT');
-});
-
-test('classifyNotionError: unknown shape → UNKNOWN', () => {
-  assert.equal(classifyNotionError('weird string').code, 'UNKNOWN');
-  assert.equal(classifyNotionError(null).code, 'UNKNOWN');
-  assert.equal(classifyNotionError(42).code, 'UNKNOWN');
-});
-
-test('classifyNotionError: McpError with embedded Notion error data → Notion wins (codex P2-4)', () => {
-  // SDK can wrap a Notion provider error in a generic numeric JSON-RPC code.
-  // Notion body takes precedence so adapter still maps object_not_found
-  // → NOT_FOUND (drives version_conflict) instead of UNKNOWN (drives throw).
-  const err = makeMcpError(-32603, 'tool failed', {
+test('classifyNotionExecError: notion body passed directly (thrown shape) → mapped', () => {
+  const hint = classifyNotionExecError({
     object: 'error',
     code: 'object_not_found',
     message: 'page deleted',
   });
-  const hint = classifyNotionError(err);
   assert.equal(hint.code, 'NOT_FOUND');
 });
 
-test('classifyNotionError: JSON-RPC numeric code used when no Notion body', () => {
-  const err = makeMcpError(-32000, 'connection closed');
-  assert.equal(classifyNotionError(err).code, 'TRANSPORT');
+test('classifyNotionExecError: error body on stderr instead of stdout → mapped', () => {
+  const hint = classifyNotionExecError({
+    exitCode: 1,
+    stdout: '',
+    stderr: JSON.stringify({
+      object: 'error',
+      code: 'unauthorized',
+      message: 'no',
+    }),
+  });
+  assert.equal(hint.code, 'AUTH');
 });
 
-test('classifyNotionError: embedded rate_limited wrapped in JSON-RPC → RATE_LIMITED', () => {
-  const err = makeMcpError(-32603, 'wrapped', {
-    object: 'error',
-    code: 'rate_limited',
-    message: 'too many',
-    retry_after: 3,
-  });
-  const hint = classifyNotionError(err);
-  assert.equal(hint.code, 'RATE_LIMITED');
-  assert.equal(hint.details?.retryAfterMs, 3000);
+test('classifyNotionExecError: unknown shape → UNKNOWN', () => {
+  assert.equal(classifyNotionExecError('weird string').code, 'UNKNOWN');
+  assert.equal(classifyNotionExecError(null).code, 'UNKNOWN');
+  assert.equal(classifyNotionExecError(42).code, 'UNKNOWN');
 });
 
 // ─── parseNotionPageId ───────────────────────────────────────────────────────
@@ -268,17 +354,47 @@ test('readStatus: null when unset', () => {
   assert.equal(readStatus(p as never, 'state'), null);
 });
 
+// ─── bodyToParagraphBlocks ───────────────────────────────────────────────────
+
+test('bodyToParagraphBlocks: empty body → no blocks', () => {
+  assert.deepEqual(bodyToParagraphBlocks(''), []);
+});
+
+test('bodyToParagraphBlocks: chunks rich_text items at 2000 chars', () => {
+  const blocks = bodyToParagraphBlocks('x'.repeat(4500));
+  assert.equal(blocks.length, 1);
+  const rt = (blocks[0] as { paragraph: { rich_text: Array<{ text: { content: string } }> } })
+    .paragraph.rich_text;
+  assert.deepEqual(
+    rt.map((i) => i.text.content.length),
+    [2000, 2000, 500],
+  );
+});
+
+test('bodyToParagraphBlocks: splits into multiple paragraphs past 100 items', () => {
+  // 100 * 2000 = 200_000 chars fills the first block; +500 spills into a 2nd
+  // paragraph. NOTE: unreachable via updateIssueBody (64 KiB byte cap admits
+  // at most 33 items) but reachable via createIssue, whose body is uncapped.
+  const blocks = bodyToParagraphBlocks('x'.repeat(200_500));
+  assert.equal(blocks.length, 2);
+  const items = (b: unknown) =>
+    (b as { paragraph: { rich_text: unknown[] } }).paragraph.rich_text.length;
+  assert.equal(items(blocks[0]), 100);
+  assert.equal(items(blocks[1]), 1);
+});
+
 // ─── healthCheck ─────────────────────────────────────────────────────────────
 
-test('healthCheck: returns ok on successful get-users call', async () => {
-  const { tracker, mock } = makeTracker([okResult({ results: [] })]);
+test('healthCheck: returns ok on successful users/me call', async () => {
+  const { tracker, mock } = makeTracker([okResult({ object: 'user', id: 'u1' })]);
   const r = await tracker.healthCheck();
   assert.equal(r.ok, true);
-  assert.equal(mock.calls[0]?.tool, 'API-get-self');
+  assert.deepEqual(apiOf(mock.calls[0]!), { path: 'v1/users/me', method: 'GET' });
+  assertVersionPinned(mock.calls[0]!);
 });
 
 test('healthCheck: returns ok:false on transport error; never throws', async () => {
-  const { tracker } = makeTracker([makeMcpError(-32000, 'closed')]);
+  const { tracker } = makeTracker([transportError()]);
   const r = await tracker.healthCheck();
   assert.equal(r.ok, false);
   assert.ok(r.detail && r.detail.length > 0);
@@ -296,7 +412,7 @@ test('healthCheck: returns ok:false on AUTH error', async () => {
 // ─── listActiveIssues ────────────────────────────────────────────────────────
 
 test('listActiveIssues: maps pages → Issue[]; filters done/cancelled/archived', async () => {
-  const { tracker } = makeTracker([
+  const { tracker, mock } = makeTracker([
     okResult(databaseInfo),
     okResult(databaseQueryActive),
   ]);
@@ -308,9 +424,19 @@ test('listActiveIssues: maps pages → Issue[]; filters done/cancelled/archived'
   );
   assert.equal(issues[0]?.forgeTaskId, 'FORGE-T1');
   assert.equal(issues[1]?.state, 'in_progress');
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: `v1/databases/${DB_ID}`,
+    method: 'GET',
+  });
+  assert.deepEqual(apiOf(mock.calls[1]!), {
+    path: `v1/data_sources/${DATA_SOURCE_ID}/query`,
+    method: 'POST',
+  });
+  assert.deepEqual(inputJson(mock.calls[1]!), { page_size: 100 });
+  for (const call of mock.calls) assertVersionPinned(call);
 });
 
-test('listActiveIssues: paginates via next_cursor', async () => {
+test('listActiveIssues: paginates via next_cursor (cursor in stdin body)', async () => {
   const { tracker, mock } = makeTracker([
     okResult(databaseInfo),
     okResult(databaseQueryPaged1),
@@ -320,9 +446,10 @@ test('listActiveIssues: paginates via next_cursor', async () => {
   assert.equal(issues.length, 2);
   // 1 db-info + 2 query calls
   assert.equal(mock.calls.length, 3);
-  assert.equal(mock.calls[0]?.tool, 'API-retrieve-a-database');
-  assert.equal(mock.calls[2]?.args.start_cursor, 'cursor-page-2');
-  assert.equal(mock.calls[1]?.args.data_source_id, DATA_SOURCE_ID);
+  assert.deepEqual(inputJson(mock.calls[2]!), {
+    page_size: 100,
+    start_cursor: 'cursor-page-2',
+  });
 });
 
 test('listActiveIssues: retries on RATE_LIMITED then succeeds', async () => {
@@ -375,9 +502,25 @@ test('claim: empty forge_claimed_by → write → recheck shows ours → ok', as
   ]);
   const r = await tracker.claim(pageId, 'agent-me');
   assert.deepEqual(r, { ok: true });
-  assert.equal(mock.calls[0]?.tool, 'API-retrieve-a-page');
-  assert.equal(mock.calls[1]?.tool, 'API-patch-page');
-  assert.equal(mock.calls[2]?.tool, 'API-retrieve-a-page');
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: `v1/pages/${pageId}`,
+    method: 'GET',
+  });
+  assert.deepEqual(apiOf(mock.calls[1]!), {
+    path: `v1/pages/${pageId}`,
+    method: 'PATCH',
+  });
+  const writeBody = inputJson(mock.calls[1]!) as {
+    properties: Record<string, { rich_text: Array<{ text: { content: string } }> }>;
+  };
+  assert.equal(
+    writeBody.properties.forge_claimed_by?.rich_text[0]?.text.content,
+    'agent-me',
+  );
+  assert.deepEqual(apiOf(mock.calls[2]!), {
+    path: `v1/pages/${pageId}`,
+    method: 'GET',
+  });
 });
 
 test('claim: already-claimed by other → already_claimed; no write', async () => {
@@ -412,7 +555,6 @@ test('claim: race — recheck shows different agent → version_conflict', async
     claimedBy: 'agent-other',
     lastEditedTime: '2026-05-12T00:00:01.000Z',
   });
-  // Two extra steps: the cleanup write for our lost-tiebreak.
   const { tracker, mock } = makeTracker([
     okResult(initial),
     okEmpty(),
@@ -461,10 +603,11 @@ test('claim: NOT_FOUND on write → version_conflict', async () => {
 test('claim: TRANSPORT mid-flow → transient_error', async () => {
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   // Need 3 retries' worth before withRetry exhausts: send 3 transport errors.
-  const t1 = makeMcpError(-32000, 'closed');
-  const t2 = makeMcpError(-32000, 'closed');
-  const t3 = makeMcpError(-32000, 'closed');
-  const { tracker } = makeTracker([t1, t2, t3]);
+  const { tracker } = makeTracker([
+    transportError(),
+    transportError(),
+    transportError(),
+  ]);
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) assert.equal(r.reason, 'transient_error');
@@ -498,10 +641,15 @@ test('claim: rejects empty issueId / runId via VALIDATION', async () => {
 // ─── releaseClaim ────────────────────────────────────────────────────────────
 
 test('releaseClaim: clears forge_claimed_by', async () => {
+  const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const { tracker, mock } = makeTracker([okEmpty()]);
-  await tracker.releaseClaim('aaaa1111-2222-3333-4444-555566667777', 'run-me');
-  assert.equal(mock.calls[0]?.tool, 'API-patch-page');
-  const props = mock.calls[0]?.args.properties as Record<string, unknown>;
+  await tracker.releaseClaim(pageId, 'run-me');
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: `v1/pages/${pageId}`,
+    method: 'PATCH',
+  });
+  const props = (inputJson(mock.calls[0]!) as { properties: Record<string, unknown> })
+    .properties;
   assert.ok('forge_claimed_by' in props);
 });
 
@@ -536,9 +684,10 @@ test('updateState: maps each IssueState to Notion status name', async () => {
   for (const [state, expected] of cases) {
     const { tracker, mock } = makeTracker([okEmpty()]);
     await tracker.updateState('aaaa1111-2222-3333-4444-555566667777', state);
-    const props = mock.calls[0]?.args.properties as Record<string, unknown>;
-    const statusProp = props.state as { status: { name: string } };
-    assert.equal(statusProp.status.name, expected);
+    const props = (inputJson(mock.calls[0]!) as {
+      properties: { state: { status: { name: string } } };
+    }).properties;
+    assert.equal(props.state.status.name, expected);
   }
 });
 
@@ -552,19 +701,22 @@ test('updateState: rejects empty issueId', async () => {
 
 // ─── comment ─────────────────────────────────────────────────────────────────
 
-test('comment: posts API-create-a-comment with rich_text body', async () => {
+test('comment: POSTs v1/comments with rich_text body via stdin', async () => {
   const { tracker, mock } = makeTracker([okEmpty()]);
   await tracker.comment(
     'aaaa1111-2222-3333-4444-555566667777',
     'Claimed by agent-me',
   );
-  assert.equal(mock.calls[0]?.tool, 'API-create-a-comment');
-  const args = mock.calls[0]?.args as {
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: 'v1/comments',
+    method: 'POST',
+  });
+  const body = inputJson(mock.calls[0]!) as {
     parent: { page_id: string };
     rich_text: Array<{ text: { content: string } }>;
   };
-  assert.equal(args.parent.page_id, 'aaaa1111-2222-3333-4444-555566667777');
-  assert.equal(args.rich_text[0]?.text.content, 'Claimed by agent-me');
+  assert.equal(body.parent.page_id, 'aaaa1111-2222-3333-4444-555566667777');
+  assert.equal(body.rich_text[0]?.text.content, 'Claimed by agent-me');
 });
 
 test('comment: rejects empty body', async () => {
@@ -603,7 +755,7 @@ test('createProject: requires FORGE_NOTION_PARENT_PAGE_ID', async () => {
   }
 });
 
-test('createProject: returns { id, url } from new database', async () => {
+test('createProject: POST v1/databases with initial_data_source; returns database { id, url }', async () => {
   process.env.FORGE_NOTION_PARENT_PAGE_ID =
     'cccc1111-2222-3333-4444-555566667777';
   try {
@@ -611,7 +763,21 @@ test('createProject: returns { id, url } from new database', async () => {
     const r = await tracker.createProject('my project', 'desc');
     assert.equal(r.id, newDatabase.id);
     assert.equal(r.url, newDatabase.url);
-    assert.equal(mock.calls[0]?.tool, 'API-create-a-data-source');
+    // API 2026-03-11: new database under a page = POST v1/databases (NOT
+    // v1/data_sources, which only adds a source to an existing database).
+    assert.deepEqual(apiOf(mock.calls[0]!), {
+      path: 'v1/databases',
+      method: 'POST',
+    });
+    const body = inputJson(mock.calls[0]!) as {
+      parent: { type: string; page_id: string };
+      initial_data_source?: { properties?: Record<string, unknown> };
+      properties?: unknown;
+    };
+    assert.equal(body.parent.type, 'page_id');
+    // Column schema rides in initial_data_source, not top-level properties.
+    assert.ok(body.initial_data_source?.properties);
+    assert.equal(body.properties, undefined);
   } finally {
     delete process.env.FORGE_NOTION_PARENT_PAGE_ID;
   }
@@ -643,16 +809,14 @@ test('createIssue: maps payload → page properties + body blocks', async () => 
   assert.equal(issue.title, 'New issue');
   assert.equal(issue.forgeTaskId, 'FORGE-99');
   assert.equal(issue.state, 'todo');
-  // API-post-page takes a single page, parented to a data_source_id,
-  // with children as plain block objects (the schema declares strings
-  // but the server rejects strings; verified live).
-  const args = mock.calls[1]?.args as {
+  assert.deepEqual(apiOf(mock.calls[1]!), { path: 'v1/pages', method: 'POST' });
+  const body = inputJson(mock.calls[1]!) as {
     parent: { type: string; data_source_id: string };
     children?: Array<{ type: string }>;
   };
-  assert.equal(args.parent.type, 'data_source_id');
-  assert.equal(args.parent.data_source_id, DATA_SOURCE_ID);
-  const children = args.children ?? [];
+  assert.equal(body.parent.type, 'data_source_id');
+  assert.equal(body.parent.data_source_id, DATA_SOURCE_ID);
+  const children = body.children ?? [];
   assert.ok(children.length >= 3); // paragraph + heading + to_do
   assert.ok(children.some((c) => c.type === 'paragraph'));
   assert.ok(children.some((c) => c.type === 'heading_2'));
@@ -704,11 +868,11 @@ test('setBlockedBy: appends new blocker, dedups existing', async () => {
     okEmpty(),
   ]);
   await tracker.setBlockedBy(pageId, blockerId);
-  const updateArgs = mock.calls[1]?.args as {
+  const updateBody = inputJson(mock.calls[1]!) as {
     properties: Record<string, { rich_text: Array<{ text: { content: string } }> }>;
   };
   const newVal =
-    updateArgs.properties.forge_blocked_by?.rich_text[0]?.text.content;
+    updateBody.properties.forge_blocked_by?.rich_text[0]?.text.content;
   assert.equal(newVal, blockerId);
 });
 
@@ -754,23 +918,209 @@ test('setBlockedBy: rejects non-UUID blockerId', async () => {
   );
 });
 
-// ─── updateIssueBody — NOT_IMPLEMENTED until FORGE-117 ───────────────────────
+// ─── updateIssueBody (FORGE-117) ─────────────────────────────────────────────
 
-test('updateIssueBody throws NOT_IMPLEMENTED pointing to FORGE-117', async () => {
+const UIB_PAGE_ID = 'aaaa1111-2222-3333-4444-555566667777';
+const uibPage = () => buildPage({ id: UIB_PAGE_ID, taskId: 'FORGE-9' });
+
+test('updateIssueBody: happy path — list children → delete each → append paragraphs', async () => {
+  const { tracker, mock } = makeTracker([
+    okResult(uibPage()),                       // fetch page (precondition)
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000002'])),
+    okEmpty(),                                 // delete child 1
+    okEmpty(),                                 // delete child 2
+    okEmpty(),                                 // append
+  ]);
+  await tracker.updateIssueBody(UIB_PAGE_ID, 'fresh body');
+
+  assert.equal(mock.calls.length, 5);
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: `v1/pages/${UIB_PAGE_ID}`,
+    method: 'GET',
+  });
+  // Children list — pagination via QUERY ARGS, not stdin.
+  assert.deepEqual(apiOf(mock.calls[1]!), {
+    path: `v1/blocks/${UIB_PAGE_ID}/children`,
+    method: 'GET',
+  });
+  assert.ok(mock.calls[1]!.args.includes('page_size==100'));
+  assert.equal(mock.calls[1]!.input, undefined, 'GET children carries no stdin body');
+  // Deletes — one per child.
+  assert.deepEqual(apiOf(mock.calls[2]!), {
+    path: 'v1/blocks/cccc0000-0000-0000-0000-000000000001',
+    method: 'DELETE',
+  });
+  assert.deepEqual(apiOf(mock.calls[3]!), {
+    path: 'v1/blocks/cccc0000-0000-0000-0000-000000000002',
+    method: 'DELETE',
+  });
+  // Append — replacement paragraph blocks via stdin.
+  assert.deepEqual(apiOf(mock.calls[4]!), {
+    path: `v1/blocks/${UIB_PAGE_ID}/children`,
+    method: 'PATCH',
+  });
+  const appendBody = inputJson(mock.calls[4]!) as {
+    children: Array<{
+      object: string;
+      type: string;
+      paragraph: { rich_text: Array<{ text: { content: string } }> };
+    }>;
+  };
+  assert.equal(appendBody.children.length, 1);
+  assert.equal(appendBody.children[0]?.type, 'paragraph');
+  assert.equal(
+    appendBody.children[0]?.paragraph.rich_text[0]?.text.content,
+    'fresh body',
+  );
+  for (const call of mock.calls) assertVersionPinned(call);
+});
+
+test('updateIssueBody: validation trio — non-string, forge footer, >64KiB; no calls issued', async () => {
   const { tracker, mock } = makeTracker([]);
+  // 1. non-string input (programmer error)
+  await assert.rejects(
+    () => tracker.updateIssueBody(UIB_PAGE_ID, 42 as unknown as string),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  // 2. forge-managed footer in the body
   await assert.rejects(
     () =>
       tracker.updateIssueBody(
-        'aaaa1111-2222-3333-4444-555566667777',
-        'whatever',
+        UIB_PAGE_ID,
+        'body with <!-- forge:task=FORGE-1 --> footer',
       ),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  // 3. byte cap
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody(UIB_PAGE_ID, 'x'.repeat(NOTION_BODY_MAX_BYTES + 1)),
+    (e: unknown) => e instanceof TrackerError && e.code === 'VALIDATION',
+  );
+  assert.equal(mock.calls.length, 0, 'must reject before issuing any ntn call');
+});
+
+test('updateIssueBody: missing forge_task_id → PRECONDITION_FAILED after fetch only', async () => {
+  const { tracker, mock } = makeTracker([okResult(pageWithoutForgeTaskId)]);
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody('cccc1111-2222-3333-4444-555566667777', 'body'),
+    (e: unknown) =>
+      e instanceof TrackerError && e.code === 'PRECONDITION_FAILED',
+  );
+  assert.equal(mock.calls.length, 1, 'no block mutation after failed precondition');
+});
+
+test('updateIssueBody: paginates children via start_cursor query arg', async () => {
+  const { tracker, mock } = makeTracker([
+    okResult(uibPage()),
+    okResult(
+      blockChildren(['cccc0000-0000-0000-0000-000000000001'], {
+        nextCursor: 'cur-2',
+      }),
+    ),
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000002'])),
+    okEmpty(), // delete 1
+    okEmpty(), // delete 2
+    okEmpty(), // append
+  ]);
+  await tracker.updateIssueBody(UIB_PAGE_ID, 'b');
+  assert.ok(mock.calls[2]!.args.includes('start_cursor==cur-2'));
+  const deletes = mock.calls.filter((c) => apiOf(c).method === 'DELETE');
+  assert.equal(deletes.length, 2);
+});
+
+test('updateIssueBody: partial failure mid-delete → retriable error; re-run completes', async () => {
+  // First run: delete of child 2 dies on transport. The page is now partial —
+  // by design (no atomic replace on Notion); the op is idempotently
+  // re-runnable.
+  const { tracker } = makeTracker([
+    okResult(uibPage()),
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000001', 'cccc0000-0000-0000-0000-000000000002'])),
+    okEmpty(),        // delete child 1 ok
+    transportError(), // delete child 2 dies
+  ]);
+  await assert.rejects(
+    () => tracker.updateIssueBody(UIB_PAGE_ID, 'body'),
+    (e: unknown) =>
+      e instanceof TrackerError &&
+      e.code === 'TRANSPORT' &&
+      isRetriableTrackerErrorCode(e.code),
+  );
+
+  // Re-run (fresh state): lists whatever children remain, deletes, appends.
+  const second = makeTracker([
+    okResult(uibPage()),
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000002'])),
+    okEmpty(), // delete remaining child
+    okEmpty(), // append
+  ]);
+  await second.tracker.updateIssueBody(UIB_PAGE_ID, 'body');
+  assert.equal(second.mock.calls.length, 4);
+});
+
+test('updateIssueBody: >2000-char body chunks rich_text items in the append', async () => {
+  const { tracker, mock } = makeTracker([
+    okResult(uibPage()),
+    okResult(blockChildren([])),
+    okEmpty(), // append (no deletes — page had no children)
+  ]);
+  await tracker.updateIssueBody(UIB_PAGE_ID, 'x'.repeat(4500));
+  const appendBody = inputJson(mock.calls[2]!) as {
+    children: Array<{ paragraph: { rich_text: Array<{ text: { content: string } }> } }>;
+  };
+  assert.equal(appendBody.children.length, 1);
+  assert.deepEqual(
+    appendBody.children[0]?.paragraph.rich_text.map((i) => i.text.content.length),
+    [2000, 2000, 500],
+  );
+});
+
+test('updateIssueBody: empty body deletes children and appends nothing', async () => {
+  const { tracker, mock } = makeTracker([
+    okResult(uibPage()),
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000001'])),
+    okEmpty(), // delete
+    // NO append step — MockNtn would throw on an unexpected call.
+  ]);
+  await tracker.updateIssueBody(UIB_PAGE_ID, '');
+  assert.equal(mock.calls.length, 3);
+});
+
+test('updateIssueBody: forge metadata is untouched (no page-properties PATCH)', async () => {
+  // forgeTaskId/blockerIds live in PAGE PROPERTIES on Notion, not body
+  // footers — the block replace must never PATCH v1/pages.
+  const { tracker, mock } = makeTracker([
+    okResult(uibPage()),
+    okResult(blockChildren(['cccc0000-0000-0000-0000-000000000001'])),
+    okEmpty(),
+    okEmpty(),
+  ]);
+  await tracker.updateIssueBody(UIB_PAGE_ID, 'new body');
+  const pagePatches = mock.calls.filter(
+    (c) => apiOf(c).path.startsWith('v1/pages/') && apiOf(c).method === 'PATCH',
+  );
+  assert.equal(pagePatches.length, 0);
+});
+
+// ─── setClaimFence — NOT_IMPLEMENTED stub (scope-dropped from FORGE-117) ─────
+
+test('setClaimFence throws NOT_IMPLEMENTED pointing to the FORGE-167 follow-up', async () => {
+  const { tracker, mock } = makeTracker([]);
+  await assert.rejects(
+    () =>
+      tracker.setClaimFence('aaaa1111-2222-3333-4444-555566667777', {
+        claimId: 'c1',
+        generation: 0,
+        ownerRunId: 'run-1',
+      }),
     (e: unknown) =>
       e instanceof TrackerError &&
       e.code === 'NOT_IMPLEMENTED' &&
-      /FORGE-117/.test(e.message) &&
-      e.details?.followUpIssue === 'FORGE-117',
+      /FORGE-167/.test(e.message) &&
+      e.details?.followUpIssue === 'FORGE-167',
   );
-  assert.equal(mock.calls.length, 0, 'must throw before issuing any MCP call');
+  assert.equal(mock.calls.length, 0, 'must throw before issuing any ntn call');
 });
 
 // ─── full lifecycle (acceptance bullet 4) ────────────────────────────────────
@@ -800,7 +1150,7 @@ test('full lifecycle: createIssue → claim → updateState → comment → rele
   });
   const { tracker, mock } = makeTracker([
     okResult(databaseInfo),   // createIssue → resolveDataSourceId
-    okResult(created),        // createIssue → API-post-page
+    okResult(created),        // createIssue → POST v1/pages
     okResult(claimedFetch),   // claim.fetch
     okEmpty(),                // claim.write
     okResult(claimedRecheck), // claim.recheck (after settle delay)
@@ -828,18 +1178,65 @@ test('full lifecycle: createIssue → claim → updateState → comment → rele
   await tracker.releaseClaim(pageId, 'agent-me');
   await tracker.updateState(pageId, 'done');
 
-  const tools = mock.calls.map((c) => c.tool);
-  assert.deepEqual(tools, [
-    'API-retrieve-a-database',
-    'API-post-page',
-    'API-retrieve-a-page',
-    'API-patch-page',
-    'API-retrieve-a-page',
-    'API-patch-page',
-    'API-create-a-comment',
-    'API-patch-page',
-    'API-patch-page',
+  assert.deepEqual(
+    mock.calls.map((c2) => apiOf(c2)),
+    [
+      { path: `v1/databases/${DB_ID}`, method: 'GET' },
+      { path: 'v1/pages', method: 'POST' },
+      { path: `v1/pages/${pageId}`, method: 'GET' },
+      { path: `v1/pages/${pageId}`, method: 'PATCH' },
+      { path: `v1/pages/${pageId}`, method: 'GET' },
+      { path: `v1/pages/${pageId}`, method: 'PATCH' },
+      { path: 'v1/comments', method: 'POST' },
+      { path: `v1/pages/${pageId}`, method: 'PATCH' },
+      { path: `v1/pages/${pageId}`, method: 'PATCH' },
+    ],
+  );
+  for (const call of mock.calls) assertVersionPinned(call);
+});
+
+// ─── round-trip: createIssue → updateIssueBody → listActiveIssues ────────────
+
+test('round-trip: updateIssueBody preserves forgeTaskId through listActiveIssues', async () => {
+  const pageId = 'eeee1111-2222-3333-4444-555566667777';
+  const page = buildPage({
+    id: pageId,
+    title: 'RT task',
+    taskId: 'FORGE-RT',
+    state: 'Todo',
+  });
+  const { tracker, mock } = makeTracker([
+    okResult(databaseInfo),                    // createIssue → resolve data source
+    okResult(page),                            // createIssue → POST v1/pages
+    okResult(page),                            // updateIssueBody → fetch page
+    okResult(blockChildren(['cccc0000-0000-0000-0000-00000000000a'])),
+    okEmpty(),                                 // delete old child
+    okEmpty(),                                 // append new body
+    okResult({ results: [page], has_more: false, next_cursor: null }), // query (cached data source)
   ]);
+
+  const created = await tracker.createIssue({
+    title: 'RT task',
+    body: 'original body',
+    forgeTaskId: 'FORGE-RT',
+    ownerType: 'backend-dev',
+    acceptance: [],
+    dependsOn: [],
+  });
+  assert.equal(created.forgeTaskId, 'FORGE-RT');
+
+  await tracker.updateIssueBody(pageId, 'replaced body');
+
+  const issues = await tracker.listActiveIssues();
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0]?.forgeTaskId, 'FORGE-RT');
+
+  // The body replace touched only block endpoints — page properties (where
+  // forgeTaskId lives) were never PATCHed.
+  const pagePatches = mock.calls.filter(
+    (c) => apiOf(c).path.startsWith('v1/pages/') && apiOf(c).method === 'PATCH',
+  );
+  assert.equal(pagePatches.length, 0);
 });
 
 // ─── regressions ─────────────────────────────────────────────────────────────
@@ -894,7 +1291,7 @@ test('listActiveIssues: hits raw-page cap and warns', async () => {
     has_more: true,
     next_cursor: 'cursor-loop',
   };
-  const steps: Array<ReturnType<typeof okResult>> = [okResult(databaseInfo)];
+  const steps: MockStep[] = [okResult(databaseInfo)];
   for (let i = 0; i < NOTION_RAW_PAGE_CAP; i++) steps.push(okResult(donePage));
   const { tracker, mock, logger } = makeTracker(steps);
   const issues = await tracker.listActiveIssues();
@@ -918,27 +1315,25 @@ test('claim cleanup: does NOT clear when field now holds another agent (codex P2
   //   2. claim.write → ok
   //   3. claim.recheck → throws TRANSPORT (3 retries each throw)
   //   4. tryClearClaimIfOwned fetch → shows 'agent-winner' (NOT us)
-  //   → adapter must NOT issue a clearing update-page call
-  const transportErr = makeMcpError(-32000, 'closed');
+  //   → adapter must NOT issue a clearing patch call
   const competitorWon = buildPage({ id: pageId, claimedBy: 'agent-winner' });
   const { tracker, mock } = makeTracker([
-    okResult(initial),     // claim.fetch
-    okEmpty(),             // claim.write
-    transportErr,          // claim.recheck attempt 1
-    transportErr,          // claim.recheck attempt 2
-    transportErr,          // claim.recheck attempt 3
+    okResult(initial),       // claim.fetch
+    okEmpty(),               // claim.write
+    transportError(),        // claim.recheck attempt 1
+    transportError(),        // claim.recheck attempt 2
+    transportError(),        // claim.recheck attempt 3
     okResult(competitorWon), // cleanup-fetch
-    // NO further steps: if adapter tried to clear, MockMcp would throw
+    // NO further steps: if adapter tried to clear, MockNtn would throw
     // "unexpected call".
   ]);
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) assert.equal(r.reason, 'transient_error');
-  const tools = mock.calls.map((c) => c.tool);
-  // 1 fetch + 1 write + 3 recheck-fetch + 1 cleanup-fetch = 6 fetches
-  // total, NO second update-page (that would be the clear).
-  const updateCount = tools.filter((t) => t === 'API-patch-page').length;
-  assert.equal(updateCount, 1, 'only the initial claim write should occur');
+  // 1 fetch + 1 write + 3 recheck-fetch + 1 cleanup-fetch = 6 calls
+  // total, NO second PATCH (that would be the clear).
+  const patchCount = mock.calls.filter((c) => apiOf(c).method === 'PATCH').length;
+  assert.equal(patchCount, 1, 'only the initial claim write should occur');
 });
 
 test('claim: applies CLAIM_SETTLE_MS sleep between write and recheck (codex P1)', async () => {
@@ -1002,33 +1397,32 @@ test('claim recheck: NOT_FOUND returns version_conflict, not thrown (codex P2-3)
 test('claim cleanup: DOES clear when field still owned by us (codex P2-2)', async () => {
   const pageId = 'aaaa1111-2222-3333-4444-555566667777';
   const initial = buildPage({ id: pageId, claimedBy: '' });
-  const transportErr = makeMcpError(-32000, 'closed');
   const stillOurs = buildPage({ id: pageId, claimedBy: 'agent-me' });
   const { tracker, mock } = makeTracker([
     okResult(initial),
     okEmpty(),
-    transportErr,
-    transportErr,
-    transportErr,
+    transportError(),
+    transportError(),
+    transportError(),
     okResult(stillOurs), // cleanup-fetch shows we still own it
     okEmpty(),           // cleanup write — clear it
   ]);
   const r = await tracker.claim(pageId, 'agent-me');
   assert.equal(r.ok, false);
   if (r.ok === false) assert.equal(r.reason, 'transient_error');
-  const updateCount = mock.calls.filter(
-    (c) => c.tool === 'API-patch-page',
-  ).length;
-  assert.equal(updateCount, 2, 'initial claim write + conditional cleanup');
+  const patchCount = mock.calls.filter((c) => apiOf(c).method === 'PATCH').length;
+  assert.equal(patchCount, 2, 'initial claim write + conditional cleanup');
 });
 
 // ─── constants ───────────────────────────────────────────────────────────────
 
-test('NOTION_LIST_LIMIT + NOTION_RAW_PAGE_CAP + CLAIM_SETTLE_MS exported', () => {
+test('NOTION_* constants + CLAIM_SETTLE_MS exported', () => {
   assert.equal(typeof NOTION_LIST_LIMIT, 'number');
   assert.ok(NOTION_LIST_LIMIT > 0);
   assert.equal(typeof NOTION_RAW_PAGE_CAP, 'number');
   assert.ok(NOTION_RAW_PAGE_CAP > 0);
   assert.equal(typeof CLAIM_SETTLE_MS, 'number');
   assert.ok(CLAIM_SETTLE_MS > 0);
+  assert.equal(NOTION_BODY_MAX_BYTES, 65_536);
+  assert.equal(NOTION_API_VERSION, '2026-03-11');
 });

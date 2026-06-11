@@ -112,23 +112,52 @@ test('createTracker: github config → GitHubTracker, no close', () => {
   assert.equal(handle.close, undefined, 'github needs no teardown');
 });
 
-test('createTracker: notion config → tracker + close handle (lazy, not spawned)', () => {
-  // createStdioMcpCall is lazy — constructing the handle does NOT spawn the MCP
-  // child, so this is safe in a unit test. We assert the close hook exists
-  // without invoking it.
+test('createTracker: notion config → NotionTracker, no close handle (FORGE-117 ntn transport)', (t) => {
+  const stderr = captureStderr(t);
+  const handle = createTracker(
+    settingsFor({
+      type: 'notion',
+      config: { database_id: 'db-1' },
+    }),
+    silentLogger,
+  );
+  assert.equal(handle.tracker.type, 'notion');
+  assert.equal(
+    handle.close,
+    undefined,
+    'notion needs no teardown — ntn CLI exec, no child process',
+  );
+  assert.equal(
+    stderr.join(''),
+    '',
+    'no deprecation warning when deprecated fields are absent',
+  );
+});
+
+test('createTracker: notion config with deprecated mcp_command/mcp_env → one-line stderr warning, fields ignored', (t) => {
+  const stderr = captureStderr(t);
   const handle = createTracker(
     settingsFor({
       type: 'notion',
       config: {
         database_id: 'db-1',
         mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
-        mcp_env: {},
+        mcp_env: { NOTION_TOKEN: 'x' },
       },
     }),
     silentLogger,
   );
   assert.equal(handle.tracker.type, 'notion');
-  assert.equal(typeof handle.close, 'function', 'notion must expose a close hook');
+  assert.equal(handle.close, undefined);
+  const combined = stderr.join('');
+  assert.match(combined, /deprecated/);
+  assert.match(combined, /mcp_command/);
+  assert.match(combined, /ntn/);
+  assert.equal(
+    combined.trim().split('\n').length,
+    1,
+    'deprecation warning is a single line',
+  );
 });
 
 // ─── resolveTrackerForCLI un-stub (FORGE-167) ────────────────────────────────

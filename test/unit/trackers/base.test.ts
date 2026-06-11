@@ -231,6 +231,54 @@ test('withRetry respects max attempts and rejects with final error', async () =>
   assert.equal(calls, 3);
 });
 
+test('withRetry uses retryAfterMs hint when it exceeds backoff (hint > backoff)', async () => {
+  const t = makeTracker();
+  const delays: number[] = [];
+  const recordingSleep = async (ms: number): Promise<void> => {
+    delays.push(ms);
+  };
+  let calls = 0;
+  const fn = async (): Promise<string> => {
+    calls++;
+    if (calls < 2) {
+      throw new TrackerError('RATE_LIMITED', 'slow down', { retryAfterMs: 7000 });
+    }
+    return 'ok';
+  };
+  const result = await t.callWithRetry('claim', fn, {
+    attempts: 2,
+    baseDelayMs: 100,
+    sleep: recordingSleep,
+  });
+  assert.equal(result, 'ok');
+  assert.equal(delays.length, 1);
+  assert.equal(delays[0], 7000);
+});
+
+test('withRetry uses backoff when retryAfterMs hint is below backoff (hint < backoff)', async () => {
+  const t = makeTracker();
+  const delays: number[] = [];
+  const recordingSleep = async (ms: number): Promise<void> => {
+    delays.push(ms);
+  };
+  let calls = 0;
+  const fn = async (): Promise<string> => {
+    calls++;
+    if (calls < 2) {
+      throw new TrackerError('RATE_LIMITED', 'slow down', { retryAfterMs: 10 });
+    }
+    return 'ok';
+  };
+  const result = await t.callWithRetry('claim', fn, {
+    attempts: 2,
+    baseDelayMs: 5000,
+    sleep: recordingSleep,
+  });
+  assert.equal(result, 'ok');
+  assert.equal(delays.length, 1);
+  assert.equal(delays[0], 5000);
+});
+
 test('setClaimFence round-trip: stamp then strip, preserving task/blockedBy/other footers', async () => {
   const t = makeTracker();
   t.body = [

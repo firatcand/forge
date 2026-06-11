@@ -1,3 +1,6 @@
+import { execa } from 'execa';
+import { z } from 'zod';
+
 import type { NotionTrackerConfig } from '../schemas/settings.ts';
 import {
   NotionDatabaseQueryResponseSchema,
@@ -13,6 +16,7 @@ import {
 } from './base.ts';
 import type { ClaimFenceData } from './claim-fence.ts';
 import { TrackerError } from './errors.ts';
+import { assertValidBodyInput } from './footers.ts';
 import type {
   ClaimResult,
   CreateIssuePayload,
@@ -23,31 +27,59 @@ import type {
 
 // ─── Public exec contract ────────────────────────────────────────────────────
 //
-// `McpCall` is the test seam — mocks pass a sequenced harness; production
-// passes a Client+StdioClientTransport closure from notion-mcp-transport.ts.
+// `NtnExec` is the test seam — exact mirror of github.ts's `GhExec`. Mocks
+// pass a sequenced harness; production passes `defaultNtnExec`, which shells
+// out to the official Notion CLI (`ntn`, https://developers.notion.com/cli).
+// Auth comes from the user's keychain via `ntn login` — no token plumbing.
 
-export interface McpToolResult {
-  isError?: boolean;
-  content?: ReadonlyArray<{
-    type: string;
-    text?: string;
-    [k: string]: unknown;
-  }>;
-  structuredContent?: unknown;
+export interface NtnExecResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
 }
 
-export type McpCall = (
-  toolName: string,
-  args: Record<string, unknown>,
-) => Promise<McpToolResult>;
+export type NtnExec = (
+  args: readonly string[],
+  opts?: { input?: string },
+) => Promise<NtnExecResult>;
+
+export const defaultNtnExec: NtnExec = async (args, opts) => {
+  // reject:false → nonzero exits RESOLVE with the result shape so callers
+  // read Notion error bodies off stdout instead of catching ExecaError.
+  // Spawn-level failures (ENOENT — ntn not installed) also resolve under
+  // reject:false but carry no exitCode; re-throw those so the thrown-error
+  // path of classifyNotionExecError sees the original `code: 'ENOENT'`.
+  const result = await execa('ntn', [...args], {
+    ...(opts?.input !== undefined ? { input: opts.input } : {}),
+    reject: false,
+  });
+  if (result.failed && result.exitCode === undefined) {
+    throw result; // ExecaError extends Error; carries .code (e.g. ENOENT)
+  }
+  return {
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+    exitCode: result.exitCode ?? 0,
+  };
+};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
+
+// Pinned Notion API version sent on EVERY `ntn api` call via --notion-version.
+// Pinned (not floating) so behavior is deterministic across adopter machines
+// regardless of which `ntn` build they have installed. Bump deliberately and
+// re-verify the endpoint payloads when you do.
+export const NOTION_API_VERSION = '2026-03-11';
 
 export const NOTION_LIST_LIMIT = 200;
 // Hard ceiling on raw pages fetched before we stop — defensive against runaway
 // databases. With page_size=100 this is 5000 raw rows. Independent of
 // NOTION_LIST_LIMIT, which caps the *active* rows we return.
 export const NOTION_RAW_PAGE_CAP = 50;
+// Body byte cap for updateIssueBody — matches the GitHub/Linear convention of
+// a 64 KiB provider cap (Notion's own per-rich_text limit is chars, handled by
+// the 2000-char chunker; this caps total input like the other adapters).
+export const NOTION_BODY_MAX_BYTES = 65_536;
 
 // Property names. The adapter expects the user's database to have these
 // columns. Schema requirements documented in docs/adapters/notion.md.
@@ -79,19 +111,20 @@ const NOTION_TO_STATE: Readonly<Record<string, IssueState>> = {
 
 // ─── Error classification (per-adapter; BaseTracker stays generic) ───────────
 //
-// Notion tool results signal errors two ways:
-//  1. JSON-RPC level: SDK throws McpError with a numeric code (transport,
-//     timeout, parse error, ...). Caught as a thrown error.
-//  2. Tool level: result has `isError: true` and content[0].text contains a
-//     Notion error JSON (`{ object: 'error', code, message }`).
+// `ntn` failures surface two ways — mirror of classifyGitHubError:
+//  1. Thrown: spawn-level errors (ENOENT when ntn isn't installed, ETIMEDOUT,
+//     killed process). defaultNtnExec re-throws these.
+//  2. Returned: nonzero exitCode with the Notion API error body
+//     (`{ object: 'error', code, message }`) passed through on stdout
+//     (occasionally stderr).
 //
-// `runTool()` collapses (2) into a thrown TrackerError so callers see a
-// single error model. classifyNotionError() handles both forms.
-//
-// Branch order is load-bearing — mirrors github.ts comment:
+// classifyNotionExecError handles both shapes. Branch order is load-bearing —
+// mirrors github.ts:
 //   AUTH before NOT_FOUND (Notion sometimes returns generic "not found"
 //   for permission denials to avoid leaking existence).
 //   VALIDATION before CONFLICT (validation errors can mention conflicts).
+// Unknown nonzero exits map to UNKNOWN (NOT retriable TRANSPORT) so a
+// misbehaving CLI doesn't drive infinite retry loops.
 
 export interface NotionErrorBody {
   object?: string;
@@ -101,36 +134,77 @@ export interface NotionErrorBody {
   retry_after?: number;
 }
 
-interface ErrorLike {
-  code?: string | number;
+interface NtnErrorLike {
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  code?: string;
   message?: string;
-  data?: unknown;
+  timedOut?: boolean;
+  object?: string;
+  retry_after?: number;
+  status?: number;
 }
 
-function isErrorLike(err: unknown): err is ErrorLike {
+function isErrorLike(err: unknown): err is NtnErrorLike {
   return typeof err === 'object' && err !== null;
 }
 
-const JSONRPC_CONNECTION_CLOSED = -32000;
-const JSONRPC_REQUEST_TIMEOUT = -32001;
-const JSONRPC_PARSE_ERROR = -32700;
-const JSONRPC_INVALID_REQUEST = -32600;
-const JSONRPC_INVALID_PARAMS = -32602;
-const JSONRPC_INTERNAL_ERROR = -32603;
+const NOTION_AUTH_CODES = new Set(['unauthorized', 'restricted_resource']);
+const NOTION_VALIDATION_CODES = new Set([
+  'validation_error',
+  'invalid_request',
+  'invalid_json',
+  'invalid_request_url',
+]);
+const NOTION_CONFLICT_CODES = new Set(['conflict_error', 'concurrent_edit']);
+const NOTION_5XX_CODES = new Set([
+  'internal_server_error',
+  'service_unavailable',
+  'bad_gateway',
+  // Official transient codes (developers.notion.com/reference/status-codes) —
+  // without these, retryable provider failures would fall through to UNKNOWN
+  // and never be retried (Codex impl-review).
+  'database_connection_unavailable',
+]);
+// 504-class — distinct from generic transport so callers can apply
+// timeout-specific backoff.
+const NOTION_TIMEOUT_CODES = new Set(['gateway_timeout']);
+// 503 "slow down" — semantically a rate signal, not an outage.
+const NOTION_OVERLOAD_CODES = new Set(['service_overload']);
 
-export function classifyNotionError(err: unknown): NormalizeErrorHint {
+export function classifyNotionExecError(err: unknown): NormalizeErrorHint {
   if (!isErrorLike(err)) return { code: 'UNKNOWN' };
+  const stdout = String(err.stdout ?? '');
+  const stderr = String(err.stderr ?? '');
+  const message = String(err.message ?? '');
+  const exitCode = typeof err.exitCode === 'number' ? err.exitCode : -1;
 
-  // Notion errors take precedence: when the MCP SDK throws a JSON-RPC error
-  // it can still carry the provider error body in `data` (e.g. -32603
-  // Internal Error wrapping `object_not_found` / `rate_limited`). Always
-  // check the embedded Notion code first; fall back to JSON-RPC numeric
-  // codes only when no provider body is present.
-  const body = extractNotionErrorBody(err);
+  // Spawn failure: ntn binary missing.
+  if (err.code === 'ENOENT') {
+    return {
+      code: 'TRANSPORT',
+      details: {
+        reason: 'ntn-not-installed',
+        stderr,
+        hint: 'install the Notion CLI (https://developers.notion.com/cli) and run `ntn login` — see docs/adapters/notion.md',
+      },
+    };
+  }
+
+  // Notion API error body — ntn passes the response through on stdout. Also
+  // accept the body thrown/passed directly (tests, wrapped errors), and a
+  // stderr-resident body as a fallback.
+  const body =
+    err.object === 'error' && typeof err.code === 'string'
+      ? (err as NotionErrorBody)
+      : (parseNotionErrorBody(stdout) ?? parseNotionErrorBody(stderr));
   if (body?.code !== undefined) {
     const notionCode = body.code;
 
-    if (notionCode === 'unauthorized' || notionCode === 'restricted_resource') {
+    // AUTH must come before NOT_FOUND — Notion returns "not found" copy for
+    // permission denials to avoid leaking existence.
+    if (NOTION_AUTH_CODES.has(notionCode)) {
       return { code: 'AUTH', details: { notionCode, message: body.message } };
     }
     if (notionCode === 'object_not_found') {
@@ -139,7 +213,7 @@ export function classifyNotionError(err: unknown): NormalizeErrorHint {
         details: { notionCode, message: body.message },
       };
     }
-    if (notionCode === 'rate_limited') {
+    if (notionCode === 'rate_limited' || NOTION_OVERLOAD_CODES.has(notionCode)) {
       const retryAfterMs =
         typeof body.retry_after === 'number'
           ? body.retry_after * 1000
@@ -153,23 +227,29 @@ export function classifyNotionError(err: unknown): NormalizeErrorHint {
         },
       };
     }
-    if (
-      notionCode === 'validation_error' ||
-      notionCode === 'invalid_request_url' ||
-      notionCode === 'invalid_json' ||
-      notionCode === 'invalid_request'
-    ) {
+    if (NOTION_TIMEOUT_CODES.has(notionCode)) {
+      return {
+        code: 'TIMEOUT',
+        details: { notionCode, message: body.message },
+      };
+    }
+    // VALIDATION before CONFLICT — validation errors can mention conflicts.
+    if (NOTION_VALIDATION_CODES.has(notionCode)) {
       return {
         code: 'VALIDATION',
         details: { notionCode, message: body.message },
       };
     }
-    if (
-      notionCode === 'conflict_error' ||
-      notionCode === 'concurrent_edit'
-    ) {
+    if (NOTION_CONFLICT_CODES.has(notionCode)) {
       return {
         code: 'CONFLICT',
+        details: { notionCode, message: body.message },
+      };
+    }
+    // 5xx-class provider errors are transient — retriable TRANSPORT.
+    if (NOTION_5XX_CODES.has(notionCode)) {
+      return {
+        code: 'TRANSPORT',
         details: { notionCode, message: body.message },
       };
     }
@@ -179,62 +259,44 @@ export function classifyNotionError(err: unknown): NormalizeErrorHint {
     };
   }
 
-  // No embedded Notion body — fall back to JSON-RPC numeric codes.
-  if (typeof err.code === 'number') {
-    switch (err.code) {
-      case JSONRPC_CONNECTION_CLOSED:
-        return { code: 'TRANSPORT', details: { reason: 'connection-closed' } };
-      case JSONRPC_REQUEST_TIMEOUT:
-        return { code: 'TIMEOUT', details: { reason: 'request-timeout' } };
-      case JSONRPC_PARSE_ERROR:
-      case JSONRPC_INVALID_REQUEST:
-      case JSONRPC_INVALID_PARAMS:
-        return { code: 'VALIDATION', details: { jsonrpcCode: err.code } };
-      case JSONRPC_INTERNAL_ERROR:
-      default:
-        return { code: 'UNKNOWN', details: { jsonrpcCode: err.code } };
-    }
+  // No provider body — fall back to exec-level patterns.
+  if (
+    err.timedOut === true ||
+    err.code === 'ETIMEDOUT' ||
+    /timeout|timed[\s_-]?out|ETIMEDOUT/i.test(stderr) ||
+    /timeout|timed[\s_-]?out|ETIMEDOUT/i.test(message)
+  ) {
+    return { code: 'TIMEOUT', details: { stderr, message } };
   }
 
-  const message = String(err.message ?? '');
-  if (/timeout|timed[\s_-]?out/i.test(message)) {
-    return { code: 'TIMEOUT', details: { message } };
-  }
   if (
-    /connection (?:refused|reset|closed)|ECONNRESET|EAI_AGAIN|spawn/i.test(
-      message,
+    /spawn|ECONNRESET|ECONNREFUSED|EAI_AGAIN|connection (?:refused|reset|closed)|HTTP 5\d\d/i.test(
+      `${stderr} ${message}`,
     )
   ) {
-    return { code: 'TRANSPORT', details: { message } };
+    return { code: 'TRANSPORT', details: { stderr, message, exitCode } };
   }
 
-  return { code: 'UNKNOWN', details: { message } };
+  // Unknown nonzero exit → UNKNOWN, NOT retriable TRANSPORT.
+  return { code: 'UNKNOWN', details: { stderr, exitCode } };
 }
 
-function extractNotionErrorBody(err: unknown): NotionErrorBody | undefined {
-  if (!isErrorLike(err)) return undefined;
-  // McpError carries data with the tool's error payload.
-  if (err.data !== undefined && isErrorLike(err.data)) {
-    if (err.data.code !== undefined || err.data.message !== undefined) {
-      return err.data as NotionErrorBody;
-    }
+function parseNotionErrorBody(text: string): NotionErrorBody | undefined {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return undefined;
   }
-  // Raw Notion error body passed through (test fixtures).
-  if ('object' in (err as object) && (err as NotionErrorBody).object === 'error') {
-    return err as NotionErrorBody;
-  }
-  // Heuristic: object with `code` string + `message` string. Pass through
-  // retry_after / status when present so the classifier sees the full body.
-  if (typeof err.code === 'string' && typeof err.message === 'string') {
-    const body: NotionErrorBody = { code: err.code, message: err.message };
-    const anyErr = err as Record<string, unknown>;
-    if (typeof anyErr.retry_after === 'number') {
-      body.retry_after = anyErr.retry_after;
-    }
-    if (typeof anyErr.status === 'number') {
-      body.status = anyErr.status;
-    }
-    return body;
+  if (
+    parsed !== null &&
+    typeof parsed === 'object' &&
+    (parsed as { object?: string }).object === 'error' &&
+    typeof (parsed as { code?: unknown }).code === 'string'
+  ) {
+    return parsed as NotionErrorBody;
   }
   return undefined;
 }
@@ -297,6 +359,26 @@ function parseBlockerList(raw: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+// Shared body→blocks chunker used by createIssue (children) and
+// updateIssueBody (replacement children). Notion limits:
+//   - 2000 chars per rich_text item (richTextPayload chunks)
+//   - 100 rich_text items per block (split into multiple paragraphs beyond)
+// Empty body → no blocks.
+export function bodyToParagraphBlocks(
+  text: string,
+): Array<Record<string, unknown>> {
+  const items = richTextPayload(text);
+  const blocks: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < items.length; i += 100) {
+    blocks.push({
+      object: 'block',
+      type: 'paragraph',
+      paragraph: { rich_text: items.slice(i, i + 100) },
+    });
+  }
+  return blocks;
+}
+
 // ─── Issue mapping ───────────────────────────────────────────────────────────
 
 function pageToIssue(page: NotionPage, dbId: string): Issue {
@@ -356,10 +438,21 @@ export function parseNotionPageId(idOrUrl: string): string {
   ].join('-');
 }
 
+// ─── Local response schemas ──────────────────────────────────────────────────
+//
+// Block-children list (GET /v1/blocks/{id}/children) — only the fields
+// updateIssueBody reads. Kept local: no other module consumes this shape.
+
+const NotionBlockChildrenResponseSchema = z.object({
+  results: z.array(z.object({ id: z.string().min(1) })),
+  next_cursor: z.string().nullable().optional(),
+  has_more: z.boolean().optional(),
+});
+
 // ─── Adapter ─────────────────────────────────────────────────────────────────
 
 export interface NotionTrackerOptions {
-  mcp: McpCall;
+  ntn: NtnExec;
   retry?: WithRetryOpts;
   // Override for tests; default is real setTimeout.
   sleep?: (ms: number) => Promise<void>;
@@ -376,7 +469,7 @@ export const CLAIM_SETTLE_MS = 250;
 export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   readonly type = 'notion' as const;
 
-  private readonly mcp: McpCall;
+  private readonly ntn: NtnExec;
   private readonly databaseId: string;
   private readonly retryOpts: WithRetryOpts;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -392,7 +485,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     options: NotionTrackerOptions,
   ) {
     super(config, logger);
-    this.mcp = options.mcp;
+    this.ntn = options.ntn;
     this.databaseId = config.config.database_id;
     this.retryOpts = options.retry ?? {};
     this.sleep =
@@ -401,19 +494,18 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   }
 
   // Resolves the database's primary data_source_id. Cached after first call.
-  // Throws PRECONDITION_FAILED if the database has no data sources, or if it
-  // has multiple (ambiguous — settings should call out which one).
+  // Throws PRECONDITION_FAILED if the database has no data sources, or warns
+  // and picks the first if it has multiple.
   private async resolveDataSourceId(op: string): Promise<string> {
     if (this.dataSourceIdCache !== undefined) return this.dataSourceIdCache;
-    const raw = await this.runTool(
-      'API-retrieve-a-database',
-      { database_id: this.databaseId },
-      op,
-    );
+    const raw = await this.runNtn(op, [
+      'api',
+      `v1/databases/${this.databaseId}`,
+    ]);
     if (raw === null || typeof raw !== 'object') {
       throw new TrackerError(
         'VALIDATION',
-        `${op}: API-retrieve-a-database returned unexpected shape`,
+        `${op}: GET v1/databases/${this.databaseId} returned unexpected shape`,
         { databaseId: this.databaseId },
       );
     }
@@ -446,53 +538,71 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     return id;
   }
 
-  // ─── runTool — central seam invoker ────────────────────────────────────────
+  // ─── runNtn — central seam invoker ─────────────────────────────────────────
   //
-  // Calls the MCP tool, normalizes tool-level isError into a thrown
-  // TrackerError, and returns the parsed JSON body of content[0].text if
-  // present. Returns null for tools with no body content (e.g. acks).
+  // Runs `ntn <apiArgs> --notion-version <pinned>`. Request bodies go via
+  // STDIN (single body source; avoids arg-length limits and quoting bugs).
+  // Nonzero exits and pass-through Notion error bodies are normalized into
+  // thrown TrackerErrors. Returns the parsed JSON body of stdout, or null
+  // when the call produced no output.
 
-  private async runTool(
-    toolName: string,
-    args: Record<string, unknown>,
+  private async runNtn(
     op: string,
+    apiArgs: readonly string[],
+    input?: string,
   ): Promise<unknown> {
-    let result: McpToolResult;
+    const args = [...apiArgs, '--notion-version', NOTION_API_VERSION];
+    let result: NtnExecResult;
     try {
-      result = await this.mcp(toolName, args);
+      result = await this.ntn(
+        args,
+        input === undefined ? undefined : { input },
+      );
     } catch (err) {
-      throw this.normalizeError(op, err, classifyNotionError(err));
+      throw this.normalizeError(op, err, classifyNotionExecError(err));
     }
 
-    if (result.isError === true) {
-      const text = readToolText(result);
-      const parsed = tryParseJson(text);
-      const hint = classifyNotionError(parsed ?? { message: text });
-      throw this.normalizeError(op, parsed ?? new Error(text), hint);
+    if (result.exitCode !== 0) {
+      const hint = classifyNotionExecError(result);
+      const body =
+        parseNotionErrorBody(result.stdout) ??
+        parseNotionErrorBody(result.stderr);
+      const detail =
+        body?.message ??
+        (result.stderr.trim().length > 0
+          ? result.stderr.trim()
+          : `ntn exited ${result.exitCode}`);
+      throw this.normalizeError(op, new Error(detail), hint);
     }
 
-    if (result.structuredContent !== undefined) return result.structuredContent;
-
-    const text = readToolText(result);
+    const text = result.stdout.trim();
     if (text.length === 0) return null;
     const parsed = tryParseJson(text);
     if (parsed === undefined) {
-      throw this.normalizeError(op, new Error('tool-result-not-json'), {
+      throw this.normalizeError(op, new Error('ntn-output-not-json'), {
         code: 'VALIDATION',
-        details: { reason: 'tool-result-not-json', preview: text.slice(0, 500) },
+        details: { reason: 'ntn-output-not-json', preview: text.slice(0, 500) },
       });
     }
-    // The Notion MCP server returns Notion error bodies (status >= 400) as
-    // *successful* tool calls — isError is undefined, content[0].text is the
-    // error JSON. Detect by shape (`object: 'error'`) and route through the
-    // same error path as McpError-thrown failures.
+    // Defensive: some error responses can come back with exit 0 (the CLI
+    // passes the API response through). Detect by shape (`object: 'error'`)
+    // and route through the same error path as nonzero exits.
     if (
       parsed !== null &&
       typeof parsed === 'object' &&
       (parsed as { object?: string }).object === 'error'
     ) {
-      const hint = classifyNotionError(parsed);
-      throw this.normalizeError(op, parsed, hint);
+      const hint = classifyNotionExecError({
+        exitCode: 1,
+        stdout: text,
+        stderr: result.stderr,
+      });
+      const body = parseNotionErrorBody(text);
+      throw this.normalizeError(
+        op,
+        new Error(body?.message ?? 'notion-error-body'),
+        hint,
+      );
     }
     return parsed;
   }
@@ -501,7 +611,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     try {
-      await this.runTool('API-get-self', {}, 'healthCheck');
+      await this.runNtn('healthCheck', ['api', 'v1/users/me']);
       return { ok: true };
     } catch (err) {
       const detail =
@@ -516,8 +626,8 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
   // ─── listActiveIssues ──────────────────────────────────────────────────────
   //
-  // Queries the database. Filters out archived + done/cancelled states so the
-  // orchestrator's eligibility pass doesn't have to.
+  // Queries the data source. Filters out archived + done/cancelled states so
+  // the orchestrator's eligibility pass doesn't have to.
 
   async listActiveIssues(): Promise<Issue[]> {
     const page = await this.listFiltered(false, 'listActiveIssues');
@@ -552,13 +662,14 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
           issues.length < NOTION_LIST_LIMIT &&
           rawPagesFetched < NOTION_RAW_PAGE_CAP
         ) {
-          const args: Record<string, unknown> = {
-            data_source_id: dataSourceId,
-            page_size: pageSize,
-          };
-          if (cursor !== undefined) args.start_cursor = cursor;
+          const body: Record<string, unknown> = { page_size: pageSize };
+          if (cursor !== undefined) body.start_cursor = cursor;
 
-          const raw = await this.runTool('API-query-data-source', args, op);
+          const raw = await this.runNtn(
+            op,
+            ['api', `v1/data_sources/${dataSourceId}/query`, '-X', 'POST'],
+            JSON.stringify(body),
+          );
 
           let parsed;
           try {
@@ -678,14 +789,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
     // Step 2: write.
     try {
-      await this.runTool(
-        'API-patch-page',
-        {
-          page_id: pageId,
-          properties: { [PROP_CLAIMED_BY]: richTextProp(runId) },
-        },
-        'claim.write',
-      );
+      await this.patchPageProperties('claim.write', pageId, {
+        [PROP_CLAIMED_BY]: richTextProp(runId),
+      });
     } catch (err) {
       if (err instanceof TrackerError) {
         if (err.code === 'NOT_FOUND') {
@@ -776,14 +882,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     void runId;
     const pageId = parseNotionPageId(issueId);
     try {
-      await this.runTool(
-        'API-patch-page',
-        {
-          page_id: pageId,
-          properties: { [PROP_CLAIMED_BY]: richTextProp('') },
-        },
-        'releaseClaim',
-      );
+      await this.patchPageProperties('releaseClaim', pageId, {
+        [PROP_CLAIMED_BY]: richTextProp(''),
+      });
     } catch (err) {
       if (err instanceof TrackerError && err.code === 'NOT_FOUND') {
         return; // page archived/gone — nothing to release
@@ -799,17 +900,12 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     const pageId = parseNotionPageId(issueId);
     const notionState = STATE_TO_NOTION[state];
     try {
-      await this.runTool(
-        'API-patch-page',
-        {
-          page_id: pageId,
-          properties: { [PROP_STATE]: statusProp(notionState) },
-        },
-        'updateState',
-      );
+      await this.patchPageProperties('updateState', pageId, {
+        [PROP_STATE]: statusProp(notionState),
+      });
     } catch (err) {
       if (err instanceof TrackerError) throw err;
-      throw this.normalizeError('updateState', err, classifyNotionError(err));
+      throw this.normalizeError('updateState', err, classifyNotionExecError(err));
     }
   }
 
@@ -820,21 +916,21 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     this.assertNonEmpty(body, 'body');
     const pageId = parseNotionPageId(issueId);
     try {
-      await this.runTool(
-        'API-create-a-comment',
-        {
+      await this.runNtn(
+        'comment',
+        ['api', 'v1/comments', '-X', 'POST'],
+        JSON.stringify({
           parent: { page_id: pageId },
           rich_text: richTextPayload(body),
-        },
-        'comment',
+        }),
       );
     } catch (err) {
       if (err instanceof TrackerError) throw err;
-      throw this.normalizeError('comment', err, classifyNotionError(err));
+      throw this.normalizeError('comment', err, classifyNotionExecError(err));
     }
   }
 
-  // ─── createProject → Notion database ───────────────────────────────────────
+  // ─── createProject → Notion data source ────────────────────────────────────
   //
   // Creates a child database under a parent page. The caller passes
   // `parent_page_id` via the `description` slot is awkward — instead we
@@ -861,31 +957,34 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       );
     }
 
-    // Notion's 2025-09 schema requires creating a data source under a page;
-    // the data source itself owns the parent database. Construct properties
-    // matching the forge schema (status options + rich_text columns).
-    const args: Record<string, unknown> = {
+    // API 2026-03-11: creating a NEW database under a page is
+    // `POST /v1/databases` (with `initial_data_source` carrying the column
+    // schema). `POST /v1/data_sources` only ADDS a data source to an EXISTING
+    // database and requires `parent.database_id` — the previous payload here
+    // was invalid under the pinned version (Codex impl-review). Construct
+    // properties matching the forge schema (status options + rich_text cols).
+    const body: Record<string, unknown> = {
       parent: { type: 'page_id', page_id: parseNotionPageId(parentPageId) },
       title: richTextPayload(name),
-      properties: defaultDatabaseProperties(),
+      initial_data_source: { properties: defaultDatabaseProperties() },
     };
     if (description !== undefined && description.length > 0) {
-      args.description = richTextPayload(description);
+      body.description = richTextPayload(description);
     }
 
     let raw: unknown;
     try {
-      raw = await this.runTool(
-        'API-create-a-data-source',
-        args,
+      raw = await this.runNtn(
         'createProject',
+        ['api', 'v1/databases', '-X', 'POST'],
+        JSON.stringify(body),
       );
     } catch (err) {
       if (err instanceof TrackerError) throw err;
       throw this.normalizeError(
         'createProject',
         err,
-        classifyNotionError(err),
+        classifyNotionExecError(err),
       );
     }
 
@@ -924,12 +1023,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       [PROP_ACCEPTANCE]: richTextProp(payload.acceptance.join('\n')),
     };
 
-    // API-post-page's schema *declares* `children: array of string` but the
-    // server actually rejects strings with validation_error and accepts plain
-    // block objects. Verified against @notionhq/notion-mcp-server@2.2.1.
     const children = buildIssueChildren(payload);
 
-    const args: Record<string, unknown> = {
+    const body: Record<string, unknown> = {
       parent: { type: 'data_source_id', data_source_id: dataSourceId },
       properties,
       ...(children.length > 0 ? { children } : {}),
@@ -937,10 +1033,14 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 
     let raw: unknown;
     try {
-      raw = await this.runTool('API-post-page', args, 'createIssue');
+      raw = await this.runNtn(
+        'createIssue',
+        ['api', 'v1/pages', '-X', 'POST'],
+        JSON.stringify(body),
+      );
     } catch (err) {
       if (err instanceof TrackerError) throw err;
-      throw this.normalizeError('createIssue', err, classifyNotionError(err));
+      throw this.normalizeError('createIssue', err, classifyNotionExecError(err));
     }
 
     let parsed: NotionPage;
@@ -970,7 +1070,7 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       page = await this.fetchPage(pageId);
     } catch (err) {
       if (err instanceof TrackerError) throw err;
-      throw this.normalizeError('setBlockedBy', err, classifyNotionError(err));
+      throw this.normalizeError('setBlockedBy', err, classifyNotionExecError(err));
     }
 
     const forgeTaskId = readRichText(page, PROP_TASK_ID);
@@ -988,42 +1088,117 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     const next = [...current, normalizedBlockerId].join(',');
 
     try {
-      await this.runTool(
-        'API-patch-page',
-        {
-          page_id: pageId,
-          properties: { [PROP_BLOCKED_BY]: richTextProp(next) },
-        },
-        'setBlockedBy',
-      );
+      await this.patchPageProperties('setBlockedBy', pageId, {
+        [PROP_BLOCKED_BY]: richTextProp(next),
+      });
     } catch (err) {
       if (err instanceof TrackerError) throw err;
-      throw this.normalizeError('setBlockedBy', err, classifyNotionError(err));
+      throw this.normalizeError('setBlockedBy', err, classifyNotionExecError(err));
     }
   }
 
-  // ─── updateIssueBody — NOT_IMPLEMENTED stub (FORGE-94 → FORGE-117) ─────────
+  // ─── updateIssueBody — content-block replace (FORGE-117) ───────────────────
   //
-  // The full implementation lands in FORGE-117 as part of the NotionTracker
-  // refactor onto the `ntn` CLI transport (https://developers.notion.com/cli).
-  // Until then, /reconcile --push and /apply-decision MUST skip Notion-backed
-  // projects.
-  async updateIssueBody(_issueId: string, _body: string): Promise<void> {
-    throw new TrackerError(
-      'NOT_IMPLEMENTED',
-      `NotionTracker.updateIssueBody is not implemented in this release. ` +
-        `Tracked in FORGE-117: refactor NotionTracker to ntn CLI transport. ` +
-        `Until then, /reconcile --push and /apply-decision must skip Notion-backed projects.`,
-      { followUpIssue: 'FORGE-117' },
-    );
+  // Replaces the page's content blocks wholesale. On Notion the body is
+  // CONTENT BLOCKS, not a single field, and forge metadata (forgeTaskId,
+  // blockerIds, ownerType) lives in PAGE PROPERTIES — so unlike the
+  // GitHub/Linear footer pump, the replace never touches forge metadata.
+  //
+  // Sequence (Notion has NO atomic body replace — PATCH children APPENDS):
+  //   1. assertValidBodyInput (non-string / forge-footer / >64KiB rejection)
+  //   2. fetch page; PRECONDITION_FAILED unless forge_task_id is non-empty
+  //      (page created outside forge)
+  //   3. GET  v1/blocks/{page_id}/children   (cursor loop — collect child ids)
+  //   4. DELETE v1/blocks/{child_id}         (per child)
+  //   5. PATCH v1/blocks/{page_id}/children  (append replacement paragraphs)
+  //
+  // ⚠️ NON-ATOMIC: a crash between steps 4 and 5 leaves a partially-deleted
+  // body on the page. This matches the interface contract (updateIssueBody
+  // has NO CAS; the caller holds the claim; single-writer), and the operation
+  // is IDEMPOTENTLY RE-RUNNABLE: a re-run lists whatever children remain,
+  // deletes them, and appends the full replacement. Errors classify retriable
+  // (TRANSPORT/RATE_LIMITED/TIMEOUT) vs not via classifyNotionExecError so
+  // callers know when a re-run is worthwhile.
+  async updateIssueBody(issueId: string, body: string): Promise<void> {
+    this.assertNonEmpty(issueId, 'issueId');
+    assertValidBodyInput(body, NOTION_BODY_MAX_BYTES);
+    const pageId = parseNotionPageId(issueId);
+
+    // Precondition: forge-created page (forge_task_id property present).
+    let page: NotionPage;
+    try {
+      page = await this.fetchPage(pageId);
+    } catch (err) {
+      if (err instanceof TrackerError) throw err;
+      throw this.normalizeError(
+        'updateIssueBody',
+        err,
+        classifyNotionExecError(err),
+      );
+    }
+    const forgeTaskId = readRichText(page, PROP_TASK_ID);
+    if (forgeTaskId.length === 0) {
+      throw new TrackerError(
+        'PRECONDITION_FAILED',
+        `updateIssueBody: page ${pageId} has no ${PROP_TASK_ID} property; was it created outside of forge?`,
+        { issueId, pageId },
+      );
+    }
+
+    // 1. Collect existing child block ids (cursor loop; pagination via query
+    //    args, not stdin — GET requests carry no body).
+    const childIds: string[] = [];
+    let cursor: string | undefined;
+    do {
+      const args = ['api', `v1/blocks/${pageId}/children`, 'page_size==100'];
+      if (cursor !== undefined) args.push(`start_cursor==${cursor}`);
+      const raw = await this.runNtn('updateIssueBody.listChildren', args);
+      let parsed;
+      try {
+        parsed = NotionBlockChildrenResponseSchema.parse(raw);
+      } catch (err) {
+        throw this.normalizeError('updateIssueBody.listChildren', err, {
+          code: 'VALIDATION',
+          details: { reason: 'block-children-parse-failed', pageId },
+        });
+      }
+      for (const child of parsed.results) childIds.push(child.id);
+      cursor =
+        parsed.has_more === true && parsed.next_cursor
+          ? parsed.next_cursor
+          : undefined;
+    } while (cursor !== undefined);
+
+    // 2. Delete each existing child.
+    for (const childId of childIds) {
+      await this.runNtn('updateIssueBody.deleteChild', [
+        'api',
+        `v1/blocks/${childId}`,
+        '-X',
+        'DELETE',
+      ]);
+    }
+
+    // 3. Append replacement paragraph blocks.
+    const children = bodyToParagraphBlocks(body);
+    if (children.length > 0) {
+      await this.runNtn(
+        'updateIssueBody.append',
+        ['api', `v1/blocks/${pageId}/children`, '-X', 'PATCH'],
+        JSON.stringify({ children }),
+      );
+    }
   }
 
-  // ─── setClaimFence — NOT_IMPLEMENTED stub (FORGE-167 → FORGE-117) ──────────
+  // ─── setClaimFence — NOT_IMPLEMENTED stub (FORGE-167) ──────────────────────
   //
-  // The forge:claim footer write rides the same body read-modify-write as
-  // updateIssueBody, which Notion's content-block model can't do until the
-  // FORGE-117 ntn CLI refactor. Claim/cancel call this best-effort, so a
-  // Notion-backed project simply skips footer mirroring (warn, no failure).
+  // Scope-dropped from FORGE-117 (Codex pre-opinion delta): on Notion the
+  // claim fence cannot ride the body — forge metadata lives in page
+  // properties — and reusing the existing forge_claimed_by property would
+  // lose claimId/generation and violate the ClaimFenceData contract. A
+  // ClaimFenceData-shaped property scheme is the FORGE-145/FORGE-167
+  // follow-up. Claim/cancel call this best-effort, so a Notion-backed
+  // project simply skips fence mirroring (warn, no failure).
   async setClaimFence(
     _issueId: string,
     _data: ClaimFenceData | null,
@@ -1031,26 +1206,37 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     throw new TrackerError(
       'NOT_IMPLEMENTED',
       `NotionTracker.setClaimFence is not implemented in this release. ` +
-        `Tracked in FORGE-117: refactor NotionTracker to ntn CLI transport. ` +
-        `Until then, claim/cancel skip forge:claim footer mirroring for Notion.`,
-      { followUpIssue: 'FORGE-117' },
+        `Notion stores claim identity in page properties, not body footers; a ` +
+        `ClaimFenceData-shaped property scheme is tracked as the FORGE-145/FORGE-167 follow-up. ` +
+        `Until then, claim/cancel skip forge:claim fence mirroring for Notion.`,
+      { followUpIssue: 'FORGE-167' },
     );
   }
 
   // ─── helpers ───────────────────────────────────────────────────────────────
 
+  // Property write: PATCH v1/pages/{id} with a properties body via stdin.
+  // Single code path for claim/releaseClaim/updateState/setBlockedBy.
+  private async patchPageProperties(
+    op: string,
+    pageId: string,
+    properties: Record<string, unknown>,
+  ): Promise<void> {
+    await this.runNtn(
+      op,
+      ['api', `v1/pages/${pageId}`, '-X', 'PATCH'],
+      JSON.stringify({ properties }),
+    );
+  }
+
   private async fetchPage(pageId: string): Promise<NotionPage> {
     let raw: unknown;
     try {
-      raw = await this.runTool(
-        'API-retrieve-a-page',
-        { page_id: pageId },
-        'fetchPage',
-      );
+      raw = await this.runNtn('fetchPage', ['api', `v1/pages/${pageId}`]);
     } catch (err) {
       throw err instanceof TrackerError
         ? err
-        : this.normalizeError('fetchPage', err, classifyNotionError(err));
+        : this.normalizeError('fetchPage', err, classifyNotionExecError(err));
     }
     try {
       return NotionPageSchema.parse(raw);
@@ -1092,14 +1278,9 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
       return;
     }
     try {
-      await this.runTool(
-        'API-patch-page',
-        {
-          page_id: pageId,
-          properties: { [PROP_CLAIMED_BY]: richTextProp('') },
-        },
-        'claim.cleanup',
-      );
+      await this.patchPageProperties('claim.cleanup', pageId, {
+        [PROP_CLAIMED_BY]: richTextProp(''),
+      });
     } catch (err) {
       this.logger.warn('tracker.tryClearClaimIfOwned', {
         pageId,
@@ -1110,14 +1291,6 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
 }
 
 // ─── utils ───────────────────────────────────────────────────────────────────
-
-function readToolText(result: McpToolResult): string {
-  if (!result.content) return '';
-  for (const c of result.content) {
-    if (c.type === 'text' && typeof c.text === 'string') return c.text;
-  }
-  return '';
-}
 
 function tryParseJson(text: string): unknown {
   if (text.length === 0) return undefined;
@@ -1142,14 +1315,9 @@ function errToString(err: unknown): string {
 function buildIssueChildren(
   payload: CreateIssuePayload,
 ): Array<Record<string, unknown>> {
-  const blocks: Array<Record<string, unknown>> = [];
-  if (payload.body.length > 0) {
-    blocks.push({
-      object: 'block',
-      type: 'paragraph',
-      paragraph: { rich_text: richTextPayload(payload.body) },
-    });
-  }
+  const blocks: Array<Record<string, unknown>> = [
+    ...bodyToParagraphBlocks(payload.body),
+  ];
   if (payload.acceptance.length > 0) {
     blocks.push({
       object: 'block',

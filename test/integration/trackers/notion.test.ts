@@ -6,18 +6,19 @@
 //     forge_blocked_by / forge_owner_type / forge_acceptance rich_text,
 //     `state` status with options Todo/In Progress/In Review/Done/Cancelled/Blocked)
 //   - env var FORGE_E2E_NOTION_DATABASE_ID
-//   - NOTION_TOKEN exported in the shell so the spawned MCP server can auth
+//   - the Notion CLI (`ntn`) installed and authenticated (`ntn login`) —
+//     FORGE-117 replaced the MCP transport; no NOTION_TOKEN plumbing.
 //
 // The test creates one page, exercises the lifecycle, archives it on cleanup.
 
 import assert from 'node:assert/strict';
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 
 import {
+  NOTION_API_VERSION,
   NotionTracker,
-  createStdioMcpCall,
+  defaultNtnExec,
   type Logger,
-  type StdioMcpHandle,
 } from '../../../src/trackers/index.ts';
 import type { NotionTrackerConfig } from '../../../src/schemas/settings.ts';
 
@@ -34,38 +35,22 @@ function noopLogger(): Logger {
   };
 }
 
-let handle: StdioMcpHandle | undefined;
-
 function makeTracker(): NotionTracker {
-  if (handle === undefined) {
-    handle = createStdioMcpCall({
-      command: 'npx',
-      args: ['-y', '@notionhq/notion-mcp-server'],
-    });
-  }
   const config: NotionTrackerConfig = {
     type: 'notion',
-    config: {
-      database_id: DATABASE_ID,
-      mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
-      mcp_env: {},
-    },
+    config: { database_id: DATABASE_ID },
   };
-  return new NotionTracker(config, noopLogger(), { mcp: handle.call });
+  return new NotionTracker(config, noopLogger(), { ntn: defaultNtnExec });
 }
 
-after(async () => {
-  await handle?.close();
-});
-
 test(
-  'integration: full lifecycle createIssue → claim → updateState → comment → releaseClaim → updateState(done)',
+  'integration: full lifecycle createIssue → claim → updateState → comment → updateIssueBody → releaseClaim → updateState(done)',
   { skip: skip ? 'FORGE_E2E_NOTION!=1 or FORGE_E2E_NOTION_DATABASE_ID unset' : false },
   async () => {
     const tracker = makeTracker();
 
     const health = await tracker.healthCheck();
-    assert.equal(health.ok, true, `notion MCP not healthy: ${health.detail}`);
+    assert.equal(health.ok, true, `ntn CLI not healthy: ${health.detail}`);
 
     const forgeTaskId = `FORGE-E2E-${Date.now()}`;
     const issue = await tracker.createIssue({
@@ -85,6 +70,17 @@ test(
 
       await tracker.updateState(pageId, 'in_progress');
       await tracker.comment(pageId, 'forge e2e: started');
+
+      // FORGE-117: body replace — non-atomic delete+append; forgeTaskId is a
+      // page property and must survive untouched.
+      await tracker.updateIssueBody(pageId, 'replaced body via ntn transport');
+      const afterBodyUpdate = await tracker.listActiveIssues();
+      assert.equal(
+        afterBodyUpdate.find((i) => i.id === pageId)?.forgeTaskId,
+        forgeTaskId,
+        'forgeTaskId must survive updateIssueBody',
+      );
+
       await tracker.releaseClaim(pageId, 'e2e-agent');
       await tracker.updateState(pageId, 'done');
 
@@ -96,10 +92,17 @@ test(
       );
     } finally {
       // Archive the test page so reruns are clean.
-      await handle?.call('API-patch-page', {
-        page_id: pageId,
-        archived: true,
-      });
+      await defaultNtnExec(
+        [
+          'api',
+          `v1/pages/${pageId}`,
+          '-X',
+          'PATCH',
+          '--notion-version',
+          NOTION_API_VERSION,
+        ],
+        { input: JSON.stringify({ archived: true }) },
+      );
     }
   },
 );

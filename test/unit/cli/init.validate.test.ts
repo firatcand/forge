@@ -30,7 +30,7 @@ function baseAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers {
   };
 }
 
-function mockExec(plan: Record<string, { exitCode: number; stdout?: string; stderr?: string; timedOut?: boolean }>): ExecaLike {
+function mockExec(plan: Record<string, { exitCode: number | undefined; stdout?: string; stderr?: string; timedOut?: boolean; code?: string }>): ExecaLike {
   return async (cmd, args) => {
     const key = `${cmd} ${args.join(' ')}`;
     const r = plan[key] ?? plan[cmd] ?? { exitCode: 127, stdout: '', stderr: 'not found' };
@@ -39,6 +39,9 @@ function mockExec(plan: Record<string, { exitCode: number; stdout?: string; stde
       stdout: r.stdout ?? '',
       stderr: r.stderr ?? '',
       timedOut: r.timedOut ?? false,
+      // Spawn-failure shape passthrough: execa@9 with reject:false resolves
+      // ENOENT with exitCode undefined + code 'ENOENT' (runProbe handles it).
+      ...(r.code !== undefined ? { code: r.code } : {}),
     };
   };
 }
@@ -166,31 +169,88 @@ test('validateTooling: github tracker probes gh auth status', async () => {
   assert.equal(gh.status, 'pass');
 });
 
-test('validateTooling: notion tracker probes notion in mcp list', async () => {
+test('validateTooling: notion tracker probes ntn install + auth (FORGE-117)', async () => {
   const cwd = tmp();
   writeFileSync(join(cwd, '.env.local'), '');
-  // Notion probe now verifies the configured mcp_command's executable is on
-  // PATH (forge spawns its own MCP server) — it does NOT probe
-  // `claude mcp list`.
+  // `ntn api v1/users/me` proves installation AND keychain auth in one call —
+  // a bare --version would pass for an unauthenticated install.
   const exec = mockExec({
     'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
     'claude --version': { exitCode: 0 },
     'codex --version': { exitCode: 0 },
-    'npx --version': { exitCode: 0, stdout: '10.8.2' },
+    'ntn api v1/users/me': { exitCode: 0, stdout: '{"object":"user","id":"u1"}' },
   });
   const answers = baseAnswers({
-    tracker: {
-      type: 'notion',
-      config: {
-        database_id: 'db',
-        mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
-        mcp_env: {},
-      },
-    },
+    tracker: { type: 'notion', config: { database_id: 'db' } },
   });
   const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
-  const probe = report.results.find((r) => r.key === 'notion_mcp_command');
+  const probe = report.results.find((r) => r.key === 'ntn');
   assert.equal(probe?.status, 'pass');
+});
+
+test('validateTooling: missing ntn binary (execa resolved-ENOENT shape) gets install guidance, not auth guidance', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  // Production shape: execa@9 with reject:false RESOLVES ENOENT with
+  // exitCode undefined + code 'ENOENT' — it does not throw.
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    'ntn api v1/users/me': { exitCode: undefined, code: 'ENOENT', stdout: '', stderr: '' },
+  });
+  const answers = baseAnswers({
+    tracker: { type: 'notion', config: { database_id: 'db' } },
+  });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
+  const probe = report.results.find((r) => r.key === 'ntn');
+  assert.equal(probe?.status, 'fail');
+  assert.match(probe?.message ?? '', /not found on PATH/);
+  assert.match(probe?.message ?? '', /ENOENT/);
+  assert.ok(!(probe?.message ?? '').includes('not authenticated'));
+});
+
+test('validateTooling: installed-but-unauthenticated ntn fails with `ntn login` guidance', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    // Binary present, auth probe rejected (no keychain credentials).
+    'ntn api v1/users/me': {
+      exitCode: 1,
+      stderr: '{"object":"error","status":401,"code":"unauthorized"}',
+    },
+  });
+  const answers = baseAnswers({
+    tracker: { type: 'notion', config: { database_id: 'db' } },
+  });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
+  const probe = report.results.find((r) => r.key === 'ntn');
+  assert.equal(probe?.status, 'fail');
+  assert.match(probe?.message ?? '', /not authenticated/);
+  assert.match(probe?.message ?? '', /ntn login/);
+});
+
+test('validateTooling: missing ntn CLI fails with install + `ntn login` guidance', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), '');
+  const exec = mockExec({
+    'git --version': { exitCode: 0, stdout: 'git version 2.40.1' },
+    'claude --version': { exitCode: 0 },
+    'codex --version': { exitCode: 0 },
+    // no 'ntn api v1/users/me' entry → mockExec returns exitCode 127
+  });
+  const answers = baseAnswers({
+    tracker: { type: 'notion', config: { database_id: 'db' } },
+  });
+  const report = await validateTooling(answers, { cwd, exec, autoSkipFailures: true });
+  const probe = report.results.find((r) => r.key === 'ntn');
+  assert.equal(probe?.status, 'fail');
+  assert.match(probe?.message ?? '', /ntn login/);
+  assert.equal(probe?.installLink, 'https://developers.notion.com/cli');
+  assert.ok(report.unverified.includes('ntn'));
 });
 
 test('validateTooling: MCP probe skipped when primary host is not claude', async () => {

@@ -23,7 +23,17 @@ export type ExecaLike = (
   cmd: string,
   args: readonly string[],
   opts: { timeout: number; reject: false; cwd?: string },
-) => Promise<{ exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean; failed?: boolean }>;
+) => Promise<{
+  // execa@9 under reject:false resolves spawn failures with exitCode
+  // undefined and a string `code` (e.g. 'ENOENT') — modeled here so runProbe
+  // and the test mocks need no casts.
+  exitCode: number | null | undefined;
+  stdout: string;
+  stderr: string;
+  timedOut?: boolean;
+  failed?: boolean;
+  code?: string;
+}>;
 
 export interface ValidateOptions {
   cwd: string;
@@ -66,13 +76,23 @@ async function runProbe(
   cmd: string,
   args: readonly string[],
   timeoutMs: number,
-  passPredicate: (r: { exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean }) => true | string,
+  passPredicate: (r: { exitCode: number | null | undefined; stdout: string; stderr: string; timedOut?: boolean }) => true | string,
   failMessage: string,
 ): Promise<ProbeResult> {
   try {
     const r = await exec(cmd, args, { timeout: timeoutMs, reject: false });
     if (r.timedOut) {
       return { key, label, status: 'fail', message: `${failMessage} (probe timed out after ${timeoutMs}ms)`, installLink };
+    }
+    // execa@9 with reject:false RESOLVES spawn failures (ENOENT — binary not
+    // on PATH) with exitCode undefined instead of throwing, so the catch
+    // below never saw them and every probe misreported a missing binary via
+    // its generic predicate message ("exited undefined") instead of the
+    // install guidance. Central fix for ALL probes (FORGE-117 Codex
+    // impl-review round 5).
+    if (r.exitCode === undefined || r.exitCode === null) {
+      const detail = typeof r.code === 'string' ? ` (${r.code})` : '';
+      return { key, label, status: 'fail', message: `${failMessage}${detail}`, installLink };
     }
     const verdict = passPredicate(r);
     if (verdict === true) {
@@ -160,37 +180,29 @@ async function probeMcp(
   );
 }
 
-// NotionTracker spawns its own MCP server (via mcp_command), so the host-CLI
-// MCP-list check used for Linear isn't right here. Probe that the configured
-// command's executable resolves on PATH. We don't try to start the server
-// itself — that risks long npx download times and would need NOTION_TOKEN.
-async function probeNotionMcpCommand(
-  mcpCommand: readonly string[],
+// FORGE-117: NotionTracker shells out to the official Notion CLI (`ntn`) —
+// mirror of the `gh auth status` probe shape. `ntn api v1/users/me` proves
+// BOTH installation (ENOENT → not-found guidance) and authentication (the
+// call fails non-interactively when the keychain has no credentials) — a bare
+// `--version` would pass for an unauthenticated install, violating the SPEC
+// "installed + authed" requirement (Codex impl-review round 4).
+async function probeNtnCli(
   exec: ExecaLike,
   timeoutMs: number,
 ): Promise<ProbeResult> {
-  const cmd = mcpCommand[0];
-  if (cmd === undefined || cmd.length === 0) {
-    return {
-      key: 'notion_mcp_command',
-      label: 'Notion MCP command',
-      status: 'fail',
-      message:
-        'tracker.config.mcp_command is empty — forge needs a command to spawn the Notion MCP server.',
-      installLink: 'https://developers.notion.com/docs/mcp',
-    };
-  }
   return runProbe(
-    'notion_mcp_command',
-    'Notion MCP server command',
-    'https://developers.notion.com/docs/mcp',
+    'ntn',
+    'Notion CLI (ntn)',
+    'https://developers.notion.com/cli',
     exec,
-    cmd,
-    ['--version'],
+    'ntn',
+    ['api', 'v1/users/me'],
     timeoutMs,
     (r) =>
-      r.exitCode === 0 ? true : `\`${cmd} --version\` exited ${r.exitCode}`,
-    `\`${cmd}\` not found on PATH — required to spawn the Notion MCP server.`,
+      r.exitCode === 0
+        ? true
+        : `\`ntn api v1/users/me\` exited ${r.exitCode} — the Notion CLI is installed but not authenticated; run \`ntn login\``,
+    '`ntn` CLI not found on PATH — install the Notion CLI (https://developers.notion.com/cli) and run `ntn login`.',
   );
 }
 
@@ -306,7 +318,7 @@ async function probeTracker(answers: InitAnswers, exec: ExecaLike, timeoutMs: nu
         '`gh` CLI not authenticated.',
       );
     case 'notion':
-      return probeNotionMcpCommand(t.config.mcp_command, exec, timeoutMs);
+      return probeNtnCli(exec, timeoutMs);
   }
 }
 

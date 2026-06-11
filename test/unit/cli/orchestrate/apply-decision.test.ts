@@ -225,16 +225,18 @@ test('--dry-run writes nothing', async (t) => {
   assert.equal(existsSync(repo.adrPath), true);
 });
 
-test('incapable tracker (notion) → TRACKER_INCAPABLE before any mutation', async (t) => {
+test('notion tracker supports body mutation since FORGE-117 → no TRACKER_INCAPABLE, applies', async (t) => {
+  // Pre-FORGE-117 this asserted TRACKER_INCAPABLE: NotionTracker.updateIssueBody
+  // was a NOT_IMPLEMENTED stub. The ntn-CLI transport shipped the
+  // implementation, so trackerSupportsBodyMutation is now true for every
+  // adapter and the preflight no longer rejects notion-backed projects.
   const repo = setupRepo();
+  const tracker = fakeTracker({ type: 'notion' });
   const buf = captureStdout(t);
-  await runOrchestrateApplyDecision(baseArgs(repo), { trackerOverride: fakeTracker({ type: 'notion' }) });
+  await runOrchestrateApplyDecision(baseArgs(repo), { trackerOverride: tracker });
   const env = lastJson(buf);
-  assert.equal(env.ok, false);
-  assert.equal(env.error.code, 'TRACKER_INCAPABLE');
-  // No local artifact was touched.
-  assert.equal(readFileSync(repo.specPath, 'utf8'), SPEC);
-  assert.equal(existsSync(repo.adrPath), true);
+  assert.equal(env.ok, true);
+  assert.deepEqual(tracker.bodyCalls, [{ id: 'FORGE-95', body: 'updated body' }]);
 });
 
 test('happy path applies all 4 artifact classes + finalizes', async (t) => {

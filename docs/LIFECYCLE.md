@@ -117,7 +117,7 @@ Each skill is documented below: when to invoke, inputs required, outputs produce
 ### `/push-to-tracker`
 
 - **When to invoke:** after `/decompose` and `/setup-repo`.
-- **Inputs:** `plans/phases.yaml`, `.forge/settings.yaml` `tracker.type` (linear | github | notion), and per-tracker tooling reachable (Linear MCP / `gh` CLI / Notion MCP).
+- **Inputs:** `plans/phases.yaml`, `.forge/settings.yaml` `tracker.type` (linear | github | notion), and per-tracker tooling reachable (Linear MCP / `gh` CLI / Notion `ntn` CLI).
 - **Outputs:** tracker project (Linear Project / GH Milestone / Notion DB), per-phase grouping, issues per task with `blocks` relations (or body-footer equivalent on GH), GitHub link configured for Linear. `phases.yaml` updated with a `source` block (`tracker`, `project_id`, `synced_at`, `spec_revision`) + per-task `tracker_issue_id` (plus legacy `linear_*` aliases when `tracker.type === 'linear'`, removed in v0.4.0).
 - **Unlocks:** `/pickup-task` (which queries the tracker for the next available task).
 

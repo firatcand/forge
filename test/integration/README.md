@@ -104,7 +104,7 @@ Issues are archived in `finally` blocks via `client.archiveIssue(id)`. Manual cl
 
 ## Notion adapter (`trackers/notion.test.ts`)
 
-Tests the full NotionTracker lifecycle against a real Notion database via the official Notion MCP server (`@notionhq/notion-mcp-server`).
+Tests the full NotionTracker lifecycle against a real Notion database via the official Notion CLI (`ntn`) — FORGE-117 replaced the MCP-server transport.
 
 ### Prerequisites
 
@@ -112,15 +112,14 @@ Tests the full NotionTracker lifecycle against a real Notion database via the of
    - `Name` (title)
    - `forge_task_id`, `forge_claimed_by`, `forge_blocked_by`, `forge_owner_type`, `forge_acceptance` (rich text)
    - `state` (status) with options `Todo`, `In Progress`, `In Review`, `Done`, `Cancelled`, `Blocked`
-2. `NOTION_TOKEN` exported so the spawned MCP server can authenticate. forge inherits `process.env` when spawning the server.
-3. The Notion integration tied to the token must have edit access to the test database.
+2. The `ntn` CLI installed (https://developers.notion.com/cli) and authenticated via `ntn login` — no `NOTION_TOKEN` plumbing.
+3. The Notion identity behind `ntn login` must have edit access to the test database.
 
 ### Run
 
 ```bash
 FORGE_E2E_NOTION=1 \
   FORGE_E2E_NOTION_DATABASE_ID=11112222-3333-4444-5555-666677778888 \
-  NOTION_TOKEN=secret_xxx \
   npm test
 ```
 
@@ -130,18 +129,18 @@ Without `FORGE_E2E_NOTION=1` the integration tests are skipped.
 
 | Test | What it verifies |
 |---|---|
-| `full lifecycle` | `createIssue` (round-trips `forge_task_id`) → `claim` → `updateState('in_progress')` → `comment` → `releaseClaim` → `updateState('done')` → `listActiveIssues` (done page filtered out) |
+| `full lifecycle` | `createIssue` (round-trips `forge_task_id`) → `claim` → `updateState('in_progress')` → `comment` → `updateIssueBody` (forge_task_id survives the block replace) → `releaseClaim` → `updateState('done')` → `listActiveIssues` (done page filtered out) |
 
-Each test archives its fixture page via `notion-update-page { archived: true }` in `finally`.
+Each test archives its fixture page via `ntn api v1/pages/{id} -X PATCH { archived: true }` in `finally`.
 
 ### Cost / runtime
 
-- ~8 MCP tool calls per run.
-- Typical wall time: **~10 seconds** plus first-run `npx` install of `@notionhq/notion-mcp-server`.
+- ~14 `ntn api` calls per run.
+- Typical wall time: **~10 seconds**.
 
 ### Limitations
 
-- `createProject` (notion-create-database) is **not** exercised in the integration test because it leaves a permanent database behind on each run and requires `FORGE_NOTION_PARENT_PAGE_ID`. Unit-tested instead.
+- `createProject` (`POST /v1/databases` with parent.page_id + initial_data_source (API 2026-03-11)) is **not** exercised in the integration test because it leaves a permanent database behind on each run and requires `FORGE_NOTION_PARENT_PAGE_ID`. Unit-tested instead.
 - The race-tiebreak claim path is not reproducible against live Notion (needs two concurrent processes); unit-tested with the `version_conflict` recheck path only.
 
 ---

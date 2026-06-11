@@ -14,18 +14,19 @@ const NotionTrackerConfigSchema = z.object({
   type: z.literal('notion'),
   config: z.object({
     database_id: z.string().min(1),
-    // Launch command for the Notion MCP server. forge spawns its own client over
-    // stdio (it does not piggyback on the host CLI's MCP connection). Default is
-    // the official Notion MCP server via npx; override to point at a different
-    // server binary or version. Required env (e.g. NOTION_TOKEN) inherits from
-    // process.env — NOT routed through the secrets manager (per SPEC).
-    mcp_command: z
-      .array(z.string().min(1))
-      .min(1)
-      .default(['npx', '-y', '@notionhq/notion-mcp-server']),
-    // Additional env vars merged on top of process.env when spawning the MCP
-    // server. Use for non-secret config (region, custom workspace URL, etc.).
-    mcp_env: z.record(z.string(), z.string()).default({}),
+    /**
+     * @deprecated FORGE-117 replaced the Notion MCP transport with the `ntn`
+     * CLI (https://developers.notion.com/cli; auth via `ntn login`). The field
+     * is ACCEPTED AND IGNORED so existing settings.yaml files keep parsing —
+     * no default is emitted — and will be REMOVED in v0.5. The factory prints
+     * a one-line deprecation warning when it is present.
+     */
+    mcp_command: z.array(z.string()).optional(),
+    /**
+     * @deprecated FORGE-117 — accepted and ignored (see mcp_command above);
+     * removed in v0.5.
+     */
+    mcp_env: z.record(z.string(), z.string()).optional(),
   }),
 });
 

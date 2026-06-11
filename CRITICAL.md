@@ -16,7 +16,6 @@
 src/trackers/linear.ts
 src/trackers/github.ts
 src/trackers/notion.ts
-src/trackers/notion-mcp-transport.ts
 src/trackers/base.ts
 src/trackers/footers.ts
 

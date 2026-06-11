@@ -37,10 +37,11 @@ export const GhMilestoneJsonSchema = z.object({
 export type GhIssueJson = z.infer<typeof GhIssueJsonSchema>;
 export type GhMilestoneJson = z.infer<typeof GhMilestoneJsonSchema>;
 
-// ─── Notion MCP response shapes ──────────────────────────────────────────────
+// ─── Notion API response shapes (via the `ntn` CLI since FORGE-117) ─────────
 //
-// Pinned subsets of the Notion MCP server's tool-result envelopes. Each entry
-// here documents what the adapter actually reads — extra fields are ignored
+// Pinned subsets of the Notion REST API responses (parsed from `ntn api`
+// stdout). Each entry documents what the adapter actually reads — extra
+// fields are ignored
 // (z.object is non-strict by default, allowing the upstream server to add
 // fields without breaking forge).
 
