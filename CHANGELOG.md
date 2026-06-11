@@ -4,109 +4,233 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-11
+
+v0.4.0 ships the **closed-loop / ephemeral-ADR workflow**: the `apply-decision`
+verb (FORGE-95), the `/update-spec --draft|--apply` skill (FORGE-93), and the
+`/amend-roadmap` verb + skill (FORGE-101) are all production-ready. Only worker
+drift *events* and the precedence engine remain scheduled for v0.5; the
+worktree-drift-guard was canceled.
+
+Also in this release: Notion tracker support via the `ntn` CLI incl.
+`updateIssueBody` (`setClaimFence` remains stubbed — FORGE-167) (replacing
+the removed MCP transport), `forge migrate` for v0.2.x project paths, a
+greenfield e2e fixture matrix, phases-write lock, and a range of orchestrator
+robustness improvements.
+
+### Migration
+
+- **Pre-v0.4 combined `CLAUDE.md`** — from any repo with a pre-v0.4-shape
+  combined `CLAUDE.md`:
+  ```
+  npm i -g @firatcand/forge@0.4.0 && forge upgrade --migrate-claudemd
+  ```
+- **v0.2.x project drift** — settings blocks, `@inherit` in `DESIGN.md`,
+  `/push-to-linear` references, renamed/dropped orchestrate verbs, missing ADR
+  template, and legacy v1 orchestrator state:
+  ```
+  forge migrate
+  ```
+  `forge migrate` previews all detected drift, requests confirmation, backs up
+  before applying, and reports complex conversions as manual follow-ups —
+  never invoking the owning tool itself (missing settings → `forge
+  init`; `@inherit` strips → `/draft-design`; legacy orchestrator state →
+  `forge orchestrate gc`).
+- **Notion** — MCP transport has been removed; `@modelcontextprotocol/sdk` is
+  no longer a dependency. The official `ntn` CLI is now required — install it
+  and authenticate (credentials live in your system keychain; no API-key env
+  var needed):
+  ```
+  curl -fsSL https://ntn.dev | bash && ntn login
+  ```
+  The `mcp_command` and `mcp_env` fields in `.forge/settings.yaml` are now
+  deprecated-ignored (accepted by the schema but not read; will be removed in
+  v0.5).
+
 ### Added
 
-- **`forge status` verb** (FORGE-159) — a read-only, top-level command that reports
-  a forge-managed project's state in one round-trip: methodology version drift
-  (bundled vs on-disk), agent root files (`CLAUDE.md`/`AGENTS.md`/`GEMINI.md`
-  marker presence + user-content byte size), symlink-farm provenance counts
-  (forge-owned vs user-owned vs broken under `.claude/`, `.codex/`, `.gemini/`),
-  spec placeholder-section counts, `plans/phases.yaml` phase/task counts, and
-  tracker/secrets config. Supports `--json` for a machine-parseable `{ ok, data }`
-  envelope (same shape as the orchestrate verbs) and a human-readable default.
-  Distinct from `forge orchestrate status` (which reports orchestrator run-state).
-  Never writes; a non-forge directory returns `managedByForge: false` and exits 0.
-  Farm provenance reuses the same ownership check `forge upgrade --remove-agent`
-  relies on (`skill-farm.ts`), so "forge-owned" means the same thing whether
-  reporting or pruning.
-- **`forge orchestrate apply-decision` verb** (FORGE-95) — the mechanical applier
-  behind `/update-spec --apply`. Given an **accepted** ephemeral ADR and a
+- **`/amend-roadmap` skill + `forge orchestrate amend-roadmap` verb** (FORGE-101)
+  — tracker-first mid-flight task creation with a journaled, resumable amend
+  flow. Features O_EXCL task-id reservation, adoption-on-resume (exactly-one
+  footer match, refuses truncated views), payload-hash mismatch refusal, and an
+  inline drift warning that replaces the dropped worktree-drift-guard
+  (FORGE-103). The new **phases-write lock** (per-attempt ownership tokens,
+  steal-mutex-serialized takeover, release validity window, `assertFresh` before
+  every write) closes lost-update races — including `apply-decision`'s previously
+  unlocked `phases.yaml` write path. `reconcile` gains `stagedAdditions` +
+  `insertTaskIntoDocument` to keep `phases.yaml` single-writer for mid-flight
+  additions.
+- **`forge migrate` — v0.2.x → v0.4 project migration** (FORGE-109) — detects
+  the v0.2.x drift signatures (stale settings blocks, `@inherit` in
+  `DESIGN.md`, `/push-to-linear` refs, renamed/dropped orchestrate verbs, missing
+  ADR template, legacy v1 orchestrator state), shows a chalk diff preview,
+  requests hybrid confirmation (TTY `y/N`, `--yes` for CI, `--dry-run`), writes
+  verified backups to `.forge/backup-<ts>/` before applying, and re-verifies
+  after each write. Complex conversions are REPORTED as manual follow-ups —
+  migrate never invokes the owning tool itself
+  (missing settings → run `forge init`; `@inherit` strips + follow-up marker;
+  legacy state → `forge orchestrate gc`).
+- **`/update-spec --draft|--apply` skill** (FORGE-93) — two-mode skill wrapping
+  the `apply-decision` verb. `--draft`: active-ADR preflight (malformed
+  ADR-shaped files refuse; companions never block), discovery interview,
+  template instantiation, codex-suggest hook. `--apply`: completed-archive
+  recovery branch before ADR resolution, canonical-file + journal-trust +
+  clean-target gates (tracker scope bounded by `affected_tasks`),
+  payload-complete journal authoring with a schema-validated worked example,
+  per-artifact diff confirmation, envelope-driven error handling, exact-footprint
+  staged-patch audit, and a `--cleanup=verbatim` propagation commit carrying the
+  full ADR rationale. Clears 36 stale "FORGE-93 still v0.5/pending" qualifiers
+  across SPEC/PRD/CONTEXT template.
+- **NotionTracker via the `ntn` CLI** (FORGE-117) — `McpCall` seam replaced with
+  `NtnExec` (a `GhExec` mirror; execa `reject:false` with resolved-ENOENT
+  re-throw). Every tracker call translated to `ntn api v1/...` — except
+  `setClaimFence`, which remains a NOT_IMPLEMENTED stub on Notion (claim-fence
+  storage needs a dedicated design; FORGE-167 follow-up) — (stdin bodies,
+  query-arg pagination, `NOTION_API_VERSION` pinned to 2026-03-11).
+  `updateIssueBody` implemented (validation contract parity, `forge_task_id`
+  precondition, list → delete → append children with documented non-atomic
+  idempotently-re-runnable semantics, shared `bodyToParagraphBlocks` chunking).
+  `classifyNotionExecError` with the full official code table including transient
+  codes. `@modelcontextprotocol/sdk` removed from `package.json` (user-approved
+  soft deprecation; `mcp_command`/`mcp_env` stay schema-accepted but ignored,
+  removed in v0.5). `BaseTracker.withRetry` now honors provider `Retry-After`
+  hints (`details.retryAfterMs`) for **all** adapters — previously stored, never
+  read. `runProbe` (init): central fix for execa@9 resolved-ENOENT spawn failures
+  — every probe (git/gh/claude/codex/ntn/op) now reports install guidance instead
+  of a bogus exit message; `ntn` probe verifies install + keychain auth in one
+  call (`ntn api v1/users/me`).
+- **Greenfield e2e fixtures + lifecycle drive-through + CI matrix** (FORGE-110)
+  — `examples/greenfield-{github,linear,notion}`: frozen mini-projects
+  (deterministic `phases.yaml`, tracker-typed settings, spec stubs with
+  resolvable anchors, ADR template) serving as both test fixtures and living
+  documentation. `test/integration/cli/orchestrate/lifecycle.e2e.test.ts`:
+  per-fixture drive-through gated behind `FORGE_E2E_FIXTURE` (self-skips under
+  plain `npm test`): fixture sanity, claim → dispatch → heartbeat with
+  `state.json`/lease assertions, amend-roadmap drift warning, multi-main CAS
+  race (winner + `ALREADY_CLAIMED` loser envelopes), full `update-spec` closed
+  loop (+ `--resume` crash recovery), `reconcile --pull/--push` drift, migrate
+  smoke. `.github/workflows/ci.yml` gains an e2e job (matrix Node 22/24 × 3
+  fixtures = 6 cells). `docs/release-checklist.md` documents the manual
+  pre-release ritual.
+- **`forge status` verb** (FORGE-159) — a read-only, top-level command that
+  reports a forge-managed project's state in one round-trip: methodology version
+  drift (bundled vs on-disk), agent root files (`CLAUDE.md`/`AGENTS.md`/
+  `GEMINI.md` marker presence + user-content byte size), symlink-farm provenance
+  counts (forge-owned vs user-owned vs broken under `.claude/`, `.codex/`,
+  `.gemini/`), spec placeholder-section counts, `plans/phases.yaml` phase/task
+  counts, and tracker/secrets config. Supports `--json` for a machine-parseable
+  `{ ok, data }` envelope. Distinct from `forge orchestrate status` (which
+  reports orchestrator run-state). Never writes; a non-forge directory returns
+  `managedByForge: false` and exits 0.
+- **`forge orchestrate apply-decision` verb** (FORGE-95) — the mechanical
+  applier behind `/update-spec --apply`. Given an accepted ephemeral ADR and a
   payload-complete journal at
-  `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`, it
-  propagates the decision across SPEC §sections + PRD §sections (marker-block
-  replacement), `phases.yaml` task fields (`description`/`acceptance`), and
-  tracker issue bodies — journaling each mutation so a partial failure is
-  resumable with `--resume`. Flags: `--adr <slug> [--yes-all] [--resume]
-  [--dry-run]`. On full success it writes a durable rationale (a
-  `spec/decisions/INDEX.md` line + a `<slug>.commit-msg.txt` body), deletes the
-  ephemeral ADR, and archives the journal. The verb never runs `git` (the
-  skill/user commits the message file). Trackers that cannot update issue bodies
-  (Notion, until FORGE-117) fail a **preflight** before any local mutation, so
-  the repo is never left half-applied. Folds in FORGE-163 (durable decision
-  rationale via `spec/decisions/INDEX.md`). The `/update-spec --draft|--apply`
-  skill that authors journals is FORGE-93 (still pending) — until then journals
-  are authored by hand or fixture.
-- **`forge eject` — reversible clean uninstall** (FORGE-158) — one command to
-  remove forge from a project. Strips the forge-managed marker block from each
-  agent root file (`CLAUDE.md` / `AGENTS.md` / `GEMINI.md`), preserving your own
-  content byte-for-byte; reverses the `.gitignore` block and the
-  `.eslintignore` / `.prettierignore` lines; removes the host skill/agent farms
-  and the `.forge/` directory. `spec/`, `plans/`, `CRITICAL.md`, and your source
-  are left untouched.
-  ```
-  forge eject                  # dry-run plan (default)
-  forge eject --confirm        # apply
-  forge eject --confirm --no-backup
-  forge eject --restore <dir>  # undo a recent eject
-  ```
-  Safety: dry-run by default; takes a restorable backup snapshot
-  (`.forge.eject-backup-<ISO>/`) before deleting; refuses while an active
-  worktree or a non-terminal task state exists, or when a forge-managed file has
-  uncommitted git changes. Reversal is driven by a new `.forge/manifest.json`
-  (written by `forge init`, refreshed by `forge upgrade`) that records exactly
-  what forge wrote — so version-drift orphans and Windows copy-mode farm entries
-  are handled. Projects predating the manifest fall back to a best-effort derived
-  mode with a warning. Exposed as a top-level verb only (not `forge orchestrate
-  eject`) — eject is a project-lifecycle command, not an orchestrator state
-  transition.
-
-- **`settings.verify` + real verification runner** (FORGE-168) — a new optional
-  `verify` block in `.forge/settings.yaml` lets an adopter declare the commands
-  that prove an attempt is good:
-  ```yaml
-  verify:
-    commands:
-      - npm test
-      - npm run lint
-  ```
-  Each entry is a shell command string, run via `shell: true` in the repo root
-  with the **full** environment (real test suites need `NODE_ENV` / DB creds —
-  this is intentionally not routed through the secret-stripping AI-subprocess
-  path). Commands run sequentially; all run even if one fails, and the runner
-  reports an aggregate pass/fail. **Optional:** unset ⇒ verification is skipped
-  with a warning; a present block must declare ≥1 non-empty command. This is the
-  real-verification capability `forge orchestrate complete` previously deferred
-  (it self-attests); consumed next by the gc `reverify_verdict` executor.
-- **Release automation** (FORGE-157) — two GitHub Action workflows that fire on `v*` tag push:
-  - `.github/workflows/release.yml` — verifies the tag matches `package.json` version, re-runs the full CI gate (typecheck, test, build, pack-gate, smoke) on the tagged commit, then runs `npm publish --provenance`. The `--provenance` flag attaches a SLSA cryptographic attestation linking the published tarball to its source commit + workflow run; adopters can verify with `npm audit signatures`.
-  - `.github/workflows/release-draft.yml` — slices the matching `## [X.Y.Z]` section out of `CHANGELOG.md` and creates a DRAFT GitHub Release pre-filled with those notes; reviewer publishes from the GH UI when ready.
-  - Required GitHub secret: `NPM_TOKEN` (granular automation token, scoped to the `@firatcand/forge` package, publish permission only). Setup recipe in `CONTRIBUTING.md` §Releasing.
-- **Adopter release templates** at `templates/github-workflows/release.yml` and `templates/github-workflows/release-draft.yml` — generic versions (no forge-specific smoke step) that adopter projects can copy into their own `.github/workflows/` manually. Auto-scaffolding by `forge init` is deferred — adopter projects aren't always npm packages, so the npm-vs-other-publishing prompt design needs more work before we wire scaffold integration.
+  `.forge/orchestrator/global/update-spec-apply-journal/<slug>.json`, propagates
+  the decision across SPEC §sections + PRD §sections (marker-block replacement),
+  `phases.yaml` task fields, and tracker issue bodies — journaling each mutation
+  so a partial failure is resumable with `--resume`. On full success writes a
+  durable rationale (`spec/decisions/INDEX.md` line + `<slug>.commit-msg.txt`),
+  deletes the ephemeral ADR, and archives the journal. Trackers that cannot
+  update issue bodies fail a preflight before any local mutation. Folds in
+  FORGE-163 (durable decision rationale via `spec/decisions/INDEX.md`).
+- **`forge eject` — reversible clean uninstall** (FORGE-158) — strips the
+  forge-managed marker block from each agent root file, reverses the `.gitignore`
+  / `.eslintignore` / `.prettierignore` blocks, removes the host skill/agent
+  farms and the `.forge/` directory. `spec/`, `plans/`, `CRITICAL.md`, and your
+  source are left untouched. Dry-run by default; takes a restorable backup
+  snapshot (`.forge.eject-backup-<ISO>/`) before deleting; refuses while an
+  active worktree or a non-terminal task state exists, or when a forge-managed
+  file has uncommitted git changes.
+- **`settings.verify` + real verification runner** (FORGE-168) — optional
+  `verify` block in `.forge/settings.yaml` declares the commands that prove an
+  attempt is good (`npm test`, `npm run lint`, etc.). Commands run sequentially
+  via `shell: true`; all run even if one fails; aggregate pass/fail reported.
+  Optional: unset ⇒ verification skipped with a warning.
+- **Release automation** (FORGE-157) — `.github/workflows/release.yml`
+  (verify-tag → full CI gate → `npm publish --provenance`) and
+  `.github/workflows/release-draft.yml` (slice matching `## [X.Y.Z]` section →
+  create DRAFT GitHub Release). Adopter generic copies at
+  `templates/github-workflows/release.yml` and `release-draft.yml`.
+- **`forge orchestrate dashboard` verb + `/status-check` skill** (FORGE-90) —
+  cross-run cockpit: active sessions (runs owning ≥1 in-flight task), open
+  questions, ready/blocked tasks, file-overlap warnings, lease health
+  (alive/expiring_soon/stale). Extracts `collectActiveAttempts` +
+  `isTrackerIdDone` into `src/orchestrator/readiness.ts` shared by `dashboard`
+  and `phases --ready`.
+- **Decision classifier + preflight wrapper + question budget** (FORGE-65) —
+  `forge orchestrate question` now runs `gateQuestion` before writing: reuse a
+  prior answer → block on an open question → force an autonomous decision at the
+  per-task hard cap → else write (carrying a soft-cap warning). `recommended_option_id`
+  + `what_happens_if_unanswered` required at the verb. New
+  `decision-classifier.ts` and `preflight.ts` (extracted from
+  `guardrail-check`). `{{BUDGET_WARNING}}` placeholder wired for FORGE-98
+  dispatcher integration.
+- **Claim-time overlap gate** (FORGE-170) — `claim.ts` pre-flight refuses a
+  task whose declared `write_globs` hard-overlap an already-active attempt
+  (retriable `OVERLAP_CONFLICT`) unless `--force`. `DEFAULT_HARD_LOCK_GLOBS`
+  retuned: drops `plans/phases.yaml` (generated cache, byte-stable via
+  FORGE-121), adds `spec/**` + `skills/**`.
+- **Claim-metadata footer storage + read** (FORGE-145 / FORGE-167) —
+  `src/trackers/claim-fence.ts` (parse/upsert/strip the `<!-- forge:claim={json}
+  -->` footer); `setClaimFence` write side on Linear + GitHub adapters; `toIssue`
+  on both adapters populates `Issue.claimId`/`claimGeneration`/`claimOwnerRunId`
+  from the body fence. Foundation for gc tracker-divergence rows. Notion write
+  stubbed (lands with FORGE-117, delivered in this release).
+- **Per-repo `.forge/.env` auto-load for tracker credentials** (#259) —
+  `src/core/forge-env.ts` loads an allowlisted set of tracker-auth keys from
+  `.forge/.env` into `process.env` at CLI startup (no-override, absent file
+  is a no-op, malformed file warns but never crashes). `forge init` scaffolds a
+  `.forge/.env` create-once. Linear AUTH errors now name `.forge/.env`.
 
 ### Changed
 
-- **`npm run lint` now runs ESLint** (#264, #265) — forge's repo gained a minimal,
-  non-blocking ESLint setup (flat config: `@typescript-eslint/no-unused-vars`,
-  `no-unreachable`, `no-constant-condition`, all as **warnings**). The `lint`
-  script previously aliased to `typecheck`, which can't flag unused imports/vars
-  (the repo omits `noUnusedLocals`) — exactly the gap that let a dead import slip
-  through review. Warnings-only keeps it non-blocking; CI runs it via a
-  `continue-on-error` step, and all 23 pre-existing warnings were cleared.
-  Contributor-facing dev tooling only — forge ships no linter config, so adopters
-  are unaffected.
+- **`npm run lint` now runs ESLint** (#264, #265) — minimal non-blocking ESLint
+  setup (flat config: `@typescript-eslint/no-unused-vars`, `no-unreachable`,
+  `no-constant-condition`, all as **warnings**). The `lint` script previously
+  aliased to `typecheck`. Warnings-only; CI runs via `continue-on-error`; all 23
+  pre-existing warnings were cleared. Contributor-facing dev tooling only.
+- **`forge orchestrate reconcile --pull` formatting preserved** (FORGE-121) —
+  serializes with `{ lineWidth: 0, flowCollectionPadding: false }` so untouched
+  nodes round-trip byte-stable. A 53-title-sync pull dropped from 1835 changed
+  lines to 112. `depends_on` lists now edited in-place (preserving block-style
+  formatting and inline comments). Deduplication of tracker `blockerIds` at
+  source prevents spurious depends_on diffs on every --pull.
+- **`forge orchestrate reconcile --pull` false-pruning fixed** (FORGE-165) —
+  matched `tracker_issue_id` against both tracker `id` and `identifier`; added
+  `Tracker.listAllIssues()` (terminal states now seen, so done/cancelled tasks
+  are never mistaken for deleted ones). Fail-closed on truncation: orphan
+  detection skipped when the adapter hits its page/limit cap.
+- **Codex review harness: diff via stdin instead of argv** (FORGE-166) — avoids
+  `SPAWN_FAILED` when the diff exceeds the OS exec arg-size limit.
+- **SPEC/PRD `deferred to v0.5` language corrected** — the ephemeral-ADR and
+  closed-loop workflow was re-scoped into v0.4 on 2026-06-11. Worker drift
+  events, the precedence engine, and the canceled worktree-drift-guard remain
+  correctly deferred/dropped.
 
 ### Fixed
 
 - **Scaffolded lint/e2e gate steps no longer fail when the script is absent**
-  (#267) — the templates `forge init` writes referenced `npm run lint` (CI
-  workflow + the default `phases.yaml` `gate_check_command`) and `npm run e2e`
-  (gate) unconditionally, so a project that hadn't defined those scripts hit
-  `Missing script` failures in CI and at the phase gate. They now use
-  `npm run lint --if-present` / `npm run e2e --if-present`; `typecheck` stays the
-  hard requirement, and the `CLAUDE.md` / `AGENTS.md` / `GEMINI.md` command lists
-  annotate Lint as "(if your project defines one)". Forge still imposes no
-  linter — the references just stop hard-failing when absent. Adopter-side mirror
-  of the forge-repo lint-script fix (#256).
+  (#267, #268) — templates now use `npm run lint --if-present` / `npm run e2e
+  --if-present`; `typecheck` stays the hard requirement.
+- **`runProbe` ENOENT crash fix** (FORGE-117) — execa@9 resolved-ENOENT spawn
+  failures now surface as install-guidance messages instead of bogus exit codes
+  for every probe (git/gh/claude/codex/ntn/op).
+- **Orchestration audit umbrella** (#262) — dead import cleanup, stale comment
+  refresh (`DECISION_KEY_EXHAUSTED` is no longer dormant), missing verb-level
+  test for the `render-worker-prompt` question-budget soft-cap path, Linear
+  claim retry classifier guard, and stale-dist e2e test restoration.
+
+### Removed
+
+- **`notion-mcp-transport.ts`** — `src/trackers/notion-mcp-transport.ts` deleted;
+  `@modelcontextprotocol/sdk` removed from `package.json`. The Notion MCP
+  transport has been replaced by the `ntn` CLI adapter (FORGE-117).
+  `mcp_command`/`mcp_env` settings fields are deprecated-ignored (accepted,
+  never read; will be removed in v0.5).
+- **Dead internal helpers + unused test fixtures** (#249) — `flags.ts:
+  nthPositional`, `core/errors.ts: isOrchestratorError`, `scaffold.ts:
+  toSettingsObject`, `orchestrator/overlap.ts: globsOverlap`. Associated dead
+  test fixtures removed.
 
 ## [0.3.0] — 2026-05-25
 
