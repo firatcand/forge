@@ -118,11 +118,101 @@ const attachHandler: VerbHandler = {
 const gcHandler: VerbHandler = {
   band: 'mutate',
   synopsis:
-    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
+    'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans); --remove-worktrees [--task <id>] removes terminal-task worktrees.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const dryRun = hasFlag(rest, 'dry-run');
-    const result = runOrchestrateGc({ forgeDir, dryRun });
+
+    // ── `--remove-worktrees` — mutually exclusive early mode (FORGE-116) ──
+    if (hasFlag(rest, 'remove-worktrees')) {
+      // No other gc flags may combine with this mode. Allowed companions are
+      // exactly: --task <id>, --dry-run, --json, and --forge-dir.
+      const ALLOWED = new Set([
+        'remove-worktrees',
+        'task',
+        'dry-run',
+        'json',
+        'forge-dir',
+      ]);
+      for (const arg of rest) {
+        if (!arg.startsWith('--')) continue;
+        const name = arg.slice(2).split('=')[0]!;
+        if (!ALLOWED.has(name)) {
+          const envelope = fail(
+            'INVALID_ARGS',
+            `forge orchestrate gc --remove-worktrees: unknown or incompatible flag '--${name}'. ` +
+              `In this mode only --task <id>, --dry-run, and --json are accepted.`,
+            false,
+          );
+          return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
+        }
+      }
+      // Fix 4 (FORGE-116): reject any positional argument in --remove-worktrees
+      // mode. The accepted surface is exactly --task <id>, --dry-run, --json,
+      // --forge-dir. A positional (any token not starting with '--' and not the
+      // value of a flag that consumes the next token) is not part of this surface.
+      {
+        const valueFlags = new Set(['task', 'forge-dir']); // flags that consume next token
+        let i = 0;
+        while (i < rest.length) {
+          const a = rest[i]!;
+          if (a.startsWith('--')) {
+            const name = a.slice(2).split('=')[0]!;
+            // If it's a value-consuming flag in `--flag value` form, skip the value token too.
+            if (valueFlags.has(name) && !a.includes('=')) {
+              i += 2;
+            } else {
+              i += 1;
+            }
+          } else {
+            // Positional token.
+            const envelope = fail(
+              'INVALID_ARGS',
+              `forge orchestrate gc --remove-worktrees: unexpected positional argument '${a}'. ` +
+                `This mode accepts no positional arguments; use --task <id> to scope to a single task.`,
+              false,
+            );
+            return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
+          }
+        }
+      }
+      // --task, if present, must carry a value that passes the task-id format.
+      // Fix 1 (FORGE-116): validate BEFORE any path construction so that a value
+      // like `../..` is rejected with INVALID_ARGS rather than escaping .forge/worktrees.
+      const TASK_ID_RE = /^(?:[A-Z][A-Z0-9]*-\d+|P\d+(?:\.\d+)?-T\d+[a-z]?)$/;
+      let scopedTask: string | undefined;
+      if (hasFlag(rest, 'task')) {
+        const value = parseFlag(rest, 'task');
+        if (value === undefined || value.length === 0 || value.startsWith('--')) {
+          const envelope = fail(
+            'INVALID_ARGS',
+            "forge orchestrate gc --remove-worktrees: --task requires a value (the task id).",
+            false,
+          );
+          return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
+        }
+        if (!TASK_ID_RE.test(value)) {
+          const envelope = fail(
+            'INVALID_ARGS',
+            `forge orchestrate gc --remove-worktrees: --task value '${value}' is not a valid task id. ` +
+              `Expected format: TRACKER-123 (e.g. FORGE-116) or P1-T3 (phases shape).`,
+            false,
+          );
+          return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
+        }
+        scopedTask = value;
+      }
+      const result = await runOrchestrateGc({
+        forgeDir,
+        dryRun,
+        removeWorktrees: true,
+        json: hasFlag(rest, 'json'),
+        ...(scopedTask !== undefined ? { removeWorktreesTask: scopedTask } : {}),
+      });
+      return { exitCode: result.exitCode };
+    }
+
+    const result = await runOrchestrateGc({ forgeDir, dryRun });
     return { exitCode: result.exitCode };
   },
 };

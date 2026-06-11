@@ -100,11 +100,11 @@ function writeState(
 
 // ── Clean-tree behavior ──
 
-test('orchestrate gc reconciler: clean tree (no tasks) → "no divergences" + exit 0', () => {
+test('orchestrate gc reconciler: clean tree (no tasks) → "no divergences" + exit 0', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.equal(result.reconcilerRows?.length, 0);
     assert.match(out(), /no divergences/);
@@ -115,14 +115,14 @@ test('orchestrate gc reconciler: clean tree (no tasks) → "no divergences" + ex
 
 // ── Dry-run formatter ──
 
-test('orchestrate gc --dry-run: reconciler plan formatted but not applied (row 14)', () => {
+test('orchestrate gc --dry-run: reconciler plan formatted but not applied (row 14)', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
     writeState(fd, 'TASK-X', { state: 'shipped' });
     writeLease(fd, 'TASK-X', { task_id: 'TASK-X' });
 
-    const result = runOrchestrateGc({
+    const result = await runOrchestrateGc({
       forgeDir: fd,
       dryRun: true,
       stdout,
@@ -148,7 +148,7 @@ test('orchestrate gc --dry-run: reconciler plan formatted but not applied (row 1
 
 // ── Apply mode: row 14 ──
 
-test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked + admin_released history event', () => {
+test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked + admin_released history event', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -156,7 +156,7 @@ test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked +
     writeLease(fd, 'TASK-X', { task_id: 'TASK-X', claim_id: 'claim-X' });
     assert.equal(existsSync(leaseFilePath(fd, 'TASK-X')), true);
 
-    const result = runOrchestrateGc({
+    const result = await runOrchestrateGc({
       forgeDir: fd,
       stdout,
       stderr,
@@ -182,7 +182,7 @@ test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked +
 
 // ── Apply mode: row 13 ──
 
-test('orchestrate gc apply: row 13 (multiple leases) → older-generation lease released, canonical untouched', () => {
+test('orchestrate gc apply: row 13 (multiple leases) → older-generation lease released, canonical untouched', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -198,7 +198,7 @@ test('orchestrate gc apply: row 13 (multiple leases) → older-generation lease 
     assert.equal(existsSync(leaseFilePath(fd, 'TASK-Y')), true);
     assert.equal(existsSync(leaseFilePath(fd, 'TASK-Y') + '.dup'), true);
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.ok(
       result.reconcilerRows?.some(
@@ -217,14 +217,14 @@ test('orchestrate gc apply: row 13 (multiple leases) → older-generation lease 
 
 // ── Apply mode: row 2 ──
 
-test('orchestrate gc apply: row 2 (expired running lease) → abandoned + lease released', () => {
+test('orchestrate gc apply: row 2 (expired running lease) → abandoned + lease released', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
     writeState(fd, 'TASK-EXP', { state: 'running' });
     writeLease(fd, 'TASK-EXP', { task_id: 'TASK-EXP', claim_id: 'claim-EXP' });
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.ok(result.reconcilerRows?.some((r) => r.rowId === 2 && r.action === 'mark_abandoned'));
     assert.equal(existsSync(leaseFilePath(fd, 'TASK-EXP')), false);
@@ -238,7 +238,7 @@ test('orchestrate gc apply: row 2 (expired running lease) → abandoned + lease 
 
 // ── Apply mode: row 8 ──
 
-test('orchestrate gc apply: row 8 (verdict without verified copy) → writes verdict.verified.json', () => {
+test('orchestrate gc apply: row 8 (verdict without verified copy) → writes verdict.verified.json', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -260,7 +260,7 @@ test('orchestrate gc apply: row 8 (verdict without verified copy) → writes ver
       }),
     );
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.ok(result.reconcilerRows?.some((r) => r.rowId === 8 && r.action === 'reverify_verdict'));
     const verified = JSON.parse(readFileSync(join(aDir, 'verdict.verified.json'), 'utf8'));
@@ -274,7 +274,7 @@ test('orchestrate gc apply: row 8 (verdict without verified copy) → writes ver
 
 // ── Apply mode: row 11 (archive question on terminal attempt) ──
 
-test('orchestrate gc apply: row 11 — question file on terminal attempt is archived', () => {
+test('orchestrate gc apply: row 11 — question file on terminal attempt is archived', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out, err } = capture();
   try {
@@ -289,7 +289,7 @@ test('orchestrate gc apply: row 11 — question file on terminal attempt is arch
     writeFileSync(join(aDir, 'verdict.json'), '{"verdict":"ready_for_review"}');
     writeFileSync(join(aDir, 'verdict.verified.json'), '{"verdict":"ready_for_review"}');
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0, `stderr: ${err()}, stdout: ${out()}`);
     // After execution: row 11 archived the question
     assert.equal(existsSync(join(qDir, 'q1.json')), false, 'question file should move');
@@ -309,7 +309,7 @@ test('orchestrate gc apply: row 11 — question file on terminal attempt is arch
 
 // ── Apply mode: row 14 + row 11 in one plan ──
 
-test('orchestrate gc apply: multiple rows in one plan execute deterministically', () => {
+test('orchestrate gc apply: multiple rows in one plan execute deterministically', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr } = capture();
   try {
@@ -326,7 +326,7 @@ test('orchestrate gc apply: multiple rows in one plan execute deterministically'
     writeFileSync(join(aDir, 'verdict.json'), '{"verdict":"ready_for_review"}');
     writeFileSync(join(aDir, 'verdict.verified.json'), '{"verdict":"ready_for_review"}');
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.equal(result.reconcilerRows?.length, 2);
     assert.equal(result.reconcilerErrors?.length ?? 0, 0);
@@ -337,19 +337,19 @@ test('orchestrate gc apply: multiple rows in one plan execute deterministically'
 
 // ── Idempotence ──
 
-test('orchestrate gc apply: re-running after apply produces empty reconciler plan', () => {
+test('orchestrate gc apply: re-running after apply produces empty reconciler plan', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr } = capture();
   try {
     writeState(fd, 'TASK-IDEM', { state: 'shipped' });
     writeLease(fd, 'TASK-IDEM', { task_id: 'TASK-IDEM' });
 
-    const first = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const first = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(first.exitCode, 0);
     assert.equal(first.reconcilerRows?.length, 1);
 
     const { stdout: s2, stderr: e2, out: out2 } = capture();
-    const second = runOrchestrateGc({ forgeDir: fd, stdout: s2, stderr: e2, now: fixedNow });
+    const second = await runOrchestrateGc({ forgeDir: fd, stdout: s2, stderr: e2, now: fixedNow });
     assert.equal(second.exitCode, 0);
     assert.equal(second.reconcilerRows?.length, 0);
     assert.match(out2(), /no divergences/);
@@ -360,7 +360,7 @@ test('orchestrate gc apply: re-running after apply produces empty reconciler pla
 
 // ── Legacy migration regression: legacy + reconciler coexist in one invocation ──
 
-test('orchestrate gc: legacy migration AND reconciler plan execute in the same invocation', () => {
+test('orchestrate gc: legacy migration AND reconciler plan execute in the same invocation', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -372,7 +372,7 @@ test('orchestrate gc: legacy migration AND reconciler plan execute in the same i
     writeState(fd, 'TASK-MIX', { state: 'shipped' });
     writeLease(fd, 'TASK-MIX', { task_id: 'TASK-MIX' });
 
-    const result = runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
+    const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     // Legacy migrated
     assert.equal(result.migrated.length, 1);

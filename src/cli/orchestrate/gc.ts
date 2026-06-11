@@ -1,4 +1,5 @@
 import {
+  existsSync,
   linkSync,
   mkdirSync,
   readFileSync,
@@ -47,11 +48,33 @@ import {
 import { LeaseSchema } from '../../schemas/lease.ts';
 import {
   TaskStateSchema,
+  type TaskState,
   type TaskStateRecord,
 } from '../../schemas/task-state.ts';
 import type { Phases } from '../../schemas/phases.ts';
 import { VerdictSchema } from '../../schemas/verdict.ts';
 import type { Issue } from '../../trackers/types.ts';
+import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
+import { WorkspaceError } from '../../core/errors.ts';
+import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
+import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
+
+// ── Task-id validation for --remove-worktrees mode (FORGE-116, fix 1) ─────────
+//
+// Two valid shapes come from two different ID namespaces:
+//   • Tracker IDs (Linear / GitHub): /^[A-Z][A-Z0-9]*-\d+$/   e.g. FORGE-116, WT-1
+//   • Phases-shape IDs:              /^P\d+(\.\d+)?-T\d+[a-z]?$/  e.g. P1-T3, P2.1-T5b
+//
+// Any other value MUST be rejected with INVALID_ARGS before any path is
+// constructed, to prevent path-traversal attacks (e.g. `--task ../..`).
+// Marker taskIds read from disk are validated with the same predicate before
+// they participate in any path join — see readWorktreeMarker().
+const TASK_ID_TRACKER_RE = /^[A-Z][A-Z0-9]*-\d+$/;
+const TASK_ID_PHASES_RE = /^P\d+(\.\d+)?-T\d+[a-z]?$/;
+
+function isValidTaskId(id: string): boolean {
+  return TASK_ID_TRACKER_RE.test(id) || TASK_ID_PHASES_RE.test(id);
+}
 
 // `forge orchestrate gc` is the deterministic reconciler defined by
 // spec/ORCHESTRATOR.md §"gc reconciliation rules". Two-phase execution:
@@ -79,6 +102,16 @@ export interface OrchestrateGcOptions {
   // Injectable clock — tests use a fixed timestamp so the archive directory
   // path is deterministic.
   readonly now?: () => Date;
+  // ── `--remove-worktrees` mode (FORGE-116) ──
+  // When set, gc runs the worktree-removal planner/executor as a MUTUALLY
+  // EXCLUSIVE early mode (it never falls through to the legacy migration or the
+  // 14-row divergence reconciler). `removeWorktreesTask` scopes to a single
+  // task id (the `--task` flag); when undefined the mode iterates every
+  // terminal-state worktree (batch mode).
+  readonly removeWorktrees?: boolean;
+  readonly removeWorktreesTask?: string;
+  // Emit the JSON envelope the /wrap-up SKILL consumes instead of human text.
+  readonly json?: boolean;
 }
 
 export interface OrchestrateGcResult {
@@ -100,6 +133,59 @@ export interface OrchestrateGcResult {
   readonly reconcilerDeferred?: readonly GcPlanRow[];
   // Reconciler rows that failed during apply, with the error message.
   readonly reconcilerErrors?: readonly { row: GcPlanRow; message: string }[];
+  // ── `--remove-worktrees` mode (FORGE-116) ──
+  // The planner envelope the /wrap-up SKILL consumes. Present only in this mode.
+  // On --dry-run this is the plan (eligible/refused). On a non-dry run the
+  // `results` field carries the per-task removal outcome.
+  readonly removeWorktrees?: RemoveWorktreesEnvelope;
+}
+
+// ── `--remove-worktrees` planner / executor types (FORGE-116) ──
+
+export interface RemoveWorktreesEligible {
+  readonly task_id: string;
+  readonly worktree_path: string;
+  readonly branch: string;
+  readonly state: TaskState;
+}
+
+export interface RemoveWorktreesRefused {
+  readonly task_id: string;
+  readonly reason: string;
+  readonly state?: TaskState;
+}
+
+export interface RemoveWorktreesResult {
+  readonly task_id: string;
+  readonly worktree_path: string;
+  readonly branch: string;
+  readonly state: TaskState;
+  // 'removed' — worktree directory gone; 'noop' — worktree already absent
+  // (NOT_FOUND, per delta 8); 'refused' — gate refused at re-check time;
+  // 'error' — cleanup() threw something other than NOT_FOUND/GITIGNORED_LOSS.
+  readonly outcome: 'removed' | 'noop' | 'refused' | 'error';
+  readonly reason?: string;
+}
+
+export interface RemoveWorktreesAbsent {
+  readonly task_id: string;
+}
+
+export interface RemoveWorktreesEnvelope {
+  readonly mode: 'remove-worktrees';
+  readonly dryRun: boolean;
+  // dry-run planner output (the SKILL's candidate list).
+  readonly eligible: readonly RemoveWorktreesEligible[];
+  readonly refused: readonly RemoveWorktreesRefused[];
+  // Planner-detected absent worktrees (delta 8): the directory does not exist.
+  // Chosen noop mechanism: planner emits a third `absent` list (rather than
+  // placing the entry in `refused`) so callers can distinguish "nothing to
+  // remove" (pure noop, exit 0) from "gate refused a real candidate". On a
+  // non-dry-run the executor converts each absent entry to
+  // `results[].outcome: "noop"`, which also keeps exit 0.
+  readonly absent: readonly RemoveWorktreesAbsent[];
+  // non-dry-run per-task outcomes (absent on dry-run).
+  readonly results?: readonly RemoveWorktreesResult[];
 }
 
 interface PlannedMove {
@@ -199,13 +285,19 @@ function moveFile(from: string, to: string): void {
   }
 }
 
-export function runOrchestrateGc(
+export async function runOrchestrateGc(
   opts: OrchestrateGcOptions,
-): OrchestrateGcResult {
+): Promise<OrchestrateGcResult> {
   const out = opts.stdout ?? process.stdout;
   const err = opts.stderr ?? process.stderr;
   const dryRun = opts.dryRun ?? false;
   const now = opts.now ?? (() => new Date());
+
+  // ── `--remove-worktrees` — mutually exclusive early mode (FORGE-116) ──
+  // This NEVER falls through to legacy migration or the divergence reconciler.
+  if (opts.removeWorktrees) {
+    return runRemoveWorktrees(opts, out, err, now());
+  }
 
   // ── Phase 0: legacy v1 question-tree migration (FORGE-73, preserved) ──
 
@@ -309,6 +401,411 @@ export function runOrchestrateGc(
     reconcilerDeferred: deferred,
     reconcilerErrors: errors,
   };
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+//  `--remove-worktrees` mode (FORGE-116) — wraps workspace.cleanup() per task.
+//
+//  Two-pass design so dry-run and execute share ONE eligibility/gate path:
+//    1. plan: classify every candidate worktree into eligible / refused.
+//    2. execute (non-dry-run only): RE-CHECK the lease gate immediately before
+//       each cleanup (delta 4), then call cleanup() with deleteBranch:false and
+//       NO force flag (deltas 6, 2). The verb removes worktrees only; the SKILL
+//       owns branch deletion + main ff.
+//
+//  Eligibility (delta 3):
+//    --task : ready_for_review | reviewed | shipped | cancelled | failed
+//    batch  : shipped | cancelled | failed (terminal only)
+//    Both modes refuse unclaimed, ACTIVE states, and abandoned.
+//  Lease gate (delta 4): refuse alive AND expiring_soon; allow stale; a
+//  malformed lease refuses (never treated as absent); an absent lease allows.
+// ────────────────────────────────────────────────────────────────────────────
+
+const SINGLE_TASK_ELIGIBLE: ReadonlySet<TaskState> = new Set<TaskState>([
+  'ready_for_review',
+  'reviewed',
+  'shipped',
+  'cancelled',
+  'failed',
+]);
+
+const BATCH_ELIGIBLE: ReadonlySet<TaskState> = new Set<TaskState>([
+  'shipped',
+  'cancelled',
+  'failed',
+]);
+
+interface WorktreeCandidate {
+  readonly taskId: string;
+  readonly worktreePath: string;
+  readonly branch: string;
+}
+
+// Read + validate the worktree-task marker. Returns null if the marker is
+// missing/unreadable/invalid OR its taskId does not match the directory name
+// (delta 7 — never assume feat/<id>; validate marker.taskId === dirname).
+//
+// Fix 1 (FORGE-116): additionally validates that the marker's taskId passes the
+// task-id format check (isValidTaskId) AND contains no path separators before
+// it is returned to callers. This prevents a crafted marker from injecting a
+// traversal component into any downstream path join.
+function readWorktreeMarker(
+  worktreePath: string,
+  dirName: string,
+): { taskId: string; branch: string } | null {
+  const markerPath = join(worktreePath, TASK_MARKER_RELPATH);
+  let raw: string;
+  try {
+    raw = readFileSync(markerPath, 'utf8');
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const m = parsed as Record<string, unknown>;
+  if (typeof m.taskId !== 'string' || typeof m.branch !== 'string') return null;
+  // Reject marker taskIds that fail the canonical format or contain path separators.
+  if (!isValidTaskId(m.taskId) || m.taskId.includes('/') || m.taskId.includes('\\')) return null;
+  if (m.taskId !== dirName) return null;
+  return { taskId: m.taskId, branch: m.branch };
+}
+
+// Read the task's state.json. Returns the state string or null (absent /
+// unreadable / schema-invalid → treated as "no observable state").
+function readTaskStateForWorktree(
+  forgeDir: string,
+  taskId: string,
+): TaskState | null {
+  const taskDir = join(tasksRootDir(forgeDir), taskId);
+  const path = join(taskDir, 'state.json');
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const res = TaskStateSchema.safeParse(parsed);
+  return res.success ? res.data.state : null;
+}
+
+type LeaseGate =
+  | { ok: true }
+  | { ok: false; reason: string };
+
+// Lease gate (delta 4). `now` is injected so tests are deterministic.
+//   - absent lease  → allow (LEASE_NOT_FOUND treated as "no live owner")
+//   - malformed/unparseable lease → refuse (never treat as absent)
+//   - alive | expiring_soon → refuse
+//   - stale → allow
+function checkLeaseGate(
+  forgeDir: string,
+  taskId: string,
+  now: Date,
+): LeaseGate {
+  const path = leaseFilePath(forgeDir, taskId);
+  if (!existsSync(path)) return { ok: true };
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch {
+    // Present but unreadable — refuse; never silently treat as absent.
+    return { ok: false, reason: 'lease.json present but unreadable; refusing (run gc divergence reconciler or release manually)' };
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'lease.json is malformed JSON; refusing (never treated as absent)' };
+  }
+  const parsed = LeaseSchema.safeParse(json);
+  if (!parsed.success) {
+    return { ok: false, reason: 'lease.json failed schema validation; refusing (never treated as absent)' };
+  }
+  const health = classifyLeaseHealth(parsed.data.expires_at, now);
+  if (health === 'alive' || health === 'expiring_soon') {
+    return { ok: false, reason: `lease is ${health}; refusing to remove an actively-leased worktree` };
+  }
+  // stale → orphaned, safe to remove.
+  return { ok: true };
+}
+
+// Why a candidate is refused by the eligibility/gate checks (state-only; the
+// lease re-check happens at execute time).
+function classifyEligibility(
+  state: TaskState | null,
+  batch: boolean,
+): { eligible: true } | { eligible: false; reason: string } {
+  if (state === null) {
+    return { eligible: false, reason: 'no task state.json found (unclaimed or never claimed); refusing' };
+  }
+  if (state === 'unclaimed') {
+    return { eligible: false, reason: 'task is unclaimed; refusing' };
+  }
+  if (ACTIVE_STATES.has(state)) {
+    return { eligible: false, reason: `task is in active state '${state}'; refusing` };
+  }
+  if (state === 'abandoned') {
+    return { eligible: false, reason: "task is 'abandoned'; refusing (run the gc divergence reconciler)" };
+  }
+  const allowed = batch ? BATCH_ELIGIBLE : SINGLE_TASK_ELIGIBLE;
+  if (!allowed.has(state)) {
+    const scope = batch ? 'batch mode allows only terminal states (shipped/cancelled/failed)' : 'not an eligible state';
+    return { eligible: false, reason: `task state '${state}': ${scope}; refusing` };
+  }
+  return { eligible: true };
+}
+
+function listWorktreeDirs(worktreesRoot: string): string[] {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = readdirSync(worktreesRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+}
+
+// Build the planner: classify candidates into eligible/refused/absent. Pure of
+// any mutation. The lease gate is evaluated here for the plan view, then
+// RE-CHECKED at execute time (delta 4).
+//
+// Noop mechanism (fix 3, FORGE-116): missing worktrees go into the `absent`
+// list (a third category, NOT `refused`). This keeps the refused list for
+// real gate failures, so callers can distinguish:
+//   - pure noop (eligible:[], refused:[], absent:[...]) → exit 0
+//   - gate refusal  (refused:[...]) → distinguishable from noop
+// The executor converts each absent entry to `results[].outcome: "noop"`.
+function planRemoveWorktrees(
+  forgeDir: string,
+  now: Date,
+  scopedTask: string | undefined,
+): { eligible: RemoveWorktreesEligible[]; refused: RemoveWorktreesRefused[]; absent: RemoveWorktreesAbsent[]; candidates: Map<string, WorktreeCandidate> } {
+  const worktreesRoot = join(forgeDir, 'worktrees');
+  const batch = scopedTask === undefined;
+
+  let dirNames: string[];
+  if (scopedTask !== undefined) {
+    // Single-task mode: only consider the named worktree dir (if it exists).
+    dirNames = [scopedTask];
+  } else {
+    dirNames = listWorktreeDirs(worktreesRoot);
+  }
+
+  const eligible: RemoveWorktreesEligible[] = [];
+  const refused: RemoveWorktreesRefused[] = [];
+  const absent: RemoveWorktreesAbsent[] = [];
+  const candidates = new Map<string, WorktreeCandidate>();
+
+  for (const dirName of dirNames) {
+    const worktreePath = join(worktreesRoot, dirName);
+    if (!existsSync(worktreePath)) {
+      // --task pointed at a worktree directory that does not exist → planned
+      // noop (delta 8). Batch mode never produces this (it lists existing dirs).
+      // Placed in `absent`, NOT `refused`, so callers can distinguish
+      // "nothing to remove" from a gate refusal of a real candidate.
+      if (scopedTask !== undefined) {
+        absent.push({ task_id: dirName });
+      }
+      continue;
+    }
+    const marker = readWorktreeMarker(worktreePath, dirName);
+    if (!marker) {
+      refused.push({ task_id: dirName, reason: 'worktree marker missing/invalid or marker.taskId does not match directory name; refusing' });
+      continue;
+    }
+    const state = readTaskStateForWorktree(forgeDir, marker.taskId);
+    const elig = classifyEligibility(state, batch);
+    if (!elig.eligible) {
+      refused.push({ task_id: marker.taskId, reason: elig.reason, ...(state ? { state } : {}) });
+      continue;
+    }
+    const gate = checkLeaseGate(forgeDir, marker.taskId, now);
+    if (!gate.ok) {
+      refused.push({ task_id: marker.taskId, reason: gate.reason, ...(state ? { state } : {}) });
+      continue;
+    }
+    // state is non-null here (classifyEligibility refuses null).
+    eligible.push({ task_id: marker.taskId, worktree_path: worktreePath, branch: marker.branch, state: state! });
+    candidates.set(marker.taskId, { taskId: marker.taskId, worktreePath, branch: marker.branch });
+  }
+
+  return { eligible, refused, absent, candidates };
+}
+
+async function runRemoveWorktrees(
+  opts: OrchestrateGcOptions,
+  out: NodeJS.WritableStream,
+  err: NodeJS.WritableStream,
+  now: Date,
+): Promise<OrchestrateGcResult> {
+  const dryRun = opts.dryRun ?? false;
+  const json = opts.json ?? false;
+  const worktreesRoot = join(opts.forgeDir, 'worktrees');
+
+  const { eligible, refused, absent } = planRemoveWorktrees(
+    opts.forgeDir,
+    now,
+    opts.removeWorktreesTask,
+  );
+
+  if (dryRun) {
+    const envelope: RemoveWorktreesEnvelope = {
+      mode: 'remove-worktrees',
+      dryRun: true,
+      eligible,
+      refused,
+      absent,
+    };
+    if (json) {
+      out.write(`${JSON.stringify({ eligible, refused, absent })}\n`);
+    } else {
+      formatRemovePlan(eligible, refused, absent, out);
+    }
+    return { exitCode: 0, migrated: [], removeWorktrees: envelope };
+  }
+
+  // ── Execute. RE-CHECK the lease gate immediately before each cleanup. ──
+  const results: RemoveWorktreesResult[] = [];
+  // Fix 2 (FORGE-116): any `refused` or `error` outcome in a non-dry-run
+  // execution must produce a non-zero exit code (1) so callers (e.g. /wrap-up)
+  // detect the failure and do not proceed to branch deletion. Pure noop and
+  // removed outcomes stay 0. The JSON envelope is unchanged.
+  let hadNonNoop = false;
+
+  // Convert planner-detected absent entries directly to noop results.
+  // The absent list is populated only in single-task mode (--task), so this
+  // loop is typically 0 or 1 iterations.
+  for (const a of absent) {
+    results.push({
+      task_id: a.task_id,
+      worktree_path: join(worktreesRoot, a.task_id),
+      branch: '',
+      state: 'shipped', // placeholder — no marker was read; not used by callers
+      outcome: 'noop',
+      reason: 'worktree directory already absent (nothing to remove)',
+    });
+  }
+
+  for (const cand of eligible) {
+    const state = readTaskStateForWorktree(opts.forgeDir, cand.task_id);
+    // Re-validate eligibility + lease at execute time (state or lease may have
+    // changed between plan and execute).
+    const elig = classifyEligibility(state, opts.removeWorktreesTask === undefined);
+    if (!elig.eligible) {
+      results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'refused', reason: elig.reason });
+      hadNonNoop = true;
+      continue;
+    }
+    const gate = checkLeaseGate(opts.forgeDir, cand.task_id, now);
+    if (!gate.ok) {
+      results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'refused', reason: gate.reason });
+      hadNonNoop = true;
+      continue;
+    }
+    try {
+      await cleanup(cand.task_id, {
+        root: worktreesRoot,
+        deleteBranch: false, // delta 6 — verb removes worktrees only.
+        // No force — delta 2. GITIGNORED_LOSS surfaces verbatim with guidance.
+      });
+      results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'removed' });
+    } catch (e) {
+      if (e instanceof WorkspaceError && e.code === 'NOT_FOUND') {
+        // delta 8 — worktree vanished between plan and execute → noop, not error.
+        results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'noop', reason: 'worktree already absent' });
+        continue;
+      }
+      if (e instanceof WorkspaceError && e.code === 'GITIGNORED_LOSS') {
+        // delta 2 — surface verbatim with manual guidance; no force flag.
+        const files = Array.isArray(e.details.files) ? (e.details.files as string[]) : [];
+        const guidance =
+          `${e.message}. Refusing to remove (would lose gitignored files: ${files.join(', ')}). ` +
+          `Remove the offending files from ${cand.worktree_path} (e.g. a node_modules symlink), then re-run.`;
+        results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'refused', reason: guidance });
+        hadNonNoop = true;
+        continue;
+      }
+      // Anything else propagates as an error result (delta 8).
+      const message = e instanceof Error ? e.message : String(e);
+      results.push({ task_id: cand.task_id, worktree_path: cand.worktree_path, branch: cand.branch, state: cand.state, outcome: 'error', reason: message });
+      hadNonNoop = true;
+    }
+  }
+
+  const envelope: RemoveWorktreesEnvelope = {
+    mode: 'remove-worktrees',
+    dryRun: false,
+    eligible,
+    refused,
+    absent,
+    results,
+  };
+  if (json) {
+    out.write(`${JSON.stringify({ eligible, refused, absent, results })}\n`);
+  } else {
+    formatRemoveResults(results, refused, out, err);
+  }
+  // Non-dry-run: PLANNER refusals must also fail the command — a refused
+  // single task exiting 0 would let /wrap-up proceed to branch deletion after
+  // nothing was removed (Codex impl-review round 2). Pure absent/noop runs
+  // stay 0.
+  return { exitCode: hadNonNoop || refused.length > 0 ? 1 : 0, migrated: [], removeWorktrees: envelope };
+}
+
+function formatRemovePlan(
+  eligible: readonly RemoveWorktreesEligible[],
+  refused: readonly RemoveWorktreesRefused[],
+  absent: readonly RemoveWorktreesAbsent[],
+  out: NodeJS.WritableStream,
+): void {
+  out.write('\ngc --remove-worktrees plan (no changes will be made):\n\n');
+  if (eligible.length === 0 && refused.length === 0 && absent.length === 0) {
+    out.write('  no worktrees found.\n');
+    return;
+  }
+  for (const e of eligible) {
+    out.write(`  ✓ ${e.task_id} (${e.state}) → ${e.worktree_path}  [branch ${e.branch}]\n`);
+  }
+  for (const r of refused) {
+    out.write(`  ✗ ${r.task_id}${r.state ? ` (${r.state})` : ''}: ${r.reason}\n`);
+  }
+  for (const a of absent) {
+    out.write(`  ○ ${a.task_id}: worktree directory already absent (noop)\n`);
+  }
+  out.write(`\n${eligible.length} eligible, ${refused.length} refused, ${absent.length} absent. Re-run without --dry-run to remove.\n`);
+}
+
+function formatRemoveResults(
+  results: readonly RemoveWorktreesResult[],
+  refused: readonly RemoveWorktreesRefused[],
+  out: NodeJS.WritableStream,
+  err: NodeJS.WritableStream,
+): void {
+  for (const r of results) {
+    if (r.outcome === 'removed') {
+      out.write(`  ✓ ${r.task_id}: removed worktree ${r.worktree_path}\n`);
+    } else if (r.outcome === 'noop') {
+      out.write(`  ✓ ${r.task_id}: ${r.reason ?? 'worktree already absent'}\n`);
+    } else {
+      err.write(`  ✗ ${r.task_id}: ${r.reason ?? r.outcome}\n`);
+    }
+  }
+  for (const r of refused) {
+    err.write(`  ✗ ${r.task_id}${r.state ? ` (${r.state})` : ''}: ${r.reason}\n`);
+  }
+  const removedCount = results.filter((r) => r.outcome === 'removed').length;
+  out.write(`gc --remove-worktrees: removed ${removedCount}/${results.length} worktree(s).\n`);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
