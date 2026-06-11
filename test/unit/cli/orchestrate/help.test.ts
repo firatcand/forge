@@ -30,6 +30,7 @@ const EXPECTED_BANDS: ReadonlyArray<readonly [string, 'read' | 'mutate']> = [
   ['complete', 'mutate'],
   ['cancel', 'mutate'],
   ['reconcile', 'mutate'],
+  ['amend-roadmap', 'mutate'],
   ['gc', 'mutate'],
 ];
 

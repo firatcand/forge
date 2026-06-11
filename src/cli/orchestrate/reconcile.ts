@@ -9,8 +9,9 @@
 // updateIssueBody on the tracker), so the skill is responsible for confirming
 // destructive operations (orphan prune).
 
-import { readFileSync, statSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { computeFreshnessLine } from '../../core/freshness.ts';
@@ -28,13 +29,223 @@ import {
   applyPlanToDocument,
   diffPull,
   diffPush,
+  insertTaskIntoDocument,
   type PullPlan,
   type PushPlan,
+  type StagedAddition,
 } from '../../orchestrator/reconcile.ts';
 
 const PHASES_PATH_DEFAULT = 'plans/phases.yaml';
 const SETTINGS_PATH_DEFAULT = '.forge/settings.yaml';
 const PHASES_FILE_MAX_BYTES = 4 * 1024 * 1024; // 4 MiB
+
+// ---- phases.yaml write lock ------------------------------------------------
+//
+// --pull is a read-modify-write over phases.yaml. Two concurrent writers
+// (two amends staging into different phases, or an amend racing a plain
+// reconcile) each read the same snapshot and writeAtomic in sequence — the
+// later write silently drops the earlier one's mutation (Codex impl-review,
+// FORGE-101). An exclusive advisory lock around the whole pull serializes
+// every phases.yaml writer. O_EXCL create is the acquire; staleness =
+// holder-pid dead OR lock older than LOCK_STALE_MS (crash recovery).
+//
+// Ownership discipline (Codex impl-review round 3): pathname-only unlink is
+// unsafe — a stale-steal contender could nuke a SUCCESSOR's fresh lock, and a
+// timed-out original holder could late-release its successor's lock. Two
+// mechanisms close both holes:
+//   1. Every unlink is RAW-BYTE compare-before-unlink: the deleter re-reads
+//      the lock file and removes it only if its content is byte-identical to
+//      what it owns (release) or what it inspected (steal). A lock that
+//      changed hands since inspection is never touched.
+//   2. Stale takeover is SERIALIZED through a steal-mutex (`<lock>.steal`,
+//      O_EXCL): only one contender at a time may run the re-inspect → unlink
+//      sequence, so two stealers can never interleave around the same stale
+//      lock. While the steal-mutex is held, the only way the main lock can
+//      reappear is a fresh O_EXCL acquire — which the stealer then loses to,
+//      correctly, on its next acquire attempt.
+const PHASES_LOCK_SUBPATH = ['.forge', 'orchestrator', 'global', 'phases-write.lock'];
+const LOCK_STALE_MS = 5 * 60_000;
+const STEAL_LOCK_STALE_MS = 30_000; // steal critical section is microseconds
+const LOCK_RETRIES = 25;
+const LOCK_RETRY_DELAY_MS = 200;
+// A holder may release (unlink) its lock only while the lock is provably NOT
+// stealable — strictly inside the staleness horizon. Past this window the
+// holder must leave the file for age-steal and abort any pending write. This
+// disjointness is what makes the pathname unlink race-free; see the proof
+// sketch on unlinkIfUnchanged.
+const LOCK_RELEASE_SAFE_FRACTION = 0.8;
+
+// Bounded env overrides (FORGE_PHASES_LOCK_RETRIES / _RETRY_DELAY_MS) for
+// operators with unusually long pulls — and for tests, where the default 5s
+// worst-case wait interferes with the node:test child-process reporter.
+function lockTuning(): { retries: number; delayMs: number; staleMs: number } {
+  const retries = Number.parseInt(process.env.FORGE_PHASES_LOCK_RETRIES ?? '', 10);
+  const delayMs = Number.parseInt(process.env.FORGE_PHASES_LOCK_RETRY_DELAY_MS ?? '', 10);
+  const staleMs = Number.parseInt(process.env.FORGE_PHASES_LOCK_STALE_MS ?? '', 10);
+  return {
+    retries: Number.isInteger(retries) && retries > 0 && retries <= 1_000 ? retries : LOCK_RETRIES,
+    delayMs: Number.isInteger(delayMs) && delayMs >= 0 && delayMs <= 10_000 ? delayMs : LOCK_RETRY_DELAY_MS,
+    staleMs:
+      Number.isInteger(staleMs) && staleMs >= 50 && staleMs <= 3_600_000 ? staleMs : LOCK_STALE_MS,
+  };
+}
+
+// Read a lock file's raw bytes; null = missing. (Corrupt is indistinguishable
+// from tampered — both compare unequal and are handled by staleness.)
+function readLockRaw(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+}
+
+// Staleness of a lock file's content: unparseable → stale; holder pid dead →
+// stale; older than staleMs → stale (NaN-safe: unparseable acquired_at is
+// NOT (age < staleMs) → stale).
+function lockContentIsStale(raw: string, staleMs: number): boolean {
+  let holder: { pid?: number; acquired_at?: string };
+  try {
+    holder = JSON.parse(raw) as { pid?: number; acquired_at?: string };
+  } catch {
+    return true;
+  }
+  const age = Date.now() - Date.parse(holder.acquired_at ?? '');
+  let alive = false;
+  if (typeof holder.pid === 'number') {
+    try {
+      process.kill(holder.pid, 0);
+      alive = true;
+    } catch {
+      alive = false;
+    }
+  }
+  return !alive || !(age < staleMs);
+}
+
+// Unlink `path` only if its content is still byte-identical to `expectedRaw`.
+// ENOENT at any point is fine (someone else legitimately removed it).
+//
+// The read→unlink pair is not atomic, but every caller's PRECONDITION makes
+// the residual interleaving impossible rather than merely unlikely:
+//   - release() runs only while age(myBody) < staleMs × 0.8 — strictly inside
+//     the staleness horizon, so no stealer's re-inspection can judge those
+//     same bytes stale (one clock, same content). The only other principals
+//     who could replace the path are the owner (us) and fresh acquirers, who
+//     need the path FREE first (O_EXCL).
+//   - the steal path runs under the steal-mutex AND re-verified the bytes as
+//     stale; the only principal who could remove/replace a stale lock's path
+//     is its owner releasing — excluded above, because release refuses past
+//     the safe window. Other stealers hold no mutex; acquirers need a free
+//     path.
+// So between any caller's read and unlink, no legal writer of this path
+// exists. (FORGE-87's flock would make this kernel-enforced; until then this
+// condition-disjointness argument is the contract — keep both sides in sync.)
+function unlinkIfUnchanged(path: string, expectedRaw: string): void {
+  const current = readLockRaw(path);
+  if (current === null || current !== expectedRaw) return;
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+// One serialized stale-takeover attempt. Returns without acquiring anything —
+// on success the main lock is gone and the caller's next O_EXCL attempt
+// competes fairly with every other waiter.
+function attemptStealUnderMutex(lockPath: string, inspectedRaw: string): void {
+  const stealPath = `${lockPath}.steal`;
+  const stealBody = JSON.stringify({ pid: process.pid, acquired_at: new Date().toISOString() });
+  try {
+    writeFileSync(stealPath, stealBody, { encoding: 'utf8', flag: 'wx' });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    // Another contender is mid-takeover. If ITS mutex is stale (stealer
+    // crashed in the microsecond critical section), clear it the same
+    // compare-before-unlink way; either way, retry on the next loop pass.
+    const currentSteal = readLockRaw(stealPath);
+    if (currentSteal !== null && lockContentIsStale(currentSteal, STEAL_LOCK_STALE_MS)) {
+      unlinkIfUnchanged(stealPath, currentSteal);
+    }
+    return;
+  }
+  try {
+    // Under the mutex: remove the stale main lock ONLY if it is still exactly
+    // the content we judged stale. If it changed (released + freshly
+    // re-acquired by someone else), it is a live lock — leave it.
+    unlinkIfUnchanged(lockPath, inspectedRaw);
+  } finally {
+    unlinkIfUnchanged(stealPath, stealBody);
+  }
+}
+
+// Handle returned by acquirePhasesWriteLock. assertFresh() is the holder-side
+// half of the disjointness contract: a writer must prove its lock is still
+// inside the safe window IMMEDIATELY before mutating phases.yaml — a pull
+// that outlived the staleness horizon may have been age-stolen, and writing
+// anyway would reintroduce the lost update the lock exists to prevent.
+export interface PhasesWriteLock {
+  release(): void;
+  assertFresh(): void;
+}
+
+// Exported for amend-roadmap, apply-decision, and the lock-discipline unit
+// tests; within this file runOrchestrateReconcile is the caller.
+export async function acquirePhasesWriteLock(cwd: string): Promise<PhasesWriteLock> {
+  const lockPath = join(cwd, ...PHASES_LOCK_SUBPATH);
+  mkdirSync(dirname(lockPath), { recursive: true });
+  const tuning = lockTuning();
+  const safeWindowMs = Math.floor(tuning.staleMs * LOCK_RELEASE_SAFE_FRACTION);
+  const token = randomBytes(16).toString('hex');
+  for (let attempt = 0; attempt < tuning.retries; attempt++) {
+    // The body (with its unique ownership token) is regenerated PER ATTEMPT so
+    // the on-disk acquired_at and the holder-side validity window derive from
+    // the same instant. Stamping it once before the retry loop let a slow
+    // acquisition write already-aged bytes: instantly stealable on disk while
+    // assertFresh() still passed — breaking the disjointness contract (Codex
+    // impl-review round 5).
+    const acquiredAtMs = Date.now();
+    const myBody = JSON.stringify({
+      pid: process.pid,
+      acquired_at: new Date(acquiredAtMs).toISOString(),
+      token,
+    });
+    try {
+      writeFileSync(lockPath, myBody, { encoding: 'utf8', flag: 'wx' });
+      return {
+        release: () => {
+          // Disjointness contract: unlink only strictly inside the safe
+          // window. Past it the lock is (or may imminently be judged)
+          // stealable — leave the file for age-steal; touching the pathname
+          // could remove a successor's lock.
+          if (Date.now() - acquiredAtMs >= safeWindowMs) return;
+          unlinkIfUnchanged(lockPath, myBody);
+        },
+        assertFresh: () => {
+          if (Date.now() - acquiredAtMs >= safeWindowMs) {
+            throw new Error(
+              `phases.yaml write lock validity window (${safeWindowMs}ms) expired before the write — aborting to avoid a lost update; re-run`,
+            );
+          }
+        },
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      const inspectedRaw = readLockRaw(lockPath);
+      if (inspectedRaw === null) continue; // released between our attempts — retry now
+      if (lockContentIsStale(inspectedRaw, tuning.staleMs)) {
+        attemptStealUnderMutex(lockPath, inspectedRaw);
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, tuning.delayMs));
+    }
+  }
+  throw new Error(
+    `phases.yaml write lock is held (${lockPath}) — another reconcile/amend is in flight; retry shortly`,
+  );
+}
 
 export type ReconcileDirection = 'pull' | 'push';
 
@@ -46,6 +257,12 @@ export interface OrchestrateReconcileOptions {
   // Injection point for tests — bypasses the settings → adapter resolution.
   readonly trackerOverride?: Tracker;
   readonly loggerOverride?: Logger;
+  // Programmatic-only (no CLI flag): complete tasks staged for insertion by
+  // `forge orchestrate amend-roadmap`. The pull path inserts them via
+  // insertTaskIntoDocument and re-validates the whole document against
+  // PhasesSchema BEFORE writing — an invalid staged task (unknown dep, dup id,
+  // cycle) aborts the write entirely. See FORGE-101.
+  readonly stagedAdditions?: readonly StagedAddition[];
 }
 
 export interface OrchestrateReconcileResult {
@@ -76,6 +293,8 @@ interface ReconcileData {
   readonly push?: PushAttemptResult;
   readonly applied?: boolean;
   readonly mutations?: number;
+  // Task ids inserted from stagedAdditions this run (absent when none staged).
+  readonly staged_added?: readonly string[];
 }
 
 interface PushAttemptResult {
@@ -140,7 +359,9 @@ function noopLogger(): Logger {
   };
 }
 
-function loadPhasesWithDocument(absPath: string): {
+// Exported for reuse by amend-roadmap.ts (same size-guard + parse + validate
+// + freshness pipeline; one loader, one set of failure modes).
+export function loadPhasesWithDocument(absPath: string): {
   phases: Phases;
   doc: ReturnType<typeof parseDocument>;
   raw: string;
@@ -214,10 +435,25 @@ export async function runOrchestrateReconcile(
     return { exitCode: 3 };
   }
 
+  // Serialize phases.yaml writers BEFORE the read: a non-dry-run --pull is a
+  // read-modify-write, and the lock must cover the read or the lost-update
+  // window just moves. Dry-run and --push never write phases.yaml — no lock.
+  let lock: PhasesWriteLock | undefined;
+  if (parsed.direction === 'pull' && !parsed.dryRun) {
+    try {
+      lock = await acquirePhasesWriteLock(opts.cwd);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      writeJson(err, { ok: false, error: { code: 'PHASES_LOCKED', message } });
+      return { exitCode: 4 };
+    }
+  }
+
   let loaded;
   try {
     loaded = loadPhasesWithDocument(phasesPath);
   } catch (e) {
+    if (lock) lock.release();
     const code = e instanceof TrackerError ? e.code : 'PHASES_NOT_FOUND';
     const message = e instanceof Error ? e.message : String(e);
     writeJson(err, { ok: false, error: { code, message } });
@@ -237,6 +473,7 @@ export async function runOrchestrateReconcile(
       tracker = handle.tracker;
       closeTracker = handle.close;
     } catch (e) {
+      if (lock) lock.release();
       const message = e instanceof Error ? e.message : String(e);
       writeJson(err, { ok: false, error: { code: 'INVALID_CONFIG', message } });
       return { exitCode: 3 };
@@ -245,10 +482,31 @@ export async function runOrchestrateReconcile(
 
   try {
     if (parsed.direction === 'pull') {
-      return await runPull(parsed, loaded, phasesPath, tracker, opts.cwd, out, err);
+      return await runPull(
+        parsed,
+        loaded,
+        phasesPath,
+        tracker,
+        opts.cwd,
+        out,
+        err,
+        opts.stagedAdditions,
+        lock,
+      );
+    }
+    if (opts.stagedAdditions && opts.stagedAdditions.length > 0) {
+      writeJson(err, {
+        ok: false,
+        error: {
+          code: 'INVALID_ARGS',
+          message: 'stagedAdditions are only supported with --pull',
+        },
+      });
+      return { exitCode: 3 };
     }
     return await runPush(parsed, loaded, tracker, out, err);
   } finally {
+    if (lock) lock.release();
     // Tear down the MCP child process spawned for Notion. createStdioMcpCall
     // returns a handle the caller is contractually required to close
     // (notion-mcp-transport.ts:24). For Linear/GitHub closeTracker is
@@ -272,6 +530,8 @@ async function runPull(
   cwd: string,
   out: NodeJS.WritableStream,
   err: NodeJS.WritableStream,
+  stagedAdditions?: readonly StagedAddition[],
+  lock?: PhasesWriteLock,
 ): Promise<OrchestrateReconcileResult> {
   let page;
   try {
@@ -328,7 +588,42 @@ async function runPull(
   }
 
   const applyOpts = { confirmPrune: args.confirmPrune };
-  const mutationsDoc = applyPlanToDocument(loaded.doc, plan, applyOpts);
+  let mutationsDoc = applyPlanToDocument(loaded.doc, plan, applyOpts);
+
+  // Staged additions (amend-roadmap): insert AFTER the plan mutations so the
+  // diff above ran against the on-disk truth, then fail closed — any invalid
+  // resulting document (unknown dep, duplicate id, DAG cycle) aborts before
+  // the write, leaving phases.yaml untouched.
+  const stagedAdded: string[] = [];
+  if (stagedAdditions && stagedAdditions.length > 0) {
+    try {
+      for (const staged of stagedAdditions) {
+        if (insertTaskIntoDocument(loaded.doc, staged.phaseId, staged.task)) {
+          stagedAdded.push(staged.task.id);
+          mutationsDoc++;
+        }
+      }
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      writeJson(err, {
+        ok: false,
+        error: { code: 'STAGED_ADDITION_FAILED', message },
+      });
+      return { exitCode: 3 };
+    }
+    const revalidated = PhasesSchema.safeParse(loaded.doc.toJS());
+    if (!revalidated.success) {
+      const detail = revalidated.error.issues[0]?.message ?? 'unknown';
+      writeJson(err, {
+        ok: false,
+        error: {
+          code: 'STAGED_ADDITION_INVALID',
+          message: `staged addition produced an invalid phases.yaml (not written): ${detail}`,
+        },
+      });
+      return { exitCode: 3 };
+    }
+  }
 
   // Resolve + stamp the source stanza on every successful --pull. synced_at
   // bumps even when the diff is empty: the semantic is "last successful sync
@@ -346,6 +641,20 @@ async function runPull(
     return { exitCode: 3 };
   }
   setSourceOnDocument(loaded.doc, nextSource);
+
+  // Holder-side half of the lock's disjointness contract: prove the lock is
+  // still inside its validity window IMMEDIATELY before the write. A pull
+  // that outlived the staleness horizon may have been age-stolen — writing
+  // anyway would reintroduce the lost update the lock prevents.
+  if (lock) {
+    try {
+      lock.assertFresh();
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      writeJson(err, { ok: false, error: { code: 'PHASES_LOCK_EXPIRED', message } });
+      return { exitCode: 4 };
+    }
+  }
 
   // Serialize without re-folding long scalars (lineWidth: 0) or padding flow
   // collections (flowCollectionPadding: false). The yaml lib's defaults rewrap
@@ -365,6 +674,7 @@ async function runPull(
       pull: plan,
       applied: mutationsDoc > 0,
       mutations: mutationsDoc,
+      ...(stagedAdditions ? { staged_added: stagedAdded } : {}),
     },
   });
 

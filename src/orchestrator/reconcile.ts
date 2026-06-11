@@ -468,6 +468,84 @@ export function applyPlanToDocument(
   return mutations;
 }
 
+// ---- staged additions (used by `forge orchestrate amend-roadmap`) ---------
+//
+// The pull diff intentionally never materializes `added[]` issues (it lacks
+// the description/type/priority/estimate/acceptance a TaskSchema task needs).
+// /amend-roadmap KNOWS the full task — it authored the tracker issue — so it
+// stages the complete task and the pull path inserts it here, keeping
+// applyPlanToDocument + this function the only writers of phases.yaml.
+
+export interface StagedAddition {
+  readonly phaseId: string;
+  readonly task: Task;
+}
+
+// Insert `task` into the tasks sequence of `phaseId`, preserving comments and
+// house style (flow-style depends_on; acceptance stays block — matches the
+// emitter conventions used across the live phases.yaml). Idempotent: returns
+// false when a task with the same id already exists anywhere in the document
+// (a resumed amend re-running the pull step must not duplicate). Throws when
+// the phase is missing or malformed — the caller surfaces that as a staged-
+// addition failure WITHOUT writing the file.
+export function insertTaskIntoDocument(
+  doc: Document,
+  phaseId: string,
+  task: Task,
+): boolean {
+  const phasesSeq = doc.get('phases');
+  if (!isSeq(phasesSeq)) {
+    throw new Error('insertTaskIntoDocument: phases.yaml has no phases sequence');
+  }
+
+  // Global idempotency sweep first: the id must not exist in ANY phase.
+  for (const phaseNode of phasesSeq.items) {
+    if (!isMap(phaseNode)) continue;
+    const tasksNode = phaseNode.get('tasks');
+    if (!isSeq(tasksNode)) continue;
+    for (const taskNode of tasksNode.items) {
+      if (isMap(taskNode) && taskNode.get('id') === task.id) return false;
+    }
+  }
+
+  for (const phaseNode of phasesSeq.items) {
+    if (!isMap(phaseNode)) continue;
+    if (phaseNode.get('id') !== phaseId) continue;
+    const tasksNode = phaseNode.get('tasks');
+    if (!isSeq(tasksNode)) {
+      throw new Error(
+        `insertTaskIntoDocument: phase '${phaseId}' has no tasks sequence`,
+      );
+    }
+    // Build the node from a plain shape with only-defined fields so the YAML
+    // output carries no `null`s for absent optionals.
+    const shape: Record<string, unknown> = {
+      id: task.id,
+      ...(task.tracker_issue_id ? { tracker_issue_id: task.tracker_issue_id } : {}),
+      title: task.title,
+      description: task.description,
+      type: task.type,
+      priority: task.priority,
+      depends_on: [...task.depends_on],
+      estimate: task.estimate,
+      owner_type: task.owner_type,
+      acceptance: [...task.acceptance],
+      ...(task.write_globs ? { write_globs: [...task.write_globs] } : {}),
+    };
+    const node = doc.createNode(shape);
+    if (isMap(node)) {
+      // depends_on renders flow-style (`[P1-T01, P1-T02]`) to match the file's
+      // existing convention; acceptance stays block style.
+      const deps = node.get('depends_on', true);
+      if (isSeq(deps)) deps.flow = true;
+    }
+    tasksNode.add(node);
+    return true;
+  }
+
+  throw new Error(`insertTaskIntoDocument: phase '${phaseId}' not found in phases.yaml`);
+}
+
 export function applyPullToPhases(
   phases: Phases,
   plan: PullPlan,

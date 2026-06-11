@@ -148,7 +148,7 @@ When automating retries, filter `failed[]` to `code in {RATE_LIMITED, TRANSPORT,
 
 ## Edge cases
 
-- **No `tracker_issue_id` on a task**: `--push` skips it silently; appears in `push.plan.skipped[]` with reason `no_tracker_issue_id`. Use `/amend-roadmap` (v0.5) to create the missing tracker issue.
+- **No `tracker_issue_id` on a task**: `--push` skips it silently; appears in `push.plan.skipped[]` with reason `no_tracker_issue_id`. Use `/amend-roadmap` to create the missing tracker issue.
 - **Adapter pagination cap** (200 issues): logged at warn level by the adapter. The verb completes against the truncated set.
 - **YAML comments in phases.yaml**: preserved across `--pull` writes via `yaml.parseDocument` document-mode mutation. Field order and inline comments survive — including the collection style (block vs flow) and per-item inline comments on `depends_on`, which are edited in place rather than rebuilt.
 - **Concurrent `--push` from another operator**: not protected — see `Tracker.updateIssueBody` docstring. Coordinate via team norms.
