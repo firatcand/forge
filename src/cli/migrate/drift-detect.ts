@@ -100,6 +100,22 @@ const SCAN_ROOT_FILES = ['CLAUDE.md', 'AGENTS.md', 'GEMINI.md'];
 const SCAN_DIRS = ['docs', '.claude', '.agents', 'skills'];
 const SCAN_EXCLUDE_DIRS = new Set(['.git', 'node_modules', '.forge']);
 
+// Paths whose JOB is to mention old command names — historical records,
+// design docs discussing renames, and deprecation-alias skills. Rewriting
+// them produces self-referential nonsense ("X is deprecated — use X"), so
+// detection still runs (to surface the mention as a warning) but migrate
+// never auto-rewrites them (FORGE-207, guards-only).
+export const REWRITE_GUARD_DIRS = ['docs/retros', 'docs/plans'];
+export const REWRITE_GUARD_SKILLS = ['skills/push-to-linear']; // alias dirs named after a rename SOURCE
+
+// Segment-boundary guard match: normalize Windows '\' → '/', then require an
+// exact match or a true path-segment prefix. A bare startsWith() would wrongly
+// guard siblings like docs/retrospective/ or skills/push-to-linear-old/.
+export function isUnderGuard(rel: string, guards: readonly string[]): boolean {
+  const norm = rel.replace(/\\/g, '/');
+  return guards.some((guard) => norm === guard || norm.startsWith(guard + '/'));
+}
+
 interface ReadResult {
   content?: string;
   skipped?: SkippedFile;
@@ -354,18 +370,98 @@ interface TextRewriteResult {
   renamedNext: number;
   renamedSuggest: number;
   removedVerbs: string[];
+  // Lines that matched an old command name but were NOT rewritten because the
+  // replacement target was already present on that line — by construction such
+  // a line is prose ABOUT the rename ("use Y instead of X"), and rewriting it
+  // would yield "use Y instead of Y" (FORGE-207, line-level self-replace guard).
+  selfReplaceSkipped: number;
 }
 
+// Replacement targets that, when already present on a line, mark that line as
+// prose ABOUT the rename — so rewriting the OLD name on that line would be a
+// self-replace. Matched against the original line (pre-rewrite).
+// Right boundary must reject command-ish continuations (`-`, `_`, alnum): a
+// bare `\b` treats `-` as a boundary, so `/push-to-tracker-old` would falsely
+// register the NEW name as present and suppress a legitimate rewrite on that
+// line. `(?![A-Za-z0-9_-])` is the command-ish right boundary (FORGE-207).
+const PUSH_TO_TRACKER_PRESENT = /\/push-to-tracker(?![A-Za-z0-9_-])/;
+const ORCHESTRATE_CLAIM_PRESENT = /\borchestrate\s+claim(?![A-Za-z0-9_-])/;
+const PHASES_READY_PRESENT = /phases --ready(?![A-Za-z0-9_-])/;
+
 export function rewriteCommandRefs(content: string): TextRewriteResult {
-  let after = content;
-  const pushToLinear = (after.match(PUSH_TO_LINEAR) ?? []).length;
-  after = after.replace(PUSH_TO_LINEAR, '/push-to-tracker');
-  const renamedNext = (after.match(ORCHESTRATE_NEXT) ?? []).length;
-  after = after.replace(ORCHESTRATE_NEXT, 'forge$1orchestrate$2claim');
-  const renamedSuggest = (after.match(SUGGEST_NEXT) ?? []).length;
-  after = after.replace(SUGGEST_NEXT, 'phases --ready');
-  const removedVerbs = [...new Set((after.match(REMOVED_VERBS) ?? []).map((m) => m))];
-  return { after, pushToLinear, renamedNext, renamedSuggest, removedVerbs };
+  let pushToLinear = 0;
+  let renamedNext = 0;
+  let renamedSuggest = 0;
+  const removedSet = new Set<string>();
+  // Track UNIQUE skipped lines: one line carrying old+new for MULTIPLE renames
+  // must count once, not once per rename pair (FORGE-207). We collect segment
+  // indices in a Set across the three rename passes and report set size.
+  const selfReplaceSkippedLines = new Set<number>();
+
+  // Split RETAINING separators (incl. lone \r) so untouched lines are emitted
+  // byte-for-byte: migrate.ts compares current !== before, and any separator
+  // normalization would show as spurious diff noise / phantom edits.
+  const segments = content.split(/(\r\n|\n|\r)/);
+  const out: string[] = [];
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const segment = segments[i];
+    // Separators (odd indices from the capturing split) pass through untouched;
+    // they never match a command name, so the cheap path is to leave any
+    // non-matching segment exactly as-is.
+    let line = segment;
+
+    // NOTE: PUSH_TO_LINEAR / ORCHESTRATE_NEXT / SUGGEST_NEXT / REMOVED_VERBS
+    // carry the `g` flag. String.prototype.match(globalRegex) resets and
+    // ignores lastIndex, so it is safe to call repeatedly; we deliberately
+    // avoid RegExp.prototype.test() on these (it would mutate lastIndex).
+    // The *_PRESENT guards are non-global and stateless.
+
+    // removedVerbs is detection-only (never rewrites) — accumulate across all
+    // lines regardless of the self-replace guard.
+    for (const m of segment.match(REMOVED_VERBS) ?? []) removedSet.add(m);
+
+    const nLinear = (segment.match(PUSH_TO_LINEAR) ?? []).length;
+    if (nLinear > 0) {
+      if (PUSH_TO_TRACKER_PRESENT.test(segment)) {
+        selfReplaceSkippedLines.add(i);
+      } else {
+        pushToLinear += nLinear;
+        line = line.replace(PUSH_TO_LINEAR, '/push-to-tracker');
+      }
+    }
+
+    const nNext = (segment.match(ORCHESTRATE_NEXT) ?? []).length;
+    if (nNext > 0) {
+      if (ORCHESTRATE_CLAIM_PRESENT.test(segment)) {
+        selfReplaceSkippedLines.add(i);
+      } else {
+        renamedNext += nNext;
+        line = line.replace(ORCHESTRATE_NEXT, 'forge$1orchestrate$2claim');
+      }
+    }
+
+    const nSuggest = (segment.match(SUGGEST_NEXT) ?? []).length;
+    if (nSuggest > 0) {
+      if (PHASES_READY_PRESENT.test(segment)) {
+        selfReplaceSkippedLines.add(i);
+      } else {
+        renamedSuggest += nSuggest;
+        line = line.replace(SUGGEST_NEXT, 'phases --ready');
+      }
+    }
+
+    out.push(line);
+  }
+
+  return {
+    after: out.join(''),
+    pushToLinear,
+    renamedNext,
+    renamedSuggest,
+    removedVerbs: [...removedSet],
+    selfReplaceSkipped: selfReplaceSkippedLines.size,
+  };
 }
 
 function detectCommandRefs(cwd: string, skipped: SkippedFile[], budget: ScanBudget): DriftFinding[] {
@@ -388,21 +484,62 @@ function detectCommandRefs(cwd: string, skipped: SkippedFile[], budget: ScanBudg
     if (content === undefined) continue;
 
     const result = rewriteCommandRefs(content);
-    const parts: string[] = [];
-    if (result.pushToLinear > 0) parts.push(`${result.pushToLinear}× /push-to-linear → /push-to-tracker`);
-    if (result.renamedNext > 0) parts.push(`${result.renamedNext}× orchestrate next → claim`);
-    if (result.renamedSuggest > 0) parts.push(`${result.renamedSuggest}× suggest-next → phases --ready`);
+    const guarded = isUnderGuard(rel, [...REWRITE_GUARD_DIRS, ...REWRITE_GUARD_SKILLS]);
 
-    if (parts.length > 0) {
-      findings.push({
-        kind: result.pushToLinear > 0 && result.renamedNext + result.renamedSuggest === 0
-          ? 'push-to-linear-refs'
-          : 'dropped-verbs-renamed',
-        class: 'actionable',
-        relPath: rel,
-        detail: parts.join(' · '),
-        edit: { relPath: rel, before: content, after: result.after },
-      });
+    // Guarded paths exist precisely to mention old names (historical records,
+    // rename design docs, deprecation-alias skills). Detection still runs so
+    // the mention is visible, but we emit a warning with NO edit — the file is
+    // never rewritten (FORGE-207, guards-only). Detection counts come from the
+    // pre-self-replace-guard rewrite (any old-name occurrence counts as a
+    // "mention" here, even self-replace lines).
+    if (guarded) {
+      // Re-derive mentioned old names directly from content: the rewrite
+      // tallies suppress self-replace lines, but for a guard warning ANY
+      // old-name occurrence is a "mention" worth surfacing.
+      const parts: string[] = [];
+      if ((content.match(PUSH_TO_LINEAR) ?? []).length > 0) parts.push('/push-to-linear');
+      if ((content.match(ORCHESTRATE_NEXT) ?? []).length > 0) parts.push('orchestrate next');
+      if ((content.match(SUGGEST_NEXT) ?? []).length > 0) parts.push('suggest-next');
+      if (parts.length > 0) {
+        findings.push({
+          kind: 'dropped-verbs-renamed',
+          class: 'warning',
+          relPath: rel,
+          detail: `mentions renamed command(s) (${parts.join(', ')}) — left untouched: historical/alias content (FORGE-207)`,
+        });
+      }
+    } else {
+      const parts: string[] = [];
+      if (result.pushToLinear > 0) parts.push(`${result.pushToLinear}× /push-to-linear → /push-to-tracker`);
+      if (result.renamedNext > 0) parts.push(`${result.renamedNext}× orchestrate next → claim`);
+      if (result.renamedSuggest > 0) parts.push(`${result.renamedSuggest}× suggest-next → phases --ready`);
+
+      if (parts.length > 0) {
+        let detail = parts.join(' · ');
+        if (result.selfReplaceSkipped > 0) {
+          detail += ` · ${result.selfReplaceSkipped} line(s) left untouched (mention both old and new name)`;
+        }
+        findings.push({
+          kind: result.pushToLinear > 0 && result.renamedNext + result.renamedSuggest === 0
+            ? 'push-to-linear-refs'
+            : 'dropped-verbs-renamed',
+          class: 'actionable',
+          relPath: rel,
+          detail,
+          edit: { relPath: rel, before: content, after: result.after },
+        });
+      } else if (result.selfReplaceSkipped > 0) {
+        // No rewrites were performed, but the file has self-replace-skipped
+        // lines (prose mentioning both an old and new command name). Without a
+        // finding this would be silent — contrary to the visibility goal. Emit
+        // an edit-free warning so the mention surfaces (FORGE-207).
+        findings.push({
+          kind: 'dropped-verbs-renamed',
+          class: 'warning',
+          relPath: rel,
+          detail: `${result.selfReplaceSkipped} line(s) mention both an old and new command name — left untouched (FORGE-207)`,
+        });
+      }
     }
     if (result.removedVerbs.length > 0) {
       findings.push({
