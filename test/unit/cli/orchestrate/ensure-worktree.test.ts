@@ -204,3 +204,39 @@ test('ensure-worktree: malformed task_id returns INVALID_ARGS', async (t) => {
   // Schema rejects ../etc/passwd via TaskIdSchema regex before workspace.ts runs.
   assert.equal(env.error?.code, 'INVALID_ARGS');
 });
+
+// FORGE-140 — a RELATIVE --repo-root must resolve against the dispatcher's
+// injected cwd, not the implicit process.cwd(). Pre-fix the runner called
+// path.resolve(opts.repoRoot) which silently anchored on process.cwd(),
+// misplacing the worktree whenever the injected cwd diverged.
+test('FORGE-140: relative --repo-root resolves against injected cwd, not process.cwd', async (t) => {
+  const { repoRoot, forgeDir, cleanup } = await freshRepo();
+  const { lines } = captureStdout(t);
+  t.after(cleanup);
+
+  // An anchor directory that is the SIBLING parent of repoRoot. We pass cwd =
+  // this anchor and a relative repoRoot from it, while leaving process.cwd()
+  // pointed somewhere unrelated.
+  const anchor = join(repoRoot, '..');
+  const repoBase = repoRoot.split(/[\\/]/).pop()!;
+  const relRepoRoot = repoBase; // relative to `anchor`
+
+  const result = await runOrchestrateEnsureWorktree({
+    taskId: 'FORGE-140',
+    forgeDir,
+    repoRoot: relRepoRoot,
+    cwd: anchor,
+    json: true,
+    base: 'main',
+  });
+  assert.equal(result.exitCode, 0);
+  const env = lastJsonEnvelope(lines);
+  assert.equal(env.ok, true);
+  const data = env.data as Record<string, unknown>;
+  const wtPath = data.worktree_path as string;
+  // The worktree must land under the REAL repoRoot (resolved via the injected
+  // cwd), not under process.cwd().
+  const expected = join(repoRoot, '.forge', 'worktrees', 'FORGE-140');
+  assert.equal(wtPath, expected, 'worktree resolved against injected cwd');
+  assert.ok(existsSync(expected), 'worktree dir exists under real repo');
+});

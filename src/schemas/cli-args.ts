@@ -210,7 +210,13 @@ export const EnsureWorktreeArgsSchema = z.object({
   branch: z.string().min(1).optional(),
   // Repo root containing .git. If omitted, verb resolves from cwd via
   // git rev-parse --git-common-dir. Used as the worktree manager's root.
+  // FORGE-140: a RELATIVE repoRoot is resolved against `cwd` (below), not the
+  // implicit process.cwd(), so it honors the dispatcher's injected cwd contract.
   repoRoot: z.string().min(1).optional(),
+  // FORGE-140: the anchor a relative `repoRoot` (and the git-rev-parse fallback)
+  // resolve against. The dispatcher injects this; defaults to process.cwd()
+  // inside the verb when omitted (preserves prior behavior).
+  cwd: z.string().min(1).optional(),
   forgeDir: ForgeDirField,
   json: JsonFlag,
 });

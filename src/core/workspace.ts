@@ -171,11 +171,36 @@ interface CopyPlanItem {
   relative: string;
 }
 
+// FORGE-142 — a git submodule is a directory whose `.git` is a FILE (a
+// `gitdir:` pointer), not a directory (only the superproject's top-level `.git`
+// is a dir, or a `.git` worktree pointer file at the worktree root). Hydration
+// must NOT recurse into a submodule: its working tree belongs to a separate git
+// object store, and copying its `.git` pointer + files into the new worktree
+// produces a broken, mis-located submodule checkout. The presence of a
+// `.gitmodules` registration is the superproject-side signal, but the robust
+// per-directory test at walk time is: does this directory contain a `.git`
+// entry at all? A nested `.git` (file OR dir) marks a git boundary we must not
+// cross during a plain file-copy hydration.
+function isGitBoundaryDir(dir: string): boolean {
+  const dotGit = path.join(dir, '.git');
+  try {
+    // lstat so a symlinked `.git` is detected too (and not followed).
+    lstatSync(dotGit);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function planCopyRecursive(srcRoot: string, destRoot: string, relativeBase: string): CopyPlanItem[] {
   const items: CopyPlanItem[] = [];
   if (!existsSync(srcRoot)) return items;
   // guard the directory root itself — a hostile symlinked dir (e.g. plans -> /etc) must not be traversed
   const rootStat = lstatSync(srcRoot);
+  // A submodule mounted directly AT a hydration root must not be hydrated —
+  // the child-dir boundary check below never sees the root itself (Codex
+  // batch-1 review).
+  if (rootStat.isDirectory() && isGitBoundaryDir(srcRoot)) return items;
   if (rootStat.isSymbolicLink()) {
     rejectIfSymlink(srcRoot);
   }
@@ -190,6 +215,10 @@ function planCopyRecursive(srcRoot: string, destRoot: string, relativeBase: stri
       rejectIfSymlink(srcPath);
     }
     if (entry.isDirectory()) {
+      // FORGE-142 — never recurse into a git submodule (or any nested git
+      // boundary). Skip the whole directory rather than copying a broken
+      // `.git` pointer + the submodule's working tree.
+      if (isGitBoundaryDir(srcPath)) continue;
       items.push(...planCopyRecursive(srcPath, destPath, rel));
     } else if (entry.isFile()) {
       items.push({ source: srcPath, destination: destPath, relative: rel });
@@ -380,7 +409,15 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
 export interface CleanupOptions {
   root: string;
   force?: boolean;
+  // Unconditional branch delete via `git branch -D` (force, ignores merge
+  // status). Caller-opt-in only — the gc verb never sets this (FORGE-116 delta 6).
   deleteBranch?: boolean;
+  // FORGE-139 — safe merged-only branch delete via `git branch -d`. When set
+  // (and `deleteBranch` is not), the branch is deleted ONLY if git considers it
+  // fully merged; an unmerged branch is RETAINED (reported via
+  // branchRetainedReason), never force-deleted. This is the orphan-branch
+  // reclaim path for `gc --remove-worktrees --prune-merged-branches`.
+  deleteMergedBranch?: boolean;
   branch?: string;
 }
 
@@ -388,6 +425,10 @@ export interface CleanupResult {
   removed: boolean;
   gitignoredFilesLost: number;
   branchDeleted: boolean;
+  // FORGE-139 — set when deleteMergedBranch was requested but git refused
+  // because the branch was not fully merged (branch left in place). Absent when
+  // no branch deletion was attempted or the delete succeeded.
+  branchRetainedReason?: string;
 }
 
 export async function cleanup(taskId: string, opts: CleanupOptions): Promise<CleanupResult> {
@@ -474,15 +515,57 @@ export async function cleanup(taskId: string, opts: CleanupOptions): Promise<Cle
   }
 
   let branchDeleted = false;
+  let branchRetainedReason: string | undefined;
+  const branch = opts.branch ?? `feat/${sanitized}`;
   if (opts.deleteBranch) {
-    const branch = opts.branch ?? `feat/${sanitized}`;
+    // Force delete — caller explicitly accepts data loss (`-D`).
     try {
       await execa('git', ['branch', '-D', branch], { cwd: absRoot, reject: true });
       branchDeleted = true;
     } catch (err) {
       throw wrapExecaError('git branch -D', err, { branch });
     }
+  } else if (opts.deleteMergedBranch) {
+    // FORGE-139 — safe merged-only delete (`-d`). git refuses an unmerged
+    // branch; we treat that refusal as RETAIN (not an error), so reclaiming
+    // orphaned merged branches never risks losing unmerged work.
+    // `--` terminates option parsing — a marker-sourced branch name starting
+    // with '-' must be an operand, never an option. Completeness vs git's ref
+    // grammar comes from git itself: check-ref-format --branch is the
+    // authoritative predicate (covers @{, lone @, trailing dot, .lock, slash
+    // edges — Codex batch-1 round 2). Leading '-' is screened first since
+    // check-ref-format would read it as an option even with the validator.
+    let refSafe = !branch.startsWith('-');
+    if (refSafe) {
+      try {
+        await execa('git', ['check-ref-format', '--branch', branch], { cwd: absRoot, reject: true });
+      } catch {
+        refSafe = false;
+      }
+    }
+    if (!refSafe) {
+      branchRetainedReason = `branch name '${branch}' is not a safe ref; retained`;
+    } else try {
+      await execa('git', ['branch', '-d', '--', branch], { cwd: absRoot, reject: true });
+      branchDeleted = true;
+    } catch (err) {
+      const cause = err as ExecaError;
+      const stderr = typeof cause.stderr === 'string' ? cause.stderr : '';
+      if (/not fully merged/i.test(stderr)) {
+        branchRetainedReason = `branch '${branch}' is not fully merged; retained (use deleteBranch to force)`;
+      } else if (/not found|Cannot delete branch/i.test(stderr)) {
+        // Branch already gone (e.g. never created, or deleted elsewhere) — noop.
+        branchRetainedReason = `branch '${branch}' not found; nothing to delete`;
+      } else {
+        throw wrapExecaError('git branch -d', err, { branch });
+      }
+    }
   }
 
-  return { removed: true, gitignoredFilesLost: count, branchDeleted };
+  return {
+    removed: true,
+    gitignoredFilesLost: count,
+    branchDeleted,
+    ...(branchRetainedReason ? { branchRetainedReason } : {}),
+  };
 }
