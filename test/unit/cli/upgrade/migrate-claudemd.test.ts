@@ -417,3 +417,50 @@ test('extractSection: deterministic across runs (same input → same fullBlock)'
   assert.ok(a && b);
   assert.equal(a.fullBlock, b.fullBlock);
 });
+
+// =====================================================================
+// FORGE-208 — upfront symlink preflight on every write target
+// =====================================================================
+
+test('migrateClaudemd (FORGE-208 #12): refuses upfront when .gitignore is a symlink — no partial writes, no .bak', async () => {
+  const cwd = bootstrapLegacy();
+  try {
+    const { symlinkSync, lstatSync } = await import('node:fs');
+    writeFileSync(join(cwd, 'real-gitignore'), 'node_modules\n');
+    symlinkSync('real-gitignore', join(cwd, '.gitignore'));
+
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /\.gitignore is a symbolic link/i);
+    assert.deepEqual([...result.filesChanged], []);
+
+    // Upfront refusal — NOTHING was written (the bug this guards: a
+    // mid-migration FsWriteError after .bak/CONTEXT.md already landed).
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak');
+    assert.ok(!existsSync(join(cwd, '.forge/CONTEXT.md')), 'no CONTEXT.md');
+    assert.ok(!existsSync(join(cwd, '.forge/.version')), 'no .version');
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), LEGACY_CLAUDEMD, 'CLAUDE.md unchanged');
+    assert.equal(lstatSync(join(cwd, '.gitignore')).isSymbolicLink(), true, 'link intact');
+    assert.equal(readFileSync(join(cwd, 'real-gitignore'), 'utf8'), 'node_modules\n', 'target untouched');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('migrateClaudemd (FORGE-208 #12b): refuses upfront when .forge/CONTEXT.md is a symlink — no partial writes', async () => {
+  const cwd = bootstrapLegacy();
+  try {
+    const { symlinkSync } = await import('node:fs');
+    writeFileSync(join(cwd, 'real-context.md'), '# elsewhere\n');
+    symlinkSync('../real-context.md', join(cwd, '.forge/CONTEXT.md'));
+
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /\.forge\/CONTEXT\.md is a symbolic link/i);
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak');
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), LEGACY_CLAUDEMD, 'CLAUDE.md unchanged');
+    assert.equal(readFileSync(join(cwd, 'real-context.md'), 'utf8'), '# elsewhere\n', 'target untouched');
+  } finally {
+    cleanup(cwd);
+  }
+});

@@ -34,6 +34,7 @@ import {
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { execaSync } from 'execa';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { FsWriteError } from '../../core/errors.ts';
 import {
   ForgeManifestSchema,
   TaskStateSchema,
@@ -151,7 +152,7 @@ export function eject(opts: EjectOptions): EjectResult {
     };
   }
 
-  applyPlan(cwd, manifest, plan);
+  warnings.push(...applyPlan(cwd, manifest, plan));
   // Remove .forge/ wholesale last (covers CONTEXT.md, .version, settings.yaml,
   // orchestrator/, logs/, manifest.json — everything forge owns under .forge/).
   rmSync(forgeDir, { recursive: true, force: true });
@@ -302,19 +303,49 @@ function computePlan(cwd: string, manifest: ForgeManifest): EjectPlanItem[] {
 
 // --- apply ------------------------------------------------------------------
 
-function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPlanItem[]): void {
+/** Returns warnings for paths that were skipped (FORGE-208: symlinked files). */
+function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPlanItem[]): string[] {
+  const warnings: string[] = [];
+
   // Root files.
   for (const rf of manifest.rootFiles) {
     const p = within(cwd, rf.path);
     if (!p || !existsSync(p)) continue;
     if (rf.forgeCreated) {
+      // FORGE-208: a forge-created file may since have been REPLACED by a user
+      // with a symlink (e.g. CLAUDE.md → AGENTS.md for host parity). Deleting
+      // it here would destroy that link, not a forge-owned regular file. lstat
+      // (not stat) so we see the link's own type; skip + warn rather than
+      // delete.
+      if (isSymlink(p)) {
+        warnings.push(
+          `skipped: ${rf.path} (symlink) — forge-created file was replaced by a symlink; not deleting the link`,
+        );
+        continue;
+      }
       unlinkSync(p);
       continue;
     }
     // forge only STAMPED a marker onto a pre-existing user file — strip the
     // block and keep the file even if the residual is empty (it's the user's
     // file; deleting it would be data loss — Codex impl #1).
-    writeAtomic(p, bodyWithoutPrefixBlock(readFileSync(p, 'utf8')));
+    //
+    // FORGE-208: when the root file is a symlink, writeAtomic refuses (the
+    // rename would destroy the link; the marker block lives in the TARGET,
+    // which forge never stamped through this path). Skip with a notice and
+    // keep ejecting — a leftover marker block in a user-managed target is
+    // benign; destroying their link is not.
+    try {
+      writeAtomic(p, bodyWithoutPrefixBlock(readFileSync(p, 'utf8')));
+    } catch (err) {
+      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+        warnings.push(
+          `skipped: ${rf.path} is a symbolic link — stripping the forge block would destroy the link (the block lives in the target). Remove the block from the target manually if needed.`,
+        );
+        continue;
+      }
+      throw err;
+    }
   }
 
   // Ignore files.
@@ -322,6 +353,14 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
     const p = within(cwd, ig.path);
     if (!p || !existsSync(p)) continue;
     if (ig.created) {
+      // FORGE-208: same guard as root files — a forge-created ignore file may
+      // have been swapped for a symlink; never delete the link.
+      if (isSymlink(p)) {
+        warnings.push(
+          `skipped: ${ig.path} (symlink) — forge-created file was replaced by a symlink; not deleting the link`,
+        );
+        continue;
+      }
       unlinkSync(p);
       continue;
     }
@@ -331,7 +370,19 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
       ig.kind === 'block'
         ? removeGitignoreBlock(before, { priorEndedWithNewline: ig.priorEndedWithNewline })
         : removeAppendedLine(before, ig.line ?? '', ig.priorEndedWithNewline);
-    writeAtomic(p, after);
+    // FORGE-208: same graceful skip as root files when the ignore file is a
+    // symlink — the forge-written block/line lives in the target.
+    try {
+      writeAtomic(p, after);
+    } catch (err) {
+      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+        warnings.push(
+          `skipped: ${ig.path} is a symbolic link — reversing forge's edit would destroy the link (the edit lives in the target). Remove it from the target manually if needed.`,
+        );
+        continue;
+      }
+      throw err;
+    }
   }
 
   // Farm entries (manifest-recorded — covers symlink + copy modes).
@@ -349,6 +400,8 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
   for (const parent of farmParents) {
     removeEmptyDirsUp(parent, cwd);
   }
+
+  return warnings;
 }
 
 // Inverse of appendLineIfMissing: forge appended `${sep}${line}\n` where

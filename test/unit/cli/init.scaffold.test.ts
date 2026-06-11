@@ -467,3 +467,74 @@ test('toMinimalYamlObject omits description when absent', () => {
   const project = obj.project as Record<string, unknown>;
   assert.equal(project.description, undefined);
 });
+
+// ============================================================================
+// FORGE-208 — symlink-safe scaffolding
+// ============================================================================
+
+test('scaffold (FORGE-208 #8): staged-promotion guard — a symlinked dest survives an init re-run (skip + warning)', async () => {
+  const { lstatSync, readlinkSync, symlinkSync, rmSync } = await import('node:fs');
+  const cwd = tmp();
+  // First scaffold creates the project.
+  scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-06-12' });
+  // User converts CLAUDE.md into a parity symlink.
+  const claudeBody = readFileSync(resolve(cwd, 'CLAUDE.md'), 'utf8');
+  rmSync(resolve(cwd, 'CLAUDE.md'));
+  writeFileSync(resolve(cwd, 'real-claude.md'), claudeBody);
+  symlinkSync('real-claude.md', resolve(cwd, 'CLAUDE.md'));
+
+  // Re-run with explicit overwrite consent for CLAUDE.md — the symlink guard
+  // must still win (skip + warning), never rmSync the link.
+  const result = scaffoldProject({
+    cwd,
+    answers: fixtureAnswers(),
+    templatesDir,
+    isoDate: '2026-06-12',
+    overwrite: { 'CLAUDE.md': true },
+  });
+
+  assert.equal(lstatSync(resolve(cwd, 'CLAUDE.md')).isSymbolicLink(), true, 'symlink survives the re-run');
+  assert.equal(readlinkSync(resolve(cwd, 'CLAUDE.md')), 'real-claude.md');
+  assert.equal(readFileSync(resolve(cwd, 'real-claude.md'), 'utf8'), claudeBody, 'target untouched');
+  assert.ok(result.skipped.includes('CLAUDE.md'), 'CLAUDE.md reported as skipped');
+  assert.equal(result.written.includes('CLAUDE.md'), false);
+  assert.ok(result.warningsPath, 'init-warnings sidecar written');
+  const warningsBody = readFileSync(result.warningsPath!, 'utf8');
+  assert.match(warningsBody, /CLAUDE\.md is a symbolic link/, 'warning names the skipped symlink');
+});
+
+test('scaffold (FORGE-208): symlinked .gitignore is skipped with a warning — link intact', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = tmp();
+  // Pre-seed a symlinked .gitignore (no forge block in the target → a write
+  // would otherwise happen).
+  writeFileSync(resolve(cwd, 'real-gitignore'), 'node_modules\n');
+  symlinkSync('real-gitignore', resolve(cwd, '.gitignore'));
+
+  const result = scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-06-12' });
+
+  assert.equal(lstatSync(resolve(cwd, '.gitignore')).isSymbolicLink(), true, 'link intact');
+  assert.equal(readFileSync(resolve(cwd, 'real-gitignore'), 'utf8'), 'node_modules\n', 'target untouched');
+  assert.ok(result.skipped.includes('.gitignore'));
+  assert.equal(result.written.includes('.gitignore'), false);
+  assert.ok(result.warningsPath, 'init-warnings sidecar written');
+  assert.match(readFileSync(result.warningsPath!, 'utf8'), /\.gitignore is a symbolic link/);
+});
+
+test('appendToolingExcludes (FORGE-208): symlinked .eslintignore is skipped + warned, never written through', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = tmp();
+  writeFileSync(resolve(cwd, 'real-eslintignore'), 'coverage\n');
+  symlinkSync('real-eslintignore', resolve(cwd, '.eslintignore'));
+
+  const result = appendToolingExcludes(cwd);
+
+  assert.equal(lstatSync(resolve(cwd, '.eslintignore')).isSymbolicLink(), true, 'link intact');
+  assert.equal(readFileSync(resolve(cwd, 'real-eslintignore'), 'utf8'), 'coverage\n', 'target untouched');
+  assert.ok(result.skipped.includes('.eslintignore'));
+  assert.equal(result.written.includes('.eslintignore'), false);
+  assert.ok(
+    result.warned.some((w) => w.target === '.eslintignore' && /symbolic link/.test(w.snippet)),
+    'warned entry present for the symlinked ignore file',
+  );
+});

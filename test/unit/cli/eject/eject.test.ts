@@ -286,3 +286,104 @@ test('eject: backup snapshot dir is created at repo root', () => {
   const backups = readdirSync(cwd).filter((e) => e.startsWith('.forge.eject-backup-'));
   assert.equal(backups.length, 1);
 });
+
+// ============================================================================
+// FORGE-208 — symlinked forge-managed files are skipped, never destroyed
+// ============================================================================
+
+test('eject (FORGE-208 #9): symlinked CLAUDE.md is skipped with a warning — link intact, target untouched', async () => {
+  const { lstatSync, readlinkSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  const targetBody = `${MARKER}\n# My Project\n\nreal content\n`;
+  writeFileSync(join(cwd, 'real-claude.md'), targetBody);
+  symlinkSync('real-claude.md', join(cwd, 'CLAUDE.md'));
+  writeManifest(cwd, baseManifest({ rootFiles: [{ path: 'CLAUDE.md', forgeCreated: false }] }));
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject completes despite the symlinked root file');
+  assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(), true, 'link intact');
+  assert.equal(readlinkSync(join(cwd, 'CLAUDE.md')), 'real-claude.md');
+  assert.equal(readFileSync(join(cwd, 'real-claude.md'), 'utf8'), targetBody, 'target untouched (marker NOT stripped through the link)');
+  assert.ok(
+    res.warnings.some((w) => /skipped: CLAUDE\.md is a symbolic link/.test(w)),
+    `expected skip warning, got: ${res.warnings.join(' | ')}`,
+  );
+  assert.ok(!existsSync(join(cwd, '.forge')), '.forge still removed');
+});
+
+test('eject (FORGE-208): symlinked ignore file is skipped with a warning — link intact, target untouched', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  const targetBody = 'coverage\n.forge/worktrees/\n';
+  writeFileSync(join(cwd, 'real-eslintignore'), targetBody);
+  symlinkSync('real-eslintignore', join(cwd, '.eslintignore'));
+  writeManifest(
+    cwd,
+    baseManifest({
+      ignoreFiles: [
+        { path: '.eslintignore', kind: 'line', created: false, priorEndedWithNewline: true, line: '.forge/worktrees/' },
+      ],
+    }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0);
+  assert.equal(lstatSync(join(cwd, '.eslintignore')).isSymbolicLink(), true, 'link intact');
+  assert.equal(readFileSync(join(cwd, 'real-eslintignore'), 'utf8'), targetBody, 'target untouched');
+  assert.ok(
+    res.warnings.some((w) => /skipped: \.eslintignore is a symbolic link/.test(w)),
+    `expected skip warning, got: ${res.warnings.join(' | ')}`,
+  );
+});
+
+test('eject: forge-created root file replaced by a symlink is NOT deleted (FORGE-208)', async () => {
+  const { lstatSync, readlinkSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  // User replaced the forge-created CLAUDE.md with a symlink to AGENTS.md after
+  // init (host-parity convention). eject must not delete the link.
+  writeFileSync(join(cwd, 'AGENTS.md'), '# real agents file\n');
+  symlinkSync('AGENTS.md', join(cwd, 'CLAUDE.md'));
+  writeManifest(cwd, baseManifest({ rootFiles: [{ path: 'CLAUDE.md', forgeCreated: true }] }));
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject still succeeds');
+  assert.equal(
+    lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(),
+    true,
+    'symlink left intact — not deleted',
+  );
+  assert.equal(readlinkSync(join(cwd, 'CLAUDE.md')), 'AGENTS.md', 'link target unchanged');
+  assert.equal(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), '# real agents file\n', 'real file untouched');
+  assert.ok(
+    res.warnings.some((w) => w.includes('CLAUDE.md') && w.includes('symlink')),
+    `expected a symlink-skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});
+
+test('eject: forge-created ignore file replaced by a symlink is NOT deleted (FORGE-208)', async () => {
+  const { lstatSync, readlinkSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  writeFileSync(join(cwd, 'shared.ignore'), 'coverage\n');
+  symlinkSync('shared.ignore', join(cwd, '.eslintignore'));
+  writeManifest(
+    cwd,
+    baseManifest({
+      ignoreFiles: [
+        { path: '.eslintignore', kind: 'block', created: true, priorEndedWithNewline: true },
+      ],
+    }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject still succeeds');
+  assert.equal(
+    lstatSync(join(cwd, '.eslintignore')).isSymbolicLink(),
+    true,
+    'symlink left intact — not deleted',
+  );
+  assert.equal(readlinkSync(join(cwd, '.eslintignore')), 'shared.ignore', 'link target unchanged');
+  assert.ok(
+    res.warnings.some((w) => w.includes('.eslintignore') && w.includes('symlink')),
+    `expected a symlink-skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});

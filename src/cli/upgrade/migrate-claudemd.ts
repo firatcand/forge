@@ -215,6 +215,33 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
       stderr: 'forge upgrade --migrate-claudemd: .forge/settings.yaml is a symbolic link. Refusing migration. Resolve the symlink or replace with a regular file first.',
     };
   }
+
+  // Precondition 2b (FORGE-208): extend the M1/M2 symlink preflight to EVERY
+  // other path this migration writes — .forge/CONTEXT.md, .forge/.version,
+  // .gitignore — BEFORE any write (including the .bak). Without this, a
+  // symlink at any of them would surface as a mid-migration FsWriteError from
+  // writeAtomic AFTER the .bak (and possibly CONTEXT.md) already landed,
+  // leaving a partial migration. lstatSync via try (paths may not exist yet —
+  // absent is fine, those are migration outputs).
+  for (const [rel, abs] of [
+    ['.forge/CONTEXT.md', contextPath],
+    ['.forge/.version', versionPath],
+    ['.gitignore', gitignorePath],
+  ] as const) {
+    let st;
+    try {
+      st = lstatSync(abs);
+    } catch {
+      // absent — fine
+    }
+    if (st?.isSymbolicLink()) {
+      return {
+        exitCode: 1,
+        filesChanged: [],
+        stderr: `forge upgrade --migrate-claudemd: ${rel} is a symbolic link. Refusing migration — destructive writes through symlinks could mutate files outside the working tree. Resolve the symlink or replace with a regular file first.`,
+      };
+    }
+  }
   try {
     const raw = yamlParse(readFileSync(settingsPath, 'utf8')) as unknown;
     const parsed = SettingsSchema.safeParse(raw);
