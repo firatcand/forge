@@ -1,1131 +1,942 @@
-project: "forge"
-gate_check_command: "npm run typecheck && npm run test && npm run build"
+project: forge
+gate_check_command: npm run typecheck && npm run test && npm run build
 source:
-  tracker: "linear"
-  project_id: "768871a9-7f95-4bd8-a5da-2ab1b290753a"
-  synced_at: "2026-05-17T22:17:11Z"
-  spec_revision: "8fa22260dfb272c0ba61a6b78288942fc1d0f418"
-
+  tracker: linear
+  project_id: 768871a9-7f95-4bd8-a5da-2ab1b290753a
+  synced_at: 2026-06-11T05:46:57Z
+  spec_revision: d4e07fbaf301cf7a8983f79c54d7948dc7bee2c4
 phases:
-  - id: phase-1
-    tracker_milestone_id: "d1aade3f-fdc2-4ea9-b948-64a6b2d9450d"
-    name: "Foundations — TS migration + schemas + core"
-    status: done
-    goal: "TS toolchain working end-to-end; settings.yaml + phases.yaml load and validate; logger + workspace ready for orchestrator to plug into."
+  - id: phase-2.5
+    name: Closed-loop workflow control
+    status: active
+    goal: Spec-change propagation, roadmap amendment, and tracker-mutation hardening so the closed-loop workflow is safe and self-correcting.
     gate_criteria:
-      - "All Phase 1 tasks complete (P0 + P1)"
-      - "npm run typecheck passes with strict TS"
-      - "npm run test passes (node:test runner)"
-      - "npm run build emits dual ESM+CJS to dist/ under 1 MB"
-      - "tsup config produces bin/forge.cjs that runs and prints --version"
-      - "Existing v0.2.1 lib/ deleted (or aliased to src/) — no JS source remains in the build path"
+      - All P0 tasks (/update-spec, /amend-roadmap) shipped with tests
+      - npm run typecheck && npm run test && npm run build green
     tasks:
-      - id: P1-T01
-        tracker_issue_id: "FORGE-6"
-        title: "Bootstrap TS toolchain"
-        description: "Add typescript, tsup, tsx, @types/node devDeps. Create tsconfig.json (strict, ESM, target ES2022, moduleResolution=bundler). Create tsup.config.ts producing dual ESM+CJS for src/bin/forge.ts and src/index.ts. Wire npm scripts: build, typecheck (tsc --noEmit), test (node --test --import tsx), dev (tsx watch)."
-        type: foundation
+      - id: P2.5-T01
+        tracker_issue_id: FORGE-93
+        title: Build /update-spec draft and apply skill
+        description: "Single skill, two modes. --draft scaffolds spec/decisions/<date>-<slug>.md from template (refuses if a draft exists). --apply <slug> requires frontmatter status: accepted, shows per-artifact diff (SPEC+PRD+phases+tracker), writes a journal, deletes the ADR on success and uses its content as the commit body; --resume/--yes-all supported. Delegates atomic mutations to the apply-decision verb."
+        type: skill
+        priority: P0
+        depends_on: []
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - --draft writes a valid ADR from template and refuses when another draft exists
+          - "--apply <slug> refuses unless status: accepted; shows per-artifact diff with confirm or --yes-all"
+          - On success ADR deleted, rationale becomes commit body; --resume continues from journal
+      - id: P2.5-T02
+        tracker_issue_id: FORGE-101
+        title: Build /amend-roadmap skill and verb
+        description: "skills/amend-roadmap + src/cli/orchestrate/amend-roadmap.ts for mid-flight task creation: prompt for title/description/type/ACs/depends_on/owner_type, write phases.yaml and push to tracker atomically (rollback both on failure), resumable journal under .forge/orchestrator/global/amend-journal/<task-id>.json, auto-invoke worktree-drift-guard after success."
+        type: skill
         priority: P0
         depends_on: []
         estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Writes phases.yaml + tracker atomically (rollback both if either fails)
+          - New task gets next P<phase>-T<n> id; resumable journal written
+          - Invokes worktree-drift-guard --dry-run preview after success
+      - id: P2.5-T03
+        tracker_issue_id: FORGE-116
+        title: Build /wrap-up post-merge housekeeping skill
+        description: "New skills/wrap-up composing existing engines into post-merge cleanup: detect task scope from worktree branch, verify PR merged via gh, run reconcile --pull, show a cleanup preview, then on approval prune the worktree via gc, delete the branch and fast-forward main. Suggest-don't-force; --all batch mode."
+        type: skill
+        priority: P1
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Auto-detects task ID from worktree branch; aborts (deletes nothing) if PR not merged
+          - Runs reconcile --pull, shows preview, confirms before any destructive action
+          - On approval removes worktree via gc, deletes branch, fast-forwards main
+      - id: P2.5-T04
+        tracker_issue_id: FORGE-118
+        title: Harden tracker body-mutation methods
+        description: "Codex/review follow-ups deferred from the updateIssueBody work: wrap updateIssueBody/setBlockedBy in withRetry on Linear+GitHub; dedup parseExtraForgeFooters by KEY; stop matching forge comments inside fenced code blocks; decide CAS/single-writer contract; verify or remove the Linear description byte cap."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - updateIssueBody + setBlockedBy wrapped in withRetry with retry-on-RATE_LIMITED tests per adapter
+          - parseExtraForgeFooters dedups by KEY; fenced-code forge comments round-trip without re-emission
+          - CAS/single-writer contract decided and documented
+      - id: P2.5-T05
+        tracker_issue_id: FORGE-119
+        title: Add /reconcile --task id filter
+        description: "Add --task <id> to parseReconcileArgv: filter diffPull/diffPush to the matching task (by id or tracker_issue_id), error INVALID_ARGS on unknown id, surface the scope in dry-run. Thin filter layer over the working diff functions."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - reconcile --pull --task <id> --dry-run --json returns only the scoped task
+          - Unknown id exits 1 with INVALID_ARGS
+          - Integration test covers both pull and push directions with the filter
+      - id: P2.5-T06
+        tracker_issue_id: FORGE-120
+        title: Constrain TaskSchema.status with typed enum
+        description: "Replace the unconstrained status: z.string().optional() on TaskSchema with z.enum(TASK_STATUSES) covering active/deferred-v0.5/dropped/paused; export TASK_STATUSES + TaskStatus."
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - TASK_STATUSES const + TaskStatus type exported; TaskSchema.status uses z.enum(TASK_STATUSES).optional()
+          - Production phases.yaml still validates
+          - Unit test rejects a garbage status value
+      - id: P2.5-T07
+        tracker_issue_id: FORGE-123
+        title: Add Tracker.getCurrentRevision for drift detection
+        description: "Extend the Tracker base with getCurrentRevision(): an opaque provider-native revision token (Linear max(updatedAt), GitHub ETag, Notion last_edited_time). Add source.tracker_revision, stamp on reconcile --pull, wire one consumer (doctor drift or --pull --check short-circuit)."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - getCurrentRevision() on the base + all 3 adapters; Source gains tracker_revision (stays strict)
+          - reconcile --pull stamps it; at least one consumer wired
+          - Per-adapter unit tests + integration test for --pull --check skip-on-match
+      - id: P2.5-T08
+        tracker_issue_id: FORGE-124
+        title: Drop auto_codex_token_cap budget from SPEC
+        description: "Remove the legacy budget language in SPEC.md Auto-codex hooks (passive suggestions cost zero codex tokens so the cap bounds nothing): drop the Bounded-by sentence + env ref, the schema field + scaffold default + matching tests, and clean the PRD line."
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Decision A/B recorded
+          - "If A: SPEC updated, schema field + scaffold default removed, tests dropped, rg auto_codex_token_cap is empty"
+          - Existing adopter settings.yaml still parse
+      - id: P2.5-T09
+        tracker_issue_id: FORGE-127
+        title: Move tracker_url into source block
+        description: Add tracker_url to SourceSchema and remove it from top-level PhasesSchema (mirrors the project_id migration). Migrate legacy top-level tracker_url into source on reconcile --pull; update fixtures/templates/docs/SPEC.
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - SourceSchema includes tracker_url (strict preserved)
+          - reconcile --pull migrates legacy top-level tracker_url (unit-tested); round-trip test added
+          - SPEC + adopter docs updated
+      - id: P2.5-T10
+        tracker_issue_id: FORGE-129
+        title: Refresh stale phases.yaml schema in SPEC
+        description: Replace the stale TaskSchema/PhaseSchema/PhasesSchema code block in spec/SPEC.md with the current shape from src/schemas/phases.ts (lifecycle fields, source block, superRefine); describe superRefine in prose, keep the schema file canonical.
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Schema code block matches current src/schemas/phases.ts exports
+          - superRefine summarized in prose (dup ids, unknown deps, DAG cycles)
+          - Stale see-also pointer removed
+      - id: P2.5-T11
+        tracker_issue_id: FORGE-131
+        title: Add doctor exported-name drift detection
+        description: Extend doctor --scope spec-code to detect exported-name drift beyond file-path drift. Requires resolving an architectural fork (inline-link vs grep+allowlist vs AST/ts-morph) to avoid false positives from prose backtick spans in SPEC.md.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Architectural fork resolved via AskUserQuestion in a /plan-task pass
+          - doctor --scope spec-code detects exported-name drift
+          - Exit-code semantics unchanged; existing doctor e2e still passes
+      - id: P2.5-T12
+        tracker_issue_id: FORGE-134
+        title: Make orchestrate verb --help print help
+        description: forge orchestrate <verb> --help silently runs the verb. Intercept --help in the dispatcher before verb.run across all 23 verbs, honoring --json precedence; choose synopsis footer vs per-verb flag table from each verb Zod args schema.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - <verb> --help prints help and exits 0 for every verb
+          - --json --help still prints help (--help precedence)
+          - 2-3 verb tests lock the intercept
+      - id: P2.5-T13
+        tracker_issue_id: FORGE-137
+        title: Add src/harnesses to SPEC module layout
+        description: SPEC.md Module layout omits the shipped src/harnesses/ subtree (IHarness abstraction). Add a harnesses/ subtree listing the 7 files (base, subprocess, verdict-parser, claude, codex, gemini, index) with one-line role comments, matching the existing code-fence style.
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - SPEC Module layout includes the harnesses/ subtree with the 7 files + role comments
+          - "doctor --scope spec-code still returns drift: []"
+          - Code-fence comment style matches the rest of the block
+  - id: phase-3
+    name: Launch v0.4
+    status: active
+    goal: "Ship v0.4.0 to npm: migration path, E2E + cross-host CI, and a public release with a dogfood-able upgrade story."
+    gate_criteria:
+      - forge migrate covers v0.2.x -> v0.4 on a fixture
+      - E2E lifecycle green for all three trackers on the Claude+Codex matrix
+      - v0.4.0 published to npm and GitHub; npx pulls 0.4.0
+    tasks:
+      - id: P3-T01
+        tracker_issue_id: FORGE-109
+        title: Build forge migrate v0.2.x to v0.4
+        description: src/cli/migrate.ts detects v0.2.x drift signatures (@inherit, /push-to-linear refs, missing settings.yaml, dropped verbs), shows a chalk diff, updates SettingsSchema (codex/decisions/doctor blocks), rewrites renamed-verb call sites, archives orphan state, backs up to .forge/backup-<ts>/, applies on accept.
+        type: backend
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Detects all v0.2.x drift signatures on a fixture project
+          - Rewrites settings.yaml + renamed-verb skill call sites
+          - Backup holds pristine originals; aborts cleanly on reject; idempotent re-run
+      - id: P3-T02
+        tracker_issue_id: FORGE-110
+        title: Build E2E fixtures and cross-host CI matrix
+        description: examples/ fixture projects (greenfield github/linear/notion); CI runs the full v0.4 closed-loop lifecycle (init through /ship and /reconcile) on Claude primary + Codex review per fixture, including mid-flight /update-spec draft/apply, ADR deletion, drift events, multi-main CAS, resume-from-failure.
+        type: integration
+        priority: P0
+        depends_on:
+          - P2.5-T01
+          - P3-T04
+        estimate: L
+        owner_type: qa-engineer
+        acceptance:
+          - 3 fixtures with deterministic phases.yaml; full v0.4 lifecycle e2e per tracker
+          - Closed-loop drift propagates SPEC+PRD+phases+tracker and deletes ADR; --apply --resume recovers
+          - "Multi-main CAS test: exactly one session wins; CI matrix Claude+Codex green, Cursor+Gemini smoke"
+      - id: P3-T03
+        tracker_issue_id: FORGE-111
+        title: Release v0.4.0 to npm and GitHub
+        description: "Cut the release: bump package.json to 0.4.0, tag v0.4.0, npm publish --access public, GitHub release with CHANGELOG excerpt + migration note. Headline = multi-agent host abstraction + dogfood-able upgrade path; closed-loop drift deferred to v0.5."
+        type: infra
+        priority: P0
+        depends_on:
+          - P3-T01
+          - P3-T02
+        estimate: S
         owner_type: devops-engineer
         acceptance:
-          - "package.json has all 4 new devDeps at locked versions"
-          - "tsconfig.json with strict mode passes tsc --noEmit on empty src/index.ts"
-          - "tsup build produces dist/bin/forge.cjs that runs node dist/bin/forge.cjs --version (placeholder OK)"
-          - "test script runs against an empty test/unit/sanity.test.ts and exits 0"
-      - id: P1-T02
-        tracker_issue_id: "FORGE-7"
-        title: "Define settings.yaml zod schema"
-        description: "Implement src/schemas/settings.ts with SettingsSchema per SPEC §Data model. Discriminated unions for tracker.type and secrets.manager. Refinement: review_host_cli !== primary_host_cli (or null). Defaults applied for missing keys outside version + project."
-        type: data
-        priority: P0
-        depends_on: [P1-T01]
-        estimate: S
-        owner_type: db-architect
-        acceptance:
-          - "Schema validates a complete settings.yaml fixture"
-          - "Schema rejects review_host_cli == primary_host_cli with refinement message"
-          - "Defaults applied to fixture missing optional keys"
-          - "Unit tests cover all 5 secret manager variants"
-      - id: P1-T03
-        tracker_issue_id: "FORGE-8"
-        title: "Define phases.yaml zod schema"
-        description: "Implement src/schemas/phases.ts with PhaseSchema, TaskSchema, PhasesSchema per SPEC. Validates owner_type, priority, depends_on as task ID list. Add validator detecting cycles in depends_on graph."
-        type: data
-        priority: P0
-        depends_on: [P1-T01]
-        estimate: S
-        owner_type: db-architect
-        acceptance:
-          - "Schema validates this very phases.yaml fixture"
-          - "Cycle validator rejects a fixture with circular depends_on"
-          - "Unit tests cover 5 owner_types and 3 priorities"
-      - id: P1-T04
-        tracker_issue_id: "FORGE-9"
-        title: "Build core/settings.ts loader + hot-reload"
-        description: "src/core/settings.ts: load(), validate via zod, mtime-cache, reload-on-change-detect. Returns parsed Settings. Throws on validation error with helpful message. Used by orchestrator polling loop (loadIfChanged: Settings | null)."
-        type: backend
-        priority: P0
-        depends_on: [P1-T02]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "load() returns parsed Settings for a valid file"
-          - "load() throws ValidationError with zod issues for invalid file"
-          - "loadIfChanged() returns null if mtime unchanged, Settings if changed"
-          - "Unit tests cover happy path, invalid YAML, schema violation, mtime caching"
-      - id: P1-T05
-        tracker_issue_id: "FORGE-10"
-        title: "Build core/phases.ts loader"
-        description: "src/core/phases.ts: load(), validate via zod, returns parsed Phases. Used by /decompose output and orchestrator to read task graph."
-        type: backend
-        priority: P0
-        depends_on: [P1-T03]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "load() returns parsed Phases for a valid file"
-          - "load() throws on schema violation or cycle in depends_on"
-          - "Unit tests cover happy path, cycle, missing required fields"
-      - id: P1-T06
-        tracker_issue_id: "FORGE-11"
-        title: "Build core/logger.ts with chalk + JSONL"
-        description: "src/core/logger.ts implementing all DESIGN.md helpers: banner, section, step, kv, list, table, spinner, prompt, errorBlock. Stdout via chalk; append-only JSONL to .forge/logs/orchestrator.jsonl. Respects FORGE_NO_COLOR. ASCII fallback when LANG is non-UTF-8. Width-aware via process.stdout.columns. Secret-key redaction in JSONL writer."
-        type: foundation
-        priority: P0
-        depends_on: [P1-T01]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "All 9 component helpers exported and typed"
-          - "FORGE_NO_COLOR=1 disables chalk, structure preserved"
-          - "ASCII fallback works when forced via test harness"
-          - "Redactor catches keys matching *_KEY, *_TOKEN, *_SECRET in fields"
-          - "Snapshot tests for each helper output (with and without color)"
-      - id: P1-T07
-        tracker_issue_id: "FORGE-13"
-        title: "Build core/workspace.ts worktree manager"
-        description: "src/core/workspace.ts: sanitizeIssueId(id), validateUnderRoot(path, root), create(taskId) → spawns git worktree at <root>/<sanitized-id>, cleanup(taskId) → removes worktree. All git ops via execa. Path traversal hardening per SPEC threat model."
-        type: backend
-        priority: P0
-        depends_on: [P1-T01]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "sanitizeIssueId('FORGE-42') returns 'FORGE-42'; sanitizeIssueId('../etc/passwd') sanitized to safe form"
-          - "validateUnderRoot rejects path that escapes root"
-          - "create() spawns worktree from current branch; cleanup() removes it"
-          - "Unit tests cover sanitization edge cases + path traversal attacks"
-      - id: P1-T08
-        tracker_issue_id: "FORGE-12"
-        title: "Delete legacy lib/ JS files"
-        description: "After P1-T01..P1-T07 land, remove lib/ JavaScript files that have been migrated to src/. Update any internal references. Update package.json files whitelist."
-        type: foundation
-        priority: P1
-        depends_on: [P1-T04, P1-T05, P1-T06, P1-T07]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "lib/ directory empty or deleted"
-          - "package.json files field excludes lib/"
-          - "No remaining imports from lib/ anywhere in src/"
-          - "Existing tests still pass"
-
-  - id: phase-2
-    tracker_milestone_id: "99412577-59a7-4b84-80f5-0e9b078dc794"
-    name: "Core features — adapters + init + orchestrator"
-    status: active
-    blocked_by: phase-1
-    goal: "User can run `forge init` to scaffold a project, then drive task delivery via `/forge orchestrate` (skill in their main Claude Code / Codex session) backed by the `forge orchestrate <verb>` CLI control plane, with at least GitHub Issues + Linear adapters working end-to-end. Workers run as host-native subagents under interactive subscription billing — no daemon, no headless host CLI subprocesses, no Agent SDK / API key usage."
-    gate_criteria:
-      - "All Phase 2 tasks complete (P0 + P1)"
-      - "End-to-end test: forge init → /forge orchestrate dispatches subagent workers against fixture phases.yaml + GitHub fixture repo, ships at least one PR with two-host review verdict file present"
-      - "Linear adapter passes adapter conformance suite (strong CAS via expectedVersion)"
-      - "GitHub adapter passes adapter conformance suite (weak CAS via verify-on-readback)"
-      - "Notion adapter passes adapter conformance suite (race-detect via last_edited_time)"
-      - "Init flow completes in <30s on cold-start fixture"
-      - "Closing the main session leaves no orphan state; `forge orchestrate gc` reconciles all divergences from the divergence table on next invocation"
-      - "Question channel end-to-end: worker writes question via `forge orchestrate question` → skill surfaces question to user → supervisor answers via `forge orchestrate answer` → skill dispatches fresh subagent with answer hydrated → task completes"
-      - "Lease semantics enforced: lease_ttl_ms expiry triggers steal-after-grace; stolen lease's worker fails next heartbeat with LEASE_STOLEN and exits cleanly"
-      - "Worker preflight wrapper forces decision checkpoint on writes to default guardrail globs"
-      - "Multi-main coordination: two main sessions racing for the same task → one wins via tracker CAS; loser drops to next ready task"
-      - "CLI-verified verdicts: a worker self-reporting `tests.passed: 0` with `tests.ran: false` causes `forge orchestrate complete` to mark attempt verdict_unverified and keep task in running state"
-      - "Harness adapter conformance: ClaudeHarness (primary-only), CodexHarness (primary + review), GeminiHarness (primary + review) all pass IHarness conformance suite; settings.review_host_cli enum tightened to {codex, gemini}"
-      - "/second-opinion skill dispatches via settings.review_host_cli (Codex or Gemini) through IHarness.runReview; /codex deprecation alias warns once per session and delegates"
-      - "/status-check skill renders a standalone 4-pane dashboard (active workers / open questions / ready vs blocked / overlap+lease warnings) via `forge orchestrate dashboard --json`; no live dispatch loop required"
-    tasks:
-      - id: P2-T01
-        tracker_issue_id: "FORGE-14"
-        title: "Define Tracker interface + base adapter"
-        description: "src/trackers/base.ts with Tracker interface, Issue, IssueState, ClaimResult, CreateIssuePayload types per SPEC. Plus BaseTracker abstract class with shared logic (retry timing, error normalization). Concrete adapters extend it."
-        type: backend
-        priority: P0
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Tracker interface exported; all 8 methods typed"
-          - "BaseTracker handles ClaimResult normalization across error types"
-          - "Type-only consumer (test file) compiles against interface"
-      - id: P2-T02
-        tracker_issue_id: "FORGE-15"
-        title: "Implement GitHubTracker adapter via gh CLI"
-        description: "src/trackers/github.ts: spawns gh CLI via execa for all 8 Tracker methods. Claim via label add (atomic). Custom field round-trip for forgeTaskId via issue body footer (parsed back). Health check via gh auth status. Rate-limit handling via gh's built-in."
-        type: integration
-        priority: P0
-        depends_on: [P2-T01]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "All 8 Tracker methods implemented; pass adapter conformance suite"
-          - "Claim via label is atomic (concurrent claim test simulating two orchestrators)"
-          - "forgeTaskId round-trips through createIssue → listActiveIssues"
-          - "Integration test against fixture repo runs full lifecycle: createProject → createIssue → claim → updateState → comment"
-          - "healthCheck() returns ok=false with detail when gh auth status fails"
-      - id: P2-T03
-        tracker_issue_id: "FORGE-16"
-        title: "Implement LinearTracker adapter via MCP"
-        description: "src/trackers/linear.ts: uses Linear MCP server (already in user's tooling for v0.2.1). Claim via custom field forge_claimed_by (atomic via Linear revisions/optimistic concurrency). All 8 Tracker methods."
-        type: integration
-        priority: P0
-        depends_on: [P2-T01]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "All 8 Tracker methods implemented; pass adapter conformance suite"
-          - "Claim is atomic when two orchestrators race (test via mock MCP)"
-          - "Issue createdAt + state + blockerIds round-trip correctly"
-          - "Integration test against mock Linear MCP runs full lifecycle"
-      - id: P2-T04
-        tracker_issue_id: "FORGE-17"
-        title: "Implement NotionTracker adapter via MCP"
-        description: "src/trackers/notion.ts: uses Notion MCP server (mcp__claude_ai_Notion__*). Claim via database property forge_claimed_by + last_edited_time check-and-set for atomicity. All 9 Tracker methods (per SPEC.md line 179 — discriminator 'linear' | 'github' | 'notion'). No secret manager dependency."
-        type: integration
-        priority: P0
-        depends_on: [P2-T01]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "All 8 Tracker methods implemented; pass adapter conformance suite"
-          - "Claim via last_edited_time check returns retry on concurrent-edit conflict"
-          - "Recorded MCP fixture replays cover full lifecycle"
-          - "MCP transport errors handled with exponential backoff"
-      - id: P2-T05
-        tracker_issue_id: "FORGE-18"
-        title: "Implement secret-managers adapters (env_file + 1password + doppler)"
-        description: "src/secrets-managers/{env-file,onepassword,doppler}.ts. env_file is the default; 1password + doppler cover most user choices. (aws_secrets + infisical deferred to v-next+1.) Each exports get(key, opts) → string. Health check probe per manager."
+          - "package.json 0.4.0 on main; tag v0.4.0 pushed; npm publish succeeds (latest: 0.4.0)"
+          - CHANGELOG v0.4.0 entry with linked ticket IDs; GitHub release with migration callout
+          - npx @firatcand/forge@0.4.0 --version prints 0.4.0 on a fresh machine
+      - id: P3-T04
+        tracker_issue_id: FORGE-117
+        title: Refactor NotionTracker to ntn CLI transport
+        description: Refactor NotionTracker off the Notion MCP transport onto the ntn CLI (execa seam like GitHubTracker) and implement updateIssueBody via ntn api PATCH. Remove notion-mcp-transport.ts and @modelcontextprotocol/sdk and the NOT_IMPLEMENTED stub; update Notion adapter docs.
         type: integration
         priority: P1
         depends_on: []
         estimate: M
         owner_type: integration
         acceptance:
-          - "env_file reads from configured path; supports JSON + dotenv format auto-detect"
-          - "1password adapter shells to op CLI; surfaces clear error if op not authenticated"
-          - "doppler adapter shells to doppler CLI; respects DOPPLER_PROJECT + DOPPLER_CONFIG"
-          - "Healthchecks for each return ok=false with actionable detail when misconfigured"
-      - id: P2-T06
-        tracker_issue_id: "FORGE-19"
-        title: "Build init flow CLI"
-        description: "src/cli/init.ts replacing the inquirer prompts in current bin/forge.js. Sequential prompts (v2 architecture per spec/ORCHESTRATOR.md): project name, description, goal, tracker, secret manager, primary_host_cli, review_host_cli, subagent_cap_per_main (default 3), retry_attempts (default 10), lease_ttl_ms (default 30 min). Per-tracker tooling validation. Scaffolds project files from templates/. Writes .forge/settings.yaml. Refuses to run inside the forge framework checkout itself."
-        type: backend
-        priority: P0
-        depends_on: [P1-T04, P1-T06, P2-T01]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "All 10 prompts shown in correct sequence; defaults work via Enter"
-          - "Tooling validation runs per chosen tracker; surfaces install link on failure with skip option"
-          - "Scaffolds spec/, plans/tasks/, .forge/settings.yaml, .gitignore, CLAUDE.md, CRITICAL.md"
-          - "Existing files prompt for confirmation (no silent overwrite)"
-          - "Refuses to run when package.json.name === '@firatcand/forge'"
-          - "Init completes in <30s end-to-end on fixture"
-          - "Settings.yaml output validates against the v2 SettingsSchema (subagent_cap_per_main, lease_ttl_ms, heartbeat_interval_ms, steal_grace_ms, branch_strategy, preflight_globs, hard_lock_globs defaults all present)"
-      # ===================================================================
-      # ORCHESTRATOR SUBSYSTEM — v2 RE-DECOMPOSITION (2026-05-14)
-      # ===================================================================
-      # The architecture in spec/ORCHESTRATOR.md was rewritten 2026-05-14 to
-      # delete the long-running daemon design and adopt a CLI-as-control-plane
-      # + skill-as-dispatch model. Workers are host-native subagents (Claude
-      # Task tool / Codex native subagents), NOT execa-spawned host CLIs.
-      # Workers bill against the user's interactive subscription, never Agent
-      # SDK quota or API credits.
-      #
-      # This re-decomposition:
-      #   1. Adds refactor follow-ups (P2-T13/T14/T15/T16 = FORGE-72/76/77/73)
-      #      bringing merged v1 work (Tracker interface, LinearTracker,
-      #      GitHubTracker, Question channel) to v2 contracts.
-      #   2. Adds a new foundational task (P2-T17 / FORGE-78) for the state
-      #      machine + lease infrastructure that the rest of the orchestrator
-      #      sits on top of.
-      #   3. RESCOPES P2-T07/T08/T09/T12 (FORGE-20/21/22/65):
-      #        - FORGE-20 → CLI verb suite (`forge orchestrate <verb>`)
-      #        - FORGE-21 → worker prompt template (templates/worker-prompt.md)
-      #        - FORGE-22 → gc reconciliation + retry policy (no signals)
-      #        - FORGE-65 → decision classifier + preflight + decision_key dedupe
-      #   4. Adds a new task (P2-T18 / FORGE-74) for the dispatch skill
-      #      `/forge orchestrate` that runs in the user's main session and
-      #      calls the CLI in a loop.
-      #   5. Adds a new task (P2-T19 / FORGE-79) for file-glob overlap
-      #      detection at dispatch time.
-      #
-      # Dispatch ordering (updated 2026-05-16 — adds P2-T20/T21/T22 for
-      # multi-harness peers + /second-opinion rename + /status-check dashboard):
-      #
-      #   P2-T11 (DONE, FORGE-64) →
-      #   {P2-T13 (FORGE-72), P2-T16 (FORGE-73)} parallel →
-      #   P2-T17 (FORGE-78) →
-      #   P2-T19 (FORGE-79) →
-      #   P2-T07 (FORGE-20) [consumes FORGE-79] [unlocks P2-T22 in parallel] →
-      #   P2-T08 (FORGE-21) →
-      #   P2-T20 (FORGE-88) [unlocks P2-T21 in parallel] →
-      #   P2-T12 (FORGE-65) → P2-T18 (FORGE-74) → P2-T09 (FORGE-22)
-      #
-      # P2-T14 (FORGE-76) and P2-T15 (FORGE-77) unblock as soon as P2-T13
-      # lands (their depends_on=[P2-T13] only); they can run in parallel
-      # anywhere in the chain after T13 — no need to wait for T07.
-      # P2-T21 (FORGE-89, /second-opinion rename) unblocks as soon as
-      # P2-T20 lands. P2-T22 (FORGE-90, /status-check dashboard) unblocks
-      # as soon as P2-T07 lands.
-      #
-      # (Phase 3 add: P3-T08 / FORGE-75 — skill portability across hosts.)
-      # ===================================================================
-      - id: P2-T11
-        tracker_issue_id: "FORGE-64"
-        title: "Question channel infrastructure"
-        description: "src/orchestrator/questions/{writer,reader,watcher}.ts + src/cli/orchestrate-{questions,answer,status,attach}.ts. Atomic-write helpers (temp + fsync + rename) for .forge/questions/{question_id}.json and .forge/answers/{question_id}.json. fs.watch-based mailbox watcher. forge orchestrate subcommands that operate purely on filesystem state (no dispatcher imports). JSONL notification stream emit/parse helpers wire to src/orchestrator/events.ts (already shipped in Task 0). Built first because it has no dispatcher dependency and every downstream task imports its contracts. See spec/ORCHESTRATOR.md §Filesystem layout + §Event types."
-        type: backend
-        priority: P0
-        depends_on: [P1-T01, P1-T02]
+          - Same Tracker interface; notion.test.ts passes against an NtnExec-mocked transport
+          - updateIssueBody matches the Linear/GitHub validation contract; round-trip preserves forgeTaskId
+          - NOT_IMPLEMENTED stub + MCP transport + sdk dep removed; docs updated
+      - id: P3-T05
+        tracker_issue_id: FORGE-138
+        title: Resolve codex auto_codex_token_cap reserved field
+        description: "Resolve the SPEC-to-code gap on codex.auto_codex_token_cap (default 50000, no consumer): either implement per-session token budget enforcement or remove the RESERVED field as a deliberate v0.5+ deferral. Cap stays RESERVED through v0.4 ship."
+        type: data
+        priority: P2
+        depends_on: []
         estimate: M
-        owner_type: backend-dev
+        owner_type: db-architect
         acceptance:
-          - "writeQuestionAtomic + writeAnswerAtomic write via temp + fsync + rename; no half-written file ever observable"
-          - "readQuestion + readAnswer enforce QUESTION_FILE_MAX_BYTES (64KB) and zod schema; reject malformed or oversized files with typed error"
-          - "Question/answer files never overwrite; duplicate-id write rejected"
-          - "fs.watch-based watcher fires on new question files and emits typed events; debounced for rapid bursts"
-          - "forge orchestrate questions --open lists all .forge/questions/{*}.json without answers, sorted by created_at"
-          - "forge orchestrate answer <question_id> --option <id> [--note <text>] writes .forge/answers/{id}.json atomically; rejects duplicate answer"
-          - "forge orchestrate status reads .forge/orchestrator/{run_id}/state.json without requiring a live dispatcher"
-          - "forge orchestrate attach tails .forge/orchestrator/{run_id}/notifications.jsonl and streams typed events"
-          - "All CLI subcommands work on a fixture .forge/ tree even if no dispatcher is running"
-          - "Unit tests cover atomic-write race (concurrent writers contending on the same id) + schema-rejection paths + oversized payload rejection"
-        split_into:
-          - "P2-T11a Atomic-write + read helpers + schema validation"
-          - "P2-T11b fs.watch mailbox watcher + debounce"
-          - "P2-T11c forge orchestrate questions/answer subcommands"
-          - "P2-T11d forge orchestrate status/attach subcommands + notifications stream tail"
-      - id: P2-T13
-        tracker_issue_id: "FORGE-72"
-        title: "Refactor Tracker.claim signature for v2 (runId, version_conflict)"
-        description: "Bring src/trackers/* contract from v1 to v2 in one atomic patch. Codebase currently has old shape: state_changed, agentId, releaseClaim(issueId) (per src/trackers/types.ts:28, base.ts:27). v2 target shape lives in spec/ORCHESTRATOR.md §Tracker atomic claim. This task moves the SIGNATURE to v2; per-adapter CAS behavior changes ship separately in P2-T14/T15. Discipline: write a failing conformance test FIRST that asserts the new shape; only then update the implementation in a single patch covering schemas, types, base, conformance, type compile tests, and any docs references to the old shape. Adapter implementations stub the new fields temporarily (returning the old behavior wrapped in new shape) — they pass the conformance suite but don't add real CAS yet."
-        type: backend
-        priority: P0
-        depends_on: [P2-T01]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Failing conformance test added FIRST asserting the new shape (claim(issueId, runId), version_conflict, optional tracker_version, no state_changed) — must fail on pre-patch code"
-          - "src/schemas/trackers.ts, src/trackers/types.ts, src/trackers/base.ts all updated to new shape in one patch"
-          - "Tracker.claim takes (issueId: string, runId: string) — no agentId"
-          - "Tracker.releaseClaim takes (issueId: string, runId: string)"
-          - "ClaimResult includes { ok: false, reason: 'version_conflict', detail?: string } variant"
-          - "ClaimResult.ok=true variant includes optional tracker_version: string"
-          - "ClaimResult no longer exposes 'state_changed' reason (deleted as part of this patch)"
-          - "All references to agentId, state_changed, old releaseClaim(issueId) in src/, test/, docs/, spec/ updated or marked legacy"
-          - "Existing GitHubTracker + LinearTracker compile + pass conformance after signature change with temporary stub behavior"
-          - "Conformance suite fixtures cover both Result.ok=true variants ({ ok: true } and { ok: true, tracker_version: '...' })"
-          - "Type compile tests verify ClaimResult discriminated union has no escape hatch"
-      - id: P2-T14
-        tracker_issue_id: "FORGE-76"
-        title: "Strengthen LinearTracker claim with strongest available CAS"
-        description: "src/trackers/linear.ts: replace label-based claim with the strongest available compare-and-set mechanism on Linear's GraphQL API. **PREREQUISITE (in this task's PR):** introspect Linear's actual schema via @linear/sdk types or a one-off introspection query to confirm what optimistic-concurrency primitive Linear actually exposes on `IssueUpdate`. The v2 spec ASSUMES `expectedVersion` but this is unverified. Possible outcomes: (a) `expectedVersion` exists — implement strong CAS as specced; (b) `If-Match` or revision-based — adapt mechanism, update spec; (c) no CAS primitive — downgrade Linear to label-CAS + verify-on-readback (same as GitHub). Whichever lands, update docs/adapters/linear.md + spec/ORCHESTRATOR.md §Tracker atomic claim Linear row to match reality. Existing label-cleanup from v1 stays as a transitional courtesy for one release."
-        type: backend
-        priority: P0
-        depends_on: [P2-T13]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Linear API CAS primitive identified via schema introspection or @linear/sdk types BEFORE implementation; finding documented in PR description"
-          - "claim() uses the identified primitive (whichever it is) and returns version_conflict on race-loss"
-          - "Concurrent-claim test (two run_ids racing same issue) deterministically picks one winner via Linear API"
-          - "docs/adapters/linear.md documents the ACTUAL mechanism — not the speculative expectedVersion name from the v2 spec unless schema confirms"
-          - "spec/ORCHESTRATOR.md §Tracker atomic claim Linear row updated to match reality (downgraded to weak CAS if no version primitive exists)"
-          - "Conformance suite passes with whatever CAS semantics the adapter actually implements"
-          - "Old label-cleanup behavior runs once on first v2 claim of any issue that still carries v1 labels (transitional)"
-      - id: P2-T15
-        tracker_issue_id: "FORGE-77"
-        title: "Strengthen GitHubTracker claim with verify-on-readback"
-        description: "src/trackers/github.ts: extend claim() to two-step: (1) add forge:claimed-by:<run_id> label via gh issue edit; (2) re-fetch via gh issue view --json labels and verify (a) our label is present AND (b) no other forge:claimed-by:* label is present. On verify failure: gh issue edit --remove-label our own, return version_conflict. Race window is ~200ms between add and re-fetch — acceptable because local lease prevents same-host concurrent dispatch (see spec/ORCHESTRATOR.md §Multi-main coordination). Updates docs/adapters/github.md to document weak-but-honest CAS semantics."
-        type: backend
-        priority: P0
-        depends_on: [P2-T13]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "claim() does two-step add-then-verify; returns version_conflict if another forge:claimed-by:* label appears"
-          - "Race-loss path cleanly removes our own label before returning"
-          - "Concurrent-claim test (two run_ids) detects collision via verify-on-readback; one wins, the other removes its label"
-          - "docs/adapters/github.md documents the verify-on-readback mechanism and explicitly names the residual race window"
-          - "Conformance suite passes with weak-CAS-plus-race-detect semantics"
-      - id: P2-T16
-        tracker_issue_id: "FORGE-73"
-        title: "Re-path question channel to task-keyed v2 layout"
-        description: "Move atomic-write helpers from FORGE-64 to operate on the task-keyed directory layout from spec/ORCHESTRATOR.md §Filesystem layout: .forge/orchestrator/tasks/<task_id>/attempts/<attempt_id>/questions/<question_id>.json (and same for answers/). Schemas + atomic-write (tmp+link) + dedupe-by-decision_key all SURVIVE unchanged — only path computation changes. Delete the fs.watch-based mailbox watcher (v2 has no daemon to consume those events; the dispatch skill polls via `forge orchestrate questions --open`). Update forge orchestrate questions/answer subcommands to read from the new layout. Migration: any project with .forge/questions/* from a prior v1 run is gc'd via `forge orchestrate gc` on first v2 invocation (archived under .forge/orchestrator/legacy/). See spec/ORCHESTRATOR.md §Filesystem layout + §Question lifecycle."
-        type: backend
-        priority: P0
-        depends_on: [P2-T11]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Atomic-write helpers operate on .forge/orchestrator/tasks/<task_id>/attempts/<attempt_id>/{questions,answers}/<id>.json"
-          - "Schema validation, 64KB cap, tmp+link atomicity, never-overwrite invariant all preserved"
-          - "decision_key dedupe scans across all attempts of a task (not just current)"
-          - "fs.watch-based mailbox watcher deleted; replaced by `forge orchestrate questions --open` polling"
-          - "Legacy .forge/questions/* archived under .forge/orchestrator/legacy/ on first gc pass; no silent data loss"
-          - "Unit tests cover new path layout + legacy-archive flow"
-      - id: P2-T17
-        tracker_issue_id: "FORGE-78"
-        title: "Build state machine + lease infrastructure"
-        description: "src/orchestrator/state-machine.ts + src/orchestrator/leases.ts + src/schemas/{attempt,verdict,lease,task-state}.ts. The foundational layer that the CLI verbs sit on top of. State machine: task state transitions (unclaimed → claimed → dispatched → running → blocked_on_question → awaiting_respawn → ready_for_review → reviewed → shipped, plus failure states cancelled / abandoned / failed) with strict transition table; attempt state transitions; legal-move validator. Lease semantics: claim_id (UUIDv7), expires_at, last_heartbeat_at, generation; heartbeat extends expires_at; steal-after-expiry increments generation and fences prior holder; LEASE_STOLEN error code propagated to workers via CLI verbs. All state read/write through this layer (CLI verbs in FORGE-20 are thin wrappers). Atomic file ops via existing helpers from FORGE-64 / FORGE-73. See spec/ORCHESTRATOR.md §State machine + §Lease semantics + §Filesystem layout."
-        type: backend
-        priority: P0
-        depends_on: [P1-T04, P1-T05, P2-T13, P2-T16]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "TaskState, AttemptState, Lease zod schemas defined and validated on every read/write"
-          - "State transition validator rejects illegal moves with typed error (no silent acceptance)"
-          - "Lease.acquire writes atomically via tmp+link; concurrent acquire on same task → one succeeds, other gets LEASE_EXISTS"
-          - "Lease.heartbeat extends expires_at; rejects with LEASE_STOLEN if generation has advanced"
-          - "Lease.steal: only succeeds if now > expires_at + steal_grace_ms; increments generation"
-          - "All state lives under .forge/orchestrator/tasks/<task_id>/ — never run-keyed"
-          - "Unit tests cover full state-machine graph (every legal + every illegal transition), full lease lifecycle (acquire, heartbeat, expire, steal, fence-prior), concurrent-write races"
-        split_into:
-          - "P2-T17a Schemas (TaskState, AttemptState, Lease, Verdict, ReviewVerdict, AttemptEvent)"
-          - "P2-T17b State transition validator + state.json persistence"
-          - "P2-T17c Lease acquire/heartbeat/steal with generation fencing"
-          - "P2-T17d Attempt event log append-only writer (events.jsonl)"
-      - id: P2-T07
-        tracker_issue_id: "FORGE-20"
-        status: paused
-        paused_at: "2026-05-17"
-        replaced_by: [P2.5-T05]
-        paused_reason: "Closed-loop redesign 2026-05-17: original 13-verb design replaced by read-only / mutate split. Re-decompose under P2.5-T05 (refactor FORGE-20 to drop suggest-next/session-check/intent-detect verbs, drop deprecated `next` alias, split into `claim` + `phases --ready` extension)."
-        title: "Build forge orchestrate CLI verb suite"
-        description: "src/cli/orchestrate/{next,dispatch,heartbeat,question,answer,event,complete,cancel,status,questions,gc,phases,run}.ts. The 13 verbs that form the entire public surface of the v2 control plane. Every state mutation goes through one of these. Each returns a stable JSON envelope { ok, data?, error? } on --json. Idempotent: a re-dispatch with the same task+attempt is a no-op; a duplicate question with the same decision_key returns the prior answer. Built on top of state machine + leases (P2-T17). gc verb is a thin entry point — full reconciliation rules live in P2-T09. See spec/ORCHESTRATOR.md §CLI surface."
-        type: backend
-        priority: P0
-        depends_on: [P2-T17, P2-T16, P2-T19]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "All 13 verbs implemented per the CLI surface section of spec/ORCHESTRATOR.md"
-          - "Every verb returns { ok, data?, error? } JSON envelope on --json; human format on tty"
-          - "forge orchestrate next: claims one ready task atomically via tracker adapter; respects dep graph; respects file-glob overlap (P2-T19)"
-          - "forge orchestrate dispatch: registers new attempt with attempt_id (UUIDv7); rejects if a non-terminal attempt exists for the task"
-          - "forge orchestrate heartbeat: validates (run_id, claim_id, generation); extends expires_at"
-          - "forge orchestrate question: validates schema; rejects duplicate decision_key with prior answer reference"
-          - "forge orchestrate complete: invokes verdict verification (re-runs tests, lint, computes diff_stats and conflicts_with_base from git); writes verdict.verified.json"
-          - "forge orchestrate cancel: marks attempt cancelled, releases lease, preserves worktree"
-          - "forge orchestrate status: snapshot across all runs (cross-run aggregation via task-keyed dir scan)"
-          - "forge orchestrate phases: graph state inspection with --ready and --blocked-by filters"
-          - "All verbs validate input via zod; reject malformed args with actionable error"
-          - "Integration test: 3-task fixture run end-to-end via CLI verbs from a shell script (no skill)"
-        split_into:
-          - "P2-T07a Run lifecycle: run start/list + next + dispatch"
-          - "P2-T07b Heartbeat + cancel"
-          - "P2-T07c Question + answer + event"
-          - "P2-T07d Complete with CLI-verified verdict (re-run tests, lint, git diff/conflicts)"
-          - "P2-T07e Status + questions + phases"
-          - "P2-T07f gc thin entry (full rules in P2-T09)"
-      - id: P2-T08
-        tracker_issue_id: "FORGE-21"
-        status: paused
-        paused_at: "2026-05-17"
-        replaced_by: [P2.5-T06]
-        paused_reason: "Closed-loop redesign 2026-05-17: worker prompt template must encode the 6-level precedence rules (user > SPEC > PRD > phases > tracker > attempts) + drift event/question protocol. Re-decompose under P2.5-T06."
-        title: "Build worker prompt template (host-agnostic)"
-        description: "templates/worker-prompt.md: the frozen prompt text that gets injected into every worker subagent. Placeholders for task_id, attempt_id, run_id, worktree absolute path, phase (IMPLEMENT/REVIEW/SHIP), task description, acceptance criteria, project conventions (CLAUDE.md / AGENTS.md), prior-attempt save-points, answered questions. Encodes the heartbeat protocol (every 5 min call `forge orchestrate heartbeat`), the 70/30 decision rule with ≥4 ask/decide examples per category, the structured DecisionClassification JSON requirement, the completion contract (run tests, run lint, write rich verdict.json, call `forge orchestrate complete`), the question-write protocol (call `forge orchestrate question`, update save-point.md, return to parent). For Claude-Code-spawned workers, includes absolute-path cwd discipline (no native cwd primitive); Codex-spawned workers skip that section (Codex has --cd). See spec/ORCHESTRATOR.md §Worker prompt template."
-        type: backend
-        priority: P0
-        depends_on: [P2-T07]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "templates/worker-prompt.md exists; renders cleanly when placeholder-substituted on fixture data"
-          - "Encodes 70/30 rule with ≥4 ask/decide examples per category (public_api, scope, naming, deprecation, error_semantics, file_lifecycle)"
-          - "Requires structured DecisionClassification JSON before any question; missing → autonomous decision logged via `forge orchestrate event --type files_modified`"
-          - "Heartbeat protocol: instructs every 5 min `forge orchestrate heartbeat` call; LEASE_STOLEN handling specified (write attempt_abandoned_by_steal event, exit cleanly)"
-          - "Completion contract: instructs tests + lint + verdict.json + `forge orchestrate complete --verdict-file`; CLI-verification expectation documented"
-          - "Question-write protocol: instructs `forge orchestrate question` call + save-point.md update + return-to-parent with 'Blocked on question <id>' format"
-          - "Claude-only working-directory section (absolute paths, cd-prefix discipline) clearly demarcated from Codex section"
-          - "Prior attempts + answered_questions sections render correctly when populated"
-          - "Snapshot test of the full rendered prompt for a fixture task"
-      - id: P2-T12
-        tracker_issue_id: "FORGE-65"
-        title: "Decision classifier + preflight wrapper + decision_key dedupe"
-        description: "src/orchestrator/decision-classifier.ts (classification validator + decision_key dedupe against task-keyed answers/) + src/orchestrator/preflight.ts (path-based mechanical guardrail) + per-task budget enforcement. Classifier validates the DecisionClassification JSON the worker prompt produces; rejects malformed/missing with typed error. Dedupe scans .forge/orchestrator/tasks/<task_id>/attempts/<*>/answers/ for matching decision_key; if found, returns the prior answer (no new question written). Preflight inspects every file write attempted by the worker; writes matching agents.preflight_globs force a question regardless of prompt-level classification. Per-task budget: soft_cap (default 3) emits warning to next-attempt context; hard_cap (default 6) forces autonomous decision. NOTE: the worker prompt template itself is FORGE-21 (P2-T08); this task is the CLI-side enforcement layer. See spec/ORCHESTRATOR.md §Worker prompt template + §Preflight wrapper (mechanical guardrail) + §Question lifecycle."
-        type: backend
-        priority: P0
-        depends_on: [P2-T08, P2-T16]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Classification validator accepts well-formed DecisionClassification JSON; rejects missing/malformed with typed error"
-          - "Preflight detects writes to all default guardrail globs and forces a decision checkpoint via `forge orchestrate question`"
-          - "Guardrail globs configurable via agents.preflight_globs in settings.yaml; defaults documented in spec/ORCHESTRATOR.md"
-          - "decision_key dedupe: existing answer in any prior attempt of the same task is reused without re-asking"
-          - "decision_key dedupe: existing open question for the same decision_key blocks on the existing question (no duplicate write)"
-          - "Per-task soft_cap → warning injected into next-attempt prompt context"
-          - "Per-task hard_cap → forced autonomous decision with logged justification in attempt event log"
-          - "recommended_option_id + what_happens_if_unanswered required on every question file (CLI rejects writes missing these)"
-          - "Unit tests cover preflight glob matching, classification validation, dedupe across attempts, budget enforcement"
-        split_into:
-          - "P2-T12a Classification validator + autonomous-decision logging"
-          - "P2-T12b decision_key dedupe + per-task budget enforcement"
-          - "P2-T12c Preflight wrapper for guardrail globs"
-      - id: P2-T18
-        tracker_issue_id: "FORGE-74"
-        status: paused
-        paused_at: "2026-05-17"
-        replaced_by: [P2.5-T07]
-        paused_reason: "Closed-loop redesign 2026-05-17: dispatch skill rewrites to present→approve→claim flow (`phases --ready` → user picks → `claim` → `dispatch`). Re-decompose under P2.5-T07."
-        title: "Build /forge orchestrate dispatch skill"
-        description: "skills/forge-orchestrate/SKILL.md (Claude Code variant; Codex variant deferred to Phase 3 portability work). The thin dispatch layer that runs in the user's main Claude Code session. Loop: (1) call `forge orchestrate run start`; (2) while active_subagents < subagent_cap_per_main, call `forge orchestrate next` and dispatch a Task-tool subagent with the rendered worker prompt template; (3) poll `forge orchestrate questions --open --json`, surface to user, record answer via `forge orchestrate answer`, schedule respawn; (4) interpret subagent return values ('Task <id> attempt <a>: ready_for_review' → state already updated by CLI; 'Blocked on question <q>' → handled by polling; bare return → gc on next pass marks abandoned). REVIEW phase dispatched via Codex subagent (when primary is Claude) — skill calls codex via Bash with a review prompt referencing the worktree's diff. SHIP phase dispatched as a primary-host subagent. The skill ONLY does dispatch, polling, and user UI — never mutates state directly. See spec/ORCHESTRATOR.md §Architectural primitives + §Phase machine."
-        type: backend
-        priority: P0
-        depends_on: [P2-T07, P2-T08, P2-T12, P2-T20]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "skills/forge-orchestrate/SKILL.md exists with Claude Code frontmatter and renders cleanly"
-          - "Skill loop dispatches Task-tool subagents respecting agents.subagent_cap_per_main"
-          - "Open questions surfaced to user with decision_key, question text, context, options, recommended_option_id"
-          - "User answer recorded via `forge orchestrate answer`; skill dispatches respawn on next loop tick"
-          - "REVIEW phase dispatch invokes secondary host (Codex when primary is Claude) with diff-aware review prompt"
-          - "SHIP phase dispatch blocks until all depends_on tasks have shipped + their PRs merged to base"
-          - "Skill never reads or writes .forge/orchestrator/ directly; all state mutations through CLI verbs"
-          - "Live view shows: active workers table, open questions list, recent events; updated on each loop iteration"
-          - "Multiple parallel main sessions tested: each main respects its own subagent_cap_per_main; tracker CAS prevents same-task double-claim"
-          - "Closing the parent session (skill terminates) leaves no orphan state — gc on next invocation reconciles"
-        split_into:
-          - "P2-T18a Skill skeleton + run start + next + dispatch loop"
-          - "P2-T18b Question polling + user-answer relay"
-          - "P2-T18c REVIEW phase dispatch (secondary host via Bash invocation)"
-          - "P2-T18d SHIP phase dispatch + dep-merged check"
-          - "P2-T18e Live view rendering (status table + open questions + recent events)"
-      - id: P2-T19
-        tracker_issue_id: "FORGE-79"
-        title: "File-glob overlap detection library (pre-CLI)"
-        description: "src/orchestrator/overlap.ts: implements the write_globs overlap check from spec/ORCHESTRATOR.md §File-glob declarations + overlap detection. Pure library: takes the active-task-attempts set + a candidate task; returns classification (no-overlap / soft-overlap / hard-overlap) with offending globs. FORGE-20 (CLI verb suite) consumes this library inside `forge orchestrate next` — the dispatch logic itself lives in FORGE-20. Hard-lock-globs default list per spec (package.json, lockfiles, tsconfig.json, phases.yaml, src/index.ts, migrations/**, prisma/schema.prisma). Test fixtures cover all 4 classification outcomes."
-        type: backend
-        priority: P1
-        depends_on: [P2-T17]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Reads write_globs from each task's phases.yaml entry"
-          - "Classifies pairs as no-overlap / soft-overlap / hard-overlap"
-          - "Hard-overlap blocks dispatch with overlap.blocked event in orchestrate.jsonl"
-          - "Soft-overlap proceeds with warning in dispatch CLI output"
-          - "Tasks without declared write_globs default to hard-lock-globs-only overlap check"
-          - "hard_lock_globs default list from settings schema; configurable per project"
-          - "Unit tests: pair classification matrix; minimatch-style glob handling"
-      - id: P2-T09
-        tracker_issue_id: "FORGE-22"
-        title: "Build gc reconciliation + retry policy"
-        description: "src/orchestrator/gc.ts: implements the deterministic divergence table from spec/ORCHESTRATOR.md §gc reconciliation rules. Every CLI invocation may trigger a cheap gc pass (lease expiry checks + tracker-local alignment); explicit `forge orchestrate gc` runs the full pass with --dry-run support and full output. Plus retry-policy logic: exponential backoff (delay = min(1000 * 2^(attempt-1), retry_backoff_ms_max)), max_attempts cap on per-task retry count, transition to failed state after retries exhausted. NO signal handling / pause-resume / drain — those v1 concepts are gone with the daemon. The skill manages dispatch concurrency; the CLI manages retry timing inside `forge orchestrate next` (which only returns tasks whose retry backoff has elapsed)."
-        type: backend
-        priority: P0
-        depends_on: [P2-T17, P2-T07]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "All 12 rows of the divergence table from spec/ORCHESTRATOR.md §gc reconciliation rules implemented and tested"
-          - "`forge orchestrate gc --dry-run` outputs a plan table; --apply executes it"
-          - "Cheap-gc on every `forge orchestrate next` and `status`: lease expiry + local-vs-tracker alignment only (expensive scans deferred)"
-          - "Lease expired beyond steal_grace_ms → task marked abandoned; lease released"
-          - "Branch-exists/worktree-missing reconciliation: gc prompts via --dry-run; auto-prunes on --apply when task is shipped"
-          - "Retry timing matches Symphony formula (snapshot test across 5 attempts)"
-          - "max_retries reached → tracker.updateState(blocked) + notification + task state failed"
-          - "task with decision_key budget exhaustion is marked blocked, not retried"
-          - "Unit tests cover every divergence-table row + retry backoff curve"
-        split_into:
-          - "P2-T09a gc divergence table — local-vs-tracker alignment rows"
-          - "P2-T09b gc divergence table — branch/worktree/orphan reconciliation rows"
-          - "P2-T09c --dry-run output formatting"
-          - "P2-T09d Retry policy + max_attempts enforcement"
-      - id: P2-T10
-        tracker_issue_id: "FORGE-23"
-        title: "Rename /push-to-linear skill → /push-to-tracker; generalize for multi-tracker"
-        description: "Move skills/push-to-linear/ → skills/push-to-tracker/. Update SKILL.md description and content to dispatch to the configured tracker.type (linear|github|notion) via the Tracker interface. Rename agents/linear-syncer → tracker-syncer (or generalize). Provide deprecation alias: /push-to-linear continues to work for one minor version emitting a chalk-warn 'deprecated; use /push-to-tracker'. Update README, /pickup-task, /sync-status, and any other internal references."
-        type: foundation
-        priority: P0
-        depends_on: [P2-T01]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "skills/push-to-tracker/SKILL.md exists; description and content reflect multi-tracker"
-          - "skills/push-to-linear/SKILL.md kept as deprecation alias; emits warning + delegates to push-to-tracker"
-          - "agents/tracker-syncer (or successor) handles all 3 trackers via Tracker interface dispatch"
-          - "README + CLAUDE.md reference /push-to-tracker as canonical name"
-          - "Internal cross-references in /pickup-task, /sync-status updated"
-          - "End-to-end test: running /push-to-tracker on a fixture phases.yaml creates issues in the configured tracker (Linear in dogfood, GitHub in fixture)"
-      - id: P2-T20
-        tracker_issue_id: "FORGE-88"
-        title: "Build IHarness adapter abstraction (primary + review dispatch)"
-        description: "src/harnesses/{base,claude,codex,gemini}.ts. IHarness interface with: dispatchSubagent(prompt, opts) → SubagentHandle for primary-mode work; runReview(diff, reviewPrompt) → ReviewVerdict for secondary-mode review; healthCheck() → HealthResult; detectVersion() → string. Per-host implementations: ClaudeHarness uses Task tool (in-session subagent dispatch) — runReview throws NotSupported (Claude is primary-only because review must come from a different model lineage). CodexHarness uses `codex exec` subprocess for both primary and reviewer. GeminiHarness uses `gemini` CLI subprocess (--cwd flag for worktree dir) for both primary and reviewer. Settings schema TIGHTENED in this task: src/schemas/settings.ts primary_host_cli enum → {claude, codex, gemini} (drop cursor); review_host_cli enum → {codex, gemini} (drop claude, cursor — Claude excluded as reviewer per architectural decision: second opinion requires different model lineage). Existing refinement review_host_cli !== primary_host_cli still applies. P2-T18 dispatch skill (FORGE-74) refactored in this task to call adapter.dispatchSubagent() instead of hardcoding Claude Task tool. P2-T08 worker prompt template (FORGE-21) extended with Gemini-cwd section. See spec/ORCHESTRATOR.md §Multi-host review (will need update to reflect Codex+Gemini reviewer parity)."
-        type: backend
-        priority: P0
-        depends_on: [P2-T07, P2-T08]
-        estimate: L
-        owner_type: backend-dev
-        acceptance:
-          - "IHarness interface exported in src/harnesses/base.ts; 4 methods typed (dispatchSubagent, runReview, healthCheck, detectVersion)"
-          - "ClaudeHarness.dispatchSubagent invokes Task tool primitive; ClaudeHarness.runReview throws NotSupported with actionable error"
-          - "CodexHarness.dispatchSubagent + runReview both work via `codex exec` subprocess; verdict file round-trips through structured JSON"
-          - "GeminiHarness.dispatchSubagent + runReview both work via `gemini` CLI subprocess with --cwd; verdict file round-trips"
-          - "Settings enum + refinement updated: review_host_cli ∈ {codex, gemini} enforced at zod validation; primary_host_cli ∈ {claude, codex, gemini}"
-          - "P2-T18 dispatch loop refactored to consume adapter via settings.primary_host_cli (zero hardcoded Task tool calls in the skill body)"
-          - "P2-T08 worker-prompt template grows a Gemini-cwd section; snapshot tests for all 3 host variants"
-          - "Conformance suite: each adapter passes IHarness conformance fixtures (dispatch lifecycle + healthCheck + version detection)"
-          - "Integration test: a primary=codex run dispatches one fixture task end-to-end; a primary=gemini run does the same"
-          - "Settings migration: existing projects with review_host_cli='claude' or 'cursor' surface a doctor warning + migrate hint pointing at /forge init re-run"
-        split_into:
-          - "P2-T20a IHarness interface + ClaudeHarness (primary-only)"
-          - "P2-T20b CodexHarness (primary + review)"
-          - "P2-T20c GeminiHarness (primary + review)"
-          - "P2-T20d Settings schema enum tightening + migration warning"
-          - "P2-T20e Refactor P2-T18 dispatch skill to consume adapter"
-          - "P2-T20f Extend P2-T08 worker-prompt template with Gemini-cwd variant"
-      - id: P2-T21
-        tracker_issue_id: "FORGE-89"
-        title: "Rename /codex skill → /second-opinion; dispatch via review adapter"
-        description: "Move skills/codex/ → skills/second-opinion/. Update SKILL.md description and content to dispatch to settings.review_host_cli via IHarness.runReview (from P2-T20). Provide deprecation alias: skills/codex/SKILL.md kept for one minor version, body simply emits chalk-warn 'deprecated; use /second-opinion' and delegates to /second-opinion. Mirrors the P2-T10 (/push-to-linear → /push-to-tracker) rename pattern. Update all internal callers: /ship CRITICAL-path trigger, /review CRITICAL-path trigger, CLAUDE.md, README. Mentions of 'Codex' in spec/ORCHESTRATOR.md §Multi-host review generalized to 'second-opinion host'. Skill validates at load-time: if review_host_cli is unset or invalid, exits with actionable error pointing at .forge/settings.yaml."
-        type: foundation
-        priority: P0
-        depends_on: [P2-T20]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "skills/second-opinion/SKILL.md exists; description names Codex + Gemini as supported reviewers"
-          - "Skill body invokes IHarness.runReview via settings.review_host_cli; never hardcodes a CLI name"
-          - "skills/codex/SKILL.md kept as deprecation alias; emits chalk-warn + delegates to /second-opinion"
-          - "/ship CRITICAL-path trigger updated to call /second-opinion (not /codex)"
-          - "/review skill updated to call /second-opinion when CRITICAL.md paths touched"
-          - "README + CLAUDE.md reference /second-opinion as canonical name; /codex marked deprecated with target removal version"
-          - "spec/ORCHESTRATOR.md §Multi-host review generalized (Codex → 'second-opinion host')"
-          - "End-to-end test: /second-opinion against a fixture diff with review_host_cli=codex produces verdict file; same fixture with review_host_cli=gemini produces equivalent verdict file"
-          - "Deprecation warning surfaces on first /codex invocation in a session; suppressed for the rest of that session"
-      - id: P2-T22
-        tracker_issue_id: "FORGE-90"
-        title: "Build forge orchestrate dashboard verb + /status-check skill"
-        description: "src/cli/orchestrate/dashboard.ts: new CLI verb distinct from `status`. Where `status` returns a snapshot for one run, `dashboard` aggregates across all runs in .forge/orchestrator/tasks/** AND cross-references plans/phases.yaml dep graph AND surfaces overlap warnings from P2-T19's library. Output shape on --json: { active_sessions: [{ run_id, started_at, claimed_tasks: [...] }], open_questions: [...], ready_tasks: [...], blocked_tasks: [...], overlap_warnings: [...], lease_health: [...] }. Pretty output on tty: 4-pane dashboard (active workers / open questions / ready vs blocked / overlap+lease warnings) rendered via chalk + width-aware logger helpers from P1-T06. Plus skills/status-check/SKILL.md: skill that runs `forge orchestrate dashboard --json`, renders human-readable summary, and offers follow-up actions ('pick up next ready task', 'answer open question N', 'investigate stuck lease M'). Works standalone (no /forge orchestrate session required) — designed for the 'I sat down at the machine, where am I?' use case. Note: distinct from FORGE-80 (/sync-status rewrite) which reconciles tracker state, not orchestrator runtime state. See spec/ORCHESTRATOR.md §CLI surface (new section required)."
-        type: backend
-        priority: P0
-        depends_on: [P2-T07, P2-T19]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "forge orchestrate dashboard --json returns the full envelope across all .forge/orchestrator/tasks/** entries"
-          - "Aggregation cross-references plans/phases.yaml: ready_tasks = unclaimed + all blocked_by Done; blocked_tasks lists blocking task IDs"
-          - "Overlap warnings populated from P2-T19's overlap library: shows pairs that would hard-lock if dispatched"
-          - "Lease health: lease_alive (heartbeat within ttl), lease_expiring_soon (within steal_grace), lease_stale (expired) categories"
-          - "Pretty output (tty): 4-pane layout fits 80-col terminal; degrades to single-column when stdout < 100 cols"
-          - "skills/status-check/SKILL.md exists; renders dashboard output + offers 3 follow-up actions"
-          - "Skill works standalone outside /forge orchestrate session (no dispatch loop required)"
-          - "Cold start performance: forge orchestrate dashboard --json <500ms p95 on 50-task fixture"
-          - "Unit tests: cross-run aggregation, dep graph evaluation, overlap warnings, lease health categorization"
-          - "Integration test: 3 simultaneous fixture runs visible in single dashboard output; correct attribution of tasks per run"
-
-  - id: phase-2.5
-    tracker_milestone_id: "63e8ae5b-22ef-4aed-b7a9-1d3af4b76b4e"
-    name: "Team-mode minimum architecture — tracker-as-truth + git-synced spec"
-    status: blocked
-    blocked_by: phase-2
-    # Phase 2.5 rescoped 2026-05-17 (PM) per docs/plans/team-mode-minimum-architecture.md
-    # (supersedes morning's closed-loop-workflow-redesign.md). Drift workflow, ephemeral ADRs,
-    # /update-spec --draft|--apply, /amend-roadmap, worktree-drift-guard, drift events, and
-    # drift-routed questions are all deferred to v0.5 opt-in or dropped entirely. Phase 2.5
-    # now ships the minimum-viable team-mode bridge: untracked-spec-files fix, phases.yaml
-    # as derived snapshot with freshness display, bidirectional /reconcile, simplified CLI
-    # verb suite, dispatch skill rewrite, doctor (SPEC↔code only), worker SPEC-diff
-    # informational notification on resume.
-    goal: "Ship the minimum-viable team-mode bridge: untrack spec files (use npm files allowlist instead of gitignore); phases.yaml becomes derived snapshot from tracker with source metadata + freshness display; bidirectional /reconcile between phases.yaml and tracker; CLI verb suite refactor (read-only vs user-approved-mutate split); worker SPEC-diff-since-claim informational notification on resume; doctor scoped to SPEC↔code reference checks. Architecture: authority-by-field (SPEC owns architecture, tracker owns execution); standard git is the sync mechanism for SPEC/PRD; no contradiction gate; team owns review/coordination rituals."
+          - "Decision made: implement enforcement or remove the field"
+          - SPEC Auto-codex hooks reflects the v0.5 truth; tests match the chosen path
+          - Schema and SPEC stay in sync via the v0.5 doctor scope
+  - id: phase-4
+    name: v0.5.0 — Autopilot, /audit, Loom, Tripwire
+    status: active
+    goal: Autonomous plan-gated review->ship pipeline, read-only /audit, plan-mode inbox, graph memory (Loom), and prompt-injection defense (Tripwire).
     gate_criteria:
-      - "All P2.5 P0 tasks shipped + merged to main"
-      - "spec/* files committed in forge's own repo; npm pack --dry-run confirms they are NOT in the published tarball (CI gate)"
-      - "phases.yaml shows source metadata stanza (tracker, synced_at, tracker_revision, spec_revision); every command that reads phases.yaml displays freshness"
-      - "/reconcile --pull round-trips tracker → phases.yaml without information loss"
-      - "Worker on resume sees 'SPEC changed since claim — N commits' informational notification (NOT a gate)"
-      - "forge orchestrate doctor on this very project returns exit 0"
-      - "Dispatch skill follows present → approve → claim flow with user approval"
-      - "NO ephemeral ADRs, NO /update-spec --draft|--apply, NO /amend-roadmap, NO drift events, NO contradiction gate in v0.4 (all deferred to v0.5 opt-in)"
+      - Autopilot I1 (auto-review loop) shipped with the billing invariant enforced by contract test
+      - /audit ships read-only with repo-agnostic validation
+      - Loom + Tripwire I0 gates satisfied before their dependent code
     tasks:
-      - id: P2.5-T01
-        tracker_issue_id: "FORGE-92"
-        status: deferred-v0.5
-        deferred_at: "2026-05-17"
-        deferred_reason: "Team-mode minimum architecture 2026-05-17 (PM): ephemeral ADR workflow demoted from v0.4 required scope to v0.5 opt-in. SPEC changes flow through standard git (commit/push/pull). ADRs may return as opt-in formalization for teams that want RFC-like flows. See docs/plans/team-mode-minimum-architecture.md."
-        title: "templates/adr.template.md + ephemeral ADR convention docs"
-        description: "Create templates/adr.template.md scaffold (slug, date, status, affected_tasks, affected_spec_sections, affected_prd_sections, affected_phases_tasks frontmatter + Context/Decision/Consequences/Alternatives body). Document ephemeral ADR convention in spec/SPEC.md §ADR layer (already drafted in the 2026-05-17 amendment). Add CLAUDE.md note about precedence rules + ephemeral ADR workflow."
-        type: foundation
-        priority: P0
+      - id: P4-T01
+        tracker_issue_id: FORGE-184
+        title: Park architectural escalations from review
+        description: An architectural escalation raised while a task is ready_for_review writes the question but never parks the task, so the auto-review loop re-escalates forever. Add the ready_for_review:question_written -> blocked_on_question transition and broaden the post-write guard to cover ready_for_review.
+        type: backend
+        priority: P2
         depends_on: []
-        estimate: S
+        estimate: M
         owner_type: backend-dev
         acceptance:
-          - "templates/adr.template.md committed with frontmatter + body sections"
-          - "CLAUDE.md updated with precedence rules + 'ADRs are ephemeral; delete after /update-spec --apply' note"
-          - "spec/SPEC.md §ADR layer references the template path"
-      - id: P2.5-T02
-        tracker_issue_id: "FORGE-93"
-        status: deferred-v0.5
-        deferred_at: "2026-05-17"
-        deferred_reason: "Team-mode minimum architecture 2026-05-17 (PM): SPEC changes flow through standard git, not through forge-managed ADR draft/apply lifecycle. /update-spec skill becomes v0.5 opt-in for teams that want formal RFC-like flows."
-        title: "/update-spec --draft and /update-spec --apply skill (single skill, two modes)"
-        description: "skills/update-spec/SKILL.md with two phases: (a) --draft creates spec/decisions/<date>-<slug>.md from template, prompts user for affected sections; refuses if another draft exists; (b) --apply <slug> requires status=accepted, reads journal if exists, propagates changes with per-artifact diff preview + user confirmation, writes journal entries, deletes ADR on success, writes full ADR content (Context+Decision+Alternatives+Consequences) as the propagation commit message body. --resume continues partial applies. Delegates atomic mutations to `forge orchestrate apply-decision` CLI verb (P2.5-T04)."
+          - Add ready_for_review:question_written -> blocked_on_question to TRANSITION_TABLE
+          - Broaden the post-write guard from state===running to include ready_for_review
+          - "Unit tests: new transition legal, others illegal; question from ready_for_review parks"
+      - id: P4-T02
+        tracker_issue_id: FORGE-185
+        title: Add review-queue read verb and scanner
+        description: No reader enumerates ready_for_review tasks. Add forge orchestrate review-queue --json and factor a shared collectTasksByState scanner in readiness.ts that review-queue reuses.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - review-queue --json returns ready_for_review tasks (task_id, title, write_globs, attempt, lease flag)
+          - Shared collectTasksByState extracted and reused
+          - Registered in the read band + help; corrupt state.json skipped; unit tests
+      - id: P4-T03
+        tracker_issue_id: FORGE-186
+        title: Build review-compose pure module and policy
+        description: Pure module combining the primary-host review and optional Codex second opinion into one complete-verb Verdict, bridging ReviewVerdict {pass|changes_requested} and worker Verdict {ready_for_review|changes_needed|blocked}. Encodes pass/changes/architectural policy with no I/O.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - composeReviewVerdict(primary, secondOpinion|null, ctx) is pure (no I/O)
+          - "Policy: both pass -> ready_for_review; mechanical -> changes_needed; architectural -> escalate; missing 2nd opinion on CRITICAL -> park"
+          - Output satisfies VerdictSchema; every branch unit-tested
+      - id: P4-T04
+        tracker_issue_id: FORGE-187
+        title: Build auto-review skill and goal driver
+        description: "Interactive Claude-host skill driven by a /goal whose exit is review-queue-empty. Per round: pull queue head, diff, run code-reviewer for a ReviewVerdict, detect architectural paths via guardrail-check, optionally request a Codex second opinion, then compose + complete or escalate via question. Written to a 4-touchpoint host-adapter interface."
         type: skill
-        priority: P0
-        depends_on: [P2.5-T01, P2.5-T04]
+        priority: P2
+        depends_on:
+          - P4-T01
+          - P4-T02
+          - P4-T03
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - skills/auto-review documents the 4-touchpoint adapter interface; interactive-session only
+          - "Contract test: references review-queue/second-opinion/guardrail-check/complete/question; asserts NO claude -p (billing invariant)"
+          - "Integration test: pass -> reviewed; architectural finding -> blocked_on_question"
+      - id: P4-T05
+        tracker_issue_id: FORGE-188
+        title: Build bounded self-heal executor loop
+        description: After plan approval a worker implements test-first then loops run -> diagnose -> fix (<=3 rounds); still-failing or architecture-smell escalates to the user (HITL during implementation). Driven per-ticket by /goal (exit = shipped-OR-parked). Builds on settings.verify, gc executors, complete.ts retry policy.
+        type: backend
+        priority: P2
+        depends_on:
+          - P4-T04
         estimate: L
         owner_type: backend-dev
         acceptance:
-          - "skills/update-spec/SKILL.md exists with frontmatter and renders cleanly in Claude Code"
-          - "/update-spec --draft writes a valid ADR to spec/decisions/ from the template"
-          - "/update-spec --draft refuses when another draft exists in spec/decisions/"
-          - "/update-spec --apply <slug> refuses unless frontmatter status=accepted"
-          - "/update-spec --apply shows per-artifact diff (SPEC + PRD + phases + tracker) before applying; user confirms each or uses --yes-all"
-          - "On success: ADR file is deleted from spec/decisions/; rationale appears as the commit message body of the propagation commit"
-          - "--resume flag continues a partially-applied propagation from journal"
-          - "Auto-codex hook: suggests /codex review-decision at end of --draft"
-      - id: P2.5-T03
-        tracker_issue_id: "FORGE-94"
-        title: "Tracker.updateIssueBody(id, body) method on all 3 adapters"
-        description: "Extend src/trackers/base.ts Tracker interface with updateIssueBody(issueId, body). Implement in linear.ts, github.ts, notion.ts. Adapter implementations MUST preserve the trailing forgeTaskId footer added by createIssue() so the round-trip mapping keeps working. Update tracker contract tests to cover the new method (idempotency, footer preservation, malformed-body rejection)."
-        type: backend
-        priority: P0
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Tracker interface includes updateIssueBody(issueId: string, body: string): Promise<void>"
-          - "All 3 adapters implement; tests pass against fixtures for each tracker"
-          - "Trailing forgeTaskId footer preserved by all adapters across replace"
-          - "Contract test: createIssue → updateIssueBody → listActiveIssues round-trip preserves forgeTaskId"
-      - id: P2.5-T04
-        tracker_issue_id: "FORGE-95"
-        status: deferred-v0.5
-        deferred_at: "2026-05-17"
-        deferred_reason: "Team-mode minimum architecture 2026-05-17 (PM): apply-decision verb wraps the deferred /update-spec --apply skill (P2.5-T02). Deferred together to v0.5 opt-in."
-        title: "forge orchestrate apply-decision CLI verb + journal-backed resumability"
-        description: "src/cli/orchestrate/apply-decision.ts + src/schemas/apply-journal.ts + src/orchestrator/adr.ts. The CLI verb that /update-spec --apply skill wraps. Reads journal at .forge/orchestrator/global/update-spec-apply-journal/<slug>.json, performs each pending mutation (SPEC section, PRD section, phases.yaml task amendment, tracker body), updates journal entry to 'applied' or 'failed', and on full success: writes commit message body, deletes ADR file, archives journal under completed/. Atomic file ops via existing tmp+rename helpers. Refuses if ADR status != accepted."
-        type: backend
-        priority: P0
-        depends_on: [P2.5-T01, P2.5-T03]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "src/cli/orchestrate/apply-decision.ts implements --adr <slug> [--yes-all] [--resume] [--dry-run] flags"
-          - "Refuses if ADR frontmatter status != accepted"
-          - "ApplyJournalSchema (zod) validates journal structure"
-          - "Journal entries written before each artifact mutation; updated after with applied/failed status"
-          - "--resume reads journal, skips applied entries, retries pending/failed"
-          - "--dry-run shows diff per artifact without writing journal or mutations"
-          - "On complete success: ADR file deleted; journal archived under completed/; commit message body contains ADR content"
-          - "Integration test: simulate tracker failure on entry 4 of 7; verify --resume completes the remaining 4"
-      - id: P2.5-T05
-        tracker_issue_id: "FORGE-96"
-        title: "Refactor FORGE-20 CLI verb suite (drop next/suggest-next/session-check/intent-detect; split into claim + extended phases)"
-        description: "src/cli/orchestrate/*.ts: implement the simplified verb taxonomy per spec/ORCHESTRATOR.md §CLI surface (rewritten 2026-05-17). Read-only verbs: phases (extended with --ready, --phase implement|review|ship), status, questions, doctor (SPEC↔code only), attach, run list. Mutating verbs: claim (was next's mutating half — atomic CAS + lease), dispatch (refuses without claim_id), heartbeat, question (with --drift-event-id + --routing-hint amend-roadmap), answer, event (with --type drift), complete, cancel, gc, run start. NO suggest-next, session-check, intent-detect, deprecation alias for next."
-        type: backend
-        priority: P0
-        depends_on: [P2-T17]
+          - Worker implements test-first then loops run -> diagnose -> fix capped at 3 rounds
+          - Still-failing or architecture-smell escalates to the user
+          - Per-ticket /goal drives the loop with exit shipped-OR-parked
+      - id: P4-T06
+        tracker_issue_id: FORGE-189
+        title: Add ship and auto-merge with PR fallback
+        description: "Net-new: after dual-review passes, push the branch, open a PR, enable auto-merge gated by GitHub branch protection + required checks. Non-GitHub trackers fall back to auto-PR + human merge. Includes a dependency merge gate and rebase-on-drift before merge."
+        type: integration
+        priority: P2
+        depends_on:
+          - P4-T05
         estimate: L
         owner_type: backend-dev
         acceptance:
-          - "All read-only verbs implemented; emit { ok, data } JSON; zero side effects beyond own log line"
-          - "All mutating verbs implemented; refuse appropriately (dispatch without claim_id, etc.)"
-          - "phases --ready supports --phase implement|review|ship filter"
-          - "question accepts --drift-event-id + --routing-hint amend-roadmap"
-          - "event accepts --type drift with --data JSON payload"
-          - "No `next` verb in the binary (compat shim NOT included per sole-user decision)"
-          - "Verb classification table (read vs mutate) documented in --help output"
-          - "Integration test: 3-task fixture run end-to-end via CLI verbs from shell script"
-      - id: P2.5-T06
-        tracker_issue_id: "FORGE-97"
-        title: "Rewrite worker prompt template with 6-level precedence + drift event/question protocol"
-        description: "templates/worker-prompt.md: replace existing template per spec/ORCHESTRATOR.md §Worker prompt template (extended 2026-05-17). Encode the binding precedence rules (user > SPEC > PRD > phases > tracker > attempts; no ADR layer because ephemeral). Add drift detection protocol: emit drift event via `forge orchestrate event --type drift`, write question with --drift-event-id + optional --routing-hint amend-roadmap, pause with blocked_on_question. Decision-key includes content hash for dedupe. Worker reads SPEC for current architecture (no ADR hydration block)."
+          - Push branch, open PR, enable auto-merge gated by branch protection + checks
+          - Non-GitHub trackers fall back to auto-PR + human merge
+          - Dependency merge gate + rebase-on-drift before merge
+      - id: P4-T07
+        tracker_issue_id: FORGE-190
+        title: Build watcher loop and plan-approval queue
+        description: The always-running front-end. A perpetual host /loop (Claude) / cron+codex exec (Codex) pulls ready, non-colliding tickets and launches a per-ticket /goal (exit = shipped-OR-parked). Plans park in an async plan-approval queue reusing question/answer + blocked_on_question; user drains async. CLI stays daemon-free.
         type: backend
-        priority: P0
-        depends_on: [P2.5-T01]
-        estimate: M
+        priority: P2
+        depends_on:
+          - P4-T06
+        estimate: L
         owner_type: backend-dev
         acceptance:
-          - "templates/worker-prompt.md updated with 6-level precedence section"
-          - "Drift event/question protocol documented with exact CLI invocations"
-          - "Decision-key format: drift:<from>-vs-<to>:<short-slug>:<content-hash>"
-          - "NO 'Active ADRs that may affect this task' block (ADRs are ephemeral)"
-          - "Worker prompt harness test: feed contradictory SPEC/phases excerpts; assert drift event JSON emitted with correct from_artifact/to_artifact"
-      - id: P2.5-T07
-        tracker_issue_id: "FORGE-98"
-        title: "Rewrite /forge orchestrate dispatch skill (present → approve → claim → dispatch)"
-        description: "skills/forge-orchestrate/SKILL.md: rewrite per spec/SPEC.md Flow 2 (rewritten 2026-05-17). Skill loop: (1) run start; (2) call `forge orchestrate phases --ready --limit N --json` (read-only); (3) present ready tasks to user with rationale; (4) user picks task_id | 'all' | 'skip' | 'stop'; (5) for selected, call `forge orchestrate claim` then `forge orchestrate dispatch <claim_id>`; (6) spawn host-native subagent with rendered worker prompt; (7) poll `forge orchestrate questions --open` and surface drift-routed questions with routing-hint. NO suggest-next call. NO automatic claim."
-        type: skill
-        priority: P0
-        depends_on: [P2.5-T05, P2.5-T06]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Skill uses `forge orchestrate phases --ready` (read-only) to list ready tasks"
-          - "Skill presents tasks for user approval before any claim or dispatch"
-          - "Skill calls `forge orchestrate claim` only after user-selected task"
-          - "Skill calls `forge orchestrate dispatch <claim_id>` with valid claim_id"
-          - "Skill surfaces drift-routed questions with routing-hint suggestion (/amend-roadmap)"
-          - "E2E test: skill drives a 3-task fixture to completion without suggest-next"
-      - id: P2.5-T08
-        tracker_issue_id: "FORGE-99"
-        title: "forge orchestrate doctor (SPEC↔code, stale ADR drafts, pending apply-journals)"
-        description: "src/cli/orchestrate/doctor.ts + src/orchestrator/drift.ts: read-only drift diagnostics. Checks per spec/SPEC.md §Doctor enforcement: (a) SPEC references to symbols (file paths, exported names) grep to ≥1 hit in src/ (exit 2 on drift); (b) stale ADR drafts older than decisions.stale_draft_threshold_days (exit 1); (c) pending update-spec-apply-journal entries (exit 1, suggest --resume). NO SPEC↔ADR check (ephemeral)."
+          - Perpetual loop pulls ready non-colliding tickets and launches per-ticket /goal
+          - Plans park in an async approval queue reusing question/answer machinery; user drains async
+          - CLI stays daemon-free; parks-and-goes-quiet at the human gate
+      - id: P4-T08
+        tracker_issue_id: FORGE-191
+        title: Add parallelism and resilience to runs
+        description: Run multiple tickets concurrently with the overlap gate serializing file-colliding merges + rebase-on-drift; survive transient API failures (529, output-token-max) via per-stage checkpoint + resume and backoff, so a long run resumes instead of restarting.
         type: backend
-        priority: P0
-        depends_on: [P2.5-T01]
-        estimate: S
+        priority: P2
+        depends_on:
+          - P4-T07
+        estimate: L
         owner_type: backend-dev
         acceptance:
-          - "doctor exits 0 on clean fixture, 1 with stale draft, 2 with SPEC↔code drift"
-          - "doctor --scope spec-code|adr-drafts|apply-journal|all flag works"
-          - "doctor on this very project returns exit 0 after Phase 2.5 ships"
-      - id: P2.5-T09
-        tracker_issue_id: "FORGE-100"
-        title: "/reconcile skill + forge orchestrate reconcile verb (bi-directional phases.yaml ↔ tracker)"
-        description: "skills/reconcile/SKILL.md + src/cli/orchestrate-reconcile.ts. Skill wraps verb with diff preview; verb owns state machine. Verb: --pull reads tracker via listActiveIssues, diffs added/removed/updated/unmanaged vs phases.yaml, writes phases.yaml atomically (yaml.parseDocument preserves comments); --push renders bodies from local task data and calls updateIssueBody best-effort. No conflict-resolution UI per spec/ORCHESTRATOR.md §CLI surface — team handles via git diff + re-run."
+          - Concurrent tickets with the overlap gate serializing colliding merges
+          - Survive 529 / output-token-max via per-stage checkpoint + resume + backoff
+          - A long run resumes from checkpoint instead of restarting
+      - id: P4-T09
+        tracker_issue_id: FORGE-192
+        title: Add separate-process worker and host adapters
+        description: "Future/backlog: (1) opt-in metered separate-process worker mode (claude -p / Agent SDK) behind explicit opt-in per the billing invariant; (2) Codex-as-primary host adapter gated on a billing-safe review path (.codex/agents/*.toml reviewer); (3) Gemini/Cursor adapters."
+        type: integration
+        priority: P2
+        depends_on:
+          - P4-T07
+        estimate: XL
+        owner_type: backend-dev
+        acceptance:
+          - Opt-in metered separate-process worker mode behind explicit user opt-in
+          - Codex-as-primary adapter gated on a billing-safe review path
+          - Gemini / Cursor adapters fill the remaining host slots
+      - id: P4-T10
+        tracker_issue_id: FORGE-178
+        title: Build read-only multi-subagent /audit skill
+        description: A /audit skill spawns parallel read-only subagents to sweep the repo for dead code, duplication, bloat and safe simplifications, producing a work-order (file:line, classification, evidence, proposed change, blast radius). Never edits source. From the work-order, file one issue per finding or hand off to a dual-reviewed fix flow.
         type: skill
-        priority: P0
-        depends_on: [P2.5-T03]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "skills/reconcile/SKILL.md + src/cli/orchestrate-reconcile.ts shipped"
-          - "/reconcile --pull round-trip: tracker → phases.yaml → tracker preserves all fields without loss"
-          - "Diff preview shows added/removed/updated tasks; --pull prompts user via skill to confirm prune list before removing orphans (--confirm-prune flag)"
-          - "Atomic phases.yaml write via tmp + rename; YAML comments + field order preserved"
-          - "Integration tests cover the Tracker interface contract via a shared FakeTracker (per-adapter quirks covered by FORGE-94 tests; Notion --push gracefully surfaces NOT_IMPLEMENTED until FORGE-117)"
-      - id: P2.5-T10
-        tracker_issue_id: "FORGE-101"
-        status: deferred-v0.5
-        deferred_at: "2026-05-17"
-        deferred_reason: "Team-mode minimum architecture 2026-05-17 (PM): mid-flight roadmap mutation deferred to v0.5. v0.4 uses direct tracker edit + /reconcile --pull (P2.5-T09) instead. /amend-roadmap may return as opt-in for teams that want atomic phases.yaml + tracker mutation."
-        title: "/amend-roadmap skill + forge orchestrate amend-roadmap verb"
-        description: "skills/amend-roadmap/SKILL.md + src/cli/orchestrate/amend-roadmap.ts. Mid-flight new-task creation: prompt user for title, description, type, ACs, depends_on, owner_type; write to phases.yaml AND push to tracker atomically; rollback local on tracker failure; resumable journal under .forge/orchestrator/global/amend-journal/. Invokes worktree-drift-guard automatically after success."
-        type: skill
-        priority: P0
-        depends_on: [P2.5-T03, P2.5-T11]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "skills/amend-roadmap/SKILL.md + src/cli/orchestrate/amend-roadmap.ts shipped"
-          - "Writes phases.yaml + tracker atomically (rollback both if either fails)"
-          - "New task gets next available P<phase>-T<n> id"
-          - "Resumable journal under .forge/orchestrator/global/amend-journal/<task-id>.json"
-          - "Invokes worktree-drift-guard --dry-run for preview after success"
-      - id: P2.5-T11
-        tracker_issue_id: "FORGE-103"
-        status: dropped
-        dropped_at: "2026-05-17"
-        dropped_reason: "Team-mode minimum architecture 2026-05-17 (PM): no drift workflow in v0.4. Workers see informational SPEC-diff-since-claim notification on resume (P2.5-T18) but forge does not actively flag/notify across worktrees. Team owns coordination."
-        title: "forge orchestrate worktree-drift-guard verb (with --dry-run)"
-        description: "src/cli/orchestrate/worktree-drift-guard.ts. Invoked by /update-spec --apply and /amend-roadmap to proactively flag active worktrees. Reads ADR frontmatter (affected_spec_sections, affected_phases_tasks, affected_tasks), iterates .forge/orchestrator/tasks/* state.json files, targets only states: running, blocked_on_question, awaiting_respawn, ready_for_review (NOT dispatched or terminal). For each affected worktree: writes drift event + question with --drift-event-id + --routing-hint amend-roadmap. --dry-run returns the list without writing."
-        type: backend
-        priority: P0
-        depends_on: [P2.5-T08]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Verb implemented; reads ADR frontmatter; matches affected sections to active tasks"
-          - "Targets only running/blocked_on_question/awaiting_respawn/ready_for_review states"
-          - "--dry-run returns JSON of would-affect worktrees without writing"
-          - "Without --dry-run: writes drift event + question to each affected worker"
-          - "Integration test: 2 active worktrees + 1 dispatched + 1 shipped; guard targets exactly the 2 active ones"
-      - id: P2.5-T12
-        tracker_issue_id: "FORGE-104"
-        status: dropped
-        dropped_at: "2026-05-17"
-        dropped_reason: "Team-mode minimum architecture 2026-05-17 (PM): no drift events, no routing_hint, no drift-routed questions. Question channel itself stays (FORGE-64 → P2-T11) for genuine ask/decide protocol; only the drift-routing layer is removed."
-        title: "Cross-session question UX in /forge orchestrate skill (surface drift-routed questions)"
-        description: "Extend skills/forge-orchestrate/SKILL.md polling loop to surface questions with routing_hint differently. When question.routing_hint == 'amend-roadmap', display suggestion banner: 'This is a scope drift — consider /amend-roadmap to formalize the new task'. When question has drift_event_id but no routing_hint, suggest: 'This is an architectural drift — consider /update-spec --draft to formalize the change'. User can still answer directly. Builds on FORGE-73 question channel."
-        type: skill
-        priority: P1
-        depends_on: [P2.5-T07]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Drift-routed questions render with routing suggestion in dispatch skill UI"
-          - "User can ignore suggestion and answer directly"
-          - "E2E test: worker emits drift event + question; supervisor's skill surfaces with routing hint"
-      - id: P2.5-T13
-        tracker_issue_id: "FORGE-105"
-        title: "Auto-codex in-skill hooks (no host hooks)"
-        description: "Extend existing skills with auto-codex suggestion at architectural decision points: /plan-task on plan exit → suggest /codex review-plan; /update-spec --draft after writing ADR → suggest /codex review-decision; /ship pre-PR-finalize → suggest /codex review-impl. All suggestions are printed lines at skill end ('💡 Suggested next: /codex review-decision (run with FORGE_AUTO_CODEX=0 to disable)'). Bounded by settings.codex.auto_codex_token_cap. Env vars: FORGE_AUTO_CODEX, FORGE_AUTO_CODEX_TOKEN_CAP."
-        type: skill
-        priority: P1
+        priority: P2
         depends_on: []
-        estimate: S
+        estimate: XL
         owner_type: backend-dev
         acceptance:
-          - "/plan-task, /update-spec, /ship each emit auto-codex suggestion at appropriate point"
-          - "Bounded by hooks.auto_codex_token_cap (default 50000); skips with warning when exceeded"
-          - "FORGE_AUTO_CODEX=0 cleanly disables; no behavior changes elsewhere"
-          - "NO host-level SessionStart/Stop/UserPromptSubmit hook installation (sole-user decision)"
-      - id: P2.5-T14
-        tracker_issue_id: "FORGE-106"
-        title: "Precedence rules + skill-verb contract docs in CLAUDE.md"
-        description: "Update CLAUDE.md with the 6-level precedence rules (user > SPEC > PRD > phases.yaml > tracker body > attempts), the skill ↔ verb contract pattern (skills own UX/confirmation, verbs own state machine), and the ephemeral ADR workflow (`/update-spec --draft → review → flip status: accepted → /update-spec --apply <slug>`). Optional lint task: a pre-commit hook that grep-checks new code for `forge orchestrate next|suggest-next|session-check|intent-detect` references and fails if found."
+          - /audit runs N read-only subagents producing a work-order; writes zero source files
+          - Scope + protected-surface enforcement is in code, unit-tested
+          - --create-issues files per-finding issues on the configured tracker
+      - id: P4-T11
+        tracker_issue_id: FORGE-179
+        title: Build core read-only audit verbs and schema
+        description: "Phase 1 of /audit: forge orchestrate audit plan + collect verbs, a Finding/WorkOrder schema with 6-way classification, AuditSchema in settings, scope auto-discovery via git ls-files ranking (no hardcoded src/), CRITICAL.md parser, path-free principles template, and the audit SKILL.md fanning out read-only subagents."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - audit plan renders one read-only subagent prompt per (scope x dimension)
+          - audit collect drops out-of-scope/protected/absolute/traversal paths (unit-tested)
+          - collect writes only .forge/audits/<ts>/work-order.{md,json}; git status clean
+      - id: P4-T12
+        tracker_issue_id: FORGE-180
+        title: Add --create-issues via configured tracker
+        description: "Phase 2 of /audit: turn a work-order into one tracker issue per finding via the adopter's configured tracker adapter (no new tracker code). Reuses resolveTrackerForCLI/createIssue/CreateIssuePayload; optional umbrella + sub-issues; hard-refuses on NoopTracker."
+        type: integration
+        priority: P2
+        depends_on:
+          - P4-T11
+        estimate: M
+        owner_type: integration
+        acceptance:
+          - One issue per finding; body = rendered finding block (evidence/whySafe/proposedChange/blastRadius/file:line)
+          - Refuses with NO_TRACKER_CONFIGURED when tracker is Noop
+      - id: P4-T13
+        tracker_issue_id: FORGE-181
+        title: Migrate forge to dogfood /audit plus docs
+        description: "Phase 3 of /audit: forge becomes just another adopter — its specifics live in its own CRITICAL.md + settings.verify, the shipped feature carries none. Add DO-NOT-SIMPLIFY paths to forge CRITICAL.md, hold the full gate in verify.commands, commit prior-art docs + generalized principles template, add /audit to CONTEXT.md + CHANGELOG."
         type: docs
-        priority: P1
-        depends_on: [P2.5-T01]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "CLAUDE.md sections added: §Precedence rules, §Skill ↔ verb contract, §Ephemeral ADR workflow"
-          - "Optional lint hook (commit-time grep for removed verbs) added to .husky/ if husky is in use; otherwise documented in CONTRIBUTING.md"
-      - id: P2.5-T15
-        tracker_issue_id: "FORGE-107"
-        status: dropped
-        dropped_at: "2026-05-17"
-        dropped_reason: "Team-mode minimum architecture 2026-05-17 (PM): no drift workflow means no drift_event_id or routing_hint fields on QuestionIndex. Question schema stays as it was post-FORGE-64."
-        title: "Question schema extension: routing_hint + drift_event_id"
-        description: "Update QuestionIndex schema in spec/ORCHESTRATOR.md §Question lifecycle (already drafted in 2026-05-17 amendment) to add drift_event_id?: string and routing_hint?: 'amend-roadmap' fields. Add zod validators in src/schemas/. Update src/cli/orchestrate/question.ts to accept --drift-event-id + --routing-hint flags. Update existing question.json files via gc-style migration if any exist with the old shape (likely none — fresh field)."
-        type: backend
-        priority: P0
-        depends_on: [P2.5-T05]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "QuestionIndex schema includes optional drift_event_id and routing_hint fields"
-          - "question.json files validate against updated schema"
-          - "`forge orchestrate question --drift-event-id <id> --routing-hint amend-roadmap` works end-to-end"
-          - "Decision-key format includes content hash component (`drift:<from>-vs-<to>:<slug>:<hash>`) — Codex C5"
-      # ─────────────────────────────────────────────────────────────────────────────
-      # Tasks added 2026-05-17 (PM) per docs/plans/team-mode-minimum-architecture.md
-      # ─────────────────────────────────────────────────────────────────────────────
-      - id: P2.5-T16
-        tracker_issue_id: "FORGE-112"
-        title: "Untrack spec/* + plans/phases.yaml from forge's .gitignore; add CI npm-pack gate"
-        description: "Remove the 7 'Forge dogfooding' entries from .gitignore (already done in this branch — verify). Verify package.json#files allowlist excludes spec/, plans/, .forge/, docs/. Add an npm script `test:pack` that runs `npm pack --dry-run --json` and asserts none of spec/**, plans/**, .forge/**, docs/** appear in the tarball file list. Wire `test:pack` into CI as a required check. Commit the (currently uncommitted) spec/* and plans/phases.yaml so forge's own dogfooding aligns with the team-mode architecture."
-        type: backend
-        priority: P0
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - ".gitignore no longer contains /spec/BRIEF.md, /spec/PRD.md, /spec/SPEC.md, /spec/DESIGN.md, /spec/CONTEXT.md, /plans/phases.yaml"
-          - "spec/{BRIEF,PRD,SPEC,DESIGN,CONTEXT}.md committed to main with current content"
-          - "plans/phases.yaml committed to main with current content"
-          - "npm script `test:pack` runs npm pack --dry-run --json and fails if any spec/**, plans/**, .forge/**, docs/** file is in the tarball"
-          - "CI workflow runs `npm run test:pack` as a required check"
-          - "Local `npm pack --dry-run` confirms package size <1MB"
-      - id: P2.5-T17
-        tracker_issue_id: "FORGE-113"
-        title: "phases.yaml source metadata stanza + freshness display on every read"
-        description: "Extend src/schemas/phases.ts with a `source` block (zod): { tracker: 'linear'|'github'|'notion', project_id: string, synced_at: ISO-8601, spec_revision: string }. /reconcile --pull writes the stanza on every regeneration. Every CLI verb that reads phases.yaml (phases verb, sync-status-render bin, reconcile loader) prints a one-line freshness summary to stderr before its main output: `phases.yaml: synced 47min ago from linear (SPEC@a3c2d1f)`. No auto-sync — just honest staleness. Breaking: top-level tracker_project_id is removed; value moves into source.project_id. tracker_url stays at top level."
-        type: backend
-        priority: P0
-        depends_on: [P2.5-T09]
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "PhasesYamlSchema includes optional `source` block validated by zod"
-          - "Top-level tracker_project_id removed from PhasesSchema; value moves into source.project_id"
-          - "/reconcile --pull writes the source stanza atomically with the rest of phases.yaml"
-          - "All CLI verbs that read phases.yaml print the freshness summary line on stderr"
-          - "When source block is absent, freshness line says: `phases.yaml: no source metadata (run forge orchestrate reconcile --pull to sync)`"
-          - "Freshness summary format documented in spec/SPEC.md §phases.yaml schema"
-          - "spec_revision = git sha of HEAD when SPEC.md was last touched, OR content digest if spec/SPEC.md is untracked (defensive)"
-          - "Unit test: round-trip write/read preserves all source fields"
-          - "Integration test: stale phases.yaml (>24h old) still works but prints the staleness duration prominently"
-      - id: P2.5-T18
-        tracker_issue_id: "FORGE-114"
-        title: "Worker spec_revision stamping at claim + informational SPEC-diff notification on resume"
-        description: "Extend the claim record schema (src/orchestrator/state-machine.ts or wherever claim records live post-FORGE-78) with a `spec_revision` field stamped at claim creation. On worker subagent resume (when it picks up a previously-claimed task), the dispatch skill computes `git log --oneline -- spec/ HEAD ^<claim.spec_revision>`. If non-empty, prints to the worker prompt as an informational block: `SPEC changed since you claimed this ticket — 3 commits affecting spec/SPEC.md and spec/PRD.md. Recent: <one-line summaries>. Run `git diff <claim.spec_revision> HEAD -- spec/` to review.` This is informational, NOT gating — the worker proceeds regardless. NO contradiction check, NO --affects flag, NO halt."
-        type: backend
-        priority: P0
-        depends_on: [P2-T17]  # depends on lease/claim infra from FORGE-78
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Claim record schema includes spec_revision (git sha or content digest at claim time)"
-          - "On worker resume: dispatch skill computes commit list since claim.spec_revision touching spec/"
-          - "If list non-empty: prints informational block to worker prompt; worker continues normally"
-          - "If list empty: prints nothing (no noise)"
-          - "Block format includes commit count, files affected, one-line commit summaries (latest 5), and the git diff command"
-          - "Unit test: stamps spec_revision correctly across new claim, resumed claim, and re-attempt"
-          - "Integration test: fixture project with 2 spec commits between claim and resume → notification fires; with 0 commits → no notification"
-          - "EXPLICITLY OUT OF SCOPE: any contradiction check, halt, --affects flag, drift event, or PR-policy enforcement (per team-mode-minimum-architecture.md §2.3)"
-      - id: P2.5-T19
-        tracker_issue_id: "FORGE-115"
-        title: "Standardize worktree location on .forge/worktrees/; align /pickup-task with orchestrator"
-        description: "Forge today has two worktree-location conventions: `/pickup-task` skill uses `../${PROJECT}-worktrees/${TICKET}/` (sibling, outside repo) while the orchestrator uses `.forge/worktrees/<sanitized-id>/` (inside repo). The split is accidental — `/pickup-task` predates the orchestrator design. Standardize on `.forge/worktrees/<sanitized-id>/` for consistency with the orchestrator, self-containment (rm project → cleanup), project-relative paths, and the already-pressure-tested orchestrator design (`.forge/` is already gitignored; the worktree checkout contains only tracked files so no recursion). Update `/pickup-task` SKILL.md to create at `.forge/worktrees/<id>/` using the same `sanitizeIssueId` rules as `src/core/workspace.ts`. Extend `forge init` to scaffold tooling-exclude entries (`.eslintignore`, `.prettierignore`, tsconfig `exclude`, vitest `exclude`) so `.forge/worktrees/**` doesn't get double-processed by detected tools (detect-and-skip — no-op if tool absent). Document the convention in `spec/SPEC.md` §Module layout as the single canonical location. CHANGELOG: behavior-change note for v0.3.x adopters (existing sibling worktrees can be `git worktree move`d or removed)."
-        type: backend
-        priority: P1
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "/pickup-task skill creates worktrees at .forge/worktrees/<sanitized-id>/"
-          - "forge init writes tooling-exclude entries for detected tools (eslint, prettier, tsconfig, vitest)"
-          - "Sandbox-config snippet in BACKLOG.md item 'ergonomic enhancements' updated to reference new path"
-          - "spec/SPEC.md §Module layout documents .forge/worktrees/ as the single canonical location"
-          - "CHANGELOG entry under 'Behavior change' notes the path migration"
-          - "No code path in forge still references ../*-worktrees/ (grep across src/, skills/, templates/, docs/)"
-          - "forge doctor (if it touches worktree paths) reads from .forge/worktrees/ only"
-      - id: P2.5-T20
-        tracker_issue_id: "FORGE-116"
-        title: "/wrap-up skill — end-of-task housekeeping (merged PR → prune worktree, branch, ff main, reconcile)"
-        description: "After a PR merges, forge has no end-to-end housekeeping flow — the user manually verifies merge, removes worktree, deletes branch, fast-forwards main, and hopes /reconcile catches the state update. The engines exist (`forge orchestrate gc`, `/reconcile`) but no thin user-facing skill composes them. Add `/wrap-up` skill (Option A from the trade-off matrix: skill = UX + confirmation; verbs = engine). Flow: (1) detect task scope from current worktree branch, or list shipped-but-not-cleaned tasks if invoked from main; (2) verify PR merged via `gh pr view --json state,mergedAt`, abort if not; (3) run `forge orchestrate reconcile --pull` to sync tracker → phases.yaml; (4) show preview of cleanup plan (worktree, branch, main delta); (5) on user confirmation: `forge orchestrate gc --remove-worktree --task <id>` + `git branch -d <branch>` + `git switch main && git pull --ff-only` (refuse if local main is dirty); (6) report one-line summary. `/wrap-up --all` mode batches all shipped-but-not-cleaned tasks with a single confirmation. Suggest-don't-force throughout: always asks before mutating."
-        type: integration
-        priority: P1
-        depends_on: [P2.5-T09, P2-T09]
+        priority: P2
+        depends_on:
+          - P4-T11
         estimate: M
         owner_type: backend-dev
         acceptance:
-          - "/wrap-up skill installed at skills/wrap-up/SKILL.md"
-          - "Skill auto-detects task ID from current worktree's branch when run from a worktree"
-          - "Skill aborts with clear message if PR is not merged (does not delete anything)"
-          - "Skill calls forge orchestrate reconcile --pull to sync phases.yaml from tracker before cleanup"
-          - "Skill shows preview + asks confirmation before any destructive action"
-          - "On approval: removes worktree via forge orchestrate gc --remove-worktree, deletes local branch, fast-forwards main"
-          - "Refuses to fast-forward if local main has uncommitted changes; surfaces the diff"
-          - "/wrap-up --all mode handles batch cleanup with a single confirmation"
-          - "Skill is host-portable (works under Claude Code; Codex/Gemini variants are a future-task)"
-          - "Integration test: dispatch task → mock-merge PR → run /wrap-up → verify worktree gone, branch deleted, main fast-forwarded, tracker state Done"
-      - id: P2.5-T21
-        tracker_issue_id: "FORGE-122"
-        title: "Fix e2e/perf tests failing from worktree — hardcoded ${repoRoot}/node_modules/.bin/tsx path"
-        description: "Six e2e/perf tests in `test/unit/bin/forge.test.ts`, `test/integration/cli/init.e2e.test.ts`, `test/integration/cli/init.perf.test.ts`, and `test/integration/orchestrate/spec-diff.e2e.test.ts` fail with `AssertionError: undefined !== 1` when `npm test` runs from any `.forge/worktrees/<id>` checkout (git worktrees inherit refs but not the `node_modules` symlink tree, so the hardcoded `resolve(repoRoot, 'node_modules/.bin/tsx')` path doesn't exist). The same tests pass from the main checkout because Node's module resolution walks up from `cwd: repoRoot` and finds `node_modules/tsx` in the parent. Fix: resolve `tsxBin` via Node's module resolution (`createRequire(import.meta.url).resolve('tsx/dist/cli.mjs')`) or use `npx --no-install tsx` as the spawn target. Surfaced inside FORGE-97 implementation (2026-05-18); blocks running the PR-gate from any worktree after FORGE-115's `.forge/worktrees/` standardization. Path-resolution change only — no behavior change in the tests themselves and no new dependencies."
-        type: infra
-        priority: P1
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "All 6 affected tests pass when npm test runs from .forge/worktrees/<id> AND from the main checkout"
-          - "No new dependencies introduced"
-          - "No behavior change in the tests themselves — only the path-resolution strategy"
-          - "Path resolution uses Node-native module resolution (createRequire) or npx --no-install, not hardcoded repoRoot/node_modules/.bin paths"
-      - id: P2.5-T22
-        tracker_issue_id: "FORGE-81"
-        title: "Fix /learn back-propagation — writes hit worktree only; /pickup-task hydrates from main"
-        description: "Compound-learning loop silently breaks for any `/learn` invocation inside a worktree. `/learn` writes the new learning markdown to `docs/learnings/{quarter}/<slug>.md` in the current worktree, but `/pickup-task` hydrates `docs/learnings/` from the main repo's checkout (FORGE-66's hydration block). `docs/learnings/` is gitignored by the forge-dogfood rule (internal docs not shipped to npm), so worktree-written learnings never sync back to main unless the human manually `cp`s them. Reproduced on FORGE-77 retro 2026-05-16. Root cause: the 'canonical store = main checkout, worktrees = copies' invariant is enforced on hydration (FORGE-66) but not on writes. Task is the fix; the design options live in the Linear ticket body (A–E) but are not pre-bound here — implementer should brainstorm and pick the right shape (most likely C: `/ship` propagates worktree learnings to main on merge). The forge-local AC is: the canonical store stays single-source-of-truth across main/worktree boundaries, and the chosen authority path is documented in spec/SPEC.md or skills/learn/SKILL.md."
-        type: skill
-        priority: P1
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - "Learnings written from any worktree are visible to /pickup-task hydration on subsequent runs"
-          - "Canonical learnings store remains single-source-of-truth — no duplicate-write divergence between main and worktree copies"
-          - "Chosen authority/source path documented in spec/SPEC.md §Learnings (or equivalent) and in skills/learn/SKILL.md"
-          - "Integration test: write a learning from a worktree → assert it lands in the canonical store AND is visible via Read from the worktree in the same session"
-          - "Update docs/learnings/2026-Q2/ac-as-unit-test-vs-it-already-exists.md (or appropriate retro) to note the gap is closed"
-
-  - id: phase-3
-    tracker_milestone_id: "9f147eda-4ec3-4ada-b77b-230e6a516d46"
-    name: "Launch v0.4 — init onboarding, migrate, e2e, release"
-    status: blocked
-    blocked_by: phase-2.5
-    goal: "v0.4.0 ready for npm publish: closed-loop workflow control (Phase 2.5) integrated and dogfooded; existing v0.2.x users have a clean migration path via forge migrate; e2e fixtures cover the closed-loop flow on Claude Code + Codex hosts; CHANGELOG + README rewritten around the closed-loop thesis. (Replaces former Phase 3 'Polish & launch — v0.3.0'; v0.3.x patches may ship the original P3-T01..T08 if needed before v0.4 cuts.)"
-    gate_criteria:
-      - "All Phase 3 P0 tasks complete; v0.4.0 ships the closed-loop drift workflow (Features 5+6) + onboarding interview + migrate"
-      - "v0.4.0 RC tag passes full e2e test matrix on Claude Code + Codex CLI hosts including the closed-loop drift scenarios"
-      - "Migration test: a v0.2.1 fixture project upgrades cleanly via forge migrate (skill call-site rewrites for renamed verbs; settings schema bump)"
-      - "Performance: forge --version <500ms p95, init <30s p95, forge orchestrate phases --ready --json <300ms p95"
-      - "Package size <1MB unpacked"
-      - "CHANGELOG.md complete, BREAKING CHANGES flagged (next verb removed, suggest-next/session-check/intent-detect never shipped, ephemeral ADRs, hooks block dropped from settings)"
-      - "ANTHROPIC_API_KEY absence verified at release-build time (no v0.4 codepath uses it)"
-      - "Manual sign-off: maintainer runs v0.4.0 dogfood loop end-to-end on a real third-party project; closed-loop drift scenario executes successfully (mid-flight /update-spec --draft + --apply propagates correctly)"
-    tasks:
-      - id: P3-T01
-        tracker_issue_id: "FORGE-108"
-        title: "Init flow onboarding interview prompts (primary/secondary agent, GitHub auth)"
-        description: "Extend src/cli/init.ts with new prompts added 2026-05-17: primary_host_cli (Claude Code / Codex CLI / Cursor / Gemini CLI; default Claude), review_host_cli (must differ from primary; default Codex when primary is Claude), 'GitHub connected?' yes/no with gh auth status validation. Async/skippable external validations (tracker auth, gh auth, claude --version) so init returns control to user within 30s budget. No host hook installation (Feature 7 dropped). Adds codex/decisions/doctor blocks to .forge/settings.yaml output per spec/SPEC.md SettingsSchema (extended 2026-05-17)."
+          - grep of shipped src/ + skills/audit/ + templates finds zero forge paths
+          - forge /audit reads its protected set from CRITICAL.md, not from code
+      - id: P4-T14
+        tracker_issue_id: FORGE-182
+        title: Add repo-agnostic read-only validation tests
+        description: "Phase 4 of /audit: prove the feature is genuinely repo-agnostic and read-only and enforce the audit+gate-must-be-a-pair lesson. Integration test runs audit plan+collect on a non-forge fixture, asserting auto-discovery without assuming src/, no forge strings, provably read-only git status, and a gate-pair warning when verify is unset."
         type: backend
-        priority: P0
-        depends_on: []
+        priority: P2
+        depends_on:
+          - P4-T11
+          - P4-T12
         estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Init prompts include primary_host_cli, review_host_cli, GitHub connected? (with gh auth status check)"
-          - "Init completes in <30s p95 (external validations are async and don't block return)"
-          - "External validation results print as they arrive after init returns control"
-          - ".forge/settings.yaml output includes codex, decisions, doctor blocks per amended schema"
-          - "NO host hook installation (no .claude/settings.json fragment written)"
-          - "Init refuses to run inside the forge framework checkout itself"
-      - id: P3-T02
-        tracker_issue_id: "FORGE-109"
-        title: "forge migrate command for v0.2.x → v0.4 upgrade"
-        description: "src/cli/migrate.ts: detects v0.2.x drift signatures (@inherit lines in DESIGN.md, /push-to-linear refs, missing .forge/settings.yaml, references to dropped verbs in custom skills if any). Generates proposed diff with chalk preview. Updates SettingsSchema (adds codex/decisions/doctor blocks); rewrites skill call sites for renamed verbs (next → claim, suggest-next references → phases --ready); archives any orphan workflow state files; adds templates/adr.template.md if missing. Backs up to .forge/backup-<timestamp>/. Applies on accept."
-        type: backend
-        priority: P0
-        depends_on: [P2.5-T01, P2.5-T05]
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - "Detects all v0.2.x drift signatures on a fixture project"
-          - "Migration rewrites settings.yaml to include codex/decisions/doctor blocks"
-          - "Migration rewrites skill call sites for renamed verbs"
-          - "Backup directory contains pristine pre-migration originals"
-          - "Aborts cleanly on user reject; no partial state"
-          - "Re-runnable safely (idempotent)"
-      - id: P3-T03
-        tracker_issue_id: "FORGE-110"
-        title: "End-to-end fixtures + cross-host CI matrix covering closed-loop workflow"
-        description: "examples/ fixture projects for greenfield-github, greenfield-linear, greenfield-notion. CI runs the full v0.4 lifecycle on Claude Code primary + Codex review combo against each fixture: init → /forge → /draft-prd → /draft-spec → /draft-design → /ingest-spec → /decompose → /push-to-tracker → /pickup-task → build → MID-FLIGHT /update-spec --draft → flip accepted → /update-spec --apply (propagates + deletes ADR + writes commit message body) → /ship → /reconcile --pull verifies tracker drift handling. Closed-loop drift scenarios tested: worker emits drift event on contradictory phases/SPEC content; supervisor surfaces with routing-hint. CLI-verified-verdict path verified."
-        type: integration
-        priority: P0
-        depends_on: [P2.5-T02, P2.5-T04, P2.5-T05, P2.5-T06, P2.5-T07, P2.5-T08, P2.5-T09, P3-T05]
-        estimate: L
         owner_type: qa-engineer
         acceptance:
-          - "3 fixture projects with deterministic phases.yaml"
-          - "Full v0.4 lifecycle e2e test passes for each tracker, driven by /forge orchestrate skill"
-          - "Closed-loop drift scenario: /update-spec --draft → accept → --apply propagates correctly across SPEC+PRD+phases+tracker and deletes ADR"
-          - "/update-spec --apply --resume recovers from simulated tracker failure mid-propagation"
-          - "Worker drift event/question protocol verified: contradictory SPEC/phases content triggers drift event with routing-hint"
-          - "Multi-main coordination test: two simulated main sessions race for same task → exactly one wins via tracker CAS"
-          - "CI matrix: Claude+Codex passes; Cursor+Gemini smoke test only (verified-deferred)"
-      - id: P3-T04
-        tracker_issue_id: "FORGE-111"
-        title: "Release v0.4.0 to npm + GitHub"
-        description: "Cut release: bump package.json to 0.4.0, tag v0.4.0, npm publish --access public, create GitHub release with CHANGELOG excerpt + migration note. Verify install via npx @firatcand/forge --version pulls v0.4.0. v0.4.0 ships the closed-loop drift workflow as the headline change (ephemeral ADRs, /update-spec --draft + --apply, /amend-roadmap, /reconcile, worktree-drift-guard). README + CHANGELOG updated with the simplified verb taxonomy (next removed, suggest-next/session-check/intent-detect never shipped)."
+          - repo-agnostic test green; no forge assumption leaks for a non-JS fixture
+          - read-only + gate-pair-warning tests green; full gate green
+      - id: P4-T15
+        tracker_issue_id: FORGE-195
+        title: Add inbox read verb and shared scanner
+        description: "I0.5 foundation: forge orchestrate inbox --json lists parked decisions (blocked_on_question tasks) with their open questions, tagged by classification. Extracts a shared collectTasksByState from readiness.ts, correlates questions via listOpenQuestionsAcrossTree, emits unified JSON. Powers /inbox and the plan-approval queue."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Lists only blocked_on_question tasks; correlates open questions; tags by classification
+          - Tolerant of corrupt/missing state.json
+          - Shared collectTasksByState reused by readiness + inbox; unit tests
+      - id: P4-T16
+        tracker_issue_id: FORGE-196
+        title: Build /inbox skill for draining decisions
+        description: "I0.5 foundation: interactive /inbox skill, the unified surface to drain parked decisions. Reads inbox --json, shows a tagged digest with age, lets the user pick + deep-dive a full question + options + recommendation via AskUserQuestion, routes answers through the answer verb."
+        type: skill
+        priority: P2
+        depends_on:
+          - P4-T15
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - /inbox lists parked items as a tagged digest, pick + deep-dive, answers via answer verb
+          - Empty queue produces a clean nothing-to-answer message
+          - "Contract test: references inbox/answer; no orchestrator writes; no sleep/watch/loop"
+      - id: P4-T17
+        tracker_issue_id: FORGE-197
+        title: Add forge statusline and host-config writer
+        description: "I0.5 foundation: a display-only badge showing parked-decision count, plus the first narrow opt-in host-settings writer. forge statusline reads state.json via collectTasksByState; a host-config writer writes only the statusLine key into ~/.claude/settings.json (atomic, deep-merge, non-clobbering, opt-in); hosts.claude.status_line schema flag default off."
         type: infra
-        priority: P0
-        depends_on: [P3-T01, P3-T02, P3-T03]
+        priority: P2
+        depends_on:
+          - P4-T15
+          - P4-T16
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - forge statusline prints the correct count; no crash on empty/missing .forge
+          - forge upgrade offers to add statusLine opt-in without clobbering an existing one
+          - schema default off; count/perf/empty + write/merge/atomic/idempotent tests
+      - id: P4-T18
+        tracker_issue_id: FORGE-198
+        title: Build Loom graph memory replacing flat recall
+        description: "Epic: replace flat agent-guessed learning recall with a queryable graph linking code symbols/files, decisions, the task dependency graph and tasks/learnings. Native graph schema (one node table + one edge table by kind) behind a pluggable MemoryBackend (local SQLite default). Node ids are pure functions of source so reindex is idempotent; tracker stays authoritative."
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: XL
+        owner_type: db-architect
+        acceptance:
+          - /pickup-task recall is a dependency-aware graph query, not tag-guessing
+          - forge loom reindex is idempotent and rebuildable from source
+          - No new runtime dependency (node:sqlite is built-in)
+      - id: P4-T19
+        tracker_issue_id: FORGE-200
+        title: Build local SQLite Loom backend and recall
+        description: "Increment 1 of Loom: node:sqlite WAL + busy_timeout + FTS5; task+learning nodes, depends_on+learned_from edges; reindex walkers for phases.yaml + learnings; loom index/reindex/recall/status verbs; MemorySchema default local. recallForTask walks depends_on ancestors + FTS, ranking structural over FTS with a why provenance, rewiring /pickup-task."
+        type: data
+        priority: P2
+        depends_on:
+          - P4-T18
+        estimate: M
+        owner_type: db-architect
+        acceptance:
+          - loom reindex --scope all builds the DB; running twice yields an identical graph
+          - WAL + busy_timeout; concurrent-writer test drops no rows; recall returns dependency-aware hits ranked structural-over-FTS
+          - /pickup-task shows Loom recall; canonical DB via git-common-dir; worktrees carry no loom.db
+      - id: P4-T20
+        tracker_issue_id: FORGE-199
+        title: Build Tripwire prompt-injection defense layer
+        description: "Epic: a runtime content-trust layer orthogonal to the static security-auditor. Tripwire inspects untrusted input a worker will consume (Scan injection heuristics) and behavior that looks compromised (Sentinel Marks decoys). Kill-switch is agents.tripwire.mode. Requires an I0 gate proving the untrusted-content data path before any code."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: XL
+        owner_type: security-auditor
+        acceptance:
+          - Threat model + data-path proof documented before code
+          - I1 ships deterministic, model-free, report-only, no new dep, default-on-non-blocking
+          - CRITICAL.md covers src/security/** so the layer auto-triggers /second-opinion on its own changes
+      - id: P4-T21
+        tracker_issue_id: FORGE-201
+        title: Write THREAT-MODEL and prove data path
+        description: "I0 gate for Tripwire (blocks all Tripwire code). Investigation + doc: trace end-to-end how externally-authored text (issue body, reconcile --pull, answered questions, prior attempts, future search/browser results) reaches the rendered worker prompt, with file:line evidence; write spec/THREAT-MODEL.md with the proven data-path table and a verdict."
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: security-auditor
+        acceptance:
+          - spec/THREAT-MODEL.md committed with the proven data-path table (file:line evidence)
+          - "Explicit verdict: render-time scanning justified, or narrowed to adapter-boundary"
+          - What Tripwire does NOT defend section includes the Sentinel-Marks network-exfil limitation
+      - id: P4-T22
+        tracker_issue_id: FORGE-202
+        title: Build deterministic injection scanner MVP
+        description: Increment 1 of Tripwire (blocked by the I0 gate). Deterministic, model-free, report-only, no new dep. Pure scanText producing a TripwireReport with severity + spans; rules for instruction_override/tool_coercion/secret_egress/encoded_payload/role_confusion; boundary wrapping in the CLI hydration layer (renderer stays pure); mode:mark never blocks; standalone scan verb.
+        type: backend
+        priority: P2
+        depends_on:
+          - P4-T21
+        estimate: M
+        owner_type: security-auditor
+        acceptance:
+          - Fixture corpus maps each injection string to expected severity/findings; delimiter forgery stays contained
+          - mode:mark never blocks dispatch; emits TripwireReport + tripwire_scanned event; renderer stays pure
+          - scan --task <id> --json prints a report; build/typecheck/lint green; no new dep; no model call
+      - id: P4-T23
+        tracker_issue_id: FORGE-203
+        title: Build pluggable browser provider adapters
+        description: "Epic (deferred; decompose when reached): make browser capability a pluggable provider adapter (tracker/secrets mold) with playwright default (no key), browserbase, browser-use; resolve decision D3 (core adapters vs skill-level wrappers) first. Keys via secrets manager, never in subprocess env. Every result passes scanText Tripwire at the base."
+        type: integration
+        priority: P2
+        depends_on:
+          - P4-T20
+        estimate: XL
+        owner_type: integration
+        acceptance:
+          - D3 resolved (core vs skill)
+          - All three providers implement the interface; playwright default works with no key
+          - Results Tripwire-scanned at the base; no mandatory heavy dep for non-users
+      - id: P4-T24
+        tracker_issue_id: FORGE-204
+        title: Build pluggable search provider adapters
+        description: "Epic (deferred; decompose when reached): make web search a pluggable provider adapter with native host passthrough as zero-key default plus exa/parallel/perplexity opt-in. Same D3 decision as the browser adapters. base.ts normalizes result-list (Exa/Parallel) and answer-shaped (Perplexity) responses. Keys via secrets manager. All results Tripwire-scanned at the base."
+        type: integration
+        priority: P2
+        depends_on:
+          - P4-T20
+        estimate: XL
+        owner_type: integration
+        acceptance:
+          - D3 resolved
+          - native default works with zero key; exa/parallel/perplexity opt-in via secrets manager
+          - base.ts normalizes both response shapes; all results Tripwire-scanned
+      - id: P4-T25
+        tracker_issue_id: FORGE-205
+        title: Add docs-coverage report to doctor
+        description: "Epic (deferred; decompose when reached): start docs coverage as a doctor extension (not a new subsystem) reporting required-but-missing doc categories (Contract / Operator / Walkthrough / Rationale / Field Note; no Diataxis vocabulary) for a diff, mapped via the existing glob engine + preflight_globs. First slice is pure src/docs-coverage/{map,report}.ts + a non-blocking doctor gap report."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: L
+        owner_type: backend-dev
+        acceptance:
+          - doctor reports required-but-missing doc categories for a diff; non-blocking
+          - No Diataxis vocabulary; no new top-level subsystem unless justified
+  - id: phase-5
+    name: Backlog — hardening and follow-ups
+    status: paused
+    goal: Deferred hardening, schema unification, host adapters, and docs/ergonomic follow-ups surfaced during prior phases. Triaged before pulling into an active phase.
+    gate_criteria:
+      - Each item triaged (promote to an active phase or drop) before work starts
+    tasks:
+      - id: P5-T01
+        tracker_issue_id: FORGE-68
+        title: Add clean-room smoke recipe to CONTRIBUTING
+        description: Add a Pre-push smoke subsection to CONTRIBUTING.md Local validation with a clean-room recipe (build, rm node_modules, npm ci --omit=dev, run forge.cjs --version and --help) that catches CJS-packaging bugs the regular checks miss.
+        type: docs
+        priority: P2
+        depends_on: []
         estimate: S
         owner_type: devops-engineer
         acceptance:
-          - "git tag v0.4.0 pushed"
-          - "npm publish succeeds; latest tag points to 0.4.0"
-          - "GitHub release with CHANGELOG body + closed-loop workflow callout"
-          - "npx @firatcand/forge --version on a fresh machine returns 0.4.0"
-          - "Maintainer dogfood sign-off: ran v0.4.0 against a non-forge personal project; shipped at least one task end-to-end including a mid-flight /update-spec --draft + --apply propagation"
-      - id: P3-T05
-        tracker_issue_id: "FORGE-117"
-        title: "Refactor NotionTracker to `ntn` CLI transport + implement updateIssueBody"
-        description: "Notion launched an official CLI (`ntn`) that mirrors `gh`'s shape exactly: auth via `ntn login` (system keychain — no API key env var management), calls via `ntn api v1/...`, `execa`-friendly stdout/stderr/exitCode contract. Today `NotionTracker` uses the Notion MCP server (`@modelcontextprotocol/sdk` + `notion-mcp-transport.ts`), which is heavier than necessary and makes new method implementations (e.g., `updateIssueBody` block-children manipulation) awkward. FORGE-94 shipped `updateIssueBody` on Linear + GitHub and left Notion as `NOT_IMPLEMENTED` in `src/trackers/notion.ts`. This task replaces the `McpCall` seam with an `NtnExec` seam (same shape as `GhExec`), maps every `runTool('API-...')` to the equivalent `ntn api v1/...` invocation, implements `updateIssueBody` against `ntn api -X PATCH v1/blocks/{page_id}/children`, removes the `@modelcontextprotocol/sdk` dependency, and updates the docs/release-notes adapter matrix. Required for FORGE-110 (P3-T03) greenfield-notion e2e to exercise the closed-loop workflow's tracker-body-mutation path."
+          - CONTRIBUTING gains a Pre-push smoke subsection with the clean-room recipe
+          - Both --version and --help are exercised
+          - One line explains why, plus restoring node_modules afterwards
+      - id: P5-T02
+        tracker_issue_id: FORGE-70
+        title: Install deps in fresh pickup-task worktree
+        description: After /pickup-task hydration, auto-run npm ci (or lockfile-detected equivalent) in the new worktree when package.json exists, so tests/typecheck/lint work. A failing install is reported best-effort without fataling pickup.
+        type: skill
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - npm ci (or pnpm/yarn by lockfile) runs after hydration when package.json exists
+          - A failing install is reported but does not fatal the pickup
+          - Step-7 output mentions deps were installed (or failed)
+      - id: P5-T03
+        tracker_issue_id: FORGE-71
+        title: Grant learning-curator Glob and LS tools
+        description: agents/learning-curator.md declares only Read/Write/Edit so it cannot enumerate docs/learnings/ and falsely returns none-found. Add Glob and LS to its tool allowlist so the documented search step works for the recall and dedup paths.
+        type: skill
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - /pickup-task on a tagged task lists 1-5 real learnings (not none-found)
+          - Ranking reflects task tags (orchestrator task surfaces concurrency/file-write learnings)
+      - id: P5-T04
+        tracker_issue_id: FORGE-83
+        title: Enforce UTF-8 byte caps on schema strings
+        description: AttemptEventSchema/VerdictSchema use z.string().max(N), which counts UTF-16 code units not UTF-8 bytes, so emoji can exceed the budget ~2x. Replace .max(N) with a Buffer.byteLength refine on byte-budget-critical fields (or document the gap). M1 from the FORGE-78 review.
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - Byte-budget-critical fields in attempt.ts/verdict.ts enforce UTF-8 byte caps (or document the cap)
+          - "Regression test: all-emoji input at the documented limit behaves as specified"
+      - id: P5-T05
+        tracker_issue_id: FORGE-84
+        title: Comment ENOENT cases in overwriteAtomicLink
+        description: overwriteAtomicLink treats ENOENT from unlinkSync as idempotent, but ENOENT can mean expected prior deletion OR a deletion racing our write. Add an inline comment (or named-case helper) distinguishing the two; no behavior change. M2 from the FORGE-78 review.
         type: backend
-        priority: P1
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - overwriteAtomicLink distinguishes expected-absence from racing-deletion ENOENT
+          - No behavior change to the lease overwrite path
+      - id: P5-T06
+        tracker_issue_id: FORGE-85
+        title: Add size cap to JSONL append logs
+        description: appendAttemptEvent (events.jsonl) and appendClaimHistory (claim-history.jsonl) append unbounded, so a tight-loop worker can fill disk. Add a configurable hard size cap refusing to append with a clear code (EVENT_LOG_FULL / CLAIM_HISTORY_FULL) surfaced via status and gc divergence. M3 from the FORGE-78 review.
+        type: backend
+        priority: P2
         depends_on: []
         estimate: M
         owner_type: backend-dev
         acceptance:
-          - "NotionTracker exposes the same Tracker interface (no breaking changes to interface contract)"
-          - "All existing test/unit/trackers/notion.test.ts cases pass against a NtnExec-mocked transport (same mock-injection pattern as GhExec)"
-          - "updateIssueBody implemented; matches Linear/GitHub validation contract (non-string rejection, embedded-forge-footer rejection, length cap)"
-          - "Integration round-trip createIssue → updateIssueBody → listActiveIssues preserves forgeTaskId (property survives)"
-          - "NOT_IMPLEMENTED stub from FORGE-94 is deleted"
-          - "docs/adapters/notion.md updated for ntn auth + install + removed MCP dependency"
-          - "README adapter matrix flags Notion updateIssueBody as launched"
-          - "@modelcontextprotocol/sdk and src/trackers/notion-mcp-transport.ts removed (or retained only with documented justification)"
+          - Appending past a configurable size threshold is refused with EVENT_LOG_FULL / CLAIM_HISTORY_FULL
+          - Full-log condition surfaced via status and gc divergence; worker bails via the lease-loss path
+      - id: P5-T07
+        tracker_issue_id: FORGE-86
+        title: Sanitize OrchestratorError path disclosure
+        description: OrchestratorError.details is unsanitized and carries raw cause/path fields disclosing absolute paths — a low-severity info leak if errors are ever exposed over IPC/HTTP. Add a safeDetails() getter filtering through an allowed-keys list; raw details stays for CLI. M4 from the FORGE-78 review.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: security-auditor
+        acceptance:
+          - safeDetails() getter filters details through an allowed-keys list and redacts unexpected keys
+          - Unit test confirms safeDetails() redacts an unknown key
+      - id: P5-T08
+        tracker_issue_id: FORGE-87
+        title: Add optional flock locking for lease steal
+        description: "Theoretical hardening: a residual ~1-2 syscall race remains between the verify-read in steal and the unlink+link in overwriteAtomicLink (today made practically unreachable by the post-mutation fence). Add a sidecar lease.lock + flock(LOCK_EX) around acquire/heartbeat/steal/release + gc stale-lock rules. Do not pick up unless a real bug surfaces."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: L
+        owner_type: security-auditor
+        acceptance:
+          - lease.lock sidecar; acquire/heartbeat/steal/release wrap their critical section in flock(LOCK_EX)
+          - gc rule deletes the lockfile when the owning PID and lease holder are both dead
+      - id: P5-T09
+        tracker_issue_id: FORGE-130
+        title: Unify task-id schema across modules
+        description: "Three inconsistent task-id regexes (cli-args, paths, workspace) block non-Linear adopters: GitHub #42 and phase-local P2.5-T07 ids fail validation, breaking mutate verbs. Pick one canonical regex source imported everywhere and normalize adapter-emitted ids. Touches src/trackers/** so /codex review required."
+        type: data
+        priority: P1
+        depends_on: []
+        estimate: M
+        owner_type: db-architect
+        acceptance:
+          - One canonical task-id regex source imported by all three call sites
+          - GitHub adapter emits forge-canonical ids; new fixture covers a GitHub-style id through dispatch
+          - All tests pass; backwards-compat for existing task dirs (migrate or documented break)
+      - id: P5-T10
+        tracker_issue_id: FORGE-139
+        title: Delete orphan branches on workspace cleanup
+        description: workspace.cleanup() only deletes the local branch when deleteBranch:true, but the CLI gc path defaults to false, so orphan feat/<task-id> branches accumulate. Decide between flipping the default vs adding a --prune-branches sweep to gc.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Decide cleanup default vs gc sweep and implement it
+          - cleanup({deleteBranch:true}) removes worktree and branch atomically
+          - "Integration test: 3 stale worktrees+branches cleaned in one gc pass"
+      - id: P5-T11
+        tracker_issue_id: FORGE-140
+        title: Fix ensure-worktree repoRoot path resolution
+        description: ensure-worktree resolves repoRoot via path.resolve(path.dirname(stdout)) where git --git-common-dir returns relative .git; path.resolve anchors to process.cwd() not the execa cwd, so invoking from a subdir resolves repoRoot wrong and bleeds hydration across worktrees. Anchor path.resolve to the execa cwd.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - ensure-worktree anchors path.resolve to the execa cwd
+          - "Regression test: invoke from a cwd outside the repo with explicit forgeDir; worktree lands under main"
+      - id: P5-T12
+        tracker_issue_id: FORGE-141
+        title: Remove stale FORGE-88 investigation file
+        description: plans/tasks/FORGE-88.investigation.md is an untracked gitignored leftover from a shipped task; it survives worktree creation, lands in every new worktree manifest, and shows as git-status noise. Delete it (or migrate load-bearing content to docs/learnings/).
+        type: infra
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - Delete the file, or move still-load-bearing content to docs/learnings/
+          - Optionally add a /wrap-up step prompting deletion of stale *.investigation.md before shipping
+      - id: P5-T13
+        tracker_issue_id: FORGE-142
+        title: Handle git submodules in hydration filter
+        description: workspace.create() hydration uses git ls-files (a submodule is one mount-point entry) while planCopyRecursive descends into the submodule and emits nested paths absent from the tracked set, so an adopter submodule under spec/plans/docs gets silently hydrated. Detect submodules and refuse, skip, or recurse.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Decide and implement submodule behavior (refuse/skip/recurse) in workspace.ts
+          - "Test: fixture with a submodule under plans/ confirms expected behavior"
+      - id: P5-T14
+        tracker_issue_id: FORGE-143
+        title: Close TOCTOU window in symlink rejection
+        description: workspace.create() lstat-rejects symlinks at plan time but copies later via copyFileSync (which follows symlinks), leaving a TOCTOU window where a concurrent actor swaps a planned file for a symlink mid-hydration. Use O_NOFOLLOW open (or re-lstat the source fd) in executeCopyPlan.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: security-auditor
+        acceptance:
+          - Replace copyFileSync with an O_NOFOLLOW open+read+write (or equivalent re-lstat)
+          - "Test: TOCTOU fixture swaps file->symlink mid-hydration; asserts SYMLINK_REJECTED or ELOOP"
+      - id: P5-T15
+        tracker_issue_id: FORGE-144
+        title: Produce Forge and Roster launch videos
+        description: "Launch Forge and Roster via a video-first approach on personal brand channels: per product show how it works, the workflows enabled and outcomes, with a HypeGen/Remotion animation layer. Resolve open questions (combined vs per-product, animation stack, length, distribution, sequencing) then break into script/storyboard/animation/edit/publish sub-tasks."
+        type: content
+        priority: P2
+        depends_on: []
+        estimate: L
+        owner_type: design-engineer
+        acceptance:
+          - Resolve the open questions (combined vs per-product, animation stack, format, distribution, sequencing)
+          - Break into sub-tasks and produce a launch video per product
+      - id: P5-T16
+        tracker_issue_id: FORGE-149
+        title: Add JSON warning surface to phases/status
+        description: Auto-gc divergence warnings from phases --ready and status go only to stderr, so scripts using 2>/dev/null or jq miss them. Add an opt-in --include-warnings flag putting a structured warnings[] array in --json stdout, add JSON mode to status, refactor detectCheapDivergences to return structured rows. Backward-compatible.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - phases --ready --json --include-warnings emits warnings[] on stdout; default stdout unchanged
+          - status gains JSON mode honoring the same flag
+          - Flag documented in verb help + ORCHESTRATOR.md CLI surface
+      - id: P5-T17
+        tracker_issue_id: FORGE-150
+        title: Rename codex-suggest verb to second-opinion
+        description: Align the auto-codex CLI verb (codex-suggest), settings field (auto_codex_enabled) and env var (FORGE_AUTO_CODEX) with the shipped /second-opinion skill name. Settings-schema migration with backward-compat shim, deprecation aliases (once-per-session stderr warning), doctor detection of the old schema, dual-shape snapshot tests.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - New names work end-to-end; old names still work with a once-per-session deprecation warning
+          - forge doctor flags the old codex.* schema; snapshot tests cover both shapes
+          - Adopter docs reference the new names
+      - id: P5-T18
+        tracker_issue_id: FORGE-155
+        title: Add upgrade exit-2 dirty-tree and lease guard
+        description: "Add exit code 2 to forge upgrade: refuse refresh on a dirty working tree or an active worker lease, with --force overriding both. The lease half needs a design memo first (what counts as active, stale-lease handling, worktree locality, malformed-lease behavior, --force symmetry). Same .bak semantics as exit 1."
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Design memo answering the 5 lease-semantics questions, approved before code
+          - Dirty tree -> exit 2; --force -> 0; clean tree + active lease -> exit 2; --force per memo
+          - Exit code 2 registered in the upgrade exit-code matrix with integration tests
+      - id: P5-T19
+        tracker_issue_id: FORGE-160
+        title: Add Cursor host adapter for .cursor/rules
+        description: "Add Cursor as a supported host: add it to AgentKind, define a per-host root-file convention (.cursor/rules/forge.mdc), extend HOST_DIRS/skill-farm and gitignore, wire --add-agent/--remove-agent. Needs a design memo first (root-file shape, skill discovery, subagent convention, @-import semantics, primary_host eligibility)."
+        type: integration
+        priority: P2
+        depends_on: []
+        estimate: L
+        owner_type: integration
+        acceptance:
+          - Design memo answers all 5 open questions, approved before code
+          - forge init lets users select cursor and materializes .cursor/rules/forge.mdc; skill farm extends
+          - --add-agent/--remove-agent cursor work idempotently with an integration test + CHANGELOG
+      - id: P5-T20
+        tracker_issue_id: FORGE-161
+        title: Track methodology-version pin in settings.yaml
+        description: Two devs on different Forge versions silently run different methodology against one repo, and the .forge/.version pin is gitignored so the drift is invisible in review. Add a tracked methodology_version to .forge/settings.yaml that forge upgrade updates intentionally, and warn on any CLI invocation when installed version differs from the pin.
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - Tracked methodology_version field updated by forge upgrade as an explicit reviewable change
+          - CLI invocations warn when installed version differs from the repo pin
+          - .forge/CONTEXT.md stays gitignored
+      - id: P5-T21
+        tracker_issue_id: FORGE-162
+        title: Add ambiguous-field conflict table to CONTEXT
+        description: The authority-by-field source-of-truth model has boundary ambiguity (acceptance criteria, task scope, dependencies, architecture overlap), so agents improvise. Add a small conflict table to the Source-of-truth section of the CONTEXT.md template giving a deterministic lookup for overlapping cases.
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - A conflict table for ambiguous fields is added to the Source-of-truth section of the CONTEXT.md template
+          - Starter rows map readiness/status + sequencing/deps to tracker, ACs to PRD/phases, arch to SPEC
+      - id: P5-T22
+        tracker_issue_id: FORGE-164
+        title: Surface SPEC changes at PR/push time
+        description: The resume-time half of SPEC-change mitigation shipped (spec_revision stamping); the gap is PR/push-time visibility — a dev can push a SPEC.md change silently while another ships against the old assumption. Add a non-gating informational signal via a /ship or PR-description annotation and/or a read-only check listing active worktrees whose claim predates the change.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - A non-gating signal fires when a change touches spec/SPEC.md (a /ship or PR annotation)
+          - And/or a read-only check lists active worktrees whose claim predates the SPEC change
+          - Strictly informational — no gate
+      - id: P5-T23
+        tracker_issue_id: FORGE-175
+        title: Fix decompose skill acceptance field name
+        description: skills/decompose/SKILL.md instructs agents to emit acceptance_criteria, but TaskSchema requires the field named acceptance, so every fresh /decompose produces a phases.yaml that fails with PHASES_PARSE_ERROR. Rename acceptance_criteria -> acceptance in the skill.
+        type: skill
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - skills/decompose/SKILL.md renamed acceptance_criteria -> acceptance (and any other refs)
+          - A /decompose run produces a phases.yaml that parses without PHASES_PARSE_ERROR
+      - id: P5-T24
+        tracker_issue_id: FORGE-176
+        title: Surface Zod issues in PHASES_PARSE_ERROR
+        description: When phases.yaml fails validation, phases returns only the top-level PHASES_PARSE_ERROR without the inner Zod issues[], so users cannot tell which field broke. The issues are already in PhasesError.details but never re-emitted. Append a bulleted issue list to stderr and add issues[] to the --json error envelope.
+        type: backend
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - "Human stderr lists each Zod issue as <path>: <message>"
+          - --json error envelope includes a top-level issues[] array with path/message
+      - id: P5-T25
+        tracker_issue_id: FORGE-177
+        title: Add human owner type to OWNER_TYPES enum
+        description: OWNER_TYPES has only agent roles and no value for human-owned bootstrap tasks (provisioning accounts, copying API keys, OAuth consent), so /decompose forces misleading workarounds. Add human (or user) to OWNER_TYPES and document that human-owned tasks are not dispatched.
+        type: data
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: db-architect
+        acceptance:
+          - OWNER_TYPES includes human (or user) so bootstrap tasks pass schema validation
+          - SPEC documents that human-owned tasks are not dispatched and appear as checkpoints
+      - id: P5-T26
+        tracker_issue_id: FORGE-206
+        title: Rename Compound Learning to Cumulative Learning
+        description: "Principle #5 Compound Learning collides with gstack compound engineering branding. Rename to Cumulative Learning across ETHOS.md, the principles template (not the generated file), package.json keyword, README and skill prose, with a CHANGELOG methodology-version note. Needs user sign-off since it is a branded principle."
+        type: docs
+        priority: P2
+        depends_on: []
+        estimate: S
+        owner_type: devops-engineer
+        acceptance:
+          - User approves the new name (or an alternative)
+          - All references updated; forge upgrade regenerates .forge/CONTEXT.md cleanly
+          - No remaining Compound Learning / compound-engineering strings except historical CHANGELOG
