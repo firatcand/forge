@@ -51,6 +51,7 @@ import {
 import { loadSettings } from '../../core/settings.ts';
 import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
+import { truncateUtf8 } from '../../schemas/byte-bounded.ts';
 import { OrchestratorError, SettingsError } from '../../core/errors.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import path from 'node:path';
@@ -298,6 +299,10 @@ export async function runOrchestrateQuestionWrite(
   }
 
   if (outcome.kind === 'forced_autonomous') {
+    // The reason is byte-capped at 2000 in AttemptEventSchema. Truncate
+    // byte-safely BEFORE the event append so a long justification never aborts
+    // the deliverable autonomous_decision log (FORGE-83 producer truncation).
+    const autonomousReason = truncateUtf8(outcome.reason, 2_000);
     // AC7: the autonomous decision MUST be logged. Unlike the best-effort
     // question_written append, this event IS the deliverable here, so a write
     // failure is surfaced rather than swallowed.
@@ -308,7 +313,7 @@ export async function runOrchestrateQuestionWrite(
           ts: new Date().toISOString(),
           decision_key: opts.decisionKey,
           chosen_option_id: outcome.chosenOptionId,
-          reason: outcome.reason,
+          reason: autonomousReason,
         },
         {
           forgeDir: opts.forgeDir,
@@ -335,7 +340,7 @@ export async function runOrchestrateQuestionWrite(
           outcome: 'forced_autonomous',
           decision_key: opts.decisionKey,
           chosen_option_id: outcome.chosenOptionId,
-          reason: outcome.reason,
+          reason: autonomousReason,
         }),
         { json: opts.json },
       ),

@@ -468,7 +468,8 @@ test('types — z.infer surface compiles via satisfies', () => {
           | 'qa-engineer'
           | 'security-auditor'
           | 'design-engineer'
-          | 'integration';
+          | 'integration'
+          | 'human';
         acceptance: string[];
       }>;
     }>;
@@ -588,4 +589,27 @@ test('PhaseSchema accepts tracker_milestone_id', () => {
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.equal(result.data.tracker_milestone_id, 'milestone-uuid');
+});
+
+// --- FORGE-120: TaskSchema.status enum rejection ----------------------------
+
+test('FORGE-120 — TaskSchema rejects an out-of-enum status value', () => {
+  const result = TaskSchema.safeParse(baseTask({ status: 'foo' }));
+  assert.equal(result.success, false);
+  if (result.success) return;
+  const issue = result.error.issues.find((i) => i.path.includes('status'));
+  assert.ok(issue, 'expected a status enum issue');
+});
+
+// --- FORGE-177: 'human' owner_type ------------------------------------------
+
+test("FORGE-177 — TaskSchema accepts owner_type 'human'", () => {
+  const result = TaskSchema.safeParse(baseTask({ owner_type: 'human' }));
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.owner_type, 'human');
+});
+
+test("FORGE-177 — OWNER_TYPES includes 'human'", () => {
+  assert.ok((OWNER_TYPES as readonly string[]).includes('human'));
 });

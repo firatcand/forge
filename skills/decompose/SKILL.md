@@ -27,12 +27,12 @@ Delegate to the `product-decomposer` subagent.
 - id (P{phase}-T{nn})
 - title (verb + noun, max 8 words)
 - description (1 paragraph)
-- type (foundation | data | backend | frontend | design | infra | content | integration)
+- type (foundation | data | backend | integration | content | infra | skill | docs)
 - priority (P0 | P1 | P2)
 - depends_on (list of task IDs)
 - estimate (S | M | L | XL)
-- owner_type (which subagent picks this up)
-- acceptance_criteria (concrete, testable)
+- owner_type (which subagent picks this up — use 'human' for manual bootstrap work, never auto-dispatched)
+- acceptance (concrete, testable)
 
 ## Hard rules
 

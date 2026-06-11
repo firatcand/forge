@@ -9,6 +9,7 @@
 import path from 'node:path';
 
 import { loadPhases, resolvePhasesYaml } from '../../core/phases.ts';
+import { PhasesError } from '../../core/errors.ts';
 import { loadSettings } from '../../core/settings.ts';
 import type { Phases, Task } from '../../schemas/phases.ts';
 import {
@@ -48,9 +49,63 @@ export interface ReadyTaskOut {
   };
 }
 
+export interface HumanCheckpointOut {
+  readonly task_id: string;
+  readonly tracker_issue_id?: string;
+  readonly title: string;
+  readonly phase: string;
+  readonly depends_on: readonly string[];
+}
+
 export interface PhasesResultData {
   readonly tasks: readonly ReadyTaskOut[];
   readonly overlap_check: 'enabled' | 'disabled';
+  // FORGE-177: ready tasks with owner_type 'human' are NOT dispatchable — they
+  // surface here as manual checkpoints so they stay queue-visible without being
+  // auto-claimed by the dispatch loop.
+  readonly human_checkpoints: readonly HumanCheckpointOut[];
+}
+
+// FORGE-176: cap on the number of issue bullets rendered into the human stderr
+// message, to avoid flooding the terminal on a deeply-broken phases.yaml. The
+// full set always rides in error.details.issues for --json consumers.
+const MAX_RENDERED_ISSUES = 20;
+
+interface PhasesIssueOut {
+  readonly path: string;
+  readonly code: string;
+  readonly message: string;
+}
+
+// Build the PHASES_PARSE_ERROR envelope. When the underlying failure is a
+// schema (Zod) validation error, surface the structured issues at
+// error.details.issues (for --json) AND compose them as bullets into the human
+// message (the envelope renderer never prints details). Non-schema failures
+// (read/parse/yaml) fall back to the bare message.
+function buildPhasesParseFailure(err: unknown): ReturnType<typeof fail> {
+  if (err instanceof PhasesError && Array.isArray(err.details.issues)) {
+    const issues: PhasesIssueOut[] = (err.details.issues as Array<{
+      path: Array<string | number>;
+      code: string;
+      message: string;
+    }>).map((issue) => ({
+      path: issue.path.join('.'),
+      code: issue.code,
+      message: issue.message,
+    }));
+    const shown = issues.slice(0, MAX_RENDERED_ISSUES);
+    const bullets = shown.map((i) => `  - ${i.path}: ${i.message}`);
+    if (issues.length > shown.length) {
+      bullets.push(`  - +${issues.length - shown.length} more`);
+    }
+    const message = `phases schema validation failed:\n${bullets.join('\n')}`;
+    return fail('PHASES_PARSE_ERROR', message, false, { issues });
+  }
+  return fail(
+    'PHASES_PARSE_ERROR',
+    err instanceof Error ? err.message : String(err),
+    false,
+  );
 }
 
 export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode: number }> {
@@ -87,14 +142,7 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
     process.stderr.write(loaded.freshnessLine + '\n');
   } catch (err) {
     return {
-      exitCode: emit(
-        fail(
-          'PHASES_PARSE_ERROR',
-          err instanceof Error ? err.message : String(err),
-          false,
-        ),
-        { json: opts.json },
-      ),
+      exitCode: emit(buildPhasesParseFailure(err), { json: opts.json }),
     };
   }
 
@@ -135,6 +183,9 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   }
 
   const candidates: Array<{ task: Task; phaseId: string }> = [];
+  // FORGE-177: ready human-owned tasks are collected separately so the dispatch
+  // loop never claims them, but they remain queue-visible as manual checkpoints.
+  const humanCheckpoints: HumanCheckpointOut[] = [];
   for (const { task, phaseId, phaseStatus } of tasks) {
     if (task.status && task.status !== 'active') continue; // skip deferred/dropped/done/paused
     if (phaseStatus === 'blocked') continue;
@@ -150,6 +201,17 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
       (depId) => doneTaskIds.has(depId) || isTrackerIdDone(depId, tasks),
     );
     if (!allDepsDone) continue;
+    if (task.owner_type === 'human') {
+      // Not dispatchable — surface as a manual checkpoint instead of a candidate.
+      humanCheckpoints.push({
+        task_id: task.tracker_issue_id ?? task.id,
+        title: task.title,
+        phase: phaseId,
+        depends_on: task.depends_on,
+        ...(task.tracker_issue_id ? { tracker_issue_id: task.tracker_issue_id } : {}),
+      });
+      continue;
+    }
     candidates.push({ task, phaseId });
   }
 
@@ -205,7 +267,21 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   });
 
   const limited = opts.limit ? out.slice(0, opts.limit) : out;
-  const result: PhasesResultData = { tasks: limited, overlap_check: 'enabled' };
+  const result: PhasesResultData = {
+    tasks: limited,
+    overlap_check: 'enabled',
+    human_checkpoints: humanCheckpoints,
+  };
+  // Human (stderr) surfacing: keep human checkpoints visible in the non-JSON
+  // form too, where the envelope renderer only dumps `tasks`. JSON stdout is
+  // unaffected (the field rides in the envelope's data).
+  if (!opts.json && humanCheckpoints.length > 0) {
+    for (const cp of humanCheckpoints) {
+      process.stderr.write(
+        `⏸ human checkpoint (not dispatchable): ${cp.task_id} — ${cp.title}\n`,
+      );
+    }
+  }
   return { exitCode: emit(ok(result), { json: opts.json }) };
 }
 

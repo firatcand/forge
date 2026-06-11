@@ -12,6 +12,7 @@ import {
 } from '../../orchestrator/state-machine.ts';
 import { release as releaseLease } from '../../orchestrator/leases.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
+import { truncateUtf8 } from '../../schemas/byte-bounded.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import { OrchestratorError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
@@ -101,7 +102,10 @@ export async function runOrchestrateCancel(
         {
           type: 'attempt_cancelled',
           ts: new Date().toISOString(),
-          reason: opts.reason ?? 'user-initiated cancel',
+          // The --reason flag is user input; the schema caps reason at 1000
+          // UTF-8 bytes. Truncate byte-safely BEFORE validation so an oversized
+          // reason never aborts the cancel (FORGE-83 producer truncation).
+          reason: truncateUtf8(opts.reason ?? 'user-initiated cancel', 1000),
         },
         {
           forgeDir: opts.forgeDir,

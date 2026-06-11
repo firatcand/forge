@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { byteBoundedString } from './byte-bounded.ts';
+
 const Ts = z.string().datetime();
 const Id = z.string().min(1).max(64);
 
@@ -36,20 +38,20 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     failed: z.number().int().min(0),
     skipped: z.number().int().min(0),
     duration_ms: z.number().int().min(0),
-    output_excerpt: z.string().max(2048),
+    output_excerpt: byteBoundedString(2048),
   }),
   z.object({
     type: z.literal('lint_run'),
     ts: Ts,
     clean: z.boolean(),
     violations: z.number().int().min(0),
-    output_excerpt: z.string().max(2048),
+    output_excerpt: byteBoundedString(2048),
   }),
   z.object({
     type: z.literal('commit'),
     ts: Ts,
     sha: z.string().min(7).max(40),
-    message_excerpt: z.string().max(200),
+    message_excerpt: byteBoundedString(200),
   }),
   z.object({
     type: z.literal('question_written'),
@@ -71,7 +73,7 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     ts: Ts,
     decision_key: z.string().min(1).max(200),
     chosen_option_id: z.string().min(1).max(64).nullable(),
-    reason: z.string().min(1).max(2_000),
+    reason: byteBoundedString(2_000, { min: 1 }),
   }),
   z.object({
     type: z.literal('attempt_completed'),
@@ -81,7 +83,7 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('attempt_cancelled'),
     ts: Ts,
-    reason: z.string().min(1).max(1000),
+    reason: byteBoundedString(1000, { min: 1 }),
   }),
   z.object({
     type: z.literal('attempt_abandoned_by_steal'),

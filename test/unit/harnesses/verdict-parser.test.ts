@@ -94,3 +94,16 @@ test('synthesizeVerdict truncates oversize messages at 2000 bytes', () => {
   const verdict = synthesizeVerdict('codex', huge);
   assert.equal(verdict.findings[0].message.length, 2000);
 });
+
+test('FORGE-83: synthesizeVerdict byte-truncates an oversized non-ASCII message to a schema-valid verdict', () => {
+  // Char-slicing 2000 UTF-16 units of '中' would be 6000 bytes — far over the
+  // 2000-byte message cap — and would FAIL ReviewVerdictSchema.parse. With
+  // byte-safe truncation the synthesized verdict must parse cleanly.
+  const huge = '中'.repeat(5000);
+  const verdict = synthesizeVerdict('gemini', huge);
+  assert.ok(Buffer.byteLength(verdict.findings[0].message, 'utf8') <= 2000);
+  // Truncation landed on a code-point boundary (no replacement char / lossless).
+  const msg = verdict.findings[0].message;
+  assert.ok(!msg.includes('�'));
+  assert.equal(Buffer.from(msg, 'utf8').toString('utf8'), msg);
+});
