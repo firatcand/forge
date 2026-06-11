@@ -1,7 +1,7 @@
 ---
 name: push-to-tracker
 description: Push phases.yaml to the configured tracker (linear|github|notion) — creates project, per-phase grouping, issues with depends_on relations.
-tools: Read, Edit, Bash(gh*)
+tools: Read, Edit, Bash(gh*), Bash(ntn*)
 subagent: tracker-syncer
 ---
 
@@ -13,7 +13,7 @@ Delegate to the `tracker-syncer` subagent. Tracker-agnostic; dispatches per `.fo
 
 - `plans/phases.yaml` exists
 - `.forge/settings.yaml` exists and has a `tracker:` block (validated by `src/schemas/settings.ts::TrackerConfigSchema` — discriminated union on `type`, one of `linear|github|notion`)
-- Per-tracker tooling reachable (Linear MCP / `gh` CLI / Notion MCP)
+- Per-tracker tooling reachable (Linear MCP / `gh` CLI / `ntn` CLI)
 
 ## Step 0 — Resolve tracker
 
@@ -36,7 +36,7 @@ If `tracker.type` is unknown, surface the zod schema error verbatim (one of `lin
 |---|---|---|
 | `linear` | Linear MCP available | Offer `claude mcp add linear --transport http https://mcp.linear.app/mcp` + OAuth + restart, OR the no-MCP fallback (print Linear-import manifest). |
 | `github` | `gh auth status` exits 0 | Instruct `gh auth login`. |
-| `notion` | Notion MCP available | Offer install + no-MCP fallback (print Notion-importable manifest). Until NotionTracker code lands (FORGE-17), MCP is the only path. |
+| `notion` | `ntn` CLI installed + authed (probe: `ntn api v1/users/me`; fix: `ntn login`) | Offer the install one-liner from docs/adapters/notion.md; NotionTracker (src/trackers/notion.ts) drives the `ntn` CLI since FORGE-117. |
 
 ## Step 2 — Delegate to `tracker-syncer`
 
@@ -63,7 +63,7 @@ All adapters write the same keys; the tracker-specific config (Linear `team_id`,
 
 - `linear` → link Linear project to GitHub repo (existing manual-instructions step; Linear's GraphQL doesn't expose the integration setup, so we print the four-step UI walkthrough).
 - `github` → no-op (issues live in the same GitHub repo).
-- `notion` → no-op for v0.3.0; deferred to FORGE-17.
+- `notion` → handled by NotionTracker via the `ntn` CLI (FORGE-117).
 
 ## Output
 
@@ -71,7 +71,7 @@ Print:
 
 - Project URL
 - Issue count
-- Mode (MCP vs offline)
+- Mode (tracker tooling vs offline)
 - "Updated phases.yaml committed."
 
 ## Edge cases

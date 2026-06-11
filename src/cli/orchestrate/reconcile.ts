@@ -507,10 +507,9 @@ export async function runOrchestrateReconcile(
     return await runPush(parsed, loaded, tracker, out, err);
   } finally {
     if (lock) lock.release();
-    // Tear down the MCP child process spawned for Notion. createStdioMcpCall
-    // returns a handle the caller is contractually required to close
-    // (notion-mcp-transport.ts:24). For Linear/GitHub closeTracker is
-    // undefined.
+    // Optional tracker teardown. Since FORGE-117 (Notion → `ntn` CLI) no
+    // adapter spawns a child process, so closeTracker is always undefined
+    // today — kept for TrackerHandle interface stability.
     if (closeTracker) {
       try {
         await closeTracker();

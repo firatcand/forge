@@ -1,19 +1,17 @@
-// Canned Notion MCP tool result payloads + error shapes for NotionTracker
-// unit tests. Each fixture mirrors what the Notion MCP server returns as the
-// `content[0].text` JSON body of a CallToolResult.
+// Canned `ntn api` exec results + error shapes for NotionTracker unit tests.
+// Each fixture mirrors what the `ntn` CLI prints: the raw Notion API JSON
+// response on stdout, error bodies passed through with a nonzero exit.
 
-import type { McpToolResult } from '../../../src/trackers/index.ts';
+import type { NtnExecResult } from '../../../src/trackers/index.ts';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-export function okResult(body: unknown): McpToolResult {
-  return {
-    content: [{ type: 'text', text: JSON.stringify(body) }],
-  };
+export function okResult(body: unknown): NtnExecResult {
+  return { stdout: JSON.stringify(body), stderr: '', exitCode: 0 };
 }
 
-export function okEmpty(): McpToolResult {
-  return { content: [] };
+export function okEmpty(): NtnExecResult {
+  return { stdout: '', stderr: '', exitCode: 0 };
 }
 
 export function errorResult(notionError: {
@@ -21,30 +19,34 @@ export function errorResult(notionError: {
   message: string;
   status?: number;
   retry_after?: number;
-}): McpToolResult {
+}): NtnExecResult {
   return {
-    isError: true,
-    content: [
-      {
-        type: 'text',
-        text: JSON.stringify({ object: 'error', ...notionError }),
-      },
-    ],
+    stdout: JSON.stringify({ object: 'error', ...notionError }),
+    stderr: '',
+    exitCode: 1,
   };
 }
 
-// Constructs a McpError-shaped throwable (the SDK throws these on
-// transport-level failures — we don't import the real class to keep tests
-// independent of internal SDK shape).
-export function makeMcpError(
-  code: number,
+// Spawn-level failure: ntn binary missing. defaultNtnExec re-throws these,
+// so mocks script them as thrown Errors carrying the Node spawn `code`.
+export function makeSpawnError(
+  code: string,
   message: string,
-  data?: unknown,
-): Error & { code: number; data?: unknown } {
-  const err = new Error(message) as Error & { code: number; data?: unknown };
+): Error & { code: string } {
+  const err = new Error(message) as Error & { code: string };
   err.code = code;
-  if (data !== undefined) err.data = data;
   return err;
+}
+
+// Transport-level failure (connection dropped mid-call). Message matches
+// classifyNotionExecError's TRANSPORT fallback patterns.
+export function transportError(): Error {
+  return new Error('connection reset by peer (ECONNRESET)');
+}
+
+// Timeout returned as an exec result (ntn exited nonzero, timeout on stderr).
+export function timeoutResult(): NtnExecResult {
+  return { stdout: '', stderr: 'request timed out', exitCode: 1 };
 }
 
 // ─── Page builders ───────────────────────────────────────────────────────────
@@ -96,6 +98,20 @@ function rt(
 
 function statusProp(name: string): Record<string, unknown> {
   return { type: 'status', status: name === '' ? null : { name } };
+}
+
+// Block-children list response (GET v1/blocks/{id}/children) for
+// updateIssueBody tests.
+export function blockChildren(
+  ids: readonly string[],
+  opts: { nextCursor?: string } = {},
+): Record<string, unknown> {
+  return {
+    object: 'list',
+    results: ids.map((id) => ({ object: 'block', id, type: 'paragraph' })),
+    has_more: opts.nextCursor !== undefined,
+    next_cursor: opts.nextCursor ?? null,
+  };
 }
 
 // ─── Common fixtures ─────────────────────────────────────────────────────────
@@ -201,8 +217,8 @@ export const newDatabase = {
   url: 'https://www.notion.so/dddd11112222333344445555666677777',
 };
 
-// Response of API-retrieve-a-database for our fixture database. Used to
-// resolve the data_source_id needed by API-query-data-source / API-post-page.
+// Response of GET v1/databases/{id} for our fixture database. Used to
+// resolve the data_source_id needed by the query/create-page endpoints.
 export const DATA_SOURCE_ID = '88888888-aaaa-bbbb-cccc-dddddddddddd';
 export const databaseInfo = {
   object: 'database',

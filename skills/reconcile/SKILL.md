@@ -18,7 +18,7 @@ Per `spec/ORCHESTRATOR.md` §CLI surface: this is the canonical bidirectional sy
 
 - `plans/phases.yaml` exists and validates against `PhasesSchema`
 - `.forge/settings.yaml` exists with a `tracker:` block (validated by `TrackerConfigSchema`)
-- The tracker is reachable (Linear API key in env / `gh auth status` ok / Notion MCP launchable)
+- The tracker is reachable (Linear API key in env / `gh auth status` ok / `ntn` CLI installed + authed)
 
 ## Step 0 — Direction
 
@@ -119,7 +119,7 @@ Print a one-line summary:
 ```
 ⚠ push partial: 7 succeeded, 3 failed.
    failed:
-     P2-T18 (FORGE-114): NOT_IMPLEMENTED — Notion updateIssueBody is a stub (FORGE-117)
+     P2-T18 (FORGE-114): PRECONDITION_FAILED — issue has no forge:task footer
      P2-T20 (FORGE-116): RATE_LIMITED — retry later
    Re-run `forge orchestrate reconcile --push` to retry — successful pushes are idempotent.
 ```
@@ -133,18 +133,17 @@ Exit codes:
 
 ## Tracker-specific notes
 
-- **Notion**: `Tracker.updateIssueBody` is a `NOT_IMPLEMENTED` stub (FORGE-117). `--push` against a Notion-backed project will produce `failed[]` entries for every task. Use `--pull` direction only until FORGE-117 lands.
+- **Notion**: fully supports `--push` since FORGE-117. `Tracker.updateIssueBody` is implemented in `NotionTracker` via the `ntn` CLI.
 - **Linear / GitHub**: both fully supported. The trailing `<!-- forge:task=... -->` footer is preserved across updates by the adapters.
 
 ## Failure semantics on --push
 
 The verb returns `exitCode: 2` (PARTIAL_PUSH_FAILURE) whenever `failed[]` is non-empty. Each failure entry includes a `code`:
 
-- `NOT_IMPLEMENTED` — Notion stub (FORGE-117). Will fail every retry until FORGE-117 lands; safe to filter out and treat as a known skip.
 - `PRECONDITION_FAILED` — the tracker issue exists but has no `<!-- forge:task=... -->` footer, so the adapter refuses the update. This means someone created the issue outside forge (e.g. via the web UI) and back-linked the `tracker_issue_id` manually. **Will fail every retry** until either the issue body gets the footer or the local `tracker_issue_id` is removed. Treat as a known skip rather than a transient retry.
 - `RATE_LIMITED` / `TRANSPORT` / `TIMEOUT` — transient, safe to retry by re-running `--push`.
 
-When automating retries, filter `failed[]` to `code in {RATE_LIMITED, TRANSPORT, TIMEOUT}` before re-invoking; `NOT_IMPLEMENTED` and `PRECONDITION_FAILED` will loop forever.
+When automating retries, filter `failed[]` to `code in {RATE_LIMITED, TRANSPORT, TIMEOUT}` before re-invoking; `PRECONDITION_FAILED` will loop forever.
 
 ## Edge cases
 

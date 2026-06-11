@@ -18,7 +18,7 @@ The skill never writes to `phases.yaml`. Per-task status drift detection is not 
 ## Preflight
 
 1. Read `.forge/settings.yaml`. Abort if `tracker.type` is unset with: "No tracker configured. Run `forge init` first."
-2. Per-tracker reachability probe (Linear MCP / `gh auth status` / Notion MCP) — same matrix as `/push-to-tracker` Step 1. Abort with the setup hint if unavailable. There is no offline fallback.
+2. Per-tracker reachability probe (Linear MCP / `gh auth status` / Notion `ntn` CLI) — same matrix as `/push-to-tracker` Step 1. Abort with the setup hint if unavailable. There is no offline fallback.
 
 ## Steps
 
@@ -27,7 +27,7 @@ The skill never writes to `phases.yaml`. Per-task status drift detection is not 
 2. **Fetch active tracker issues — ONE call.** Based on `tracker.type` from settings:
    - **Linear**: call the Linear MCP `list_issues` tool with the team filter from settings. Pass no state filter (the adapter excludes terminal states server-side).
    - **GitHub**: shell out to `gh issue list --repo <owner/repo> --state open --json id,number,title,labels,body,url --limit 250`.
-   - **Notion**: call the Notion MCP equivalent against the configured data source.
+   - **Notion**: call the Notion `ntn` CLI equivalent against the configured data source.
 
    ONE call total — no per-issue follow-ups. This matches the FORGE-20 design constraint.
 

@@ -443,7 +443,7 @@ export interface Tracker {
 |---|---|---|---|---|
 | `LinearTracker` | `@linear/sdk` with `LINEAR_API_KEY` env var | **Strong CAS** | `IssueUpdate` mutation with `expectedVersion` matching the current issue version | API returns `VersionConflict`; race loser drops task, picks next ready |
 | `GitHubTracker` | `gh` CLI (`gh auth status` validated at init) | **Weak — best-effort** | Two-step: (1) `gh issue edit --add-label forge:claimed-by:<run_id>`; (2) re-fetch via `gh issue view --json labels` and verify our label is present and no other `forge:claimed-by:*` label is present | Race loser sees another `forge:claimed-by:*` label, removes its own, drops task |
-| `NotionTracker` | Notion MCP server (`mcp__claude_ai_Notion__*`) | **Weak — race-detect** | Set `forge_claimed_by` property to `<run_id>`, re-fetch page, verify `last_edited_time` matches our write | If `last_edited_time` advanced past our write, another writer raced — clear claim, drop task |
+| `NotionTracker` | official `ntn` CLI (FORGE-117; MCP transport removed) | **Weak — race-detect** | Set `forge_claimed_by` property to `<run_id>`, re-fetch page, verify `last_edited_time` matches our write | If `last_edited_time` advanced past our write, another writer raced — clear claim, drop task |
 
 Cross-run ownership truth comes from the local lease (`.forge/orchestrator/tasks/<task_id>/lease.json`), not the tracker. The tracker is the eventually-consistent rendezvous point. See `ORCHESTRATOR.md` → "Tracker atomic claim — per-adapter capability matrix" for the full rationale.
 
@@ -573,7 +573,7 @@ src/
     base.ts                   // Tracker interface + shared types (now includes updateIssueBody)
     linear.ts                 // LinearTracker via @linear/sdk
     github.ts                 // GitHubTracker via gh CLI
-    notion.ts                 // NotionTracker via MCP
+    notion.ts                 // NotionTracker via the `ntn` CLI (FORGE-117)
   secrets-managers/
     env-file.ts
     onepassword.ts
@@ -633,7 +633,7 @@ Rationale:
 4. Tooling validation per tracker choice:
    - Linear → check `LINEAR_API_KEY` env var is set; the orchestrator uses `@linear/sdk` directly. (Linear MCP probe is also kept as a soft-warn since the user-facing `/push-to-linear` skill uses MCP, but it's NOT an orchestrator-runtime dependency.)
    - GitHub → run `gh auth status`; if missing, surface `brew install gh` link
-   - Notion → check MCP installed (`claude mcp list` or platform equivalent); if missing, surface install link
+   - Notion → check the `ntn` CLI installed + authed (probe: `ntn api v1/users/me`; fix: `ntn login`); if missing, surface the install link (docs/adapters/notion.md)
 5. If validation fails: offer "skip and configure later" (mark settings as unverified)
 6. Scaffold project files:
    - Copy `templates/BRIEF.template.md` → `spec/BRIEF.md` (placeholders)
@@ -941,7 +941,7 @@ type ApplyJournal = {
 
 Workflow:
 
-1. `apply-decision --adr <slug>` reads the journal (must exist + be payload-complete → else `MISSING_JOURNAL`). The ADR frontmatter is a coverage check + `accepted` gate, NOT a content source. If any tracker entry needs applying, a tracker-capability **preflight** fails (`TRACKER_INCAPABLE`) BEFORE any local mutation (Notion `updateIssueBody` is NOT_IMPLEMENTED until FORGE-117) so the repo is never left half-applied.
+1. `apply-decision --adr <slug>` reads the journal (must exist + be payload-complete → else `MISSING_JOURNAL`). The ADR frontmatter is a coverage check + `accepted` gate, NOT a content source. If any tracker entry needs applying, a tracker-capability **preflight** fails (`TRACKER_INCAPABLE`) BEFORE any local mutation so the repo is never left half-applied.
 2. For each `pending`/`failed` entry in order [spec, prd, phases, tracker]: write-ahead (entry already `pending` on disk) → apply the payload → set `applied`/`failed` → persist. Stop at the first failure (re-run `--resume`).
 3. After all entries are `applied`, run the **journaled finalize** — each step is world-state-idempotent, not flag-only (flag-set and side-effect aren't atomic): (a) write `<slug>.commit-msg.txt` (overwrite); (b) **upsert** the `spec/decisions/INDEX.md` line keyed by slug (no duplicate on resume); (c) delete the ADR (unlink-ignoring-ENOENT) — only after rationale is durable in SPEC + INDEX; (d) archive the journal to `completed/<slug>.json` (last, so the active journal stays recoverable). The verb does **not** `git commit` (skill↔verb contract — the skill/user commits the message file).
 4. `--resume` skips `applied`; retries `pending`/`failed`; resumes finalize from the first incomplete step (accepted-gate skipped when resuming an all-applied journal, since the ADR may already be gone).
@@ -1064,7 +1064,7 @@ Skills can be either; their classification follows the verbs they wrap. `/status
 | `LINEAR_API_KEY` env var | Tracker = linear (orchestrator runtime) | Check env var presence at init via `getEnv` seam | Init prompts user to mint a Personal API Key at linear.app/settings/account/security |
 | Linear MCP server | `/push-to-linear` skill (NOT orchestrator runtime) | Soft probe `claude mcp list` | Init shows soft-warn only; orchestrator does not depend on MCP |
 | `gh` CLI | Tracker = github | `gh auth status` exit code 0 | Init prompts `brew install gh` + `gh auth login`, offers skip |
-| Notion MCP | Tracker = notion | MCP server installed + healthcheck call | Init prompts to install MCP, offers skip-and-configure-later |
+| Notion `ntn` CLI | Tracker = notion | `ntn api v1/users/me` probe (verifies install + keychain auth in one call) | Init points to the CLI install + `ntn login`, offers skip-and-configure-later (FORGE-117) |
 | Primary host CLI | Dispatch skill loaded into user's main session; spawns IMPLEMENT + SHIP subagents | `--version` exit code 0 | Init lists detected hosts; orchestrate skill warns if `agents.primary_host_cli` host isn't the host the skill is running in |
 | Review host CLI (different from primary) | Dispatch skill spawns REVIEW subagent in secondary host (e.g. `codex` invoked from a Claude main) | `--version` exit code 0 | Init validates `review_host_cli !== primary_host_cli` and host is detected; warns if missing, allows skip-and-disable |
 | `git` | Worktree management | `git --version` ≥ 2.20 | Init refuses; forge doesn't run on machines without git |
@@ -1113,7 +1113,7 @@ The worktree's hydrated copy is a snapshot — it is allowed to drift from `${MA
 ### What forge handles vs delegates
 
 - **AI provider auth (Anthropic, OpenAI, etc.)** — DELEGATED to host CLIs. Forge never sees API keys. Workers spawn with the user's existing host session.
-- **Tracker auth** — DELEGATED to adapter tooling: `gh` CLI for GitHub (no extra env), `@linear/sdk` + `LINEAR_API_KEY` env var for Linear (Personal API Key minted by user), Notion MCP for Notion (no secret manager needed). Linear was originally specced as "via MCP" but the orchestrator is a Node CLI, not an LLM host — using MCP would have required implementing OAuth device flow + token cache management for marginal benefit. See `docs/adapters/linear.md` for the rationale.
+- **Tracker auth** — DELEGATED to adapter tooling: `gh` CLI for GitHub (no extra env), `@linear/sdk` + `LINEAR_API_KEY` env var for Linear (Personal API Key minted by user), the `ntn` CLI for Notion (keychain auth via `ntn login`; no secret manager needed — FORGE-117). Linear was originally specced as "via MCP" but the orchestrator is a Node CLI, not an LLM host — using MCP would have required implementing OAuth device flow + token cache management for marginal benefit. See `docs/adapters/linear.md` for the rationale.
 - **Secret manager auth** — DELEGATED to manager's own CLI/SDK (op CLI, doppler CLI, AWS SDK chain, etc.).
 - **Forge-stored secrets** — none for trackers (all three delegate auth via CLI or MCP). The secret manager remains useful for adopter projects' own secrets (their API keys, etc.), not for forge core.
 

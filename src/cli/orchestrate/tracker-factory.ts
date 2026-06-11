@@ -11,8 +11,9 @@
 //
 // Production setups configure tracker.type in settings.yaml and the factory
 // instantiates the matching adapter (Linear/GitHub/Notion) via createTracker.
-// Notion spawns an MCP child process, so resolveTrackerForCLI returns an
-// optional `close` the caller MUST invoke in a finally (see claim.ts/cancel.ts).
+// Since FORGE-117 every adapter is CLI/SDK-backed (no child processes), so
+// `close` is always undefined; the optional teardown hook is kept on
+// TrackerHandle for interface stability (callers already tolerate undefined).
 
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -22,11 +23,7 @@ import type { ClaimFenceData } from '../../trackers/claim-fence.ts';
 import type { Logger, Tracker } from '../../trackers/base.ts';
 import { GitHubTracker } from '../../trackers/github.ts';
 import { LinearTracker } from '../../trackers/linear.ts';
-import { NotionTracker } from '../../trackers/notion.ts';
-import {
-  createStdioMcpCall,
-  type StdioMcpHandle,
-} from '../../trackers/notion-mcp-transport.ts';
+import { NotionTracker, defaultNtnExec } from '../../trackers/notion.ts';
 import type { Settings } from '../../schemas/settings.ts';
 import type { ClaimResult } from '../../trackers/types.ts';
 
@@ -55,31 +52,22 @@ export class NoopTracker implements ClaimableTracker {
   }
 }
 
-// A constructed tracker plus an optional teardown. Notion spawns an MCP child
-// process via createStdioMcpCall; `close` tears it down. Linear/GitHub leave
-// `close` undefined. Callers MUST invoke `close` in a finally.
+// A constructed tracker plus an optional teardown. Since FORGE-117 no adapter
+// spawns a child process, so `close` is always undefined — the hook is kept
+// for interface stability (callers already invoke it conditionally).
 export interface TrackerHandle {
   readonly tracker: Tracker;
   readonly close?: () => Promise<void>;
 }
 
-// Threat model for createTracker:
-//
-// settings.yaml is treated as TRUSTED EXECUTABLE CONFIG (same trust level as
-// package.json scripts or a Makefile). The Notion launcher accepts an
-// arbitrary `mcp_command` because that's the customization point for users
-// who want a different Notion MCP server build/version. An earlier review
-// suggested allowlisting `mcp_command[0]` to {npx, node}, but Codex 2nd-pass
-// pointed out that `node -e '...'` or `npx -y <attacker-pkg>` are still
-// arbitrary code execution — argv[0] is not a meaningful boundary. So
-// allowlisting was security theater.
-//
-// Honest mitigation: settings.yaml must be repo-tracked and review-gated
-// (branch protection, CODEOWNERS). The same applies to package.json, Makefile,
-// and any other dev-time config that names a binary forge will run. CI
-// systems that allow PR contributors to mutate settings.yaml without review
-// have a broader trust-model issue that this allowlist would not have
-// resolved either.
+// Threat model for createTracker: settings.yaml is treated as TRUSTED
+// EXECUTABLE CONFIG (same trust level as package.json scripts or a Makefile)
+// and must be repo-tracked and review-gated (branch protection, CODEOWNERS).
+// Since FORGE-117 no tracker config field names a binary to launch — the
+// Notion adapter shells out to the fixed `ntn` CLI on PATH exactly like the
+// GitHub adapter shells out to `gh`. The deprecated mcp_command/mcp_env
+// fields are accepted by the schema but IGNORED (warned below); they are
+// removed for real in v0.5.
 export function createTracker(settings: Settings, logger: Logger): TrackerHandle {
   const t = settings.tracker;
   switch (t.type) {
@@ -88,19 +76,15 @@ export function createTracker(settings: Settings, logger: Logger): TrackerHandle
     case 'github':
       return { tracker: new GitHubTracker(t, logger) };
     case 'notion': {
-      const [command, ...args] = t.config.mcp_command;
-      if (!command) {
-        throw new Error('notion tracker: mcp_command must be non-empty');
+      if (
+        t.config.mcp_command !== undefined ||
+        t.config.mcp_env !== undefined
+      ) {
+        process.stderr.write(
+          'warning: tracker.config.mcp_command / mcp_env are deprecated and ignored — NotionTracker uses the `ntn` CLI since FORGE-117; remove them from .forge/settings.yaml (the fields will be rejected in v0.5).\n',
+        );
       }
-      const handle: StdioMcpHandle = createStdioMcpCall({
-        command,
-        args,
-        env: t.config.mcp_env,
-      });
-      return {
-        tracker: new NotionTracker(t, logger, { mcp: handle.call }),
-        close: () => handle.close(),
-      };
+      return { tracker: new NotionTracker(t, logger, { ntn: defaultNtnExec }) };
     }
     default: {
       const exhaustive: never = t;
@@ -109,12 +93,13 @@ export function createTracker(settings: Settings, logger: Logger): TrackerHandle
   }
 }
 
-// Whether `updateIssueBody` is implemented for this tracker. Notion's is a
-// NOT_IMPLEMENTED stub until FORGE-117 lands the `ntn` transport; apply-decision
-// (FORGE-95) preflights this so it fails BEFORE any local mutation rather than
-// half-applying. FORGE-117: flip to always-true once NotionTracker.updateIssueBody ships.
-export function trackerSupportsBodyMutation(tracker: Pick<Tracker, 'type'>): boolean {
-  return tracker.type !== 'notion';
+// Whether `updateIssueBody` is implemented for this tracker. Historically
+// Notion's was a NOT_IMPLEMENTED stub; FORGE-117 shipped the `ntn`-backed
+// implementation, so every adapter now supports body mutation. The preflight
+// hook is kept (apply-decision still calls it) so a future incapable adapter
+// fails BEFORE any local mutation rather than half-applying.
+export function trackerSupportsBodyMutation(_tracker: Pick<Tracker, 'type'>): boolean {
+  return true;
 }
 
 // Silent logger for CLI tracker construction. Claim/cancel call setClaimFence

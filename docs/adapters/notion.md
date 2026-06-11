@@ -1,38 +1,34 @@
 # NotionTracker
 
-> **`updateIssueBody` status: planned, not launched.** Calling this method on
-> NotionTracker throws `TrackerError(NOT_IMPLEMENTED)` referencing
-> [FORGE-117](https://linear.app/firatdogan/issue/FORGE-117), which refactors
-> NotionTracker onto the new official [`ntn` CLI][ntn] transport and ships the
-> full `updateIssueBody` implementation. Until FORGE-117 lands, the verbs that
-> depend on body rewriting (`/reconcile --push`, `/apply-decision`) must skip
-> Notion-backed projects.
->
-> [ntn]: https://developers.notion.com/cli/get-started/overview
-
 forge's third tracker adapter. Treats a Notion database as the issue store, the
 same way `GitHubTracker` treats a GitHub repo.
 
-> **MCP server**: targets the official [`@notionhq/notion-mcp-server`][nmcp]
-> (npm) — the one whose tools are named `API-*` and which speaks Notion's
-> 2025-09-03 API. **Not** compatible with Claude AI's hosted Notion connector
-> (which uses `notion-*` tool names). forge spawns its own stdio connection;
-> see [Settings](#settings) below.
+> **Transport (FORGE-117)**: the adapter shells out to the official
+> [Notion CLI (`ntn`)][ntn] — exactly like `GitHubTracker` shells out to `gh`.
+> The previous MCP-server transport (`@notionhq/notion-mcp-server` over
+> `@modelcontextprotocol/sdk` stdio) was **removed**; the
+> `@modelcontextprotocol/sdk` dependency is gone from forge entirely. Every
+> `ntn api` call is pinned to Notion API version `2026-03-11`
+> (`NOTION_API_VERSION` in `src/trackers/notion.ts`).
 >
-> [nmcp]: https://www.npmjs.com/package/@notionhq/notion-mcp-server
+> [ntn]: https://developers.notion.com/cli
+
+## Install & auth
+
+1. Install the [Notion CLI][ntn] so `ntn` resolves on `PATH` (the `forge init`
+   tooling probe runs `ntn api v1/users/me` — verifying install AND keychain auth in one call).
+2. Authenticate once with `ntn login` — credentials are stored in your
+   keychain. There is **no token plumbing through forge**: no `NOTION_TOKEN`
+   env var, nothing routed through forge's secrets manager.
 
 ## How it differs from the other adapters
 
 | | LinearTracker | GitHubTracker | NotionTracker |
 |---|---|---|---|
-| Transport | Linear MCP (planned) | `gh` CLI via `execa` | Notion MCP via `@modelcontextprotocol/sdk` (stdio) |
-| Auth | MCP server config | `gh auth login` | Env var (e.g. `NOTION_TOKEN`) inherited from process.env |
+| Transport | `@linear/sdk` (GraphQL) | `gh` CLI via `execa` | `ntn` CLI via `execa` |
+| Auth | `LINEAR_API_KEY` env var | `gh auth login` | `ntn login` (keychain) |
 | Atomic claim | Weak label-CAS: `forge:claimed-by:*` add + verify-on-readback + tiebreak | Weak label-CAS: `forge:claimed-by:*` add + verify-on-readback + tiebreak | `forge_claimed_by` rich_text + read-write-reread tiebreak |
-| Secrets manager | Not used | Not used | **Not used** — auth goes through MCP server env, not forge's secrets manager |
-
-NotionTracker spawns its own connection to the Notion MCP server — it does
-**not** piggyback on the host CLI's (Claude/Codex/Cursor/Gemini) MCP connection.
-Same server binary, same auth; separate stdio pipe.
+| Secrets manager | Not used | Not used | Not used |
 
 ## Database schema
 
@@ -65,7 +61,7 @@ page referenced by `FORGE_NOTION_PARENT_PAGE_ID`.
 
 ### Data sources vs databases (Notion 2025-09 schema)
 
-Notion's recent API splits databases into two concepts:
+Notion's API splits databases into two concepts:
 
 - **Database** — the container you see in the UI (`database_id`, what you put
   in `settings.yaml`).
@@ -85,20 +81,44 @@ tracker:
   type: notion
   config:
     database_id: 11112222-3333-4444-5555-666677778888
-    # Optional — defaults shown
-    mcp_command:
-      - npx
-      - -y
-      - "@notionhq/notion-mcp-server"
-    mcp_env: {}  # merged on top of process.env when spawning
 ```
 
-## Required env
+That's it — `database_id` is the entire Notion config. The `ntn` binary is
+assumed on `PATH` exactly like `gh` is for the GitHub tracker.
 
-- `NOTION_TOKEN` — your Notion integration token. Exported in the user's shell
-  or `.env.local`; **not** read through forge's secrets manager. The spawned MCP
-  server inherits `process.env` so anything the server expects (e.g. some
-  installations use `NOTION_API_KEY`) goes here.
+### Deprecated fields (removed in v0.5)
+
+`mcp_command` and `mcp_env` configured the removed MCP-server transport. They
+are still **accepted by the schema but ignored** so existing `settings.yaml`
+files keep parsing; the tracker factory prints a one-line deprecation warning
+when they are present. Remove them — the fields will be rejected in v0.5.
+
+## `updateIssueBody` — implemented (FORGE-117)
+
+Replaces the page's content blocks wholesale. Notes:
+
+- forge metadata (`forge_task_id`, `forge_blocked_by`, `forge_owner_type`)
+  lives in **page properties** on Notion, not body footers — a body replace
+  never touches it. (`/reconcile --push` and `/apply-decision` no longer skip
+  Notion-backed projects.)
+- **Non-atomic replace semantics.** Notion has no atomic body replace
+  (`PATCH /v1/blocks/{id}/children` appends), so the adapter runs
+  list-children → delete-each-child → append-replacement. A crash mid-way
+  leaves a partial body, but the operation is **idempotently re-runnable**: a
+  re-run deletes whatever children remain and appends the full replacement.
+  The interface contract already assumes the caller holds the claim
+  (single-writer, no CAS).
+- Input validation matches GitHub/Linear: non-string input, embedded
+  `<!-- forge:* -->` footers, and bodies over 64 KiB (`NOTION_BODY_MAX_BYTES`)
+  are rejected with `VALIDATION`; pages without a `forge_task_id` property
+  (created outside forge) fail with `PRECONDITION_FAILED`.
+- Body text is chunked into paragraph blocks: ≤2000 chars per rich_text item,
+  ≤100 items per block (Notion limits).
+
+`setClaimFence` remains a `NOT_IMPLEMENTED` stub — on Notion the claim fence
+cannot ride the body (metadata is page properties), and a
+ClaimFenceData-shaped property scheme is the FORGE-145/FORGE-167 follow-up.
+Claim/cancel call it best-effort and just skip fence mirroring for Notion.
 
 ## Claim concurrency model
 
@@ -146,24 +166,29 @@ doesn't fit Notion's schema model.
 
 ## Error classification
 
-| Notion error code | TrackerErrorCode | Notes |
+`classifyNotionExecError` handles both thrown spawn errors and returned
+nonzero-exit results (the Notion error body is parsed off stdout, stderr as a
+fallback):
+
+| Signal | TrackerErrorCode | Notes |
 |---|---|---|
+| spawn `ENOENT` (`ntn` not installed) | `TRANSPORT` | Install hint: Notion CLI + `ntn login` |
 | `unauthorized`, `restricted_resource` | `AUTH` | Always wins over `NOT_FOUND` (Notion sometimes returns "not found" for permission denial) |
 | `object_not_found` | `NOT_FOUND` | |
 | `rate_limited` | `RATE_LIMITED` | `retry_after` (seconds) preserved in details as `retryAfterMs` |
-| `validation_error`, `invalid_request_url`, `invalid_json`, `invalid_request` | `VALIDATION` | Always wins over `CONFLICT` (validation errors can mention conflicts) |
+| `validation_error`, `invalid_request`, `invalid_json`, `invalid_request_url` | `VALIDATION` | Always wins over `CONFLICT` (validation errors can mention conflicts) |
 | `conflict_error`, `concurrent_edit` | `CONFLICT` | |
-| JSON-RPC `-32000` (ConnectionClosed) | `TRANSPORT` | SDK-level |
-| JSON-RPC `-32001` (RequestTimeout) | `TIMEOUT` | SDK-level |
-| JSON-RPC `-32700/-32600/-32602` | `VALIDATION` | SDK-level |
-| Other | `UNKNOWN` | |
+| `internal_server_error`, `service_unavailable`, `bad_gateway` | `TRANSPORT` | 5xx-class — retriable |
+| timeouts (`timedOut`, `ETIMEDOUT`, "timed out" patterns) | `TIMEOUT` | |
+| connection failures (`ECONNRESET`, "connection refused", spawn errors) | `TRANSPORT` | |
+| unknown nonzero exit | `UNKNOWN` | Deliberately NOT retriable |
 
 Retriable codes (`TRANSPORT`, `TIMEOUT`, `RATE_LIMITED`) drive exponential
 backoff via `BaseTracker.withRetry`.
 
 ## Testing
 
-- Unit tests (always run): `test/unit/trackers/notion.test.ts` (~50 tests, mocked `McpCall`)
+- Unit tests (always run): `test/unit/trackers/notion.test.ts` (mocked `NtnExec`)
 - Integration tests (opt-in): `test/integration/trackers/notion.test.ts` — see `test/integration/README.md`
 
 Per the `gh-cli-flag-spelling-vs-api-enum` learning, mocks verify call shape

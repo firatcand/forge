@@ -9,8 +9,8 @@
 ## How it works
 
 - Adapter: `NotionTracker` — implements the `Tracker` interface.
-- Transport: Notion's official [MCP server](https://github.com/makenotion/notion-mcp-server), spawned via the stdio transport in `src/trackers/notion-mcp-transport.ts`.
-- Project → top-level Notion database (created via `notion-create-database`).
+- Transport (FORGE-117): the official [Notion CLI (`ntn`)](https://developers.notion.com/cli) via `execa` — mirror of the GitHub adapter's `gh` exec. Auth via `ntn login` (keychain). The previous MCP-server transport was removed.
+- Project → top-level Notion database (created via `POST /v1/databases` with parent.page_id + initial_data_source (API 2026-03-11)).
 - Issue → row in the tasks database.
 - `depends_on` → `forge_blocked_by` rich-text footer on each row (Notion's native relation property is supported as overlay metadata).
 

@@ -93,6 +93,15 @@ export interface NormalizeErrorHint {
 const DEFAULT_ATTEMPTS = 3;
 const DEFAULT_BASE_DELAY_MS = 1000;
 
+// Provider-stated Retry-After surfaced by a classifier (details.retryAfterMs
+// on RATE_LIMITED TrackerErrors — all three adapters set it). Bounded read:
+// non-numeric/negative/absent → undefined.
+function retryAfterMsFrom(err: unknown): number | undefined {
+  if (!(err instanceof TrackerError)) return undefined;
+  const v = (err.details as { retryAfterMs?: unknown } | undefined)?.retryAfterMs;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : undefined;
+}
+
 export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   implements Tracker
 {
@@ -190,8 +199,21 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
         if (attempt === attempts || !isRetriable(err)) {
           throw err;
         }
-        const delay = this.retryDelayMs(attempt, baseDelayMs, maxDelayMs);
-        this.logger.warn('tracker.retry', { op, attempt, delay });
+        // Honor a provider-stated Retry-After when the classifier surfaced
+        // it — sleeping LESS than the provider asked guarantees another
+        // rejection. max(backoff, hint) keeps exponential growth across
+        // attempts; maxDelayMs stays the hard ceiling. (FORGE-117 Codex
+        // impl-review: the hint was previously stored but never read.)
+        const backoff = this.retryDelayMs(attempt, baseDelayMs, maxDelayMs);
+        const hinted = retryAfterMsFrom(err);
+        const delay =
+          hinted !== undefined ? Math.min(Math.max(hinted, backoff), maxDelayMs) : backoff;
+        this.logger.warn('tracker.retry', {
+          op,
+          attempt,
+          delay,
+          ...(hinted !== undefined ? { retryAfterMs: hinted } : {}),
+        });
         await sleep(delay);
       }
     }

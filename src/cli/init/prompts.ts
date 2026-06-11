@@ -43,15 +43,13 @@ const TrackerGithubSchema = z.object({
   type: z.literal('github'),
   config: z.object({ repo: z.string().regex(GITHUB_REPO_RE) }),
 });
+// FORGE-117: init emits only database_id for Notion. The legacy
+// mcp_command/mcp_env fields are deprecated (accepted+ignored by the settings
+// schema; removed in v0.5) — new projects must not be born with them.
 const TrackerNotionSchema = z.object({
   type: z.literal('notion'),
   config: z.object({
     database_id: z.string().min(1),
-    mcp_command: z
-      .array(z.string().min(1))
-      .min(1)
-      .default(['npx', '-y', '@notionhq/notion-mcp-server']),
-    mcp_env: z.record(z.string(), z.string()).default({}),
   }),
 });
 const TrackerSchema = z.discriminatedUnion('type', [
@@ -291,11 +289,7 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
     ).trim();
     tracker = {
       type: 'notion',
-      config: {
-        database_id: databaseId,
-        mcp_command: ['npx', '-y', '@notionhq/notion-mcp-server'],
-        mcp_env: {},
-      },
+      config: { database_id: databaseId },
     };
   }
 
