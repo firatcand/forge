@@ -58,23 +58,17 @@ import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
 import { WorkspaceError } from '../../core/errors.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
 import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
+import { isValidTaskId } from '../../schemas/task-id.ts';
 
 // ── Task-id validation for --remove-worktrees mode (FORGE-116, fix 1) ─────────
 //
-// Two valid shapes come from two different ID namespaces:
-//   • Tracker IDs (Linear / GitHub): /^[A-Z][A-Z0-9]*-\d+$/   e.g. FORGE-116, WT-1
-//   • Phases-shape IDs:              /^P\d+(\.\d+)?-T\d+[a-z]?$/  e.g. P1-T3, P2.1-T5b
-//
-// Any other value MUST be rejected with INVALID_ARGS before any path is
-// constructed, to prevent path-traversal attacks (e.g. `--task ../..`).
-// Marker taskIds read from disk are validated with the same predicate before
-// they participate in any path join — see readWorktreeMarker().
-const TASK_ID_TRACKER_RE = /^[A-Z][A-Z0-9]*-\d+$/;
-const TASK_ID_PHASES_RE = /^P\d+(\.\d+)?-T\d+[a-z]?$/;
-
-function isValidTaskId(id: string): boolean {
-  return TASK_ID_TRACKER_RE.test(id) || TASK_ID_PHASES_RE.test(id);
-}
+// FORGE-130: replaced FORGE-116's local dual-regex copy (tracker + phases
+// shapes) with the unified `isValidTaskId` primitive from src/schemas/task-id.ts
+// — the single source of truth. The unified shape is a strict superset of the
+// two old regexes (FORGE-116/WT-1 and P1-T3/P2.1-T5b both still pass), with the
+// same path-traversal rejection: a marker taskId must pass this predicate AND
+// contain no path separators before it participates in any path join — see
+// readWorktreeMarker().
 
 // `forge orchestrate gc` is the deterministic reconciler defined by
 // spec/ORCHESTRATOR.md §"gc reconciliation rules". Two-phase execution:

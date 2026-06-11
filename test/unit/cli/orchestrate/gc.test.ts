@@ -748,12 +748,12 @@ test('fix1 traversal: marker with invalid taskId (path sep) is refused by planne
   }
 });
 
-test('fix1 traversal: --task with non-numeric suffix rejected (e.g. FORGE-abc)', async () => {
+test('fix1 traversal: --task with path-hostile id rejected (e.g. #42)', async () => {
   const fx = await setupRepoFixture('fix1-bad-suffix');
   const cap = captureProcess();
   try {
     const result = await dispatchOrchestrate(
-      ['gc', '--remove-worktrees', '--task', 'FORGE-abc', '--forge-dir', fx.forgeDir],
+      ['gc', '--remove-worktrees', '--task', '#42', '--forge-dir', fx.forgeDir],
       { cwd: fx.repoDir },
     );
     assert.equal(result.exitCode, 1);

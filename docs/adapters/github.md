@@ -44,7 +44,21 @@ No additional environment variables. The adapter uses the same `gh` credentials 
 | `comment(issueId, body)` | `gh issue comment --body` (one-shot — no retry) |
 | `createProject(name, description?)` | `gh api repos/{repo}/milestones --method POST` → returns `{ id: milestoneNumber, url: html_url }`; precreates state overlay labels |
 | `createIssue(payload)` | `gh issue create --title --body` with forge:task + forge:ownerType HTML-comment footers |
-| `setBlockedBy(issueId, blockerId)` | rewrites the issue body's `<!-- forge:blockedBy=... -->` footer; idempotent (dedup) |
+| `setBlockedBy(issueId, blockerId)` | rewrites the issue body's `<!-- forge:blockedBy=... -->` footer; idempotent (dedup). `blockerId` accepts `GH-42` / `#42` / `42` / URL; the footer stores the bare number |
+
+---
+
+## Identifier normalization (FORGE-130)
+
+GitHubTracker emits each issue's `identifier` as **`GH-<number>`** (e.g. `GH-42`), not the older `#<number>` (e.g. `#42`). The unified task-id shape (`src/schemas/task-id.ts`, `/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/`) is **path-safe** and rejects `#` — so `#42` cannot be a worktree directory name, a `tracker_issue_id`, or a CLI `--task` argument. `GH-42` is the canonical, path-safe identifier stored in `plans/phases.yaml` and on disk.
+
+**Reverse mapping (read-side back-compat).** The bare GitHub issue number is the only shape the `gh` API speaks. Every native call site reverse-maps through `parseIssueNumber()`, which accepts **`GH-42`, `#42`, `42`, and full issue URLs**. This means:
+
+- Existing `plans/phases.yaml` files that bind `tracker_issue_id: '#42'` (or a bare `42`) keep resolving — `claim`, `comment`, `updateState`, `setBlockedBy`, `updateIssueBody`, `setClaimFence`, and `releaseClaim` all parse them.
+- `reconcile --pull` / `--push` seed legacy aliases (`#<n>` and bare `<n>`) for each GitHub issue, so a task stored under any of the three shapes binds without a false orphan-removal, and `--push` targets the right issue body.
+- `setBlockedBy` accepts a blocker reference in any of those shapes; the `forge:blockedBy` footer continues to store the **bare number** (stable wire form — pre-FORGE-130 footers already carried bare numbers).
+
+`reconcile --pull` rewrites stored ids toward the canonical `GH-<n>` over time as it materializes tracker truth.
 
 ---
 
@@ -118,7 +132,7 @@ Forge metadata lives in HTML comments inside the issue body (footers `<!-- forge
 
 Unlike LinearTracker, GitHubTracker does NOT create a native issue dependency. GitHub has no first-class blocked-by relation on `repos/{repo}/issues` — only project-board-level dependencies, which require a separate API surface and project configuration. The body-footer is the single source of truth for forge orchestrator blocker resolution.
 
-If `blockerId` is non-numeric, `setBlockedBy` throws `TrackerError('VALIDATION')`. If the issue body has no `forge:task=` footer (the issue was created outside forge), it throws `TrackerError('PRECONDITION_FAILED')`.
+If `blockerId` cannot be parsed as an issue reference (`GH-42`, `#42`, `42`, or an issue URL — FORGE-130), `setBlockedBy` throws `TrackerError('VALIDATION')`. If the issue body has no `forge:task=` footer (the issue was created outside forge), it throws `TrackerError('PRECONDITION_FAILED')`.
 
 ---
 

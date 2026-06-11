@@ -22,11 +22,18 @@ import {
 
 const VALID_UUIDV7 = '01890bb1-cf24-7a1f-9c4f-d4b4f51d28b9';
 
-test('TaskIdSchema accepts FORGE-96 / ABC-1', () => {
+test('TaskIdSchema accepts FORGE-96 / ABC-1 (and the FORGE-130 wider shape)', () => {
   assert.equal(TaskIdSchema.safeParse('FORGE-96').success, true);
   assert.equal(TaskIdSchema.safeParse('ABC-1').success, true);
-  assert.equal(TaskIdSchema.safeParse('forge-96').success, false); // must be uppercase
-  assert.equal(TaskIdSchema.safeParse('FORGE96').success, false); // requires hyphen
+  // FORGE-130 widened the Linear-only shape: lowercase, no-hyphen, phases ids,
+  // and normalized GitHub ids all pass now. (Full matrix in task-id.test.ts.)
+  assert.equal(TaskIdSchema.safeParse('forge-96').success, true);
+  assert.equal(TaskIdSchema.safeParse('FORGE96').success, true);
+  assert.equal(TaskIdSchema.safeParse('GH-42').success, true);
+  assert.equal(TaskIdSchema.safeParse('P2.5-T07').success, true);
+  // Still rejects path-unsafe shapes.
+  assert.equal(TaskIdSchema.safeParse('#42').success, false);
+  assert.equal(TaskIdSchema.safeParse('../x').success, false);
 });
 
 test('RunIdSchema / ClaimIdSchema / AttemptIdSchema accept a UUIDv7', () => {
@@ -52,7 +59,9 @@ test('ClaimArgsSchema requires taskId + runId + forgeDir', () => {
     json: false,
   });
   assert.equal(ok.success, true);
-  const bad = ClaimArgsSchema.safeParse({ taskId: 'forge-1', runId: VALID_UUIDV7, forgeDir: '/tmp/.forge', json: false });
+  // FORGE-130: `forge-1` is now a valid id; use a `#`-prefixed id to exercise
+  // the rejection path.
+  const bad = ClaimArgsSchema.safeParse({ taskId: '#1', runId: VALID_UUIDV7, forgeDir: '/tmp/.forge', json: false });
   assert.equal(bad.success, false);
 });
 

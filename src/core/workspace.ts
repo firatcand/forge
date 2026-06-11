@@ -14,6 +14,7 @@ import {
 import * as path from 'node:path';
 
 import { WorkspaceError } from './errors.ts';
+import { TASK_ID_RE, TASK_ID_MAX_LEN } from '../schemas/task-id.ts';
 
 function wrapExecaError(
   op: string,
@@ -33,8 +34,18 @@ function wrapExecaError(
   );
 }
 
-const MAX_ID_LENGTH = 64;
-const ALLOWED_PATTERN = /^[A-Za-z0-9._-]+$/;
+// Length + charset come from the unified task-id primitive (FORGE-130,
+// src/schemas/task-id.ts). sanitizeIssueId WRAPS that primitive: it preserves
+// its granular WorkspaceError codes (EMPTY / TOO_LONG / CONTROL_CHAR /
+// PATH_TRAVERSAL / LEADING_DASH / INVALID_CHAR) by running the structural
+// checks individually before the final charset test, rather than collapsing to
+// a single boolean. NARROWING vs the prior ALLOWED_PATTERN `/^[A-Za-z0-9._-]+$/`:
+// the unified shape requires a leading alphanumeric, so a leading `.` (e.g.
+// `.foo`) now fails the INVALID_CHAR charset check. No worktree dir name or
+// fixture relied on a leading dot (all task ids start alnum). See
+// test/unit/workspace.test.ts for the documented-narrowing regression.
+const MAX_ID_LENGTH = TASK_ID_MAX_LEN;
+const ALLOWED_PATTERN = TASK_ID_RE;
 
 export function sanitizeIssueId(id: unknown): string {
   if (typeof id !== 'string') {
@@ -69,7 +80,7 @@ export function sanitizeIssueId(id: unknown): string {
     throw new WorkspaceError('LEADING_DASH', 'issue id must not start with a dash', { input: id });
   }
   if (!ALLOWED_PATTERN.test(id)) {
-    throw new WorkspaceError('INVALID_CHAR', 'issue id contains characters outside [A-Za-z0-9._-]', {
+    throw new WorkspaceError('INVALID_CHAR', 'issue id must start with [A-Za-z0-9] and contain only [A-Za-z0-9._-]', {
       input: id,
     });
   }

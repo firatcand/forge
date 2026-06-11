@@ -1000,3 +1000,79 @@ test('applyPullToPhases — added entries are NOT auto-inserted', () => {
   const next = applyPullToPhases(phases, plan, { confirmPrune: true });
   assert.equal(next.phases[0]!.tasks.length, 0);
 });
+
+// ── FORGE-130: GitHub legacy-alias binding (stored #42 / 42 / GH-42) ──────────
+//
+// A GitHub issue's normalized identifier is GH-<n>. phases.yaml may bind it
+// under any of three historical shapes. None must produce a false orphan
+// removal on --pull, and --push must resolve the body target through the same
+// alias set.
+
+function ghIssue(number: number, overrides: Partial<Issue> = {}): Issue {
+  return {
+    id: String(number),
+    identifier: `GH-${number}`,
+    title: 'GH task',
+    state: 'todo',
+    blockerIds: [],
+    ...overrides,
+  };
+}
+
+for (const stored of ['#42', '42', 'GH-42'] as const) {
+  test(`diffPull — github task bound by '${stored}' binds (no false removal)`, () => {
+    const task = mkTask({ tracker_issue_id: stored, title: 'GH task', id: 'P1-T01' });
+    const issue = ghIssue(42, { title: 'GH task', forgeTaskId: 'P1-T01' });
+    const plan = diffPull([issue], mkPhases([task]));
+    assert.equal(plan.removed.length, 0, `${stored} must not be reported as removed`);
+    assert.equal(plan.updated.length, 0, 'same title → no update');
+    assert.equal(plan.unmanaged.length, 0);
+    assert.equal(plan.added.length, 0);
+  });
+
+  test(`diffPull — github task bound by '${stored}' still detects a title change`, () => {
+    const task = mkTask({ tracker_issue_id: stored, title: 'Local title', id: 'P1-T01' });
+    const issue = ghIssue(42, { title: 'Tracker title', forgeTaskId: 'P1-T01' });
+    const plan = diffPull([issue], mkPhases([task]));
+    assert.equal(plan.updated.length, 1);
+    assert.equal(plan.updated[0]!.changes[0]!.field, 'title');
+  });
+
+  test(`diffPush — github task bound by '${stored}' resolves body target (not orphan)`, () => {
+    const task = mkTask({ tracker_issue_id: stored, title: 'GH task', id: 'P1-T01' });
+    const issue = ghIssue(42, { title: 'GH task', forgeTaskId: 'P1-T01' });
+    const plan = diffPush(mkPhases([task]), [issue]);
+    assert.equal(plan.skipped.length, 0, `${stored} must resolve to an issue, not skip as orphan`);
+    assert.equal(plan.bodies.length, 1);
+    assert.equal(plan.bodies[0]!.tracker_issue_id, stored);
+    assert.equal(plan.bodies[0]!.task_id, 'P1-T01');
+  });
+}
+
+test('diffPull — github blocker footer bare 42 maps to GH-42-bound task', () => {
+  // The blocker issue (#42 → GH-42) is bound locally as P1-T01. The child's
+  // forge:blockedBy footer carries the BARE number `42`. mapBlockerIdsToTaskIds
+  // must resolve `42` → P1-T01 via the alias-seeded index.
+  const blocker = mkTask({ id: 'P1-T01', tracker_issue_id: 'GH-42', title: 'GH task' });
+  const child = mkTask({ id: 'P1-T02', tracker_issue_id: 'GH-43', title: 'Child', depends_on: [] });
+  const blockerIssue = ghIssue(42, { forgeTaskId: 'P1-T01' });
+  const childIssue = ghIssue(43, {
+    forgeTaskId: 'P1-T02',
+    title: 'Child',
+    blockerIds: ['42'], // bare number footer
+  });
+  const plan = diffPull([blockerIssue, childIssue], mkPhases([blocker, child]));
+  assert.equal(plan.updated.length, 1);
+  assert.equal(plan.updated[0]!.task_id, 'P1-T02');
+  assert.equal(plan.updated[0]!.changes[0]!.field, 'depends_on');
+  assert.deepEqual(plan.updated[0]!.changes[0]!.to, ['P1-T01']);
+});
+
+test('diffPush — task bound by GH-42 with tracker_issue_id: GH-42 targets the right issue body', () => {
+  const task = mkTask({ id: 'P1-T01', tracker_issue_id: 'GH-42', title: 'T' });
+  const issue = ghIssue(42, { title: 'T', forgeTaskId: 'P1-T01' });
+  const plan = diffPush(mkPhases([task]), [issue]);
+  assert.equal(plan.bodies.length, 1);
+  assert.equal(plan.bodies[0]!.tracker_issue_id, 'GH-42');
+  assert.match(plan.bodies[0]!.body, /Forge task ID:\*\* P1-T01/);
+});
