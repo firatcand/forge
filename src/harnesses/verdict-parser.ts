@@ -1,4 +1,5 @@
 import { ReviewVerdictSchema, type ReviewVerdict } from '../schemas/verdict.ts';
+import { truncateUtf8 } from '../schemas/byte-bounded.ts';
 import { HarnessError, type HarnessHost } from './base.ts';
 
 const FENCED_JSON_RE = /```json\s*\n([\s\S]*?)\n```/;
@@ -22,7 +23,7 @@ export function parseHarnessVerdict({ host, stdout }: ParseOpts): ReviewVerdict 
         'INVALID_STDOUT',
         host,
         `${host} emitted a fenced JSON block that failed to parse`,
-        { stdout_excerpt: fenced[1].slice(0, 2000) },
+        { stdout_excerpt: truncateUtf8(fenced[1], 2000) },
         { cause: err },
       );
     }
@@ -53,7 +54,7 @@ export function synthesizeVerdict(host: ReviewableHost, stdout: string): ReviewV
   const trimmed = stdout.trim();
   const message = trimmed.length === 0
     ? `${host} produced no stdout; stderr captured in attempt logs.`
-    : trimmed.slice(0, MAX_FINDING_MESSAGE_BYTES);
+    : truncateUtf8(trimmed, MAX_FINDING_MESSAGE_BYTES);
 
   return ReviewVerdictSchema.parse({
     version: 1,

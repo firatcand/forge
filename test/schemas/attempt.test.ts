@@ -218,3 +218,60 @@ test('schemas/attempt: worktree_inspected rejects sha shorter than 7 chars', () 
   });
   assert.equal(result.success, false);
 });
+
+// --- FORGE-83: UTF-8 byte caps -----------------------------------------------
+
+test('FORGE-83: attempt_cancelled rejects reason over the 1000-byte cap (multibyte)', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'attempt_cancelled',
+    ts: TS,
+    reason: '中'.repeat(400), // 400 units (<= 1000 pre-filter) but 1200 bytes > 1000
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-83: attempt_cancelled still rejects an empty reason (min:1 preserved)', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'attempt_cancelled',
+    ts: TS,
+    reason: '',
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-83: autonomous_decision rejects reason over the 2000-byte cap (multibyte)', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'autonomous_decision',
+    ts: TS,
+    decision_key: 'k',
+    chosen_option_id: 'opt',
+    reason: '😀'.repeat(600), // 1200 units, 2400 bytes > 2000
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-83: tests_run rejects output_excerpt over the 2048-byte cap (multibyte)', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'tests_run',
+    ts: TS,
+    passed: 1,
+    failed: 0,
+    skipped: 0,
+    duration_ms: 1,
+    output_excerpt: '中'.repeat(800), // 2400 bytes > 2048
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-83: tests_run accepts ASCII output_excerpt at exactly 2048 bytes', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'tests_run',
+    ts: TS,
+    passed: 1,
+    failed: 0,
+    skipped: 0,
+    duration_ms: 1,
+    output_excerpt: 'a'.repeat(2048),
+  });
+  assert.equal(result.success, true);
+});

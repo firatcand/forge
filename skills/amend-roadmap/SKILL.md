@@ -27,7 +27,7 @@ Prompt the user for (one round, AskUserQuestion where it helps):
 | `type` | foundation · data · backend · integration · content · infra · skill · docs |
 | `priority` | P0 · P1 · P2 |
 | `estimate` | S · M · L — **XL is refused by the verb** ("No XL tasks ship — split them") |
-| `owner_type` | backend-dev · frontend-dev · db-architect · devops-engineer · qa-engineer · security-auditor · design-engineer · integration |
+| `owner_type` | backend-dev · frontend-dev · db-architect · devops-engineer · qa-engineer · security-auditor · design-engineer · integration · human (manual bootstrap work — never auto-dispatched) |
 | `acceptance` | ≥ 1 concrete, testable criteria |
 | `depends_on` | task ids (`P2-T03`) or tracker identifiers (`FORGE-93`); every dep must already exist AND be tracker-backed |
 | `write_globs` | optional — file globs for overlap classification |

@@ -9,6 +9,9 @@ export const OWNER_TYPES = [
   'security-auditor',
   'design-engineer',
   'integration',
+  // FORGE-177: manual bootstrap work (account provisioning, OAuth consent,
+  // secrets placement). Never auto-dispatched — see phases --ready exclusion.
+  'human',
 ] as const;
 
 export const PRIORITIES = ['P0', 'P1', 'P2'] as const;

@@ -352,7 +352,7 @@ export const TaskSchema = z.object({
   priority: z.enum(['P0', 'P1', 'P2']),
   depends_on: z.array(z.string().min(1)).default([]),
   estimate: z.enum(['S', 'M', 'L', 'XL']),
-  owner_type: z.enum(['frontend-dev', 'backend-dev', 'db-architect', 'devops-engineer', 'qa-engineer', 'security-auditor', 'design-engineer', 'integration']),
+  owner_type: z.enum(['frontend-dev', 'backend-dev', 'db-architect', 'devops-engineer', 'qa-engineer', 'security-auditor', 'design-engineer', 'integration', 'human']),
   acceptance: z.array(z.string().min(1)).min(1),
   split_into: z.array(z.string().min(1)).optional(),
   status: z.enum(['active', 'paused', 'done', 'deferred-v0.5', 'dropped']).optional(),
@@ -400,6 +400,8 @@ export const PhasesSchema = z
 ```
 
 The schema's `.superRefine` validates duplicate phase/task IDs, unknown `blocked_by`/`depends_on` targets, and DAG cycles (reporting the cycle path). `src/schemas/phases.ts` remains canonical — the snippet above is a documentation mirror.
+
+Tasks with `owner_type: 'human'` are never auto-dispatched by the orchestrator — they appear in the queue as documentation/checkpoints for manual work (account provisioning, OAuth consent, secrets placement). `phases --ready` excludes them from the dispatchable task list and surfaces them separately as `human_checkpoints`; plain `phases` (no `--ready`) still lists them normally.
 
 ### Tracker adapter interface (TypeScript)
 
