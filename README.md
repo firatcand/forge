@@ -137,7 +137,7 @@ What forge adds:
 
 ## Status
 
-Forge is **v0.2.1** — used in production by the maintainer for solo founder workflows. Stable enough to depend on, raw enough that you'll find sharp edges. Issues and PRs welcome.
+Forge is **v0.4.0** — used in production by the maintainer for solo founder workflows. Stable enough to depend on, raw enough that you'll find sharp edges. Issues and PRs welcome.
 
 ## License
 
