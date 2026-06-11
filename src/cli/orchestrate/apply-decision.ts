@@ -37,6 +37,7 @@ import {
   type ParsedAdr,
 } from '../../orchestrator/adr.ts';
 import { parseSectionRef, replaceManagedSection } from '../../orchestrator/markdown-section.ts';
+import { acquirePhasesWriteLock } from './reconcile.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, firstPositional, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -139,34 +140,51 @@ function applyMarkdownEntry(repoRoot: string, entry: MarkdownSectionEntry): void
   writeAtomic(abs, replaceManagedSection(content, anchor, entry.new_body));
 }
 
-function applyPhasesEntry(repoRoot: string, entry: PhasesTaskEntry): void {
+async function applyPhasesEntry(repoRoot: string, entry: PhasesTaskEntry): Promise<void> {
   const abs = validateUnderRoot(resolve(repoRoot, PHASES_PATH), repoRoot);
-  let raw: string;
+  // phases.yaml is a read-modify-write here too — serialize against
+  // reconcile --pull and amend-roadmap via the shared phases-write lock, or
+  // a concurrent pull can drop this entry's edit (and vice versa). The lock
+  // must cover the read (FORGE-101 Codex impl-review round 4).
+  let lock;
   try {
-    raw = readFileSync(abs, 'utf8');
+    lock = await acquirePhasesWriteLock(repoRoot);
   } catch (err) {
-    throw new ApplyError('IO_ERROR', `failed to read phases.yaml: ${(err as Error).message}`, { path: abs });
-  }
-  const doc = parseDocument(raw);
-  if (doc.errors.length > 0) {
-    throw new ApplyError('IO_ERROR', `phases.yaml YAML parse error: ${doc.errors[0]!.message}`, { path: abs });
-  }
-  const js = doc.toJS() as { phases?: Array<{ tasks?: Array<{ id?: string }> }> };
-  let phaseIdx = -1;
-  let taskIdx = -1;
-  (js.phases ?? []).forEach((phase, p) => {
-    (phase.tasks ?? []).forEach((task, t) => {
-      if (task.id === entry.id) {
-        phaseIdx = p;
-        taskIdx = t;
-      }
+    throw new ApplyError('IO_ERROR', `phases.yaml write lock: ${(err as Error).message}`, {
+      path: abs,
     });
-  });
-  if (phaseIdx < 0) {
-    throw new ApplyError('PHASES_TASK_NOT_FOUND', `phases.yaml has no task '${entry.id}'`, { id: entry.id });
   }
-  doc.setIn(['phases', phaseIdx, 'tasks', taskIdx, entry.field], entry.value);
-  writeAtomic(abs, doc.toString({ lineWidth: 0, flowCollectionPadding: false }));
+  try {
+    let raw: string;
+    try {
+      raw = readFileSync(abs, 'utf8');
+    } catch (err) {
+      throw new ApplyError('IO_ERROR', `failed to read phases.yaml: ${(err as Error).message}`, { path: abs });
+    }
+    const doc = parseDocument(raw);
+    if (doc.errors.length > 0) {
+      throw new ApplyError('IO_ERROR', `phases.yaml YAML parse error: ${doc.errors[0]!.message}`, { path: abs });
+    }
+    const js = doc.toJS() as { phases?: Array<{ tasks?: Array<{ id?: string }> }> };
+    let phaseIdx = -1;
+    let taskIdx = -1;
+    (js.phases ?? []).forEach((phase, p) => {
+      (phase.tasks ?? []).forEach((task, t) => {
+        if (task.id === entry.id) {
+          phaseIdx = p;
+          taskIdx = t;
+        }
+      });
+    });
+    if (phaseIdx < 0) {
+      throw new ApplyError('PHASES_TASK_NOT_FOUND', `phases.yaml has no task '${entry.id}'`, { id: entry.id });
+    }
+    doc.setIn(['phases', phaseIdx, 'tasks', taskIdx, entry.field], entry.value);
+    lock.assertFresh();
+    writeAtomic(abs, doc.toString({ lineWidth: 0, flowCollectionPadding: false }));
+  } finally {
+    lock.release();
+  }
 }
 
 // Append a durable index line for an applied decision. Idempotent: keyed by
@@ -370,17 +388,17 @@ async function applyAllEntries(
 ): Promise<{ ref: string; message: string } | null> {
   for (const e of journal.spec_sections) {
     if (e.status === 'applied') continue;
-    const r = runEntry(() => applyMarkdownEntry(repoRoot, e), e, journal, journalPath, `spec:${e.ref}`);
+    const r = await runEntry(() => applyMarkdownEntry(repoRoot, e), e, journal, journalPath, `spec:${e.ref}`);
     if (r) return r;
   }
   for (const e of journal.prd_sections) {
     if (e.status === 'applied') continue;
-    const r = runEntry(() => applyMarkdownEntry(repoRoot, e), e, journal, journalPath, `prd:${e.ref}`);
+    const r = await runEntry(() => applyMarkdownEntry(repoRoot, e), e, journal, journalPath, `prd:${e.ref}`);
     if (r) return r;
   }
   for (const e of journal.phases_tasks) {
     if (e.status === 'applied') continue;
-    const r = runEntry(() => applyPhasesEntry(repoRoot, e), e, journal, journalPath, `phases:${e.id}`);
+    const r = await runEntry(() => applyPhasesEntry(repoRoot, e), e, journal, journalPath, `phases:${e.id}`);
     if (r) return r;
   }
   for (const e of journal.tracker_issues) {
@@ -408,15 +426,15 @@ async function applyAllEntries(
   return null;
 }
 
-function runEntry(
-  mutate: () => void,
+async function runEntry(
+  mutate: () => void | Promise<void>,
   entry: { status: 'pending' | 'applied' | 'failed'; applied_at?: string; error?: string },
   journal: ApplyJournal,
   journalPath: string,
   ref: string,
-): { ref: string; message: string } | null {
+): Promise<{ ref: string; message: string } | null> {
   try {
-    mutate();
+    await mutate();
     entry.status = 'applied';
     entry.applied_at = new Date().toISOString();
     delete entry.error;

@@ -114,6 +114,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'Apply an accepted ephemeral ADR across SPEC/PRD/phases/tracker via a resumable journal.',
   },
   {
+    name: 'amend-roadmap',
+    summary: 'Create a new task mid-flight: tracker-first issue + relations, then materialize into phases.yaml via reconcile (resumable journal).',
+  },
+  {
     name: 'gc',
     summary: 'Run the deterministic reconciler: legacy v1 migration + 14-row divergence table (--dry-run plans).',
   },
@@ -197,6 +201,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'reconcile',
     summary: 'Diff phases.yaml against tracker; pull tracker truth into phases.yaml or push the reverse.',
+  },
+  {
+    name: 'amend-roadmap',
+    summary: 'Create a new task mid-flight: collect fields, then a tracker-first atomic amend with a resumable journal.',
   },
   // ── Phase / retrospective ──
   {

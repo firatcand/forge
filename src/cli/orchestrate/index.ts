@@ -26,6 +26,7 @@ import { eventHandler } from './event.ts';
 import { completeHandler } from './complete.ts';
 import { cancelHandler } from './cancel.ts';
 import { applyDecisionHandler } from './apply-decision.ts';
+import { amendRoadmapHandler } from './amend-roadmap.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
@@ -185,6 +186,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['cancel', cancelHandler],
   ['reconcile', reconcileHandler],
   ['apply-decision', applyDecisionHandler],
+  ['amend-roadmap', amendRoadmapHandler],
   ['gc', gcHandler],
   ['second-opinion', secondOpinionHandler],
 ]);
@@ -212,6 +214,7 @@ export const HELP_ORDER: readonly string[] = [
   'cancel',
   'reconcile',
   'apply-decision',
+  'amend-roadmap',
   'gc',
   'second-opinion',
 ];

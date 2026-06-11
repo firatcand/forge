@@ -16,7 +16,7 @@ Driven by [docs/plans/team-mode-minimum-architecture.md](../docs/plans/team-mode
 | §Precedence rules (6-level chain) | **Superseded** — replaced with authority-by-field (see below) |
 | §ADR layer (ephemeral) | **Shipped (FORGE-95, 2026-05-30)** — apply mechanics live; the `/update-spec --draft` skill that authors ADRs/journals is FORGE-93 (still v0.5) |
 | §`/update-spec --apply` journal | **Shipped (FORGE-95)** — payload-complete, resumable; see the updated schema below |
-| §Module layout: `apply-decision.ts` | **Shipped (FORGE-95)**. `amend-roadmap.ts` remains v0.5 (FORGE-101) |
+| §Module layout: `apply-decision.ts` | **Shipped (FORGE-95)**. `amend-roadmap.ts` **shipped in v0.4 (FORGE-101, 2026-06-11)** — tracker-first + reconcile staged addition |
 | §Key flows: Flow 2 drift-routing block, "routing_hint" references | **Superseded** — no drift events, no routing in v0.4 (unchanged by FORGE-95) |
 | §Doctor enforcement: ADR-drafts and apply-journal scopes | **Still dropped** — the `apply-decision` verb shipped, but the doctor stale-journal scope is a separate follow-up; doctor stays SPEC↔code only |
 
@@ -47,7 +47,7 @@ The morning's linear precedence rule (`user > SPEC > PRD > phases > tracker > at
 
 ### `phases.yaml` is a derived snapshot
 
-`plans/phases.yaml` is written **only** by `/reconcile --pull` from the tracker. All other commands that change scope (`/decompose`, `/push-to-tracker`, and the v0.5 `/amend-roadmap`) write to the tracker first, then trigger reconcile.
+`plans/phases.yaml` is written **only** by `/reconcile --pull` from the tracker. All other commands that change scope (`/decompose`, `/push-to-tracker`, and `/amend-roadmap`) write to the tracker first, then trigger reconcile. `/amend-roadmap` (FORGE-101) honors this literally: it stages the complete new task into the pull path (`stagedAdditions` → `insertTaskIntoDocument`), so the pull machinery remains the single writer even for mid-flight additions.
 
 The schema gains an optional `source:` block:
 
@@ -88,7 +88,7 @@ The single forge-side assist (informational, not gating): workers stamp `spec_re
 ### Out of scope for v0.4 (re-listed for clarity)
 
 - `/update-spec --draft` and `/update-spec --apply` skills (FORGE-93) — the verb (`apply-decision`) they wrap shipped in FORGE-95, but the skill layer is still v0.5
-- `/amend-roadmap` skill + verb
+- ~~`/amend-roadmap` skill + verb~~ — **re-scoped into v0.4, shipped under FORGE-101 (2026-06-11)**
 - `forge orchestrate worktree-drift-guard` verb
 - Drift events, drift-routed questions, `QuestionIndex.drift_event_id`, `QuestionIndex.routing_hint`
 - Section ownership tags (`<!-- forge:section affects=... -->`)
@@ -605,7 +605,7 @@ test/
   e2e/                        // examples/ as fixture projects
 ```
 
-**Shipped under FORGE-95 (2026-05-30):** `apply-decision.ts` + `markdown-section.ts` (`src/cli/orchestrate/` and `src/orchestrator/`), `adr.ts` (`src/orchestrator/` + `src/schemas/`), `apply-journal.ts` (`src/schemas/`), and `factory.ts` (`src/trackers/`, extracted from `reconcile.ts`). **Still v0.5:** `amend-roadmap.ts` + `worktree-drift-guard.ts` (`src/cli/orchestrate/`) and `precedence.ts` (`src/orchestrator/`) — owning tickets FORGE-101 (`/amend-roadmap`) and the deferred drift/precedence work; FORGE-93 (`/update-spec --draft|--apply` skill) wraps the now-shipped verb. The `templates/adr.template.md` scaffold shipped under FORGE-92.
+**Shipped under FORGE-95 (2026-05-30):** `apply-decision.ts` + `markdown-section.ts` (`src/cli/orchestrate/` and `src/orchestrator/`), `adr.ts` (`src/orchestrator/` + `src/schemas/`), `apply-journal.ts` (`src/schemas/`), and `factory.ts` (`src/trackers/`, extracted from `reconcile.ts`). **Shipped under FORGE-101 (2026-06-11):** `amend-roadmap.ts` (`src/cli/orchestrate/`) + `amend-journal.ts` (`src/schemas/`) + the `stagedAdditions`/`insertTaskIntoDocument` extension to the reconcile pull path. **Still v0.5:** `precedence.ts` (`src/orchestrator/`) — the deferred drift/precedence work; FORGE-93 (`/update-spec --draft|--apply` skill) wraps the now-shipped verb. `worktree-drift-guard.ts` is dropped (FORGE-103 canceled); its role survives as `amend-roadmap`'s inline drift warning. The `templates/adr.template.md` scaffold shipped under FORGE-92.
 
 ### Worktree location convention
 
@@ -1026,7 +1026,7 @@ Forge ships two parallel surfaces: **skills** (user-invoked via slash commands i
 
 | Layer | Owns | Examples |
 |---|---|---|
-| **Skills** | UX, conversation, prompts, diff previews, user confirmation, multi-step orchestration | `/forge`, `/draft-prd`, `/pickup-task`, `/reconcile`, `/ship`; `/update-spec` *(v0.5)*, `/amend-roadmap` *(v0.5)* |
+| **Skills** | UX, conversation, prompts, diff previews, user confirmation, multi-step orchestration | `/forge`, `/draft-prd`, `/pickup-task`, `/reconcile`, `/ship`, `/amend-roadmap`; `/update-spec` *(v0.5)* |
 | **CLI verbs** | Deterministic state machine, atomic operations, machine-parseable I/O, no human prompts | `forge orchestrate claim`, `dispatch`, `heartbeat`, `complete`, `reconcile`, `apply-decision` *(shipped FORGE-95)*; `worktree-drift-guard` *(dropped 2026-05-17)* |
 
 ### The pattern
