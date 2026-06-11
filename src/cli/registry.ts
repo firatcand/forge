@@ -206,6 +206,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
     name: 'amend-roadmap',
     summary: 'Create a new task mid-flight: collect fields, then a tracker-first atomic amend with a resumable journal.',
   },
+  {
+    name: 'update-spec',
+    summary: 'Draft an ephemeral ADR (--draft) or propagate the accepted decision to SPEC/PRD/phases/tracker (--apply <slug>) via apply-decision.',
+  },
   // ── Phase / retrospective ──
   {
     name: 'phase-gate',

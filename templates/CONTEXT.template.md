@@ -47,11 +47,11 @@ Skills (`/pickup-task`, `/plan-task`, `/implement`, `/ship`, etc.) own user-faci
 
 See `spec/SPEC.md` §Skill ↔ verb contract and `spec/ORCHESTRATOR.md` §CLI surface for the full state-machine ownership story.
 
-## Ephemeral ADR workflow (v0.5+)
+## Ephemeral ADR workflow
 
 In-flight architectural decisions are drafted as **ephemeral ADRs** in `spec/decisions/<YYYY-MM-DD>-<kebab-slug>.md` using the scaffold at `templates/adr.template.md`. The `/update-spec --apply <slug>` skill propagates an accepted ADR to SPEC + PRD + `phases.yaml` + tracker bodies, then **deletes the ADR file**; rationale stays durable in the SPEC sections it touched + a `spec/decisions/INDEX.md` line + the propagation commit message. SPEC remains the sole durable source of truth — no permanent ADR archive.
 
-The `apply-decision` CLI verb (the apply engine, resumable journal, and `spec/decisions/INDEX.md` convention) shipped in FORGE-95. The `/update-spec --draft|--apply` skill that authors ADRs/journals and runs the commit is FORGE-93 (still pending).
+The `apply-decision` CLI verb (the apply engine, resumable journal, and `spec/decisions/INDEX.md` convention) shipped in FORGE-95; the `/update-spec --draft|--apply` skill that authors ADRs/journals and runs the commit shipped in FORGE-93. Draft with `/update-spec --draft`, flip `status: accepted` after review, propagate with `/update-spec --apply <slug>`.
 
 ## Critical paths convention
 
