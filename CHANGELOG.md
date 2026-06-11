@@ -4,6 +4,28 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-06-12
+
+### Fixed
+
+- **`forge upgrade` destroyed symlinked agent root files (FORGE-208).**
+  `writeAtomic`'s rename replaced the symlink inode itself, so a
+  CLAUDE.md → AGENTS.md parity link became a divergent regular file on every
+  upgrade. The primitive is now default-deny: an lstat preflight throws typed
+  `FsWriteError('SYMLINK_TARGET_REFUSED')` on symlinked targets (only ENOENT
+  is treated as absent; other lstat failures propagate). Per-surface policy:
+  the recurring upgrade refresh **skips symlinked root files / .gitignore with
+  a notice** (exit 0, identical in `--dry-run`); a symlinked
+  `.forge/settings.yaml` is refused upfront before anything is written;
+  `--add-agent`/`--remove-agent` refuse explicitly; `migrate-claudemd`'s
+  preconditions now cover CONTEXT.md/.version/.gitignore (no partial-state
+  writes); `eject` and `init` skip gracefully — including eject's
+  forge-created `unlinkSync` paths and init's staged-promotion bypass, so a
+  user-converted symlink is never deleted. Covered by property tests (lstat
+  file type before == after for every touched path; upgrade twice == once;
+  dry-run parity). Known documented gap: hardlinks still break silently on
+  rename (`nlink > 1` preflight is follow-up scope).
+
 ## [0.4.1] - 2026-06-12
 
 ### Added
