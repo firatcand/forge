@@ -18,7 +18,10 @@ import { parse as parseYaml } from 'yaml';
 
 import {
   detectDrift,
+  isUnderGuard,
   rewriteCommandRefs,
+  REWRITE_GUARD_DIRS,
+  REWRITE_GUARD_SKILLS,
   SCAN_FILE_MAX_BYTES,
   SCAN_MAX_FILES,
   SETTINGS_DEFAULT_BLOCKS,
@@ -126,6 +129,284 @@ test('rewriteCommandRefs: targeted rewrites only', () => {
   assert.match(r.after, /\/push-to-tracker/);
   assert.match(r.after, /the next step/); // bare 'next' untouched
   assert.deepEqual(r.removedVerbs, ['session-check']);
+});
+
+// ── FORGE-207: codemod guards (self-replace + guarded path classes) ──────────
+
+// Scenario 1 — deprecation-alias line: old AND new name on one line → the
+// self-replace guard leaves it byte-untouched, even outside guarded dirs.
+test('FORGE-207 #1: deprecation-alias line is not self-replaced', () => {
+  const src = '/push-to-linear is deprecated — use /push-to-tracker\n';
+  const r = rewriteCommandRefs(src);
+  assert.equal(r.after, src); // byte-identical
+  assert.equal(r.pushToLinear, 0); // no rewrite counted
+  assert.equal(r.selfReplaceSkipped, 1);
+});
+
+// Scenario 2 — historical "Rename X → Y" line: the rewritten name (the arrow
+// target) is already present, so the line is left untouched.
+test('FORGE-207 #2: historical "Rename X → Y" line untouched', () => {
+  const src = 'Rename /push-to-linear → /push-to-tracker\n';
+  const r = rewriteCommandRefs(src);
+  assert.equal(r.after, src);
+  assert.equal(r.pushToLinear, 0);
+  assert.equal(r.selfReplaceSkipped, 1);
+});
+
+// Self-replace guard for the other two rename pairs.
+test('FORGE-207: self-replace guard for orchestrate-next and suggest-next', () => {
+  const next = 'use forge orchestrate claim, not forge orchestrate next\n';
+  const rNext = rewriteCommandRefs(next);
+  assert.equal(rNext.after, next);
+  assert.equal(rNext.renamedNext, 0);
+  assert.equal(rNext.selfReplaceSkipped, 1);
+
+  const suggest = 'suggest-next is now phases --ready\n';
+  const rSuggest = rewriteCommandRefs(suggest);
+  assert.equal(rSuggest.after, suggest);
+  assert.equal(rSuggest.renamedSuggest, 0);
+  assert.equal(rSuggest.selfReplaceSkipped, 1);
+});
+
+// Scenario 4 (unit half) — an unguarded stale ref with NO replacement target on
+// the line is still rewritten and counted (convenience preserved).
+test('FORGE-207 #4: unguarded stale ref still rewrites + counts', () => {
+  const r = rewriteCommandRefs('run /push-to-linear to sync\n');
+  assert.equal(r.after, 'run /push-to-tracker to sync\n');
+  assert.equal(r.pushToLinear, 1);
+  assert.equal(r.selfReplaceSkipped, 0);
+});
+
+// Scenario 5 (unit half) — mixed file: one self-replace line + one rewritable
+// line → only the rewritable line changes; counts/skips both reflected.
+test('FORGE-207 #5: mixed file rewrites only the rewritable line', () => {
+  const src =
+    '/push-to-linear is deprecated — use /push-to-tracker\n' +
+    'run /push-to-linear to sync\n';
+  const r = rewriteCommandRefs(src);
+  assert.equal(
+    r.after,
+    '/push-to-linear is deprecated — use /push-to-tracker\n' +
+      'run /push-to-tracker to sync\n',
+  );
+  assert.equal(r.pushToLinear, 1);
+  assert.equal(r.selfReplaceSkipped, 1);
+});
+
+// Scenario 7 — CRLF preservation: a CRLF file with one rewrite keeps CRLF on
+// every line; lone \r is also retained (split on /(\r\n|\n|\r)/).
+test('FORGE-207 #7: CRLF (and lone CR) line endings preserved', () => {
+  const crlf = 'first line\r\nrun /push-to-linear to sync\r\nlast\r\n';
+  const r = rewriteCommandRefs(crlf);
+  assert.equal(r.after, 'first line\r\nrun /push-to-tracker to sync\r\nlast\r\n');
+  assert.equal(r.pushToLinear, 1);
+
+  const cr = 'a\rrun /push-to-linear\rb\r';
+  const rCr = rewriteCommandRefs(cr);
+  assert.equal(rCr.after, 'a\rrun /push-to-tracker\rb\r');
+  assert.equal(rCr.pushToLinear, 1);
+});
+
+// selfReplaceSkipped is surfaced in the actionable finding detail (visibility).
+test('FORGE-207: selfReplaceSkipped surfaced in finding detail', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'forge-migrate-srskip-'));
+  mkdirSync(join(cwd, 'docs'), { recursive: true });
+  writeFileSync(
+    join(cwd, 'docs', 'guide.md'),
+    '/push-to-linear is deprecated — use /push-to-tracker\nrun /push-to-linear to sync\n',
+    'utf8',
+  );
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.relPath === join('docs', 'guide.md') && x.class === 'actionable');
+  assert.ok(f, 'expected an actionable finding for the rewritable line');
+  assert.match(f!.detail, /1 line\(s\) left untouched \(mention both old and new name\)/);
+});
+
+// isUnderGuard segment-boundary matching (pre-review major): no sibling guards.
+test('FORGE-207: isUnderGuard matches segments only, not sibling prefixes', () => {
+  // exact + true descendant → guarded
+  assert.equal(isUnderGuard('docs/retros', REWRITE_GUARD_DIRS), true);
+  assert.equal(isUnderGuard('docs/retros/phase-1.md', REWRITE_GUARD_DIRS), true);
+  assert.equal(isUnderGuard('skills/push-to-linear/SKILL.md', REWRITE_GUARD_SKILLS), true);
+  // sibling prefixes must NOT be guarded
+  assert.equal(isUnderGuard('docs/retrospective/x.md', REWRITE_GUARD_DIRS), false);
+  assert.equal(isUnderGuard('skills/push-to-linear-old/SKILL.md', REWRITE_GUARD_SKILLS), false);
+  assert.equal(isUnderGuard('docs/retros-archive.md', REWRITE_GUARD_DIRS), false);
+  // Windows backslash paths normalize before matching
+  assert.equal(isUnderGuard('docs\\retros\\phase-1.md', REWRITE_GUARD_DIRS), true);
+  assert.equal(isUnderGuard('skills\\push-to-linear\\SKILL.md', REWRITE_GUARD_SKILLS), true);
+});
+
+// Scenario 3 — guarded dir with a genuinely stale (non-self-replace) ref:
+// warning finding, NO edit, and an apply run leaves the file byte-untouched.
+test('FORGE-207 #3: guarded docs/retros stale ref → warning, no edit, untouched on apply', async () => {
+  const cwd = bootstrapV02x();
+  const stale = '# Retro\nrun /push-to-linear to sync\n'; // genuinely stale, no new name
+  mkdirSync(join(cwd, 'docs', 'retros'), { recursive: true });
+  writeFileSync(join(cwd, 'docs', 'retros', 'phase-1.md'), stale, 'utf8');
+
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.relPath === join('docs', 'retros', 'phase-1.md'));
+  assert.ok(f, 'expected a finding for the guarded file');
+  assert.equal(f!.class, 'warning');
+  assert.equal(f!.edit, undefined);
+  assert.match(f!.detail, /FORGE-207/);
+
+  // Full apply: the guarded file is never rewritten.
+  const result = await runMigrate({ cwd, argv: ['--yes'], stdout: makeSink().stream, stderr: makeSink().stream });
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(cwd, 'docs', 'retros', 'phase-1.md'), 'utf8'), stale);
+});
+
+// Scenario 4 (integration half) — an unguarded docs/ file with a stale ref IS
+// rewritten on apply (convenience regression guard).
+test('FORGE-207 #4: unguarded docs/guide.md stale ref rewritten on apply', async () => {
+  const cwd = bootstrapV02x();
+  mkdirSync(join(cwd, 'docs'), { recursive: true });
+  writeFileSync(join(cwd, 'docs', 'guide.md'), 'run /push-to-linear to sync\n', 'utf8');
+
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.relPath === join('docs', 'guide.md'));
+  assert.ok(f);
+  assert.equal(f!.class, 'actionable');
+  assert.ok(f!.edit);
+
+  await runMigrate({ cwd, argv: ['--yes'], stdout: makeSink().stream, stderr: makeSink().stream });
+  assert.equal(readFileSync(join(cwd, 'docs', 'guide.md'), 'utf8'), 'run /push-to-tracker to sync\n');
+});
+
+// Scenario 5 (integration half) — mixed UNGUARDED file: guarded(self-replace)
+// line + rewritable line → only the rewritable line changes on apply.
+test('FORGE-207 #5: mixed unguarded file rewrites only the rewritable line on apply', async () => {
+  const cwd = bootstrapV02x();
+  mkdirSync(join(cwd, 'docs'), { recursive: true });
+  const src =
+    '/push-to-linear is deprecated — use /push-to-tracker\n' +
+    'run /push-to-linear to sync\n';
+  writeFileSync(join(cwd, 'docs', 'mixed.md'), src, 'utf8');
+
+  await runMigrate({ cwd, argv: ['--yes'], stdout: makeSink().stream, stderr: makeSink().stream });
+  assert.equal(
+    readFileSync(join(cwd, 'docs', 'mixed.md'), 'utf8'),
+    '/push-to-linear is deprecated — use /push-to-tracker\n' +
+      'run /push-to-tracker to sync\n',
+  );
+});
+
+// Scenario 6 — skills/push-to-linear/SKILL.md alias dir: untouched entirely
+// (guard-dir class), even with a genuinely stale ref.
+test('FORGE-207 #6: skills/push-to-linear/SKILL.md left untouched (guard dir)', async () => {
+  const cwd = bootstrapV02x();
+  const aliasSkill =
+    '---\nname: push-to-linear\n---\n' +
+    '# /push-to-linear (deprecated)\n' +
+    '> `/push-to-linear` is deprecated — use `/push-to-tracker`.\n' +
+    'Also a genuinely stale line: run /push-to-linear now.\n';
+  mkdirSync(join(cwd, 'skills', 'push-to-linear'), { recursive: true });
+  writeFileSync(join(cwd, 'skills', 'push-to-linear', 'SKILL.md'), aliasSkill, 'utf8');
+
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.relPath === join('skills', 'push-to-linear', 'SKILL.md'));
+  assert.ok(f);
+  assert.equal(f!.class, 'warning');
+  assert.equal(f!.edit, undefined);
+
+  await runMigrate({ cwd, argv: ['--yes'], stdout: makeSink().stream, stderr: makeSink().stream });
+  assert.equal(readFileSync(join(cwd, 'skills', 'push-to-linear', 'SKILL.md'), 'utf8'), aliasSkill);
+});
+
+// Scenario 8 — forge-repo-shaped end-to-end: the four real corruption sites
+// (two guarded dirs, one alias skill, plus a deprecation-alias doc) → zero
+// edits across all four after a full apply run.
+test('FORGE-207 #8: forge-repo-shaped fixture — zero edits across all four sites', async () => {
+  const cwd = bootstrapV02x();
+  const sites: Array<[string, string]> = [
+    [join('docs', 'retros', 'phase-1.md'), '| Rename /push-to-linear → /push-to-tracker | shipped |\n'],
+    [join('docs', 'plans', 'redesign.md'), 'used suggest-next then forge orchestrate next; session-check helped\n'],
+    [
+      join('skills', 'push-to-linear', 'SKILL.md'),
+      '---\nname: push-to-linear\n---\n> `/push-to-linear` is deprecated — use `/push-to-tracker`.\n',
+    ],
+    [
+      join('docs', 'aliases.md'),
+      '`/push-to-linear` is deprecated — use `/push-to-tracker`.\n', // unguarded, but self-replace
+    ],
+  ];
+  for (const [rel, content] of sites) {
+    mkdirSync(join(cwd, rel, '..'), { recursive: true });
+    writeFileSync(join(cwd, rel), content, 'utf8');
+  }
+
+  const report = detectDrift(cwd);
+  for (const [rel] of sites) {
+    const f = report.findings.find((x) => x.relPath === rel);
+    if (f) assert.equal(f.edit, undefined, `${rel} must have no planned edit`);
+  }
+
+  await runMigrate({ cwd, argv: ['--yes'], stdout: makeSink().stream, stderr: makeSink().stream });
+  for (const [rel, content] of sites) {
+    assert.equal(readFileSync(join(cwd, rel), 'utf8'), content, `${rel} must be byte-identical after apply`);
+  }
+});
+
+// ── FORGE-207 review round 2 (GPT-5.5): tighter present-guards + visibility ──
+
+// FINDING 1 — `\b` treats `-` as a boundary, so a `/push-to-tracker-old` token
+// on the line must NOT register the NEW name as present and suppress a
+// legitimate `/push-to-linear` rewrite. The command-ish right boundary fixes it.
+test('FORGE-207 r2 #1a: push-to-tracker-old does not suppress push-to-linear rewrite', () => {
+  const r = rewriteCommandRefs('run /push-to-linear (not /push-to-tracker-old)\n');
+  assert.equal(r.after, 'run /push-to-tracker (not /push-to-tracker-old)\n');
+  assert.equal(r.pushToLinear, 1);
+  assert.equal(r.selfReplaceSkipped, 0);
+});
+
+// FINDING 1 — same shape for the phases --ready guard: a `phases --ready-foo`
+// token must not suppress a legitimate suggest-next rewrite.
+test('FORGE-207 r2 #1b: phases --ready-foo does not suppress suggest-next rewrite', () => {
+  const r = rewriteCommandRefs('use suggest-next (cf phases --ready-foo)\n');
+  assert.equal(r.after, 'use phases --ready (cf phases --ready-foo)\n');
+  assert.equal(r.renamedSuggest, 1);
+  assert.equal(r.selfReplaceSkipped, 0);
+});
+
+// FINDING 1 — and the orchestrate claim guard: `orchestrate claim-foo` must not
+// count as the new name present, so an `orchestrate next` rewrite still fires.
+test('FORGE-207 r2 #1c: orchestrate claim-foo does not suppress orchestrate next rewrite', () => {
+  const r = rewriteCommandRefs('forge orchestrate next (not orchestrate claim-foo)\n');
+  assert.equal(r.after, 'forge orchestrate claim (not orchestrate claim-foo)\n');
+  assert.equal(r.renamedNext, 1);
+  assert.equal(r.selfReplaceSkipped, 0);
+});
+
+// FINDING 3 — one line carrying old+new for MULTIPLE renames counts as ONE
+// skipped line, not one per rename pair.
+test('FORGE-207 r2 #3: multi-rename self-replace line counts once', () => {
+  const r = rewriteCommandRefs(
+    '/push-to-linear → /push-to-tracker and suggest-next → phases --ready\n',
+  );
+  assert.equal(r.selfReplaceSkipped, 1);
+  assert.equal(r.pushToLinear, 0);
+  assert.equal(r.renamedSuggest, 0);
+});
+
+// FINDING 2 — an unguarded file with ONLY self-replace-skipped lines (no
+// performed rewrites) must still surface an edit-free warning finding.
+test('FORGE-207 r2 #2: self-replace-only unguarded file emits a warning, no edit', () => {
+  const cwd = mkdtempSync(join(tmpdir(), 'forge-migrate-sronly-'));
+  mkdirSync(join(cwd, 'docs'), { recursive: true });
+  writeFileSync(
+    join(cwd, 'docs', 'aliases.md'),
+    '`/push-to-linear` is deprecated — use `/push-to-tracker`.\n',
+    'utf8',
+  );
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.relPath === join('docs', 'aliases.md'));
+  assert.ok(f, 'expected a finding for the self-replace-only file');
+  assert.equal(f!.class, 'warning');
+  assert.equal(f!.edit, undefined);
+  assert.match(f!.detail, /1 line\(s\) mention both an old and new command name/);
+  assert.match(f!.detail, /FORGE-207/);
 });
 
 test('chooseBackupDir: windows-safe stamp + collision suffix', () => {
