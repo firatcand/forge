@@ -4,6 +4,28 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-12
+
+### Added
+
+- **`/wrap-up` skill + `forge orchestrate gc --remove-worktrees` (FORGE-116).**
+  End-of-task housekeeping: confirm the merge, close the tracker issue, and
+  remove the task's worktree through the gc planner (eligible/refused/absent
+  classification, lease-health gate, exit 1 on any refusal).
+- **`gc --prune-merged-branches` opt-in (FORGE-139).** `workspace.cleanup()`
+  can now delete the task branch after merge: leading-`-` pre-screen,
+  `git check-ref-format --branch` as the authoritative ref predicate, then
+  `git branch -d --` (never `-D`); a refusal is reported as
+  `branchRetainedReason`, never an error.
+- **`owner_type: 'human'` for manual bootstrap tasks (FORGE-177).** Provision
+  accounts / paste keys / OAuth-consent work can now be modeled faithfully.
+  Human-owned tasks are never auto-dispatched: `phases --ready` excludes them
+  from the dispatchable set and surfaces them as `human_checkpoints` (with a
+  `⏸ human checkpoint` line in human output); plain `phases` still lists them.
+- **`PHASES_PARSE_ERROR` now surfaces the zod `issues[]` (FORGE-176).** Human
+  stderr gets a bulleted `<path>: <message>` list (capped at 20, `+N more`);
+  `--json` gets structured `error.details.issues`.
+
 ### Changed
 
 - **Unified task-id schema (FORGE-130).** All task-id validation now flows through
@@ -28,6 +50,47 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
   `reconcile` seeds legacy aliases (`#<n>` + bare `<n>`) for GitHub issues so
   `--pull` never false-removes a task bound by an old shape and `--push` resolves
   body targets through the same aliases.
+- **UTF-8 byte caps on attempt/verdict string fields (FORGE-83).** Byte-budget
+  fields (output excerpts, summaries, `save_point`, finding messages, reasons)
+  now enforce true UTF-8 byte limits via `byteBoundedString` (the old `.max(N)`
+  counted UTF-16 code units — multibyte text could overshoot up to 3×). New
+  code-point-safe `truncateUtf8` helper; `verdict-parser` and the
+  `cancel`/`question` producers truncate byte-safely. **Stricter:** previously
+  stored multibyte strings over the byte cap now fail re-parse (by design; forge's
+  own producers emit ASCII excerpts).
+- **`codex.auto_codex_token_cap` removed (FORGE-124).** The field was RESERVED
+  with no enforcement (a relic of dropped host-level hooks). Legacy keys in
+  existing `settings.yaml` files parse cleanly and are silently ignored.
+
+### Fixed
+
+- **`forge migrate`/`upgrade` rename codemod no longer corrupts deprecation
+  aliases and historical docs (FORGE-207).** `docs/retros/`, `docs/plans/`, and
+  `skills/push-to-linear/` are detection-only (warning findings, never
+  rewritten), and a line-level self-replace guard skips any line that already
+  contains the replacement name — eliminating the self-referential
+  "/push-to-tracker is deprecated — use /push-to-tracker" class. Skipped lines
+  are surfaced, untouched content stays byte-identical.
+- **Worktree-lifecycle hardening (FORGE-139/140/142/70).** `ensure-worktree`
+  anchors a relative `git rev-parse --git-common-dir` on the git command's cwd
+  (not `process.cwd()`); hydration skips git submodule boundaries (including a
+  submodule hydration root itself); `/pickup-task` installs dependencies in the
+  fresh worktree (npm/pnpm/yarn/bun by lockfile).
+- **`/decompose` emitted invalid `phases.yaml` (FORGE-175).** The skill and the
+  product-decomposer agent now emit `acceptance` (was `acceptance_criteria`,
+  which failed validation on every fresh run) and the skill's `type` list
+  matches the real TaskSchema enum.
+- **`TaskSchema.status` garbage-rejection test (FORGE-120)** closing the
+  deferred security-review AC (enum itself shipped earlier).
+
+### Documentation
+
+- SPEC §Module layout gains the `src/harnesses/` subtree (FORGE-137); the
+  §`phases.yaml` schema snippet is refreshed field-for-field from
+  `src/schemas/phases.ts` (FORGE-129); the methodology context template gains
+  the ambiguous-field authority conflict table (FORGE-162); CONTRIBUTING gains
+  the clean-room pre-push smoke recipe incl. the chalk-render check via
+  `migrate --dry-run` (FORGE-68).
 
 ## [0.4.0] - 2026-06-11
 
