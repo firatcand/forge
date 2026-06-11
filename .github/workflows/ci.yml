@@ -51,6 +51,25 @@ jobs:
       - run: npm run lint:test-helpers
       - run: npm test
 
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ['22.x', '24.x']
+        fixture: ['github', 'linear', 'notion']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+      - run: npm ci
+      # The migrate smoke shells out to dist/bin/forge.cjs, so build first.
+      - run: npm run build
+      - run: FORGE_E2E_FIXTURE=${{ matrix.fixture }} node --test --import tsx test/integration/cli/orchestrate/lifecycle.e2e.test.ts
+
   build:
     name: build
     needs: [typecheck, test]

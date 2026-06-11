@@ -1,0 +1,89 @@
+# Frozen example roadmap — 2 phases × 3 tasks, fixed ids (P1-T01..P2-T03).
+# Used as an E2E lifecycle fixture; keep ids + the source stanza deterministic.
+project: greenfield-linear
+source:
+  tracker: linear
+  project_id: greenfield-linear-project
+  synced_at: "2026-01-01T00:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000ln01
+phases:
+  - id: phase-1
+    name: Foundation
+    status: active
+    goal: Stand up the core scaffolding
+    gate_criteria:
+      - all foundation tasks shipped
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: LN-1
+        title: Bootstrap the project skeleton
+        description: Create the base app structure and CI wiring.
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - skeleton builds clean
+      - id: P1-T02
+        tracker_issue_id: LN-2
+        title: Wire the data layer
+        description: Add the persistence layer and migrations.
+        type: backend
+        priority: P1
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - migrations run
+      - id: P1-T03
+        tracker_issue_id: LN-3
+        title: Add the HTTP surface
+        description: Expose the first API routes with input validation.
+        type: backend
+        priority: P1
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - routes validated
+  - id: phase-2
+    name: Polish
+    status: active
+    goal: Harden and finish the product surface
+    gate_criteria:
+      - all polish tasks shipped
+    tasks:
+      - id: P2-T01
+        tracker_issue_id: LN-4
+        title: Add observability
+        description: Wire structured logging and metrics.
+        type: backend
+        priority: P2
+        depends_on: [P1-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - logs emitted
+      - id: P2-T02
+        tracker_issue_id: LN-5
+        title: Build the dashboard
+        description: Render the operator dashboard view.
+        type: integration
+        priority: P2
+        depends_on: [P1-T03]
+        estimate: M
+        owner_type: frontend-dev
+        acceptance:
+          - dashboard renders
+      - id: P2-T03
+        tracker_issue_id: LN-6
+        title: Final acceptance pass
+        description: Run the full acceptance checklist.
+        type: backend
+        priority: P2
+        depends_on: [P2-T01, P2-T02]
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - checklist green

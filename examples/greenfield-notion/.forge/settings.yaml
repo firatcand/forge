@@ -1,0 +1,32 @@
+version: 1
+project:
+  name: greenfield-notion
+  description: Frozen example project wired to a Notion tracker. Doubles as an E2E fixture (see examples/README.md) and as living documentation of a minimal Forge layout.
+tracker:
+  type: notion
+  config:
+    database_id: "11111111-2222-3333-4444-555555555555"
+secrets:
+  manager: env_file
+  env_file_path: ./.env.local
+agents:
+  max_concurrent: 10
+  retry_attempts: 10
+  retry_backoff_ms_max: 300000
+  poll_interval_ms: 30000
+  worktree_root: ./.forge/worktrees
+  on_persistent_failure: notify
+  primary_host_cli: claude
+  review_host_cli: codex
+  enabled_root_files:
+    - claude
+design:
+  mode: project_owned
+codex:
+  auto_codex_enabled: true
+  auto_codex_token_cap: 50000
+decisions:
+  decision_dir: ./spec/decisions
+  stale_draft_threshold_days: 7
+doctor:
+  spec_code_check_enabled: true

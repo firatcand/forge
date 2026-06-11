@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// npm-pack-gate: fail if any file under spec/, plans/, docs/, .forge/
-// leaks into the published npm tarball. Defense in depth on top of the
-// package.json#files allowlist — catches regressions in the allowlist.
+// npm-pack-gate: fail if any file under spec/, plans/, docs/, .forge/,
+// examples/ leaks into the published npm tarball. Defense in depth on top of
+// the package.json#files allowlist — catches regressions in the allowlist.
 import { spawnSync } from 'node:child_process';
 
-const FORBIDDEN_PREFIXES = ['spec/', 'plans/', 'docs/', '.forge/'];
+const FORBIDDEN_PREFIXES = ['spec/', 'plans/', 'docs/', '.forge/', 'examples/'];
 
 const result = spawnSync('npm', ['pack', '--dry-run', '--json'], { encoding: 'utf8' });
 if (result.status !== 0) {

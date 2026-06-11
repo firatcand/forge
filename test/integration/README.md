@@ -2,6 +2,37 @@
 
 Real-API tests that hit live providers. **Skipped by default in CI** — gated behind environment variables.
 
+The live-provider suites below are also part of the manual pre-release ritual —
+see [docs/release-checklist.md](../../docs/release-checklist.md), which links
+each `FORGE_E2E_*` gate to a publish step.
+
+## Deterministic lifecycle harness (`cli/orchestrate/lifecycle.e2e.test.ts`) — FORGE-110
+
+A **fully deterministic** drive-through of the orchestrate verb surface over the
+frozen fixtures in [`examples/`](../../examples/) — no LLM, no live tracker. It
+exercises programmatic verb composition with injected in-memory trackers: the
+lifecycle chain (to RUNNING), the multi-main CAS race, the `/update-spec` closed
+loop + `--resume` crash recovery, `reconcile --pull/--push`, `amend-roadmap`
+drift, and a `forge migrate` smoke.
+
+### Run
+
+```bash
+# one fixture at a time (each <60s):
+FORGE_E2E_FIXTURE=github node --test --import tsx test/integration/cli/orchestrate/lifecycle.e2e.test.ts
+FORGE_E2E_FIXTURE=linear node --test --import tsx test/integration/cli/orchestrate/lifecycle.e2e.test.ts
+FORGE_E2E_FIXTURE=notion node --test --import tsx test/integration/cli/orchestrate/lifecycle.e2e.test.ts
+```
+
+Without `FORGE_E2E_FIXTURE` set to `github|linear|notion` the file **self-skips**
+(so plain `npm test` does not double-run the heavier scenarios). CI runs all
+three across Node 22/24 in the `e2e` job (`.github/workflows/ci.yml`).
+
+> The harness proves *programmatic verb composition with injected trackers over
+> frozen fixtures* — NOT skill execution. Skill-driven runs (Claude + Codex) are
+> the manual pre-release checklist's job — see
+> [docs/release-checklist.md](../../docs/release-checklist.md).
+
 ## GitHub adapter (`trackers/github.test.ts`)
 
 Tests the full GitHubTracker lifecycle against a real repo via the `gh` CLI.
