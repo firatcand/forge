@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -13,6 +14,7 @@ import { stringify as yamlStringify, parse as yamlParse } from 'yaml';
 import { SettingsSchema } from '../../schemas/index.ts';
 import type { ForgeManifest, ManifestFarmEntry } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { FsWriteError } from '../../core/errors.ts';
 import {
   buildManifest,
   farmEntriesFromResult,
@@ -150,6 +152,16 @@ function safeReadConfig(filePath: string): string | null {
   }
 }
 
+/** FORGE-208: true when the path itself is a symbolic link (lstat — the
+ * link's own type). False when absent or a regular file/dir. */
+function isSymlinkAt(absPath: string): boolean {
+  try {
+    return lstatSync(absPath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
 interface Artifact {
   // Path relative to cwd.
   relPath: string;
@@ -249,7 +261,23 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
   // Flat-ignore files — safe to append.
   for (const name of ['.eslintignore', '.prettierignore'] as const) {
     const p = resolve(cwd, name);
-    const r = appendLineIfMissing(p, TOOLING_EXCLUDE_LINE);
+    // FORGE-208: a symlinked ignore file makes writeAtomic refuse (rewriting
+    // it would destroy the link). Skip with a warning into the init-warnings
+    // surface instead of aborting init.
+    let r;
+    try {
+      r = appendLineIfMissing(p, TOOLING_EXCLUDE_LINE);
+    } catch (err) {
+      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+        result.skipped.push(name);
+        result.warned.push({
+          target: name,
+          snippet: `${name} is a symbolic link, so forge did not append the worktree exclude (writing through the link would destroy it). Add this line to the link's target manually:\n\n\`\`\`\n${TOOLING_EXCLUDE_LINE}\n\`\`\``,
+        });
+        continue;
+      }
+      throw err;
+    }
     if (r.appended) {
       result.written.push(name);
       result.appendedLines.push({
@@ -436,6 +464,9 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   // 2) Promote each artefact, respecting per-file overwrite decisions.
   const written: string[] = [];
   const skipped: string[] = [];
+  // FORGE-208: warnings accumulated by the promotion loop + .gitignore step,
+  // merged into the init-warnings surface (tooling.warned) below.
+  const symlinkWarnings: ToolingExcludeWarning[] = [];
   // Settings yaml MUST be last — it's the marker file that proves init succeeded.
   const ordered = [
     ...artefacts.filter((a) => a.relPath !== '.forge/settings.yaml'),
@@ -443,6 +474,20 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   ];
   for (const a of ordered) {
     const dest = resolve(opts.cwd, a.relPath);
+    // FORGE-208: the staged rmSync+renameSync below bypasses writeAtomic, so
+    // it needs its own guard — a symlinked dest must be SKIPPED, never
+    // unlinked (rmSync would delete the link; renameSync over it would
+    // replace the link with a regular file — the same class of bug
+    // writeAtomic's preflight refuses). lstat: the link's own type, so a
+    // dangling symlink (existsSync false) is also caught.
+    if (isSymlinkAt(dest)) {
+      skipped.push(a.relPath);
+      symlinkWarnings.push({
+        target: a.relPath,
+        snippet: `${a.relPath} is a symbolic link, so forge left it untouched (replacing it would destroy the link). Resolve the symlink or replace it with a regular file, then re-run \`forge init\` / \`forge upgrade\` if you want forge to manage it.`,
+      });
+      continue;
+    }
     const exists = existsSync(dest);
     const allow = a.mustOverwrite || !exists || overwrite[a.relPath] === true;
     if (!allow) {
@@ -473,14 +518,29 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   // can reverse them byte-exactly.
   const ignoreFiles: ForgeManifest['ignoreFiles'] = [];
   if (newGi !== existingGi) {
-    writeAtomic(giPath, newGi);
-    written.push('.gitignore');
-    ignoreFiles.push({
-      path: '.gitignore',
-      kind: 'block',
-      created: !giExisted,
-      priorEndedWithNewline: existingGi.endsWith('\n'),
-    });
+    // FORGE-208: a symlinked .gitignore makes writeAtomic refuse — skip with
+    // a warning into the init-warnings surface rather than aborting init.
+    try {
+      writeAtomic(giPath, newGi);
+      written.push('.gitignore');
+      ignoreFiles.push({
+        path: '.gitignore',
+        kind: 'block',
+        created: !giExisted,
+        priorEndedWithNewline: existingGi.endsWith('\n'),
+      });
+    } catch (err) {
+      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+        skipped.push('.gitignore');
+        symlinkWarnings.push({
+          target: '.gitignore',
+          snippet:
+            '.gitignore is a symbolic link, so forge did not write its marker block (writing through the link would destroy it). Add the forge-managed block to the link\'s target manually, or replace the link with a regular file and re-run `forge upgrade`.',
+        });
+      } else {
+        throw err;
+      }
+    }
   } else {
     skipped.push('.gitignore');
   }
@@ -488,6 +548,8 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   // 4) Tooling-exclude entries (FORGE-115 / P2.5-T19) — hybrid:
   //    append to flat-ignore files; warn-only for code configs.
   const tooling = appendToolingExcludes(opts.cwd);
+  // FORGE-208: surface symlink skips from steps 2–3 in the same sidecar.
+  tooling.warned.unshift(...symlinkWarnings);
   for (const f of tooling.written) written.push(f);
   for (const f of tooling.skipped) skipped.push(f);
   for (const a of tooling.appendedLines) {
@@ -539,6 +601,9 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
   const unverified = opts.unverified ?? [];
   if (unverified.length > 0 || tooling.warned.length > 0) {
     const p = resolve(opts.cwd, '.forge/init-warnings.md');
+    // FORGE-208 classification: forge-owned sidecar under .forge/ — a symlink
+    // here is exotic, so writeAtomic's FsWriteError propagates loudly (no
+    // per-site handling by design).
     writeAtomic(p, buildWarningsBody(unverified, tooling.warned));
     warningsPath = p;
     written.push('.forge/init-warnings.md');

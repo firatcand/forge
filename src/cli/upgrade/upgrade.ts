@@ -14,7 +14,15 @@
 //   4 — repo's methodology is NEWER than CLI bundles (silent-rollback guard)
 
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
@@ -70,6 +78,24 @@ function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
+/** FORGE-208: true when the path itself is a symbolic link (lstat — the
+ * link's own type, never the target's). False when absent or a regular
+ * file/dir. Catches a dangling symlink too (lstat succeeds on those). */
+function isSymlinkAt(absPath: string): boolean {
+  try {
+    return lstatSync(absPath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** FORGE-208: skip notice for a symlinked forge-managed file. Printed in BOTH
+ * dry-run and real mode (dry-run parity AC) and the path never enters the
+ * `changed` array. */
+function symlinkSkipNotice(fileName: string, absPath: string): string {
+  return `skipped: ${fileName} (symlink → ${readlinkSync(absPath)}) — forge does not manage symlinked root files; managing the target if enabled`;
+}
+
 /**
  * Working snapshot of settings.yaml as parsed YAML — mutable so --add-agent /
  * --remove-agent can update agents.enabled_root_files and re-serialize. This
@@ -109,6 +135,10 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   const gitignorePath = resolve(cwd, '.gitignore');
 
   const changed: string[] = [];
+  // FORGE-208: skip notices for symlinked managed files. Reported on stderr
+  // with exit 0 — a symlinked root file is a deliberate adopter topology
+  // (e.g. CLAUDE.md → AGENTS.md parity), not an error.
+  const notices: string[] = [];
 
   // 0. Settings must exist (design §9 exit code 3).
   if (!existsSync(settingsPath)) {
@@ -116,6 +146,20 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       exitCode: 3,
       filesChanged: [],
       stderr: 'forge upgrade: .forge/settings.yaml not found. Run `forge init` first.',
+    };
+  }
+  // FORGE-208: refuse a symlinked settings.yaml UPFRONT — before parsing and
+  // before ANY mutation (CONTEXT.md, .version, root files, .gitignore). The
+  // later settings re-serializations (--add-agent / --remove-agent) go through
+  // writeAtomic, whose own preflight would throw mid-flow; refusing here keeps
+  // the refusal idempotent (exit 1, nothing written). Consistent with
+  // migrate-claudemd's M2 guard.
+  if (isSymlinkAt(settingsPath)) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr:
+        'forge upgrade: .forge/settings.yaml is a symbolic link. Refusing — destructive writes through symlinks could mutate files outside the working tree. Resolve the symlink or replace with a regular file first.',
     };
   }
   let settings: SettingsYaml;
@@ -253,6 +297,16 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     const fileName = ROOT_FILE_BY_AGENT[agent];
     if (recentlyWritten.has(fileName)) continue; // plan §4a: skip add-agent's just-written file
     const filePath = resolve(cwd, fileName);
+    // FORGE-208: a symlinked root file (e.g. CLAUDE.md → AGENTS.md) is
+    // skipped with a notice, NOT rewritten — writeAtomic's rename would
+    // destroy the link and materialize divergent content. The target (if
+    // it's another enabled agent's real root file) is still refreshed by
+    // its own loop iteration. Never enters `changed`; notice is identical
+    // in dry-run and real mode.
+    if (isSymlinkAt(filePath)) {
+      notices.push(symlinkSkipNotice(fileName, filePath));
+      continue;
+    }
     if (!existsSync(filePath)) continue;
     const fileContents = readFileSync(filePath, 'utf8');
     const desiredPrefix = buildPrefixBlock(agent, { repoUrl: FORGE_REPO_URL });
@@ -264,11 +318,17 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   }
 
   // 8. Refresh .gitignore marker block.
-  const currentGitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
-  const desiredGitignore = applyGitignoreBlock(currentGitignore);
-  if (desiredGitignore !== currentGitignore) {
-    if (!opts.dryRun) writeAtomic(gitignorePath, desiredGitignore);
-    changed.push('.gitignore');
+  // FORGE-208: same skip + notice as the root-file loop when .gitignore is a
+  // symlink — exit 0, link intact, never enters `changed`.
+  if (isSymlinkAt(gitignorePath)) {
+    notices.push(symlinkSkipNotice('.gitignore', gitignorePath));
+  } else {
+    const currentGitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
+    const desiredGitignore = applyGitignoreBlock(currentGitignore);
+    if (desiredGitignore !== currentGitignore) {
+      if (!opts.dryRun) writeAtomic(gitignorePath, desiredGitignore);
+      changed.push('.gitignore');
+    }
   }
 
   // 9. Refresh per-host skill + agent farm (FORGE-156). Each enabled host
@@ -313,7 +373,7 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     changed.push(MANIFEST_RELPATH);
   }
 
-  return { exitCode: 0, filesChanged: changed, stderr: '' };
+  return { exitCode: 0, filesChanged: changed, stderr: notices.join('\n') };
 }
 
 /** Render a path relative to cwd for the filesChanged report — keeps the
@@ -331,6 +391,21 @@ function applyAddAgent(
   changed: string[],
 ): UpgradeResult | null {
   const agent = opts.addAgent!;
+
+  // FORGE-208: hard refusal (exit 1) when the requested agent's root file is
+  // a symlink — this is an explicit user request targeting that file, so a
+  // silent skip would be lying about what was done. Checked BEFORE the
+  // in-memory settings mutation so nothing is written on refusal.
+  const addFileName = ROOT_FILE_BY_AGENT[agent];
+  const addFilePath = resolve(cwd, addFileName);
+  if (isSymlinkAt(addFilePath)) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr: `forge upgrade --add-agent: ${addFileName} is a symbolic link. Refusing — writing through it would destroy the link and materialize a divergent regular file. Resolve the symlink or replace with a regular file first.`,
+    };
+  }
+
   let settingsTouched = false;
 
   if (!settings.agents.enabled_root_files.includes(agent)) {
@@ -357,6 +432,10 @@ function applyAddAgent(
 
   if (settingsTouched) {
     if (!opts.dryRun) {
+      // FORGE-208: a symlinked settings.yaml was already refused upfront in
+      // step 0; if one is swapped in during the TOCTOU window, writeAtomic's
+      // preflight throws FsWriteError, which propagates loudly (exit 1 via
+      // the bin/forge.ts catch) — the required hard-refusal behavior.
       writeAtomic(resolve(cwd, '.forge/settings.yaml'), yamlStringify(settings, { lineWidth: 0 }));
     }
     changed.push('.forge/settings.yaml');
@@ -399,6 +478,18 @@ function applyRemoveAgent(
   const fileName = ROOT_FILE_BY_AGENT[agent];
   const filePath = resolve(cwd, fileName);
 
+  // FORGE-208: hard refusal (exit 1) when the root file is a symlink — the
+  // unlinkSync below would destroy the parity link (and a .pre-removal.bak
+  // would snapshot the TARGET's content, not the link). Same message style
+  // as --add-agent. Checked before any settings/file mutation.
+  if (isSymlinkAt(filePath)) {
+    return {
+      exitCode: 1,
+      filesChanged: changed,
+      stderr: `forge upgrade --remove-agent: ${fileName} is a symbolic link. Refusing — removing it would destroy the link. Resolve the symlink or replace with a regular file first.`,
+    };
+  }
+
   if (existsSync(filePath)) {
     const contents = readFileSync(filePath, 'utf8');
     const userBody = bodyWithoutPrefixBlock(contents).trim();
@@ -421,6 +512,8 @@ function applyRemoveAgent(
 
   settings.agents.enabled_root_files = settings.agents.enabled_root_files.filter((a) => a !== agent);
   if (!opts.dryRun) {
+    // FORGE-208: symlinked settings.yaml refused upfront in step 0; a TOCTOU
+    // swap-in hits writeAtomic's preflight → FsWriteError propagates loudly.
     writeAtomic(resolve(cwd, '.forge/settings.yaml'), yamlStringify(settings, { lineWidth: 0 }));
   }
   changed.push('.forge/settings.yaml');

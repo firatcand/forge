@@ -28,6 +28,30 @@ export class WorkspaceError extends Error {
   }
 }
 
+// FORGE-208: thrown by src/core/fs-atomic.ts writeAtomic when the write target
+// is a symbolic link. rename(2) over a symlink replaces the LINK itself (not
+// the target), silently destroying e.g. a CLAUDE.md → AGENTS.md parity link and
+// materializing a divergent regular file. Mirrors WorkspaceError house style
+// (which has the SYMLINK_REJECTED precedent).
+export type FsWriteErrorCode = 'SYMLINK_TARGET_REFUSED';
+
+export class FsWriteError extends Error {
+  readonly code: FsWriteErrorCode;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    code: FsWriteErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'FsWriteError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export type SettingsErrorCode =
   | 'FILE_NOT_FOUND'
   | 'YAML_PARSE_ERROR'

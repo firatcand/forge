@@ -426,3 +426,262 @@ test('upgrade --remove-agent: refuses when removal would empty enabled_root_file
     cleanup(cwd);
   }
 });
+
+// ============================================================================
+// FORGE-208 — symlink-safe writes
+// ============================================================================
+
+import { lstatSync, readdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+
+type FsKind = 'file' | 'dir' | 'symlink' | 'other';
+
+/** Recursively record the lstat TYPE of every path under root (relative paths). */
+function lstatTypes(root: string): Map<string, FsKind> {
+  const out = new Map<string, FsKind>();
+  const walk = (rel: string): void => {
+    const abs = rel === '' ? root : join(root, rel);
+    for (const entry of readdirSync(abs)) {
+      const childRel = rel === '' ? entry : `${rel}/${entry}`;
+      const st = lstatSync(join(root, childRel));
+      const kind: FsKind = st.isSymbolicLink()
+        ? 'symlink'
+        : st.isDirectory()
+          ? 'dir'
+          : st.isFile()
+            ? 'file'
+            : 'other';
+      out.set(childRel, kind);
+      if (kind === 'dir') walk(childRel);
+    }
+  };
+  walk('');
+  return out;
+}
+
+/** Recursively snapshot bytes of every regular file + link target of every
+ * symlink under root. */
+function byteSnapshot(root: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const [rel, kind] of lstatTypes(root)) {
+    if (kind === 'file') out.set(rel, readFileSync(join(root, rel), 'utf8'));
+    if (kind === 'symlink') out.set(rel, `-> ${readlinkSync(join(root, rel))}`);
+  }
+  return out;
+}
+
+/** Bootstrap the CLAUDE.md → AGENTS.md parity topology: AGENTS.md is the real
+ * file, CLAUDE.md is a symlink to it, both agents enabled. When
+ * `agentsNeedsRefresh`, AGENTS.md is written WITHOUT its prefix block so the
+ * upgrade has a real change to apply to the symlink TARGET. */
+function bootstrapSymlinkTopology(opts: { agentsNeedsRefresh?: boolean } = {}): string {
+  const cwd = bootstrap({ enabledAgents: ['claude', 'codex'], primary: 'claude', skipRootFiles: true });
+  const agentsBody = opts.agentsNeedsRefresh
+    ? '# my-product\n\nuser body without a forge prefix block\n'
+    : buildPrefixBlock('codex', { repoUrl: FORGE_REPO_URL });
+  writeFileSync(join(cwd, 'AGENTS.md'), agentsBody);
+  symlinkSync('AGENTS.md', join(cwd, 'CLAUDE.md'));
+  return cwd;
+}
+
+// --- scenario 1: type-preservation property ---------------------------------
+
+test('upgrade (FORGE-208 #1): lstat type of every pre-existing path is preserved across upgrade on the symlink topology', async () => {
+  const cwd = bootstrapSymlinkTopology({ agentsNeedsRefresh: true });
+  try {
+    const before = lstatTypes(cwd);
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+
+    // Property: every path that existed before still exists with the SAME
+    // lstat type (file stays file, symlink stays symlink, dir stays dir).
+    const after = lstatTypes(cwd);
+    for (const [rel, kind] of before) {
+      assert.equal(after.get(rel), kind, `lstat type changed for ${rel}: ${kind} → ${after.get(rel)}`);
+    }
+
+    // AGENTS.md (the real file) got its prefix block.
+    const agents = readFileSync(join(cwd, 'AGENTS.md'), 'utf8');
+    assert.match(agents, /<!-- >>> forge-managed/, 'AGENTS.md got the prefix block');
+    assert.match(agents, /user body without a forge prefix block/, 'user body preserved');
+    assert.ok(result.filesChanged.includes('AGENTS.md'));
+
+    // CLAUDE.md is STILL a symlink pointing at AGENTS.md.
+    assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(), true);
+    assert.equal(readlinkSync(join(cwd, 'CLAUDE.md')), 'AGENTS.md');
+
+    // Skip notice on stderr; CLAUDE.md never enters `changed`.
+    assert.match(result.stderr, /skipped: CLAUDE\.md \(symlink → AGENTS\.md\)/);
+    assert.equal(result.filesChanged.includes('CLAUDE.md'), false, 'skipped symlink must not enter changed');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenario 2: idempotency property ----------------------------------------
+
+test('upgrade (FORGE-208 #2a): twice == once on regular topology — zero changed + byte-identical on second run', async () => {
+  const cwd = bootstrap({ versionOverride: '0.0.1' }); // stale → first run writes
+  try {
+    const first = await upgrade({ cwd });
+    assert.equal(first.exitCode, 0);
+    assert.ok(first.filesChanged.length > 0, 'first run applies the pending change');
+    const snapshot = byteSnapshot(cwd);
+
+    const second = await upgrade({ cwd });
+    assert.equal(second.exitCode, 0);
+    assert.deepEqual([...second.filesChanged], [], 'second run reports zero changed');
+    assert.deepEqual(byteSnapshot(cwd), snapshot, 'second run leaves every byte identical');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade (FORGE-208 #2b): twice == once on symlink topology — zero changed, byte-identical, identical notice', async () => {
+  const cwd = bootstrapSymlinkTopology({ agentsNeedsRefresh: true });
+  try {
+    const first = await upgrade({ cwd });
+    assert.equal(first.exitCode, 0);
+    assert.ok(first.filesChanged.includes('AGENTS.md'));
+    const snapshot = byteSnapshot(cwd);
+
+    const second = await upgrade({ cwd });
+    assert.equal(second.exitCode, 0);
+    assert.deepEqual([...second.filesChanged], [], 'second run reports zero changed');
+    assert.deepEqual(byteSnapshot(cwd), snapshot, 'second run leaves every byte identical');
+    assert.equal(second.stderr, first.stderr, 'skip notice identical across runs');
+    assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(), true, 'link survives both runs');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenario 3: dry-run parity ----------------------------------------------
+
+test('upgrade (FORGE-208 #3): dry-run changed list + skip notices are IDENTICAL to the real run on the symlink topology', async () => {
+  const cwd = bootstrapSymlinkTopology({ agentsNeedsRefresh: true });
+  try {
+    const dry = await upgrade({ cwd, dryRun: true });
+    assert.equal(dry.exitCode, 0);
+    // Dry-run wrote nothing.
+    assert.doesNotMatch(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), /forge-managed/);
+
+    const real = await upgrade({ cwd });
+    assert.equal(real.exitCode, 0);
+    assert.deepEqual([...dry.filesChanged], [...real.filesChanged], 'changed lists identical');
+    assert.equal(dry.stderr, real.stderr, 'skip notices identical');
+    assert.match(dry.stderr, /skipped: CLAUDE\.md \(symlink → AGENTS\.md\)/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenario 5: --add-agent onto a symlinked root file -----------------------
+
+test('upgrade --add-agent (FORGE-208 #5): refuses (exit 1) when the agent root file is a symlink; nothing written', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude'] });
+  try {
+    writeFileSync(join(cwd, 'real-agents.md'), 'real target\n');
+    symlinkSync('real-agents.md', join(cwd, 'AGENTS.md'));
+    const settingsBefore = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8');
+
+    const result = await upgrade({ cwd, addAgent: 'codex' });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /--add-agent: AGENTS\.md is a symbolic link/);
+    assert.match(result.stderr, /Resolve the symlink or replace with a regular file first/);
+    assert.deepEqual([...result.filesChanged], []);
+
+    // No write: settings unchanged, link + target intact.
+    assert.equal(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'), settingsBefore);
+    assert.equal(lstatSync(join(cwd, 'AGENTS.md')).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(cwd, 'real-agents.md'), 'utf8'), 'real target\n');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenarios 6 + 10: symlinked .forge/settings.yaml -------------------------
+
+/** Replace .forge/settings.yaml with a symlink to a real copy in the repo. */
+function symlinkSettings(cwd: string): void {
+  const content = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8');
+  writeFileSync(join(cwd, 'real-settings.yaml'), content);
+  unlinkSync(join(cwd, '.forge/settings.yaml'));
+  symlinkSync('../real-settings.yaml', join(cwd, '.forge/settings.yaml'));
+}
+
+test('upgrade (FORGE-208 #6): refuses (exit 1) upfront when .forge/settings.yaml is a symlink', async () => {
+  const cwd = bootstrap();
+  try {
+    symlinkSettings(cwd);
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /settings\.yaml is a symbolic link/);
+    assert.deepEqual([...result.filesChanged], []);
+    assert.equal(lstatSync(join(cwd, '.forge/settings.yaml')).isSymbolicLink(), true, 'link intact');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade (FORGE-208 #10): symlinked settings.yaml refusal happens before ANY mutation, even with pending changes', async () => {
+  // Stale version → without the refusal, this run WOULD rewrite CONTEXT.md +
+  // .version + root files. Assert none of that happened.
+  const cwd = bootstrap({ versionOverride: '0.0.1' });
+  try {
+    symlinkSettings(cwd);
+    const before = byteSnapshot(cwd);
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /settings\.yaml is a symbolic link/);
+    assert.deepEqual([...result.filesChanged], []);
+    assert.deepEqual(byteSnapshot(cwd), before, 'NOTHING written: CONTEXT.md/.version/root files/.gitignore all untouched');
+    assert.equal(existsSync(join(cwd, '.forge/CONTEXT.md.bak')), false, 'no .bak');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenario 7: symlinked .gitignore -----------------------------------------
+
+test('upgrade (FORGE-208 #7): symlinked .gitignore is skipped with notice, exit 0, link intact', async () => {
+  const cwd = bootstrap();
+  try {
+    // Replace .gitignore with a symlink to a file WITHOUT the marker block,
+    // so the step-8 refresh would otherwise have a change to write.
+    unlinkSync(join(cwd, '.gitignore'));
+    writeFileSync(join(cwd, 'real-gitignore'), 'node_modules\n');
+    symlinkSync('real-gitignore', join(cwd, '.gitignore'));
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stderr, /skipped: \.gitignore \(symlink → real-gitignore\)/);
+    assert.equal(result.filesChanged.includes('.gitignore'), false, 'skipped symlink must not enter changed');
+    assert.equal(lstatSync(join(cwd, '.gitignore')).isSymbolicLink(), true, 'link intact');
+    assert.equal(readFileSync(join(cwd, 'real-gitignore'), 'utf8'), 'node_modules\n', 'target untouched');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- scenario 11: --remove-agent on a symlinked root file ---------------------
+
+test('upgrade --remove-agent (FORGE-208 #11): refuses (exit 1) when the root file is a symlink; link intact', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude', 'codex'] });
+  try {
+    const orig = readFileSync(join(cwd, 'AGENTS.md'), 'utf8');
+    unlinkSync(join(cwd, 'AGENTS.md'));
+    writeFileSync(join(cwd, 'real-agents.md'), orig);
+    symlinkSync('real-agents.md', join(cwd, 'AGENTS.md'));
+    const settingsBefore = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8');
+
+    const result = await upgrade({ cwd, removeAgent: 'codex', confirm: true });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /--remove-agent: AGENTS\.md is a symbolic link/);
+    assert.equal(lstatSync(join(cwd, 'AGENTS.md')).isSymbolicLink(), true, 'link intact');
+    assert.equal(readFileSync(join(cwd, 'real-agents.md'), 'utf8'), orig, 'target untouched');
+    assert.equal(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'), settingsBefore, 'settings untouched');
+    assert.equal(existsSync(join(cwd, 'AGENTS.md.pre-removal.bak')), false, 'no .bak');
+  } finally {
+    cleanup(cwd);
+  }
+});
