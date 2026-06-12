@@ -24,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
+import { parse as yamlParse, parseDocument, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
 import {
@@ -371,6 +371,33 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   if (manifestDiffers) {
     if (!opts.dryRun) writeManifest(cwd, desiredManifest);
     changed.push(MANIFEST_RELPATH);
+  }
+
+  // 11. FORGE-161: stamp the tracked methodology_version pin. COMMENT-PRESERVING
+  //     surgical edit via a YAML Document setIn — NOT the wholesale
+  //     yamlStringify rewrite the add/remove-agent path uses (that nukes
+  //     adopter comments). It re-reads the on-disk file so it composes over any
+  //     prior add/remove-agent rewrite (neither write clobbers the other).
+  //
+  //     ORDERING (GPT-5.5 review F3): this is the LAST settings mutation, placed
+  //     AFTER every refusal / early-exit path (the edited-CONTEXT.md exit-1
+  //     refusal, exit-4 downgrade guard, add/remove-agent refusals). Stamping
+  //     the pin earlier let an upgrade that ultimately exits 1 still mutate
+  //     settings.yaml — violating the refusal/no-write contract. Now the pin
+  //     only fires on the success path. Dry-run reports the would-be change
+  //     without writing; `changed` includes the path only when the pin differs.
+  {
+    const onDiskSettings = readFileSync(settingsPath, 'utf8');
+    const doc = parseDocument(onDiskSettings);
+    const currentPin = doc.get('methodology_version');
+    if (currentPin !== bundledVersion) {
+      doc.setIn(['methodology_version'], bundledVersion);
+      const updatedSettings = doc.toString({ lineWidth: 0 });
+      if (updatedSettings !== onDiskSettings) {
+        if (!opts.dryRun) writeAtomic(settingsPath, updatedSettings);
+        if (!changed.includes('.forge/settings.yaml')) changed.push('.forge/settings.yaml');
+      }
+    }
   }
 
   return { exitCode: 0, filesChanged: changed, stderr: notices.join('\n') };

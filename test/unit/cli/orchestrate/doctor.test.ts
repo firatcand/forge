@@ -258,3 +258,61 @@ test('doctor on the forge worktree itself returns exit 0 (AC3 SPEC hygiene gate)
     'doctor on the forge worktree must return exit 0; if this fails, SPEC.md or ORCHESTRATOR.md mentions a `src/...ts` path that does not exist.',
   );
 });
+
+// ── FORGE-150: legacy-codex settings warning (typed channel) ─────────────────
+
+function writeSettingsWithBlocks(forgeDir: string, blocks: string): void {
+  mkdirSync(forgeDir, { recursive: true });
+  const body = `version: 1
+project:
+  name: doctor-test-fixture
+tracker:
+  type: github
+  config:
+    repo: firatcand/forge-fixture
+secrets:
+  manager: env_file
+  env_file_path: ./.env.local
+agents:
+  primary_host_cli: claude
+  review_host_cli: codex
+${blocks}`;
+  writeFileSync(join(forgeDir, 'settings.yaml'), body, 'utf8');
+}
+
+test('FORGE-150 — doctor warns (typed) when legacy codex block present without second_opinion', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo, forgeDir } = makeRepoWithSpec('No src refs here.\n', []);
+  writeSettingsWithBlocks(forgeDir, 'codex:\n  auto_codex_enabled: true\n');
+  const result = await runOrchestrateDoctor({ scope: 'spec-code', forgeDir, json: true, repoRoot: repo });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.settingsWarnings.length, 1);
+  assert.equal(env.data.settingsWarnings[0].kind, 'legacy-codex-settings');
+  assert.match(env.data.settingsWarnings[0].message, /forge migrate/);
+  // The legacy warning lives on its OWN typed channel, NOT in drift.
+  assert.deepEqual(env.data.drift, []);
+});
+
+test('FORGE-150 — doctor emits no settings warning when second_opinion present', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo, forgeDir } = makeRepoWithSpec('No src refs here.\n', []);
+  writeSettingsWithBlocks(forgeDir, 'second_opinion:\n  auto_enabled: true\n');
+  const result = await runOrchestrateDoctor({ scope: 'spec-code', forgeDir, json: true, repoRoot: repo });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.deepEqual(env.data.settingsWarnings, []);
+});
+
+test('FORGE-150 — doctor emits no settings warning when both blocks present', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo, forgeDir } = makeRepoWithSpec('No src refs here.\n', []);
+  writeSettingsWithBlocks(
+    forgeDir,
+    'second_opinion:\n  auto_enabled: true\ncodex:\n  auto_codex_enabled: true\n',
+  );
+  const result = await runOrchestrateDoctor({ scope: 'spec-code', forgeDir, json: true, repoRoot: repo });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.deepEqual(env.data.settingsWarnings, []);
+});

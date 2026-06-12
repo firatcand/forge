@@ -42,9 +42,12 @@ function bootstrap(opts: BootstrapOpts = {}): string {
   // value to keep this safely portable across test environments.
   const reviewCli = primary === 'claude' ? 'codex' : 'codex'; // codex is always valid as a reviewer when not primary
   const finalReview = primary === 'codex' ? null : reviewCli;
+  // FORGE-161: include the methodology_version pin matching the bundled
+  // version so a freshly-bootstrapped repo is a true no-op on upgrade (the pin
+  // write only fires when the pin differs from the bundled version).
   writeFileSync(
     join(cwd, '.forge/settings.yaml'),
-    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: ${primary}\n  review_host_cli: ${finalReview === null ? 'null' : finalReview}\n  enabled_root_files:\n${enabled.map((a) => `    - ${a}`).join('\n')}\ndesign:\n  mode: project_owned\n`,
+    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: ${primary}\n  review_host_cli: ${finalReview === null ? 'null' : finalReview}\n  enabled_root_files:\n${enabled.map((a) => `    - ${a}`).join('\n')}\ndesign:\n  mode: project_owned\nmethodology_version: ${version}\n`,
   );
 
   // .forge/.version
@@ -165,6 +168,39 @@ test('upgrade: refuses with exit 1 when CONTEXT.md has been edited', async () =>
     assert.match(readFileSync(contextPath, 'utf8'), /LOCAL EDIT/);
     // No .bak written on refusal
     assert.equal(existsSync(`${contextPath}.bak`), false);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// GPT-5.5 review F3: the methodology_version pin write must come AFTER every
+// refusal/early-exit path. An upgrade that hits the edited-CONTEXT.md refusal
+// (exit 1) must leave settings.yaml byte-identical — no pin stamped, honoring
+// the refusal/no-write contract.
+test('upgrade: edited-CONTEXT refusal (exit 1) leaves settings.yaml byte-identical (no pin stamped)', async () => {
+  const cwd = bootstrap();
+  try {
+    const settingsPath = join(cwd, '.forge/settings.yaml');
+    // Remove the pin so a successful run WOULD stamp it — proving the refusal,
+    // not a coincidental no-op, is what leaves the file untouched.
+    const settingsBefore = readFileSync(settingsPath, 'utf8').replace(
+      /methodology_version: .*\n/,
+      '',
+    );
+    writeFileSync(settingsPath, settingsBefore);
+
+    // Edit CONTEXT.md so the upgrade hits the exit-1 local-edit refusal.
+    const contextPath = resolve(cwd, '.forge/CONTEXT.md');
+    writeFileSync(contextPath, readFileSync(contextPath, 'utf8') + '\nLOCAL EDIT\n');
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /has local edits/);
+    assert.deepEqual(result.filesChanged, []);
+    // settings.yaml is byte-identical — the pin was NOT stamped on the refusal path.
+    assert.equal(readFileSync(settingsPath, 'utf8'), settingsBefore);
+    const parsed = yamlParse(settingsBefore) as { methodology_version?: string };
+    assert.equal(parsed.methodology_version, undefined);
   } finally {
     cleanup(cwd);
   }
@@ -300,6 +336,99 @@ test('upgrade: older on-disk version still upgrades (no exit 4)', async () => {
       readBundledMethodologyVersion(),
     );
     assert.ok(result.filesChanged.includes('.forge/.version'));
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// ============================================================================
+// FORGE-161 — methodology_version pin
+// ============================================================================
+
+test('upgrade: stamps the methodology_version pin when absent (comment-preserving)', async () => {
+  const cwd = bootstrap();
+  try {
+    // Drop the pin and add a user comment to assert byte-survival.
+    const before = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')
+      .replace(/methodology_version: .*\n/, '');
+    const withComment = `# team-owned settings — do not delete\n${before}`;
+    writeFileSync(join(cwd, '.forge/settings.yaml'), withComment);
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.filesChanged.includes('.forge/settings.yaml'));
+
+    const after = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8');
+    const bundled = readBundledMethodologyVersion();
+    const parsed = yamlParse(after) as { methodology_version?: string };
+    assert.equal(parsed.methodology_version, bundled);
+    // Comment survived the surgical setIn (not nuked by a wholesale rewrite).
+    assert.match(after, /# team-owned settings — do not delete/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade --dry-run: reports pin change without writing', async () => {
+  const cwd = bootstrap();
+  try {
+    const noPin = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')
+      .replace(/methodology_version: .*\n/, '');
+    writeFileSync(join(cwd, '.forge/settings.yaml'), noPin);
+
+    const result = await upgrade({ cwd, dryRun: true });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.filesChanged.includes('.forge/settings.yaml'));
+    // Not actually written in dry-run.
+    const onDisk = yamlParse(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')) as {
+      methodology_version?: string;
+    };
+    assert.equal(onDisk.methodology_version, undefined);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade: pin is no-op when already matching bundled version', async () => {
+  const cwd = bootstrap();
+  try {
+    // bootstrap already pins to bundled → upgrade must not re-write settings.
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0);
+    assert.equal(
+      result.filesChanged.includes('.forge/settings.yaml'),
+      false,
+      `settings should not be in changed: ${result.filesChanged.join(',')}`,
+    );
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade --add-agent + pin in one run: both writes land, neither clobbers the other', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude'] });
+  try {
+    // Remove the pin so this run must BOTH add codex AND stamp the pin.
+    const noPin = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')
+      .replace(/methodology_version: .*\n/, '');
+    writeFileSync(join(cwd, '.forge/settings.yaml'), noPin);
+
+    const result = await upgrade({ cwd, addAgent: 'codex' });
+    assert.equal(result.exitCode, 0);
+
+    const parsed = yamlParse(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')) as {
+      agents: { enabled_root_files: AgentKind[] };
+      methodology_version?: string;
+    };
+    // add-agent's enabled_root_files mutation survived the pin write.
+    assert.ok(parsed.agents.enabled_root_files.includes('codex'));
+    // The pin write survived the add-agent rewrite (ordered AFTER it).
+    assert.equal(parsed.methodology_version, readBundledMethodologyVersion());
+    // settings.yaml listed (deduped — appears once).
+    assert.equal(
+      result.filesChanged.filter((f) => f === '.forge/settings.yaml').length,
+      1,
+    );
   } finally {
     cleanup(cwd);
   }

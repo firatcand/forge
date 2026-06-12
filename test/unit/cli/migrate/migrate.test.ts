@@ -106,16 +106,22 @@ function bootstrapV02x(opts: { settings?: string | null } = {}): string {
 
 // ── pure helpers ─────────────────────────────────────────────────────────────
 
-test('SETTINGS_DEFAULT_BLOCKS matches SettingsSchema defaults exactly', () => {
+test('SETTINGS_DEFAULT_BLOCKS matches SettingsSchema defaults exactly (FORGE-150)', () => {
+  // FORGE-150: equality-invariant test rewritten deliberately. The legacy
+  // `codex` block is now optional WITHOUT a default, so it does NOT appear in
+  // default parse output — assert `second_opinion` matches the default block
+  // AND `codex` is absent from a fresh parse.
   const parsed = SettingsSchema.parse({
     version: 1,
     project: { name: 'x' },
-    tracker: { type: 'github', config: { owner: 'a', repo: 'b' } },
+    tracker: { type: 'github', config: { repo: 'b' } },
     secrets: { manager: 'env_file', env_file_path: './.env.local' },
     agents: {},
     design: { mode: 'project_owned' },
   });
-  assert.deepEqual(parsed.codex, SETTINGS_DEFAULT_BLOCKS.codex);
+  assert.deepEqual(parsed.second_opinion, SETTINGS_DEFAULT_BLOCKS.second_opinion);
+  assert.equal(parsed.codex, undefined, 'codex must be absent from default parse output');
+  assert.equal('codex' in SETTINGS_DEFAULT_BLOCKS, false, 'codex must not be a seeded default block');
   assert.deepEqual(parsed.decisions, SETTINGS_DEFAULT_BLOCKS.decisions);
   assert.deepEqual(parsed.doctor, SETTINGS_DEFAULT_BLOCKS.doctor);
 });
@@ -466,7 +472,7 @@ test('detectDrift: settings that would still fail the v0.4 schema → warning, n
   assert.match(f!.detail, /manual/i);
 });
 
-test('detectDrift: partial blocks — only the missing ones are added', () => {
+test('FORGE-150 — legacy codex block → second_opinion seeded from value + codex mirror kept', () => {
   const cwd = bootstrapV02x({
     settings: `${STALE_SETTINGS}codex:\n  auto_codex_enabled: false\n`,
   });
@@ -474,8 +480,55 @@ test('detectDrift: partial blocks — only the missing ones are added', () => {
   const f = report.findings.find((x) => x.kind === 'settings-missing-blocks');
   assert.ok(f?.edit);
   const after = parseYaml(f!.edit!.after) as Record<string, unknown>;
-  // User's codex block untouched; decisions/doctor added with defaults.
+  // second_opinion seeded from the legacy disable value (false preserved).
+  assert.deepEqual(after.second_opinion, { auto_enabled: false });
+  // codex block KEPT, mirrored to the same value (old-CLI compat; removal v0.5).
   assert.deepEqual(after.codex, { auto_codex_enabled: false });
+  // Mirror comment present in the rendered YAML.
+  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.5/);
+  // decisions/doctor added with defaults.
+  assert.deepEqual(after.decisions, SETTINGS_DEFAULT_BLOCKS.decisions);
+  assert.deepEqual(after.doctor, SETTINGS_DEFAULT_BLOCKS.doctor);
+  // The result re-parses cleanly under the v0.4+ schema.
+  const reparsed = SettingsSchema.parse(after);
+  assert.equal(reparsed.second_opinion.auto_enabled, false);
+  assert.equal(reparsed.codex?.auto_codex_enabled, false);
+});
+
+test('FORGE-150 — both blocks present + DISAGREE → codex mirror refreshed to match second_opinion, change recorded', () => {
+  // GPT-5.5 review F2: second_opinion is source of truth. A file carrying
+  // second_opinion: true + codex: false (divergent) must rewrite codex to
+  // MATCH second_opinion (true) and the finding must record the change —
+  // previously this wrote codex back to its own value and recorded nothing,
+  // leaving old-CLI and new-CLI behavior divergent.
+  const cwd = bootstrapV02x({
+    settings: `${STALE_SETTINGS}second_opinion:\n  auto_enabled: true\ncodex:\n  auto_codex_enabled: false\n`,
+  });
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.kind === 'settings-missing-blocks');
+  assert.ok(f?.edit, 'expected a settings-missing-blocks finding with an edit');
+  const after = parseYaml(f!.edit!.after) as Record<string, unknown>;
+  // second_opinion (source of truth) unchanged; codex refreshed to MATCH it.
+  assert.deepEqual(after.second_opinion, { auto_enabled: true });
+  assert.deepEqual(after.codex, { auto_codex_enabled: true });
+  // The change is recorded in the finding detail.
+  assert.match(f!.detail, /codex/);
+  // Mirror comment preserved.
+  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.5/);
+  // Result re-parses cleanly and old-CLI lever now agrees with new-CLI lever.
+  const reparsed = SettingsSchema.parse(after);
+  assert.equal(reparsed.second_opinion.auto_enabled, true);
+  assert.equal(reparsed.codex?.auto_codex_enabled, true);
+});
+
+test('FORGE-150 — absent-both settings seeds second_opinion only (no codex block)', () => {
+  const cwd = bootstrapV02x();
+  const report = detectDrift(cwd);
+  const f = report.findings.find((x) => x.kind === 'settings-missing-blocks');
+  assert.ok(f?.edit);
+  const after = parseYaml(f!.edit!.after) as Record<string, unknown>;
+  assert.deepEqual(after.second_opinion, { auto_enabled: true });
+  assert.equal('codex' in after, false, 'fresh migrate must not seed a codex block');
   assert.deepEqual(after.decisions, SETTINGS_DEFAULT_BLOCKS.decisions);
   assert.deepEqual(after.doctor, SETTINGS_DEFAULT_BLOCKS.doctor);
 });
@@ -714,7 +767,10 @@ test('apply --yes migrates everything; backups pristine (ACs 2,3,4)', async () =
   const settingsRaw = readFileSync(join(cwd, '.forge', 'settings.yaml'), 'utf8');
   assert.match(settingsRaw, /# project block — user-edited, must survive migration/);
   const settings = SettingsSchema.parse(parseYaml(settingsRaw));
-  assert.deepEqual(settings.codex, SETTINGS_DEFAULT_BLOCKS.codex);
+  // FORGE-150: STALE_SETTINGS has no codex block → second_opinion seeded with
+  // its default; no codex block fabricated on a fresh migrate.
+  assert.deepEqual(settings.second_opinion, SETTINGS_DEFAULT_BLOCKS.second_opinion);
+  assert.equal(settings.codex, undefined);
   assert.deepEqual(settings.decisions, SETTINGS_DEFAULT_BLOCKS.decisions);
   assert.deepEqual(settings.doctor, SETTINGS_DEFAULT_BLOCKS.doctor);
 
@@ -800,7 +856,7 @@ test('clean v0.4 project: exit 0, "no drift" message, no writes', async () => {
   mkdirSync(join(cwd, 'templates'), { recursive: true });
   writeFileSync(
     join(cwd, '.forge', 'settings.yaml'),
-    `${STALE_SETTINGS}codex:\n  auto_codex_enabled: true\ndecisions:\n  decision_dir: ./spec/decisions\n  stale_draft_threshold_days: 7\ndoctor:\n  spec_code_check_enabled: true\n`,
+    `${STALE_SETTINGS}second_opinion:\n  auto_enabled: true\ndecisions:\n  decision_dir: ./spec/decisions\n  stale_draft_threshold_days: 7\ndoctor:\n  spec_code_check_enabled: true\n`,
     'utf8',
   );
   writeFileSync(join(cwd, 'templates', 'adr.template.md'), '# ADR\n', 'utf8');

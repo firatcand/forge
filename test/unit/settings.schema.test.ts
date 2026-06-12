@@ -517,9 +517,16 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
     design: {
       mode: 'project_owned' | 'reference_external';
     };
-    codex: {
+    // FORGE-150: primary block always materializes (schema default).
+    second_opinion: {
+      auto_enabled: boolean;
+    };
+    // FORGE-150: legacy block — optional, no default.
+    codex?: {
       auto_codex_enabled: boolean;
     };
+    // FORGE-161: tracked pin — optional top-level field.
+    methodology_version?: string;
     decisions: {
       decision_dir: string;
       stale_draft_threshold_days: number;
@@ -532,9 +539,9 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
   };
 });
 
-// FORGE-105: codex / decisions / doctor blocks (added 2026-05-18)
+// FORGE-150: second_opinion (primary) / codex (legacy, optional) blocks
 
-test('FORGE-105 — codex block: defaults expand when block omitted', () => {
+test('FORGE-150 — second_opinion block: defaults expand when block omitted', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
@@ -543,10 +550,46 @@ test('FORGE-105 — codex block: defaults expand when block omitted', () => {
   });
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.codex.auto_codex_enabled, true);
+  assert.equal(result.data.second_opinion.auto_enabled, true);
 });
 
-test('FORGE-105 — codex block: explicit values preserved', () => {
+test('FORGE-150 — codex block is ABSENT from default parse output (optional, no default)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.codex, undefined);
+});
+
+test('FORGE-150 — second_opinion block: explicit values preserved', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    second_opinion: { auto_enabled: false },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.second_opinion.auto_enabled, false);
+});
+
+test('FORGE-150 — second_opinion block: non-boolean enabled rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    second_opinion: { auto_enabled: 'yes' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-150 — legacy codex block: materializes only when present', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
@@ -556,18 +599,7 @@ test('FORGE-105 — codex block: explicit values preserved', () => {
   });
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.codex.auto_codex_enabled, false);
-});
-
-test('FORGE-105 — codex block: non-boolean enabled rejected', () => {
-  const result = SettingsSchema.safeParse({
-    version: 1,
-    project: { name: 'x' },
-    tracker: { type: 'linear', config: { team_id: 'T' } },
-    secrets: { manager: 'env_file' },
-    codex: { auto_codex_enabled: 'yes' },
-  });
-  assert.equal(result.success, false);
+  assert.equal(result.data.codex?.auto_codex_enabled, false);
 });
 
 test('codex block: legacy auto_codex_token_cap key tolerated (FORGE-124)', () => {
@@ -584,8 +616,44 @@ test('codex block: legacy auto_codex_token_cap key tolerated (FORGE-124)', () =>
   });
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.codex.auto_codex_enabled, true);
-  assert.ok(!('auto_codex_token_cap' in result.data.codex), 'legacy key must be absent from parsed output');
+  assert.equal(result.data.codex?.auto_codex_enabled, true);
+  assert.ok(!('auto_codex_token_cap' in (result.data.codex ?? {})), 'legacy key must be absent from parsed output');
+});
+
+test('FORGE-161 — methodology_version pin: optional, absent by default', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.methodology_version, undefined);
+});
+
+test('FORGE-161 — methodology_version pin: string value preserved', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    methodology_version: '0.4.2',
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.methodology_version, '0.4.2');
+});
+
+test('FORGE-161 — methodology_version pin: empty string rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    methodology_version: '',
+  });
+  assert.equal(result.success, false);
 });
 
 test('FORGE-105 — decisions block: defaults expand when omitted', () => {
