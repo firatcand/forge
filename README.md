@@ -140,7 +140,6 @@ Forge stands on the shoulders of:
 
 - **[gstack](https://github.com/garrytan/gstack)** — for the skill-as-specialist pattern, AI Slop detection, the Iron Law of Investigation, and the Confusion Protocol
 - **[Every's Compound Engineering plugin](https://github.com/EveryInc/compound-engineering-plugin)** — for the 80/20 plan-heavy thesis and the compound learning loop
-- **[Paperclip](https://github.com/paperclipai/paperclip)** — for the orchestration mental model (without the heavyweight infrastructure)
 - **Boris Cherny's Claude Code best practices** — for context budgeting and plan mode discipline
 
 What forge adds:
