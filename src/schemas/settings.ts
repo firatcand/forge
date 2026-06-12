@@ -155,6 +155,12 @@ const AgentsSchema = z
     // phases.yaml. Distinct from the per-decision_key respawn cap (max_attempts),
     // which is owned by FORGE-146.
     question_budget: QuestionBudgetSchema,
+    // FORGE-85: soft-rotation threshold for the append-only JSONL logs
+    // (events.jsonl, claim-history.jsonl). When a file's size reaches this many
+    // bytes BEFORE an append, the writer renames `<file>` → `<file>.1` (single
+    // generation, overwriting any prior `.1`) and starts fresh; readers merge
+    // `.1` + current. Default 10 MiB. See src/orchestrator/jsonl-rotate.ts.
+    log_rotate_max_bytes: z.number().int().positive().default(10_485_760),
   })
   // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
   // Runs BEFORE refinements so the refined object sees the promoted value.

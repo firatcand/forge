@@ -1679,6 +1679,115 @@ await test('updateIssueBody — VALIDATION on embedded forge footer in input bod
   assert.equal(issueCalled, false);
 });
 
+// ─── FORGE-118: withRetry sweep + claim-token CAS ────────────────────────────
+
+await test('setBlockedBy — retries on RATE_LIMITED then succeeds (FORGE-118)', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-1',
+    description: 'body\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  let issueCalls = 0;
+  const { tracker } = makeTracker({
+    issue: async () => {
+      issueCalls++;
+      if (issueCalls === 1) throw makeLinearRateLimitError();
+      return issue;
+    },
+    updateIssue: async () => issue,
+    createIssueRelation: async () => {},
+  });
+  await tracker.setBlockedBy('i1', 'blocker-uuid-1');
+  assert.equal(issueCalls, 2, 'first call rate-limited, retry succeeded');
+});
+
+await test('updateIssueBody — retries on RATE_LIMITED then succeeds (FORGE-118)', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-1',
+    description: 'old\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  let issueCalls = 0;
+  const { tracker } = makeTracker({
+    issue: async () => {
+      issueCalls++;
+      if (issueCalls === 1) throw makeLinearRateLimitError();
+      return issue;
+    },
+    updateIssue: async () => issue,
+  });
+  await tracker.updateIssueBody('i1', 'fresh body');
+  assert.equal(issueCalls, 2);
+});
+
+await test('updateIssueBody — expectedClaim refuses on mismatching forge:claim (CLAIM_MISMATCH)', async () => {
+  const issue = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-1',
+    description:
+      'body\n\n<!-- forge:task=P2-T03 -->\n' +
+      '<!-- forge:claim={"claim_id":"other","generation":1,"owner_run_id":"r0"} -->\n',
+  });
+  let updateCalled = false;
+  const { tracker } = makeTracker({
+    issue: async () => issue,
+    updateIssue: async () => {
+      updateCalled = true;
+      return issue;
+    },
+  });
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody('i1', 'new body', {
+        expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+      }),
+    (err: unknown) => err instanceof TrackerError && err.code === 'CLAIM_MISMATCH',
+  );
+  assert.equal(updateCalled, false, 'write refused — no updateIssue call');
+});
+
+await test('updateIssueBody — expectedClaim proceeds when footer matches or is absent', async () => {
+  // Matching claim → proceed.
+  const matching = makeIssue({
+    id: 'i1',
+    identifier: 'FORGE-1',
+    description:
+      'body\n\n<!-- forge:task=P2-T03 -->\n' +
+      '<!-- forge:claim={"claim_id":"mine","generation":2,"owner_run_id":"r1"} -->\n',
+  });
+  let updates = 0;
+  const m = makeTracker({
+    issue: async () => matching,
+    updateIssue: async () => {
+      updates++;
+      return matching;
+    },
+  });
+  await m.tracker.updateIssueBody('i1', 'new body', {
+    expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+  });
+  assert.equal(updates, 1, 'matching claim → write proceeds');
+
+  // Absent claim footer → proceed (fence is advisory).
+  const noFence = makeIssue({
+    id: 'i2',
+    identifier: 'FORGE-2',
+    description: 'body\n\n<!-- forge:task=P2-T03 -->\n',
+  });
+  let updates2 = 0;
+  const n = makeTracker({
+    issue: async () => noFence,
+    updateIssue: async () => {
+      updates2++;
+      return noFence;
+    },
+  });
+  await n.tracker.updateIssueBody('i2', 'new body', {
+    expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+  });
+  assert.equal(updates2, 1, 'absent fence → write proceeds');
+});
+
 // ─── setClaimFence (FORGE-167) ───────────────────────────────────────────────
 
 await test('setClaimFence — stamps forge:claim via RAW updateIssue, preserving forge:task', async () => {

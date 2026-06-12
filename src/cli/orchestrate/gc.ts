@@ -57,6 +57,7 @@ import type { Issue } from '../../trackers/types.ts';
 import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
 import { WorkspaceError } from '../../core/errors.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
 import { isValidTaskId } from '../../schemas/task-id.ts';
 
@@ -1154,6 +1155,7 @@ function executeRow(
       adminReleaseLeaseByIdentity({
         forgeDir,
         taskId: row.taskId,
+        logRotateMaxBytes: resolveLogRotateMaxBytes(forgeDir),
         expectedClaimId: row.payload.expectedClaimId,
         expectedGeneration: row.payload.expectedGeneration,
         expectedOwnerRunId: row.payload.expectedOwnerRunId,
@@ -1253,7 +1255,7 @@ function executeMarkTerminal(
   writeStateForGc(forgeDir, row.taskId, row.payload.targetState, caller, {
     current_attempt_id: null,
   });
-  release({ forgeDir, taskId: row.taskId, caller });
+  release({ forgeDir, taskId: row.taskId, caller, logRotateMaxBytes: resolveLogRotateMaxBytes(forgeDir) });
   out.write(
     `  ✓ row ${row.rowId} (${row.taskId}): marked ${row.payload.targetState} and released lease\n`,
   );
@@ -1267,7 +1269,7 @@ function executeMarkAbandoned(
 ): ExecuteOutcome {
   const caller = callerFromLeaseIdentity(row.payload.leaseIdentity);
   writeStateForGc(forgeDir, row.taskId, 'abandoned', caller);
-  release({ forgeDir, taskId: row.taskId, caller });
+  release({ forgeDir, taskId: row.taskId, caller, logRotateMaxBytes: resolveLogRotateMaxBytes(forgeDir) });
   out.write(
     `  ✓ row ${row.rowId} (${row.taskId}): marked abandoned and released expired lease\n`,
   );
@@ -1283,7 +1285,7 @@ function executeMarkUnclaimed(
   writeStateForGc(forgeDir, row.taskId, 'unclaimed', caller, {
     current_attempt_id: null,
   });
-  release({ forgeDir, taskId: row.taskId, caller });
+  release({ forgeDir, taskId: row.taskId, caller, logRotateMaxBytes: resolveLogRotateMaxBytes(forgeDir) });
   out.write(
     `  ✓ row ${row.rowId} (${row.taskId}): marked unclaimed (${row.payload.reason}) and released lease\n`,
   );

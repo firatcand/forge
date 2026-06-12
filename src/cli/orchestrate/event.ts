@@ -14,6 +14,7 @@ import { AttemptEventSchema, type AttemptEvent } from '../../schemas/attempt.ts'
 import { OrchestratorError } from '../../core/errors.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
@@ -69,6 +70,7 @@ export async function runOrchestrateEvent(args: EventArgs): Promise<{ exitCode: 
       taskId: opts.taskId,
       attemptId: opts.attemptId,
       caller: callerFromLease(lease),
+      logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
     });
   } catch (err) {
     return {

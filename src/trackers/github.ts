@@ -855,61 +855,71 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     const blockerNumberStr = String(blockerNumber);
     const number = this.parseIssueNumber(issueId);
 
-    let viewResult: GhExecResult;
-    try {
-      viewResult = await this.gh([
-        'issue',
-        'view',
-        String(number),
-        '--repo',
-        this.repo,
-        '--json',
-        'body',
-      ]);
-    } catch (err) {
-      throw this.normalizeError('setBlockedBy', err, classifyGitHubError(err));
-    }
+    // FORGE-118: wrap the view+edit legs in withRetry (model: getCurrentRevision
+    // 277–323) so a RATE_LIMITED/TRANSPORT/TIMEOUT on either gh call retries
+    // with backoff. View-parse-edit is idempotent (footer dedup), so a retry
+    // from any point is safe.
+    return this.withRetry(
+      'setBlockedBy',
+      async () => {
+        let viewResult: GhExecResult;
+        try {
+          viewResult = await this.gh([
+            'issue',
+            'view',
+            String(number),
+            '--repo',
+            this.repo,
+            '--json',
+            'body',
+          ]);
+        } catch (err) {
+          throw this.normalizeError('setBlockedBy', err, classifyGitHubError(err));
+        }
 
-    let body: string;
-    try {
-      const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
-      body = parsed.body ?? '';
-    } catch (err) {
-      throw this.normalizeError('setBlockedBy', err, {
-        code: 'VALIDATION',
-        details: { reason: 'view-parse-failed' },
-      });
-    }
+        let body: string;
+        try {
+          const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
+          body = parsed.body ?? '';
+        } catch (err) {
+          throw this.normalizeError('setBlockedBy', err, {
+            code: 'VALIDATION',
+            details: { reason: 'view-parse-failed' },
+          });
+        }
 
-    const { forgeTaskId, blockerIds } = parseForgeFooters(body);
-    if (forgeTaskId === undefined) {
-      throw new TrackerError(
-        'PRECONDITION_FAILED',
-        `setBlockedBy: issue #${number} has no forge:task footer; was it created outside of forge?`,
-        { issueId, number },
-      );
-    }
+        const { forgeTaskId, blockerIds } = parseForgeFooters(body);
+        if (forgeTaskId === undefined) {
+          throw new TrackerError(
+            'PRECONDITION_FAILED',
+            `setBlockedBy: issue #${number} has no forge:task footer; was it created outside of forge?`,
+            { issueId, number },
+          );
+        }
 
-    if (blockerIds.includes(blockerNumberStr)) return; // dedup
+        if (blockerIds.includes(blockerNumberStr)) return; // dedup
 
-    const newBody = serializeWithForgeFooters(body, forgeTaskId, [
-      ...blockerIds,
-      blockerNumberStr,
-    ]);
+        const newBody = serializeWithForgeFooters(body, forgeTaskId, [
+          ...blockerIds,
+          blockerNumberStr,
+        ]);
 
-    try {
-      await this.gh([
-        'issue',
-        'edit',
-        String(number),
-        '--repo',
-        this.repo,
-        '--body',
-        newBody,
-      ]);
-    } catch (err) {
-      throw this.normalizeError('setBlockedBy', err, classifyGitHubError(err));
-    }
+        try {
+          await this.gh([
+            'issue',
+            'edit',
+            String(number),
+            '--repo',
+            this.repo,
+            '--body',
+            newBody,
+          ]);
+        } catch (err) {
+          throw this.normalizeError('setBlockedBy', err, classifyGitHubError(err));
+        }
+      },
+      this.retryOpts,
+    );
   }
 
   // ─── updateIssueBody — body-footer rewrite (FORGE-94) ──────────────────────
@@ -917,75 +927,109 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
   // Replaces issue body wholesale while preserving forge:task + forge:blockedBy
   // footers. Mirror of setBlockedBy's view-parse-edit loop, except the *body*
   // is the input and *blockerIds* are read-through.
-  async updateIssueBody(issueId: string, body: string): Promise<void> {
+  async updateIssueBody(
+    issueId: string,
+    body: string,
+    opts?: { expectedClaim?: ClaimFenceData },
+  ): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     assertValidBodyInput(body, GH_ISSUE_BODY_MAX_BYTES);
     const number = this.parseIssueNumber(issueId);
 
-    let viewResult: GhExecResult;
-    try {
-      viewResult = await this.gh([
-        'issue',
-        'view',
-        String(number),
-        '--repo',
-        this.repo,
-        '--json',
-        'body',
-      ]);
-    } catch (err) {
-      throw this.normalizeError(
-        'updateIssueBody',
-        err,
-        classifyGitHubError(err),
-      );
-    }
+    // FORGE-118: wrap the view+edit legs in withRetry (model: getCurrentRevision
+    // 277–323). View-parse-edit is idempotent (body replaced wholesale), so a
+    // retry from any point is safe.
+    return this.withRetry(
+      'updateIssueBody',
+      async () => {
+        let viewResult: GhExecResult;
+        try {
+          viewResult = await this.gh([
+            'issue',
+            'view',
+            String(number),
+            '--repo',
+            this.repo,
+            '--json',
+            'body',
+          ]);
+        } catch (err) {
+          throw this.normalizeError(
+            'updateIssueBody',
+            err,
+            classifyGitHubError(err),
+          );
+        }
 
-    let existing: string;
-    try {
-      const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
-      existing = parsed.body ?? '';
-    } catch (err) {
-      throw this.normalizeError('updateIssueBody', err, {
-        code: 'VALIDATION',
-        details: { reason: 'view-parse-failed' },
-      });
-    }
+        let existing: string;
+        try {
+          const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
+          existing = parsed.body ?? '';
+        } catch (err) {
+          throw this.normalizeError('updateIssueBody', err, {
+            code: 'VALIDATION',
+            details: { reason: 'view-parse-failed' },
+          });
+        }
 
-    const { forgeTaskId, blockerIds } = parseForgeFooters(existing);
-    if (forgeTaskId === undefined) {
-      throw new TrackerError(
-        'PRECONDITION_FAILED',
-        `updateIssueBody: issue #${number} has no forge:task footer; was it created outside of forge?`,
-        { issueId, number },
-      );
-    }
-    const extraFooters = parseExtraForgeFooters(existing);
+        const { forgeTaskId, blockerIds } = parseForgeFooters(existing);
+        if (forgeTaskId === undefined) {
+          throw new TrackerError(
+            'PRECONDITION_FAILED',
+            `updateIssueBody: issue #${number} has no forge:task footer; was it created outside of forge?`,
+            { issueId, number },
+          );
+        }
 
-    const newBody = serializeWithForgeFooters(
-      body,
-      forgeTaskId,
-      blockerIds,
-      extraFooters,
+        // FORGE-118 claim-token CAS (advisory). When the caller passes
+        // expectedClaim, refuse the write if the fresh-read body carries a
+        // forge:claim footer with a DIFFERENT claimId. CLAIM_MISMATCH is
+        // non-retriable (errors.ts), so withRetry never re-runs the refusal.
+        if (opts?.expectedClaim !== undefined) {
+          const current = parseClaimFooter(existing);
+          if (current !== null && current.claimId !== opts.expectedClaim.claimId) {
+            throw new TrackerError(
+              'CLAIM_MISMATCH',
+              `updateIssueBody: issue #${number} is claimed by a different run (expected ${opts.expectedClaim.claimId}, found ${current.claimId})`,
+              {
+                issueId,
+                number,
+                expectedClaimId: opts.expectedClaim.claimId,
+                foundClaimId: current.claimId,
+              },
+            );
+          }
+        }
+
+        const extraFooters = parseExtraForgeFooters(existing);
+
+        const newBody = serializeWithForgeFooters(
+          body,
+          forgeTaskId,
+          blockerIds,
+          extraFooters,
+        );
+
+        try {
+          await this.gh([
+            'issue',
+            'edit',
+            String(number),
+            '--repo',
+            this.repo,
+            '--body',
+            newBody,
+          ]);
+        } catch (err) {
+          throw this.normalizeError(
+            'updateIssueBody',
+            err,
+            classifyGitHubError(err),
+          );
+        }
+      },
+      this.retryOpts,
     );
-
-    try {
-      await this.gh([
-        'issue',
-        'edit',
-        String(number),
-        '--repo',
-        this.repo,
-        '--body',
-        newBody,
-      ]);
-    } catch (err) {
-      throw this.normalizeError(
-        'updateIssueBody',
-        err,
-        classifyGitHubError(err),
-      );
-    }
   }
 
   // ─── setClaimFence — forge:claim footer write (FORGE-167) ──────────────────
@@ -1002,47 +1046,57 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     this.assertNonEmpty(issueId, 'issueId');
     const number = this.parseIssueNumber(issueId);
 
-    let viewResult: GhExecResult;
-    try {
-      viewResult = await this.gh([
-        'issue',
-        'view',
-        String(number),
-        '--repo',
-        this.repo,
-        '--json',
-        'body',
-      ]);
-    } catch (err) {
-      throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
-    }
+    // FORGE-118: wrap view+edit in withRetry to match Linear.setClaimFence
+    // (1183–1208) — the scout-found inconsistency was that GitHub.setClaimFence
+    // alone lacked it. View-parse-edit is idempotent (upsertClaimFooter
+    // read-modify-writes the LATEST body), so a retry from any point is safe.
+    return this.withRetry(
+      'setClaimFence',
+      async () => {
+        let viewResult: GhExecResult;
+        try {
+          viewResult = await this.gh([
+            'issue',
+            'view',
+            String(number),
+            '--repo',
+            this.repo,
+            '--json',
+            'body',
+          ]);
+        } catch (err) {
+          throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
+        }
 
-    let existing: string;
-    try {
-      const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
-      existing = parsed.body ?? '';
-    } catch (err) {
-      throw this.normalizeError('setClaimFence', err, {
-        code: 'VALIDATION',
-        details: { reason: 'view-parse-failed' },
-      });
-    }
+        let existing: string;
+        try {
+          const parsed = GhIssueBodyOnlySchema.parse(JSON.parse(viewResult.stdout));
+          existing = parsed.body ?? '';
+        } catch (err) {
+          throw this.normalizeError('setClaimFence', err, {
+            code: 'VALIDATION',
+            details: { reason: 'view-parse-failed' },
+          });
+        }
 
-    const newBody = upsertClaimFooter(existing, data);
+        const newBody = upsertClaimFooter(existing, data);
 
-    try {
-      await this.gh([
-        'issue',
-        'edit',
-        String(number),
-        '--repo',
-        this.repo,
-        '--body',
-        newBody,
-      ]);
-    } catch (err) {
-      throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
-    }
+        try {
+          await this.gh([
+            'issue',
+            'edit',
+            String(number),
+            '--repo',
+            this.repo,
+            '--body',
+            newBody,
+          ]);
+        } catch (err) {
+          throw this.normalizeError('setClaimFence', err, classifyGitHubError(err));
+        }
+      },
+      this.retryOpts,
+    );
   }
 
   // ─── helpers ───────────────────────────────────────────────────────────────

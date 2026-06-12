@@ -18,6 +18,7 @@ import { OrchestratorError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import {
   resolveTrackerForCLI,
   type ClaimableTracker,
@@ -112,6 +113,7 @@ export async function runOrchestrateCancel(
           taskId: opts.taskId,
           attemptId: state.current_attempt_id,
           caller: callerFromLease(lease),
+          logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
         },
       );
     } catch {
@@ -155,6 +157,7 @@ export async function runOrchestrateCancel(
       forgeDir: opts.forgeDir,
       taskId: opts.taskId,
       caller: callerFromLease(lease),
+      logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
     });
   } catch {
     // Best-effort lease release; state is already cancelled which is the source of truth.

@@ -20,6 +20,9 @@ import {
   mkdirSync as _mkdirSync,
   openSync as _openSync,
   readFileSync as _readFileSync,
+  renameSync as _renameSync,
+  statSync as _statSync,
+  unlinkSync as _unlinkSync,
   writeSync as _writeSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
@@ -28,13 +31,22 @@ import { AttemptEventSchema, type AttemptEvent } from '../schemas/attempt.ts';
 import { eventsFilePath, validateIdSegment } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
 import { assertLeaseOwnership, type CallerIdentity } from './leases.ts';
+import {
+  LOG_ROTATE_MAX_BYTES_DEFAULT,
+  rotateIfNeeded,
+} from './jsonl-rotate.ts';
 
-// Test seam — same pattern as writer.ts and leases.ts.
+// Test seam — same pattern as writer.ts and leases.ts. statSync/renameSync/
+// unlinkSync added for FORGE-85 rotation (threaded into rotateIfNeeded so a
+// mocked seam exercises rotation too).
 export const __eventsFsForTesting = {
   closeSync: _closeSync,
   mkdirSync: _mkdirSync,
   openSync: _openSync,
   readFileSync: _readFileSync,
+  renameSync: _renameSync,
+  statSync: _statSync,
+  unlinkSync: _unlinkSync,
   writeSync: _writeSync,
 };
 const fs = __eventsFsForTesting;
@@ -57,6 +69,10 @@ export interface AppendAttemptEventOptions {
   attemptId: string;
   // B2: caller identity required — ownership must be validated before any mutation.
   caller: CallerIdentity;
+  // FORGE-85: soft-rotation threshold in bytes. Deep orchestrator code has no
+  // settings access, so callers pass the resolved value; absent → schema
+  // default (LOG_ROTATE_MAX_BYTES_DEFAULT).
+  logRotateMaxBytes?: number;
 }
 
 export function appendAttemptEvent(
@@ -99,6 +115,24 @@ export function appendAttemptEvent(
 
   const line = JSON.stringify(validation.data) + '\n';
   const buf = Buffer.from(line, 'utf8');
+
+  // FORGE-85: soft-rotate BEFORE the append. Rotation errors SURFACE (like this
+  // writer's other IO errors) — events.jsonl is a durable audit log and a
+  // silently-dropped rotation could grow it unbounded. rotateIfNeeded is a
+  // no-op when the file is absent, below threshold, or the lock is contended.
+  try {
+    rotateIfNeeded(
+      targetPath,
+      opts.logRotateMaxBytes ?? LOG_ROTATE_MAX_BYTES_DEFAULT,
+      fs,
+    );
+  } catch (err) {
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to rotate events.jsonl at ${targetPath}`,
+      { taskId, attemptId, path: targetPath, cause: err },
+    );
+  }
 
   // openSync with 'a' — atomic append flag. Each call is wrapped independently.
   let fd: number;
@@ -186,30 +220,34 @@ export function readAttemptEvents(
 
   const targetPath = eventsFilePath(forgeDir, taskId, attemptId);
 
-  let raw: string;
-  try {
-    raw = fs.readFileSync(targetPath, 'utf8');
-  } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      return [];
+  // FORGE-85: merge the rotated generation with the current file. Read `.1`
+  // FIRST (older events) then `<file>` (newer), concatenated in chronological
+  // order so a rotation that just happened doesn't drop the older half.
+  const readOne = (path: string): string | null => {
+    try {
+      return fs.readFileSync(path, 'utf8');
+    } catch (err) {
+      if (isNodeFsError(err) && err.code === 'ENOENT') return null;
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to read events.jsonl at ${path}`,
+        { taskId, attemptId, path, cause: err },
+      );
     }
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to read events.jsonl at ${targetPath}`,
-      { taskId, attemptId, path: targetPath, cause: err },
-    );
-  }
+  };
 
-  // Split on newlines. A partial trailing line (no trailing \n) is silently
-  // skipped — the writer's writeSync loop guarantees complete line writes
-  // but a crash mid-write can leave a partial line.
-  const lines = raw.split('\n');
   const results: ParsedEventLine[] = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === '') continue; // skip empty lines including the final \n-generated empty entry
-    results.push(tryParseEventLine(trimmed));
+  for (const path of [`${targetPath}.1`, targetPath]) {
+    const raw = readOne(path);
+    if (raw === null) continue;
+    // Split on newlines. A partial trailing line (no trailing \n) is silently
+    // skipped — the writer's writeSync loop guarantees complete line writes
+    // but a crash mid-write can leave a partial line.
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed === '') continue; // skip empty / final-\n-generated entry
+      results.push(tryParseEventLine(trimmed));
+    }
   }
 
   return results;

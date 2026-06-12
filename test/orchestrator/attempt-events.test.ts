@@ -1,6 +1,13 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  statSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -211,4 +218,65 @@ test('attempt-events: tryParseEventLine returns ok:true for valid event', () => 
   if (result.ok) {
     assert.equal(result.event.type, 'heartbeat');
   }
+});
+
+// ---- FORGE-85: soft rotation (events.jsonl) ----
+
+test('attempt-events: rotation triggers at threshold; reader merges .1 + current', () => {
+  const fd = forgeDir('ae-rotate');
+  const caller = acquireLease(fd, 'TASK-AER');
+  // Tiny threshold so the first append's accumulated size triggers rotation
+  // on the SECOND append.
+  const opts = {
+    forgeDir: fd,
+    taskId: 'TASK-AER',
+    attemptId: 'att-1',
+    caller,
+    logRotateMaxBytes: 1,
+  };
+  appendAttemptEvent(startedEvent(), opts); // file now > 1 byte
+  const evPath = eventsFilePath(fd, 'TASK-AER', 'att-1');
+  assert.equal(existsSync(`${evPath}.1`), false, 'no rotation before threshold check');
+  appendAttemptEvent(heartbeatEvent(), opts); // pre-append size >= 1 → rotate
+  assert.equal(existsSync(`${evPath}.1`), true, 'rotated: .1 created');
+
+  // Reader merges the rotated (older) + current (newer), in chronological order.
+  const events = readAttemptEvents(opts);
+  assert.equal(events.length, 2, 'both generations merged');
+  assert.ok(events[0].ok && events[0].event.type === 'attempt_started');
+  assert.ok(events[1].ok && events[1].event.type === 'heartbeat');
+});
+
+test('attempt-events: single generation — second rotation overwrites .1', () => {
+  const fd = forgeDir('ae-rotate-single');
+  const caller = acquireLease(fd, 'TASK-AES');
+  const opts = {
+    forgeDir: fd,
+    taskId: 'TASK-AES',
+    attemptId: 'att-1',
+    caller,
+    logRotateMaxBytes: 1,
+  };
+  appendAttemptEvent(startedEvent(), opts);
+  appendAttemptEvent(heartbeatEvent(), opts); // rotation #1
+  appendAttemptEvent(
+    { type: 'attempt_completed', ts: TS, verdict: 'ready_for_review' },
+    opts,
+  ); // rotation #2 — .1 overwritten
+  const evPath = eventsFilePath(fd, 'TASK-AES', 'att-1');
+  assert.equal(existsSync(`${evPath}.1`), true);
+  // Merge yields exactly the last two events (the first generation is gone).
+  const events = readAttemptEvents(opts);
+  assert.equal(events.length, 2, 'single generation: oldest dropped');
+});
+
+test('attempt-events: large default threshold does not rotate normal traffic', () => {
+  const fd = forgeDir('ae-no-rotate');
+  const caller = acquireLease(fd, 'TASK-AEN');
+  const opts = { forgeDir: fd, taskId: 'TASK-AEN', attemptId: 'att-1', caller };
+  appendAttemptEvent(startedEvent(), opts);
+  appendAttemptEvent(heartbeatEvent(), opts);
+  const evPath = eventsFilePath(fd, 'TASK-AEN', 'att-1');
+  assert.equal(existsSync(`${evPath}.1`), false, 'no rotation under 10 MiB default');
+  assert.ok(statSync(evPath).size > 0);
 });

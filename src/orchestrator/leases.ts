@@ -26,6 +26,7 @@ import {
   openSync as _openSync,
   readFileSync as _readFileSync,
   renameSync as _renameSync,
+  statSync as _statSync,
   unlinkSync as _unlinkSync,
   writeSync as _writeSync,
   linkSync as _linkSync,
@@ -57,6 +58,10 @@ import {
   computeSpecRevisionSync,
   type SpecRevisionResult,
 } from './spec-diff.ts';
+import {
+  LOG_ROTATE_MAX_BYTES_DEFAULT,
+  rotateIfNeeded,
+} from './jsonl-rotate.ts';
 
 // Test seam — same pattern as writer.ts.
 export const __leasesFsForTesting = {
@@ -66,6 +71,7 @@ export const __leasesFsForTesting = {
   openSync: _openSync,
   readFileSync: _readFileSync,
   renameSync: _renameSync,
+  statSync: _statSync,
   unlinkSync: _unlinkSync,
   writeSync: _writeSync,
   linkSync: _linkSync,
@@ -294,47 +300,86 @@ function readLeaseFile(taskId: string, leasePath: string): Lease | null {
 // - File exists, non-empty, but zero parseable lines: throw CLAIM_HISTORY_CORRUPT.
 //   Caller (acquire) must NOT silently re-use generation 0, as that would re-introduce B3.
 // - Non-ENOENT read error: throw IO_ERROR.
-function readLastClaimHistoryEntry(
-  forgeDir: string,
+// Outcome of scanning ONE history file for its last parseable generation.
+type HistoryScan =
+  | { kind: 'found'; generation: number }
+  | { kind: 'absent' } // ENOENT
+  | { kind: 'empty' } // file exists, 0 parseable-eligible lines
+  | { kind: 'unparseable' }; // non-empty, but no parseable entry
+
+// Read + scan a single claim-history file. Throws IO_ERROR on a non-ENOENT
+// read failure; otherwise classifies the outcome for the caller's fallback.
+function scanClaimHistoryFile(
+  path: string,
   taskId: string,
-): { generation: number } | null {
-  const historyPath = claimHistoryFilePath(forgeDir, taskId);
+): HistoryScan {
   let raw: string;
   try {
-    raw = fs.readFileSync(historyPath, 'utf8');
+    raw = fs.readFileSync(path, 'utf8');
   } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      return null; // no history yet
-    }
+    if (isNodeFsError(err) && err.code === 'ENOENT') return { kind: 'absent' };
     throw new OrchestratorError(
       'IO_ERROR',
       `Failed to read claim-history.jsonl for task ${taskId}`,
-      { taskId, path: historyPath, cause: err },
+      { taskId, path, cause: err },
     );
   }
 
   const lines = raw.split('\n').filter((l) => l.trim() !== '');
-  if (lines.length === 0) return null; // empty file — legitimate
+  if (lines.length === 0) return { kind: 'empty' };
 
-  // Walk backwards to find the last parseable line.
   for (let i = lines.length - 1; i >= 0; i--) {
     try {
       const entry = JSON.parse(lines[i]);
-      if (typeof entry.generation === 'number' && Number.isInteger(entry.generation)) {
-        return { generation: entry.generation };
+      if (
+        typeof entry.generation === 'number' &&
+        Number.isInteger(entry.generation)
+      ) {
+        return { kind: 'found', generation: entry.generation };
       }
     } catch {
       // skip malformed lines
     }
   }
+  return { kind: 'unparseable' };
+}
 
-  // File is non-empty but contains no parseable entries. This is corruption —
-  // do NOT return null (which would silently reset generation to 0 and re-introduce B3).
-  throw new OrchestratorError(
-    'CLAIM_HISTORY_CORRUPT',
-    `claim-history.jsonl for task ${taskId} is non-empty but contains no parseable entries`,
-    { taskId, path: historyPath, detail: 'no parseable entries in non-empty history file' },
-  );
+function readLastClaimHistoryEntry(
+  forgeDir: string,
+  taskId: string,
+): { generation: number } | null {
+  const historyPath = claimHistoryFilePath(forgeDir, taskId);
+
+  // FORGE-85: generation continuity across rotation is the correctness case.
+  // Scan the CURRENT file first; if it is ENOENT, EMPTY, or has no parseable
+  // entry, fall back to the rotated `.1` (the last generation may live there
+  // when a rotation just happened). A non-perfect snapshot is acceptable: a
+  // rotation racing between the two reads still yields *a* generation, never a
+  // RESET (which would re-introduce B3).
+  const current = scanClaimHistoryFile(historyPath, taskId);
+  if (current.kind === 'found') return { generation: current.generation };
+
+  // Current is absent/empty/unparseable — consult the rotated generation.
+  const rotated = scanClaimHistoryFile(`${historyPath}.1`, taskId);
+  if (rotated.kind === 'found') return { generation: rotated.generation };
+
+  // Neither file has a parseable entry.
+  // - Both absent/empty → no history yet (legitimate; generation starts at 0).
+  // - Either file non-empty with no parseable entry → corruption: do NOT
+  //   return null (that would silently reset generation to 0 and re-introduce
+  //   B3).
+  if (current.kind === 'unparseable' || rotated.kind === 'unparseable') {
+    throw new OrchestratorError(
+      'CLAIM_HISTORY_CORRUPT',
+      `claim-history.jsonl for task ${taskId} is non-empty but contains no parseable entries`,
+      {
+        taskId,
+        path: historyPath,
+        detail: 'no parseable entries in non-empty history file (current or .1)',
+      },
+    );
+  }
+  return null;
 }
 
 // ---- Append to claim-history.jsonl (best-effort) ----
@@ -343,10 +388,22 @@ function appendClaimHistory(
   forgeDir: string,
   taskId: string,
   entry: Record<string, unknown>,
+  // FORGE-85: soft-rotation threshold. These deep call sites have no settings
+  // access, so the schema default is the fallback (plan: wiring stays minimal).
+  logRotateMaxBytes: number = LOG_ROTATE_MAX_BYTES_DEFAULT,
 ): void {
   const historyPath = claimHistoryFilePath(forgeDir, taskId);
   const line = JSON.stringify(entry) + '\n';
   const buf = Buffer.from(line, 'utf8');
+
+  // FORGE-85: soft-rotate BEFORE the append. STAYS BEST-EFFORT — a rotation
+  // failure is swallowed exactly like this writer's write failures, so it never
+  // fails the claim. (Contrast appendAttemptEvent, which surfaces.)
+  try {
+    rotateIfNeeded(historyPath, logRotateMaxBytes, fs);
+  } catch {
+    // best-effort: rotation failure must not fail the claim
+  }
 
   let fd: number;
   try {
@@ -490,6 +547,9 @@ export interface AcquireOptions {
   // already computed the revision asynchronously, or for deterministic tests.
   specRevision?: SpecRevisionResult;
   repoRoot?: string;
+  // FORGE-118: soft-rotation threshold for claim-history.jsonl, sourced from
+  // agents.log_rotate_max_bytes by the CLI caller. Omitted → schema default.
+  logRotateMaxBytes?: number;
 }
 
 export function acquire(opts: AcquireOptions): Lease {
@@ -565,13 +625,18 @@ export function acquire(opts: AcquireOptions): Lease {
     bestEffortUnlink(tmpPath);
   }
 
-  appendClaimHistory(forgeDir, taskId, {
-    event: 'acquired',
-    ts: new Date().toISOString(),
-    claim_id: lease.claim_id,
-    run_id: runId,
-    generation: lease.generation,
-  });
+  appendClaimHistory(
+    forgeDir,
+    taskId,
+    {
+      event: 'acquired',
+      ts: new Date().toISOString(),
+      claim_id: lease.claim_id,
+      run_id: runId,
+      generation: lease.generation,
+    },
+    opts.logRotateMaxBytes,
+  );
 
   return validation.data;
 }
@@ -745,6 +810,8 @@ export interface StealOptions {
   // Pre-computed SPEC revision marker for the new claim. See AcquireOptions.specRevision.
   specRevision?: SpecRevisionResult;
   repoRoot?: string;
+  // FORGE-118: soft-rotation threshold for claim-history.jsonl. See AcquireOptions.
+  logRotateMaxBytes?: number;
 }
 
 export function steal(opts: StealOptions): Lease {
@@ -871,15 +938,20 @@ export function steal(opts: StealOptions): Lease {
   // If this write fails, gc reconciles on next sweep.
   writeStateUnclaimed(forgeDir, taskId, validation.data);
 
-  appendClaimHistory(forgeDir, taskId, {
-    event: 'stolen',
-    ts: new Date(now).toISOString(),
-    claim_id: validation.data.claim_id,
-    run_id: runId,
-    generation: newGeneration,
-    from_generation: existing.generation,
-    from_claim_id: existing.claim_id,
-  });
+  appendClaimHistory(
+    forgeDir,
+    taskId,
+    {
+      event: 'stolen',
+      ts: new Date(now).toISOString(),
+      claim_id: validation.data.claim_id,
+      run_id: runId,
+      generation: newGeneration,
+      from_generation: existing.generation,
+      from_claim_id: existing.claim_id,
+    },
+    opts.logRotateMaxBytes,
+  );
 
   return validation.data;
 }
@@ -888,6 +960,8 @@ export interface ReleaseOptions {
   forgeDir: string;
   taskId: string;
   caller: CallerIdentity;
+  // FORGE-118: soft-rotation threshold for claim-history.jsonl. See AcquireOptions.
+  logRotateMaxBytes?: number;
 }
 
 export function release(opts: ReleaseOptions): void {
@@ -913,13 +987,18 @@ export function release(opts: ReleaseOptions): void {
     );
   }
 
-  appendClaimHistory(forgeDir, taskId, {
-    event: 'released',
-    ts: new Date().toISOString(),
-    claim_id: caller.claim_id,
-    run_id: caller.run_id,
-    generation: caller.generation,
-  });
+  appendClaimHistory(
+    forgeDir,
+    taskId,
+    {
+      event: 'released',
+      ts: new Date().toISOString(),
+      claim_id: caller.claim_id,
+      run_id: caller.run_id,
+      generation: caller.generation,
+    },
+    opts.logRotateMaxBytes,
+  );
 }
 
 // ---- adminReleaseLeaseByIdentity (gc-only — identity-gated, NOT ownership-bypassing) ----
@@ -966,6 +1045,8 @@ export interface AdminReleaseByIdentityOptions {
   // window. (Codex 3rd-pass BLOCK 1.)
   requireTerminalState: boolean;
   reason: AdminReleaseReason;
+  // FORGE-118: soft-rotation threshold for claim-history.jsonl. See AcquireOptions.
+  logRotateMaxBytes?: number;
 }
 
 export function adminReleaseLeaseByIdentity(
@@ -1165,15 +1246,20 @@ export function adminReleaseLeaseByIdentity(
   // 6. Record the admin release in claim-history.jsonl with the reason. This
   //    is the audit trail — any unexpected admin_released event in a production
   //    run is a bug to investigate.
-  appendClaimHistory(forgeDir, taskId, {
-    event: 'admin_released',
-    ts: new Date().toISOString(),
-    claim_id: opts.expectedClaimId,
-    run_id: opts.expectedOwnerRunId,
-    generation: opts.expectedGeneration,
-    reason,
-    path: expectedPath,
-  });
+  appendClaimHistory(
+    forgeDir,
+    taskId,
+    {
+      event: 'admin_released',
+      ts: new Date().toISOString(),
+      claim_id: opts.expectedClaimId,
+      run_id: opts.expectedOwnerRunId,
+      generation: opts.expectedGeneration,
+      reason,
+      path: expectedPath,
+    },
+    opts.logRotateMaxBytes,
+  );
 }
 
 function isTerminalTaskState(state: string): state is TerminalTaskState {

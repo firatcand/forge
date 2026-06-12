@@ -19,6 +19,7 @@ import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
@@ -132,6 +133,7 @@ export async function runOrchestrateHeartbeat(
         taskId: opts.taskId,
         attemptId: opts.attemptId,
         caller: callerFromLease(renewed),
+        logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
       },
     );
   } catch {

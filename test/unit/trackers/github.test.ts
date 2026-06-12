@@ -1019,6 +1019,87 @@ test('setClaimFence PRECONDITION_FAILED when no forge:task footer (no edit issue
   assert.equal(mock.calls.length, 1, 'view only; no edit after precondition');
 });
 
+// ─── FORGE-118: withRetry sweep + claim-token CAS (GitHub adapter) ────────────
+
+const ghRateLimit = (): Error =>
+  makeExecaError({
+    stderr: 'API rate limit exceeded\nRetry-After: 1',
+    exitCode: 1,
+  });
+
+test('setBlockedBy — retries on RATE_LIMITED then succeeds (FORGE-118)', async () => {
+  // First view rate-limited; retry views, then edits.
+  const { tracker, mock } = makeTracker([
+    ghRateLimit(),
+    ok(ghIssueViewBodyOnly),
+    ok(),
+  ]);
+  await tracker.setBlockedBy('42', '11');
+  assert.equal(mock.calls.length, 3, 'view(rl) → view → edit');
+});
+
+test('updateIssueBody — retries on RATE_LIMITED then succeeds (FORGE-118)', async () => {
+  const { tracker, mock } = makeTracker([
+    ghRateLimit(),
+    ok(ghIssueViewBodyOnly),
+    ok(),
+  ]);
+  await tracker.updateIssueBody('42', 'fresh body');
+  assert.equal(mock.calls.length, 3);
+});
+
+test('setClaimFence — retries on RATE_LIMITED then succeeds (FORGE-118; parity with Linear)', async () => {
+  const { tracker, mock } = makeTracker([
+    ghRateLimit(),
+    ok(ghIssueViewBodyOnly),
+    ok(),
+  ]);
+  await tracker.setClaimFence('42', {
+    claimId: 'c-1',
+    generation: 2,
+    ownerRunId: 'run-1',
+  });
+  assert.equal(mock.calls.length, 3, 'setClaimFence now has withRetry');
+});
+
+test('updateIssueBody — expectedClaim refuses on mismatching forge:claim (CLAIM_MISMATCH, no edit)', async () => {
+  const bodyWithOtherClaim = {
+    body:
+      'b\n\n<!-- forge:task=FORGE-9 -->\n' +
+      '<!-- forge:claim={"claim_id":"other","generation":1,"owner_run_id":"r0"} -->\n',
+  };
+  const { tracker, mock } = makeTracker([ok(bodyWithOtherClaim)]);
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody('42', 'new body', {
+        expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+      }),
+    (e: unknown) => e instanceof TrackerError && e.code === 'CLAIM_MISMATCH',
+  );
+  assert.equal(mock.calls.length, 1, 'view only; refused before edit');
+});
+
+test('updateIssueBody — expectedClaim proceeds when footer matches or is absent', async () => {
+  // matching claim
+  const matching = {
+    body:
+      'b\n\n<!-- forge:task=FORGE-9 -->\n' +
+      '<!-- forge:claim={"claim_id":"mine","generation":2,"owner_run_id":"r1"} -->\n',
+  };
+  const m = makeTracker([ok(matching), ok()]);
+  await m.tracker.updateIssueBody('42', 'new body', {
+    expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+  });
+  assert.equal(m.mock.calls.length, 2, 'matching → view + edit');
+
+  // absent fence
+  const n = makeTracker([ok(ghIssueViewBodyOnly), ok()]);
+  await n.tracker.updateIssueBody('42', 'new body', {
+    expectedClaim: { claimId: 'mine', generation: 2, ownerRunId: 'r1' },
+  });
+  assert.equal(n.mock.calls.length, 2, 'absent fence → view + edit');
+});
+
 test('setBlockedBy preserves unknown forge:* footers (ownerType)', async () => {
   const bodyWithOwnerType = {
     body:

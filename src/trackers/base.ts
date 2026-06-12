@@ -50,13 +50,30 @@ export interface Tracker {
   // comments — the adapter appends and rewrites those. Adapters reject such
   // input with TrackerError('VALIDATION') (see assertValidBodyInput).
   //
-  // Concurrency: no CAS. Caller must hold the issue's claim — concurrent
+  // Concurrency: no hard CAS. Caller must hold the issue's claim — concurrent
   // updateIssueBody calls clobber each other and can drop concurrently-added
   // blocker footers. Used by /reconcile --push and /apply-decision, which
   // run single-writer per project.
   //
+  // FORGE-118 — optional advisory claim-token CAS: pass
+  // `opts.expectedClaim` to make the adapter parse the fresh-read body's
+  // forge:claim footer and REFUSE (TrackerError 'CLAIM_MISMATCH') when a
+  // footer exists with a DIFFERENT claimId (footer absent or matching →
+  // proceed). The fence is advisory — the authority for lease ownership stays
+  // the generation-fenced local lease. NOTE: no caller wires expectedClaim in
+  // this batch; the documented single-writer contract still stands. The
+  // mechanism + tests land now so a future caller can opt in.
+  // Linear + GitHub implement the real check (footer-based). Notion does NOT
+  // use footers (metadata lives in page properties) — it accepts the param in
+  // its signature but THROWS a typed NOT_IMPLEMENTED TrackerError when
+  // expectedClaim is actually provided (honest failure, no silent ignore).
+  //
   // Added 2026-05-17 for /apply-decision + /reconcile propagation (FORGE-94).
-  updateIssueBody(issueId: string, body: string): Promise<void>;
+  updateIssueBody(
+    issueId: string,
+    body: string,
+    opts?: { expectedClaim?: ClaimFenceData },
+  ): Promise<void>;
 
   // Mirror the local lease identity onto the tracker issue as a `forge:claim`
   // body footer (read-modify-write the LATEST body via upsertClaimFooter, then a
@@ -136,7 +153,11 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   abstract releaseClaim(issueId: string, runId: string): Promise<void>;
   abstract updateState(issueId: string, state: IssueState): Promise<void>;
   abstract comment(issueId: string, body: string): Promise<void>;
-  abstract updateIssueBody(issueId: string, body: string): Promise<void>;
+  abstract updateIssueBody(
+    issueId: string,
+    body: string,
+    opts?: { expectedClaim?: ClaimFenceData },
+  ): Promise<void>;
   abstract setClaimFence(
     issueId: string,
     data: ClaimFenceData | null,

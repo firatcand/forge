@@ -22,6 +22,7 @@ import type { Lease } from '../../schemas/lease.ts';
 import type { TaskStateRecord } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
@@ -150,6 +151,7 @@ export async function runOrchestrateDispatch(
         taskId: opts.taskId,
         attemptId,
         caller: callerFromLease(lease),
+        logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
       },
     );
   } catch (err) {

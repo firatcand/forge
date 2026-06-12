@@ -8,6 +8,11 @@ export type TrackerErrorCode =
   | 'TRANSPORT'
   | 'TIMEOUT'
   | 'NOT_IMPLEMENTED'
+  // FORGE-118: advisory claim-token CAS mismatch on updateIssueBody — the
+  // fresh-read body's forge:claim footer belongs to a different run. NOT in
+  // RETRIABLE_CODES (TrackerError has no retriable flag; the default
+  // non-retriable semantics apply), so withRetry never re-runs the refusal.
+  | 'CLAIM_MISMATCH'
   | 'UNKNOWN';
 
 const RETRIABLE_CODES: ReadonlySet<TrackerErrorCode> = new Set([

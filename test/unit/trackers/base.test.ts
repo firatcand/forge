@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   BaseTracker,
   TrackerError,
+  isRetriableTrackerErrorCode,
   type Logger,
   type NormalizeErrorHint,
   type WithRetryOpts,
@@ -211,6 +212,29 @@ test('withRetry rethrows non-retriable errors after one call', async () => {
     (e: unknown) => e === authErr,
   );
   assert.equal(calls, 1);
+});
+
+test('isRetriableTrackerErrorCode classifies CLAIM_MISMATCH as non-retriable', () => {
+  assert.equal(isRetriableTrackerErrorCode('CLAIM_MISMATCH'), false);
+  // sanity: the retriable set is unchanged.
+  assert.equal(isRetriableTrackerErrorCode('RATE_LIMITED'), true);
+  assert.equal(isRetriableTrackerErrorCode('TRANSPORT'), true);
+  assert.equal(isRetriableTrackerErrorCode('TIMEOUT'), true);
+});
+
+test('withRetry never retries CLAIM_MISMATCH (FORGE-118 claim-token CAS)', async () => {
+  const t = makeTracker();
+  let calls = 0;
+  const mismatch = new TrackerError('CLAIM_MISMATCH', 'claimed elsewhere');
+  const fn = async (): Promise<never> => {
+    calls++;
+    throw mismatch;
+  };
+  await assert.rejects(
+    () => t.callWithRetry('updateIssueBody', fn, { sleep: instantSleep }),
+    (e: unknown) => e === mismatch,
+  );
+  assert.equal(calls, 1, 'CLAIM_MISMATCH is non-retriable → exactly one call');
 });
 
 test('withRetry respects max attempts and rejects with final error', async () => {
