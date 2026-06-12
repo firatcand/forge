@@ -1000,6 +1000,18 @@ test('updateIssueBody: validation trio — non-string, forge footer, >64KiB; no 
   assert.equal(mock.calls.length, 0, 'must reject before issuing any ntn call');
 });
 
+test('updateIssueBody: expectedClaim CAS → NOT_IMPLEMENTED (Notion stores metadata in properties, not footers); no calls issued', async () => {
+  const { tracker, mock } = makeTracker([]);
+  await assert.rejects(
+    () =>
+      tracker.updateIssueBody(UIB_PAGE_ID, 'body', {
+        expectedClaim: { claimId: 'mine', generation: 1, ownerRunId: 'r1' },
+      }),
+    (e: unknown) => e instanceof TrackerError && e.code === 'NOT_IMPLEMENTED',
+  );
+  assert.equal(mock.calls.length, 0, 'rejects before any ntn call');
+});
+
 test('updateIssueBody: missing forge_task_id → PRECONDITION_FAILED after fetch only', async () => {
   const { tracker, mock } = makeTracker([okResult(pageWithoutForgeTaskId)]);
   await assert.rejects(

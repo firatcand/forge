@@ -84,6 +84,8 @@ test('AC3 — applies defaults when agents+design absent', () => {
   assert.equal(result.data.agents.on_persistent_failure, 'notify');
   assert.equal(result.data.agents.primary_host_cli, 'claude');
   assert.equal(result.data.agents.review_host_cli, 'codex');
+  // FORGE-85: soft-rotation threshold default = 10 MiB.
+  assert.equal(result.data.agents.log_rotate_max_bytes, 10_485_760);
   assert.deepEqual(result.data.agents.preflight_globs, [
     'src/index.ts',
     'src/schemas/**',
@@ -111,6 +113,21 @@ test('AC3.1 — preflight_globs can be overridden', () => {
   assert.equal(result.success, true);
   if (!result.success) return;
   assert.deepEqual(result.data.agents.preflight_globs, ['only/this/**']);
+});
+
+test('FORGE-85 — log_rotate_max_bytes override parses; rejects non-positive', () => {
+  const data = loadFixture('minimal.yaml');
+  type WithAgents = { agents?: { log_rotate_max_bytes?: number } };
+  (data as WithAgents).agents = { log_rotate_max_bytes: 1_000_000 };
+  const ok = SettingsSchema.safeParse(data);
+  assert.equal(ok.success, true);
+  if (ok.success) {
+    assert.equal(ok.data.agents.log_rotate_max_bytes, 1_000_000);
+  }
+
+  (data as WithAgents).agents = { log_rotate_max_bytes: 0 };
+  const bad = SettingsSchema.safeParse(data);
+  assert.equal(bad.success, false, 'must reject non-positive');
 });
 
 test('AC3 — does NOT default version', () => {

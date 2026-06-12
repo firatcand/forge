@@ -57,6 +57,7 @@ import type { Lease } from '../../schemas/lease.ts';
 import path from 'node:path';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
@@ -320,6 +321,7 @@ export async function runOrchestrateQuestionWrite(
           taskId: opts.taskId,
           attemptId: opts.attemptId,
           caller: callerFromLease(lease),
+          logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
         },
       );
     } catch (err) {
@@ -402,6 +404,7 @@ export async function runOrchestrateQuestionWrite(
           taskId: opts.taskId,
           attemptId: opts.attemptId,
           caller: callerFromLease(lease),
+          logRotateMaxBytes: resolveLogRotateMaxBytes(opts.forgeDir),
         },
       );
   } catch {

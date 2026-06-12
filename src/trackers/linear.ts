@@ -1062,59 +1062,70 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
     this.assertNonEmpty(blockerId, 'blockerId');
     const client = await this.getClient();
 
-    let issue: LinearIssueLike;
-    try {
-      issue = await client.issue(issueId);
-    } catch (err) {
-      throw this.normalizeError(
-        'setBlockedBy',
-        err,
-        classifyLinearError(err),
-      );
-    }
+    // FORGE-118: wrap the read+write legs in withRetry (model: listByStateTypes
+    // 647–671) so a RATE_LIMITED/TRANSPORT/TIMEOUT on either GraphQL call
+    // retries with backoff. The whole read-parse-write-relate sequence is
+    // idempotent (footer dedup + CONFLICT swallow), so a retry from any point
+    // is safe.
+    return this.withRetry(
+      'setBlockedBy',
+      async () => {
+        let issue: LinearIssueLike;
+        try {
+          issue = await client.issue(issueId);
+        } catch (err) {
+          throw this.normalizeError(
+            'setBlockedBy',
+            err,
+            classifyLinearError(err),
+          );
+        }
 
-    const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
-    if (forgeTaskId === undefined) {
-      throw new TrackerError(
-        'PRECONDITION_FAILED',
-        `setBlockedBy: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
-        { issueId, identifier: issue.identifier },
-      );
-    }
+        const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
+        if (forgeTaskId === undefined) {
+          throw new TrackerError(
+            'PRECONDITION_FAILED',
+            `setBlockedBy: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
+            { issueId, identifier: issue.identifier },
+          );
+        }
 
-    // Footer write — only when blockerId isn't already recorded.
-    if (!blockerIds.includes(blockerId)) {
-      const newDescription = serializeWithForgeFooters(
-        issue.description ?? '',
-        forgeTaskId,
-        [...blockerIds, blockerId],
-      );
-      try {
-        await client.updateIssue(issueId, { description: newDescription });
-      } catch (err) {
-        throw this.normalizeError(
-          'setBlockedBy',
-          err,
-          classifyLinearError(err),
-        );
-      }
-    }
+        // Footer write — only when blockerId isn't already recorded.
+        if (!blockerIds.includes(blockerId)) {
+          const newDescription = serializeWithForgeFooters(
+            issue.description ?? '',
+            forgeTaskId,
+            [...blockerIds, blockerId],
+          );
+          try {
+            await client.updateIssue(issueId, { description: newDescription });
+          } catch (err) {
+            throw this.normalizeError(
+              'setBlockedBy',
+              err,
+              classifyLinearError(err),
+            );
+          }
+        }
 
-    // Native relation — ALWAYS attempted (idempotent via CONFLICT swallow).
-    // Source = blocker; related = blocked issue. Linear's `Blocks` enum
-    // means "source blocks related", so to express "issueId is blocked by
-    // blockerId" we set source=blockerId, related=issueId.
-    try {
-      await client.createIssueRelation({
-        issueId: blockerId,
-        relatedIssueId: issueId,
-        type: 'blocks',
-      });
-    } catch (err) {
-      const hint = classifyLinearError(err);
-      if (hint.code === 'CONFLICT') return; // idempotent
-      throw this.normalizeError('setBlockedBy', err, hint);
-    }
+        // Native relation — ALWAYS attempted (idempotent via CONFLICT swallow).
+        // Source = blocker; related = blocked issue. Linear's `Blocks` enum
+        // means "source blocks related", so to express "issueId is blocked by
+        // blockerId" we set source=blockerId, related=issueId.
+        try {
+          await client.createIssueRelation({
+            issueId: blockerId,
+            relatedIssueId: issueId,
+            type: 'blocks',
+          });
+        } catch (err) {
+          const hint = classifyLinearError(err);
+          if (hint.code === 'CONFLICT') return; // idempotent
+          throw this.normalizeError('setBlockedBy', err, hint);
+        }
+      },
+      this.retryOpts,
+    );
   }
 
   // ─── updateIssueBody — body-footer rewrite (FORGE-94) ──────────────────────
@@ -1122,48 +1133,83 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
   // Replaces description wholesale while preserving forge:task + forge:blockedBy
   // footers. Mirror of setBlockedBy's read-parse-serialize-write loop, except
   // the *body content* is the input and *blockerIds* are read-through.
-  async updateIssueBody(issueId: string, body: string): Promise<void> {
+  async updateIssueBody(
+    issueId: string,
+    body: string,
+    opts?: { expectedClaim?: ClaimFenceData },
+  ): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
     assertValidBodyInput(body, LINEAR_DESCRIPTION_MAX_BYTES);
     const client = await this.getClient();
 
-    let issue: LinearIssueLike;
-    try {
-      issue = await client.issue(issueId);
-    } catch (err) {
-      throw this.normalizeError(
-        'updateIssueBody',
-        err,
-        classifyLinearError(err),
-      );
-    }
+    // FORGE-118: wrap read+write in withRetry (model: listByStateTypes 647–671).
+    // Read-parse-serialize-write is idempotent (the write replaces the body
+    // wholesale), so retry from any point is safe.
+    return this.withRetry(
+      'updateIssueBody',
+      async () => {
+        let issue: LinearIssueLike;
+        try {
+          issue = await client.issue(issueId);
+        } catch (err) {
+          throw this.normalizeError(
+            'updateIssueBody',
+            err,
+            classifyLinearError(err),
+          );
+        }
 
-    const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
-    if (forgeTaskId === undefined) {
-      throw new TrackerError(
-        'PRECONDITION_FAILED',
-        `updateIssueBody: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
-        { issueId, identifier: issue.identifier },
-      );
-    }
-    const extraFooters = parseExtraForgeFooters(issue.description);
+        const { forgeTaskId, blockerIds } = parseForgeFooters(issue.description);
+        if (forgeTaskId === undefined) {
+          throw new TrackerError(
+            'PRECONDITION_FAILED',
+            `updateIssueBody: issue ${issue.identifier} has no forge:task footer; was it created outside of forge?`,
+            { issueId, identifier: issue.identifier },
+          );
+        }
 
-    const newDescription = serializeWithForgeFooters(
-      body,
-      forgeTaskId,
-      blockerIds,
-      extraFooters,
+        // FORGE-118 claim-token CAS (advisory). When the caller passes
+        // expectedClaim, refuse the write if the fresh-read body carries a
+        // forge:claim footer with a DIFFERENT claimId — another run owns the
+        // lease. Footer absent or matching → proceed. CLAIM_MISMATCH is
+        // non-retriable (errors.ts), so withRetry never re-runs the refusal.
+        if (opts?.expectedClaim !== undefined) {
+          const current = parseClaimFooter(issue.description);
+          if (current !== null && current.claimId !== opts.expectedClaim.claimId) {
+            throw new TrackerError(
+              'CLAIM_MISMATCH',
+              `updateIssueBody: issue ${issue.identifier} is claimed by a different run (expected ${opts.expectedClaim.claimId}, found ${current.claimId})`,
+              {
+                issueId,
+                identifier: issue.identifier,
+                expectedClaimId: opts.expectedClaim.claimId,
+                foundClaimId: current.claimId,
+              },
+            );
+          }
+        }
+
+        const extraFooters = parseExtraForgeFooters(issue.description);
+
+        const newDescription = serializeWithForgeFooters(
+          body,
+          forgeTaskId,
+          blockerIds,
+          extraFooters,
+        );
+
+        try {
+          await client.updateIssue(issueId, { description: newDescription });
+        } catch (err) {
+          throw this.normalizeError(
+            'updateIssueBody',
+            err,
+            classifyLinearError(err),
+          );
+        }
+      },
+      this.retryOpts,
     );
-
-    try {
-      await client.updateIssue(issueId, { description: newDescription });
-    } catch (err) {
-      throw this.normalizeError(
-        'updateIssueBody',
-        err,
-        classifyLinearError(err),
-      );
-    }
   }
 
   // ─── setClaimFence — forge:claim footer write (FORGE-167) ──────────────────

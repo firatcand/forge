@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -361,6 +361,77 @@ test('leases: re-acquire after release uses generation from history, not 0 (B3)'
     first.generation + 1,
     'second acquire should use generation 1, not 0 (history read)',
   );
+});
+
+// ---- FORGE-85: generation continuity across claim-history rotation ----
+
+test('leases: rotate-then-acquire continues the generation (reads .1 fallback)', () => {
+  const fd = forgeDir('rotate-continuity');
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-ROT', runId: 'run-001' });
+  assert.equal(first.generation, 0);
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-ROT',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+
+  // Simulate a rotation: the entire history (acquire+release entries) moves to
+  // <file>.1 and the current file is gone. This is exactly the post-rotation
+  // state where the last generation lives in .1.
+  const histPath = claimHistoryFilePath(fd, 'TASK-ROT');
+  renameSync(histPath, `${histPath}.1`);
+  assert.equal(existsSync(histPath), false, 'current gone after rotation');
+
+  // acquire must continue the generation from .1, NOT reset to 0.
+  const second = acquire({ forgeDir: fd, taskId: 'TASK-ROT', runId: 'run-002' });
+  assert.equal(
+    second.generation,
+    first.generation + 1,
+    'generation continued from rotated .1, not reset',
+  );
+});
+
+test('leases: empty current + populated .1 → generation read from .1 (no reset)', () => {
+  const fd = forgeDir('rotate-empty-current');
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-ROT2', runId: 'run-001' });
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-ROT2',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+  const histPath = claimHistoryFilePath(fd, 'TASK-ROT2');
+  // Rotation just happened: history in .1, current freshly truncated (0 bytes).
+  renameSync(histPath, `${histPath}.1`);
+  writeFileSync(histPath, '', 'utf8');
+
+  const second = acquire({ forgeDir: fd, taskId: 'TASK-ROT2', runId: 'run-002' });
+  assert.equal(second.generation, first.generation + 1, 'no RESET; .1 consulted');
+});
+
+test('leases: rotation BETWEEN current and .1 read still yields a generation (no RESET)', () => {
+  // A perfect snapshot is impossible without cross-file locking. We assert the
+  // invariant the plan requires: the resolved generation is never a RESET to 0
+  // when prior history exists somewhere. Here the last generation lives in .1
+  // while current carries a LATER entry — the walk-current-first path returns
+  // the current entry; either way it is >= the rotated generation, never 0.
+  const fd = forgeDir('rotate-race');
+  const first = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-001' });
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-ROT3',
+    caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
+  });
+  const histPath = claimHistoryFilePath(fd, 'TASK-ROT3');
+  renameSync(histPath, `${histPath}.1`);
+  // A newer entry lands in the current file (e.g. another process appended).
+  writeFileSync(
+    histPath,
+    JSON.stringify({ event: 'acquired', generation: 5 }) + '\n',
+    'utf8',
+  );
+  const next = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-002' });
+  assert.ok(next.generation >= 1, 'never a RESET to 0');
+  assert.equal(next.generation, 6, 'current entry (gen 5) + 1 wins when present');
 });
 
 // ---- steal writes state.json = unclaimed (OQ-6) + updated_by from new owner ----

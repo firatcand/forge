@@ -33,6 +33,7 @@ import { leaseFilePath, validateIdSegment } from '../../orchestrator/questions/p
 import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import type { VerbHandler } from './index.ts';
 
 export interface GuardrailCheckArgs {
@@ -187,6 +188,7 @@ function appendGuardrailEvent(args: {
           claim_id: lease.claim_id,
           generation: lease.generation,
         },
+        logRotateMaxBytes: resolveLogRotateMaxBytes(args.forgeDir),
       },
     );
   } catch (e) {

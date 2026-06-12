@@ -1191,8 +1191,28 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
   // deletes them, and appends the full replacement. Errors classify retriable
   // (TRANSPORT/RATE_LIMITED/TIMEOUT) vs not via classifyNotionExecError so
   // callers know when a re-run is worthwhile.
-  async updateIssueBody(issueId: string, body: string): Promise<void> {
+  async updateIssueBody(
+    issueId: string,
+    body: string,
+    opts?: { expectedClaim?: ClaimFenceData },
+  ): Promise<void> {
     this.assertNonEmpty(issueId, 'issueId');
+    // FORGE-118 claim-token CAS: Notion's forge metadata lives in PAGE
+    // PROPERTIES, not the footer machinery (footers.ts) the Linear/GitHub CAS
+    // relies on — a footer-based check is meaningless here. Rather than
+    // silently ignore the contract, throw an honest typed not-supported error
+    // when a caller actually provides expectedClaim. A property-scheme CAS is
+    // out of scope for this batch.
+    if (opts?.expectedClaim !== undefined) {
+      throw new TrackerError(
+        'NOT_IMPLEMENTED',
+        `NotionTracker.updateIssueBody does not support the expectedClaim CAS: ` +
+          `Notion stores forge metadata in page properties, not the forge:claim ` +
+          `body footer the Linear/GitHub check reads. A property-scheme CAS is ` +
+          `tracked as a FORGE-145/FORGE-167 follow-up.`,
+        { issueId, feature: 'expectedClaim' },
+      );
+    }
     assertValidBodyInput(body, NOTION_BODY_MAX_BYTES);
     const pageId = parseNotionPageId(issueId);
 

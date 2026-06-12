@@ -26,6 +26,7 @@ import type { TaskStateRecord } from '../../schemas/task-state.ts';
 import { OrchestratorError } from '../../core/errors.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
+import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import {
   resolveTrackerForCLI,
   type ClaimableTracker,
@@ -136,6 +137,11 @@ async function runClaimWithTracker(
   t: ClaimableTracker,
   deps: ClaimDeps,
 ): Promise<{ exitCode: number }> {
+  // FORGE-118: source the claim-history rotation threshold from settings so a
+  // user override in agents.log_rotate_max_bytes actually takes effect (the
+  // inert-config foot-gun removed in FORGE-124). Best-effort → schema default.
+  const logRotateMaxBytes = resolveLogRotateMaxBytes(opts.forgeDir);
+
   // 1. Tracker claim.
   let claimRes;
   try {
@@ -172,6 +178,7 @@ async function runClaimWithTracker(
       forgeDir: opts.forgeDir,
       taskId: opts.taskId,
       runId: opts.runId,
+      logRotateMaxBytes,
       ...(deps.specRevision ? { specRevision: deps.specRevision } : {}),
       ...(deps.repoRoot ? { repoRoot: deps.repoRoot } : { repoRoot: path.dirname(opts.forgeDir) }),
     });
@@ -244,6 +251,7 @@ async function runClaimWithTracker(
           claim_id: lease.claim_id,
           generation: lease.generation,
         },
+        logRotateMaxBytes,
       });
     } catch (rbErr) {
       rollbackErrors.push(`lease release: ${rbErr instanceof Error ? rbErr.message : String(rbErr)}`);
