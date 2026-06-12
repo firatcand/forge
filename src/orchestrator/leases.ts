@@ -210,7 +210,22 @@ function overwriteAtomicLink(tmpPath: string, targetPath: string, taskId: string
         { taskId, path: targetPath, cause: err },
       );
     }
-    // ENOENT is fine — treat as idempotent
+    // ENOENT here collapses two distinct situations into ONE idempotent path,
+    // on purpose:
+    //   (1) Expected absence — a well-behaved prior process already released or
+    //       cleaned up this lease, so there is simply nothing to unlink. This is
+    //       the common, benign case (e.g. a steal after a clean release).
+    //   (2) Racing deletion — a concurrent actor deleted the lease between our
+    //       (logical) check and this unlink. The same observer window means a
+    //       reader sitting between our unlink and the linkSync below momentarily
+    //       sees no lease at the target.
+    // We deliberately do NOT try to distinguish (1) from (2): the caller has
+    // already validated ownership before reaching this function, and both cases
+    // want the identical outcome — proceed to re-link the new lease. The torn
+    // window (target momentarily absent) is bounded by the immediately following
+    // linkSync and is acceptable precisely because ownership was validated first;
+    // a racing observer that misses the lease will re-read and find the freshly
+    // linked one. Treat ENOENT as success and fall through to the link.
   }
   try {
     fs.linkSync(tmpPath, targetPath);

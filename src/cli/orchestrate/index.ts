@@ -37,9 +37,23 @@ import { dashboardHandler } from './dashboard.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
+// FORGE-134: per-verb flag declaration. `takesValue: true` marks a flag whose
+// NEXT token is its value (so a `--help`/`-h` sitting in that value position is a
+// value, never a help request). `takesValue: false` is a boolean flag. The
+// declared set must MATCH what the handler actually parses (parseFlag → value,
+// hasFlag → boolean) so the value-aware --help interceptor cannot misclassify.
+export interface FlagDecl {
+  readonly flag: string; // canonical long form WITHOUT leading dashes, e.g. 'scope'
+  readonly takesValue: boolean;
+  readonly description: string;
+  readonly aliases?: ReadonlyArray<string>; // other long names that map to the same flag
+  readonly valueLabel?: string; // display label for the value, default '<value>'
+}
+
 export interface VerbHandler {
   readonly band: VerbBand;
   readonly synopsis: string;
+  readonly flags?: ReadonlyArray<FlagDecl>;
   readonly run: (rest: readonly string[], opts: DispatcherOpts) => Promise<{ exitCode: number }>;
 }
 
@@ -92,9 +106,13 @@ const statusHandler: VerbHandler = {
   synopsis: 'Snapshot of task and run state.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
-    const runId = firstPositional(rest) ?? parseFlag(rest, 'run-id');
+    // FORGE-149: --run is an alias for --run-id (ORCHESTRATOR.md documents --run).
+    const runId =
+      firstPositional(rest) ?? parseFlag(rest, 'run-id') ?? parseFlag(rest, 'run');
     const result = runOrchestrateStatus({
       forgeDir,
+      json: hasFlag(rest, 'json'),
+      includeWarnings: hasFlag(rest, 'include-warnings'),
       ...(runId ? { runId } : {}),
     });
     return { exitCode: result.exitCode };
@@ -106,7 +124,11 @@ const attachHandler: VerbHandler = {
   synopsis: 'Tail per-run notifications.jsonl.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
-    const runId = firstPositional(rest) ?? parseFlag(rest, 'run-id');
+    // FORGE-149: --run is an alias for --run-id (declared in FLAG_DECLS.attach
+    // and documented in ORCHESTRATOR.md). The handler MUST honor it, else the
+    // advertised alias silently no-ops and attach falls back to the latest run.
+    const runId =
+      firstPositional(rest) ?? parseFlag(rest, 'run-id') ?? parseFlag(rest, 'run');
     const result = await runOrchestrateAttach({
       forgeDir,
       follow: true,
@@ -253,38 +275,236 @@ const reconcileHandler: VerbHandler = {
   },
 };
 
+// ── Per-verb flag declarations (FORGE-134) ───────────────────────────────────
+// Reality-matched: each entry mirrors the parseFlag (value) / hasFlag (boolean)
+// / firstPositional (positional) calls in the verb's handler. Most read/mutate
+// handlers accept `--forge-dir <path>` via resolveForgeDir(); declared per verb.
+// `--json` is declared where the handler reads it. Aliases (e.g. --run/--run-id)
+// are ONE entry with `aliases`. Positionals are NOT flags and are noted in the
+// synopsis, not here.
+
+const FD: FlagDecl = { flag: 'forge-dir', takesValue: true, description: 'Path to the .forge directory (default <cwd>/.forge).', valueLabel: '<path>' };
+const JSON_FLAG: FlagDecl = { flag: 'json', takesValue: false, description: 'Emit a stable JSON envelope on stdout.' };
+
+const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
+  phases: [
+    { flag: 'ready', takesValue: false, description: 'Filter to dispatchable, overlap-classified ready tasks.' },
+    { flag: 'phase', takesValue: true, description: 'Phase filter: implement | review | ship.', valueLabel: '<phase>' },
+    { flag: 'blocked-by', takesValue: true, description: 'Only tasks depending on this task id.', valueLabel: '<task-id>' },
+    { flag: 'limit', takesValue: true, description: 'Cap the number of tasks returned.', valueLabel: '<n>' },
+    { flag: 'run', takesValue: true, description: 'Scope to a run id.', aliases: ['run-id'], valueLabel: '<id>' },
+    { flag: 'include-warnings', takesValue: false, description: 'With --ready --json, add auto-gc cheap divergences as a warnings array.' },
+    JSON_FLAG,
+    FD,
+  ],
+  status: [
+    { flag: 'run', takesValue: true, description: 'Run id to inspect (default: latest).', aliases: ['run-id'], valueLabel: '<id>' },
+    { flag: 'include-warnings', takesValue: false, description: 'With --json, add auto-gc cheap divergences as a warnings array.' },
+    JSON_FLAG,
+    FD,
+  ],
+  dashboard: [JSON_FLAG, FD],
+  questions: [
+    { flag: 'open', takesValue: false, description: 'Only open (unanswered) questions.' },
+    { flag: 'run', takesValue: true, description: 'Scope to a run id.', aliases: ['run-id'], valueLabel: '<id>' },
+    JSON_FLAG,
+    FD,
+  ],
+  doctor: [
+    { flag: 'scope', takesValue: true, description: 'Drift scope: spec-code (default) | all.', valueLabel: '<scope>' },
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    JSON_FLAG,
+    FD,
+  ],
+  attach: [
+    { flag: 'run', takesValue: true, description: 'Run id whose notifications.jsonl to tail.', aliases: ['run-id'], valueLabel: '<id>' },
+    FD,
+  ],
+  'spec-diff': [
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    JSON_FLAG,
+    FD,
+  ],
+  'guardrail-check': [
+    { flag: 'path', takesValue: true, description: 'Path to check against preflight globs.', valueLabel: '<path>' },
+    { flag: 'task', takesValue: true, description: 'Task id (records a guardrail_checked event with --attempt).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    JSON_FLAG,
+    FD,
+  ],
+  'render-worker-prompt': [
+    { flag: 'task', takesValue: true, description: 'Task id.', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    JSON_FLAG,
+    FD,
+  ],
+  'ensure-worktree': [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'branch', takesValue: true, description: 'Branch name to create.', valueLabel: '<name>' },
+    { flag: 'base', takesValue: true, description: 'Base branch to fork from.', valueLabel: '<branch>' },
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    JSON_FLAG,
+    FD,
+  ],
+  claim: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'run', takesValue: true, description: 'Owning run id.', aliases: ['run-id'], valueLabel: '<id>' },
+    { flag: 'force', takesValue: false, description: 'Force claim despite overlap gate.' },
+    JSON_FLAG,
+    FD,
+  ],
+  dispatch: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'claim', takesValue: true, description: 'Claim id from a prior claim.', valueLabel: '<claim-id>' },
+    { flag: 'run', takesValue: true, description: 'Owning run id.', aliases: ['run-id'], valueLabel: '<id>' },
+    { flag: 'worktree', takesValue: true, description: 'Worktree path for the attempt.', valueLabel: '<path>' },
+    { flag: 'phase', takesValue: true, description: 'Phase: implement (default) | review | ship.', valueLabel: '<phase>' },
+    JSON_FLAG,
+    FD,
+  ],
+  heartbeat: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    JSON_FLAG,
+    FD,
+  ],
+  question: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    { flag: 'decision-key', takesValue: true, description: 'Decision key (question-channel budget bucket).', valueLabel: '<key>' },
+    { flag: 'question', takesValue: true, description: 'The question text.', valueLabel: '<text>' },
+    { flag: 'options-file', takesValue: true, description: 'Path to a JSON options file.', valueLabel: '<path>' },
+    { flag: 'recommended-option-id', takesValue: true, description: 'Recommended option id.', valueLabel: '<id>' },
+    { flag: 'what-happens-if-unanswered', takesValue: true, description: 'Consequence text if unanswered.', valueLabel: '<text>' },
+    { flag: 'question-budget-soft', takesValue: true, description: 'Soft question budget.', valueLabel: '<n>' },
+    { flag: 'question-budget-hard', takesValue: true, description: 'Hard question budget.', valueLabel: '<n>' },
+    { flag: 'drift-event-id', takesValue: true, description: 'Originating drift event id.', valueLabel: '<id>' },
+    { flag: 'routing-hint', takesValue: true, description: 'Routing hint: apply-decision | amend-roadmap.', valueLabel: '<hint>' },
+    JSON_FLAG,
+    FD,
+  ],
+  answer: [
+    { flag: 'option', takesValue: true, description: 'Chosen option id.', valueLabel: '<id>' },
+    { flag: 'note', takesValue: true, description: 'Free-text supervisor note.', valueLabel: '<text>' },
+    FD,
+  ],
+  event: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    { flag: 'type', takesValue: true, description: 'Event type (e.g. drift).', valueLabel: '<type>' },
+    { flag: 'data', takesValue: true, description: 'JSON object payload for the event.', valueLabel: '<json>' },
+    JSON_FLAG,
+    FD,
+  ],
+  complete: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
+    { flag: 'verdict-file', takesValue: true, description: 'Path to the verdict JSON file.', valueLabel: '<path>' },
+    { flag: 'phase', takesValue: true, description: 'Phase: implement (default) | review | ship.', valueLabel: '<phase>' },
+    JSON_FLAG,
+    FD,
+  ],
+  cancel: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'reason', takesValue: true, description: 'Cancellation reason.', valueLabel: '<text>' },
+    JSON_FLAG,
+    FD,
+  ],
+  reconcile: [
+    { flag: 'pull', takesValue: false, description: 'Tracker → phases.yaml.' },
+    { flag: 'push', takesValue: false, description: 'phases.yaml → tracker bodies.' },
+    { flag: 'dry-run', takesValue: false, description: 'Plan only; write nothing.' },
+    { flag: 'confirm-prune', takesValue: false, description: 'Confirm pruning of removed tasks.' },
+    { flag: 'no-prune', takesValue: false, description: 'Never prune removed tasks.' },
+    JSON_FLAG,
+  ],
+  'apply-decision': [
+    { flag: 'adr', takesValue: true, description: 'ADR slug (else first positional).', valueLabel: '<slug>' },
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    { flag: 'yes-all', takesValue: false, description: 'Approve every per-artifact diff without prompting.' },
+    { flag: 'resume', takesValue: false, description: 'Resume from an existing journal.' },
+    { flag: 'dry-run', takesValue: false, description: 'Plan only; write nothing.' },
+    JSON_FLAG,
+    FD,
+  ],
+  'amend-roadmap': [
+    { flag: 'payload', takesValue: true, description: 'Path to the amend payload (YAML).', valueLabel: '<path>' },
+    { flag: 'resume', takesValue: true, description: 'Resume the amend for this task id.', valueLabel: '<task-id>' },
+    { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    JSON_FLAG,
+    FD,
+  ],
+  gc: [
+    { flag: 'dry-run', takesValue: false, description: 'Plan only; write nothing.' },
+    { flag: 'remove-worktrees', takesValue: false, description: 'Remove terminal-task worktrees (mutually exclusive mode).' },
+    { flag: 'task', takesValue: true, description: 'With --remove-worktrees, scope to one task id.', valueLabel: '<task-id>' },
+    { flag: 'prune-merged-branches', takesValue: false, description: 'With --remove-worktrees, also git branch -d merged branches.' },
+    JSON_FLAG,
+    FD,
+  ],
+  'second-opinion': [
+    { flag: 'task', takesValue: true, description: 'Task id to review.', valueLabel: '<task-id>' },
+    { flag: 'diff', takesValue: true, description: 'Diff text or ref to review.', valueLabel: '<diff>' },
+    { flag: 'prompt', takesValue: true, description: 'Custom review prompt.', valueLabel: '<text>' },
+    { flag: 'cwd', takesValue: true, description: 'Working directory for the reviewer.', valueLabel: '<path>' },
+    { flag: 'timeout-ms', takesValue: true, description: 'Reviewer timeout in milliseconds.', valueLabel: '<ms>' },
+    JSON_FLAG,
+    FD,
+  ],
+};
+
+// Nested run sub-verb flag declarations.
+const RUN_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
+  start: [
+    { flag: 'name', takesValue: true, description: 'Human-friendly run name.', valueLabel: '<name>' },
+    JSON_FLAG,
+    FD,
+  ],
+  list: [
+    { flag: 'active', takesValue: false, description: 'Only runs with traffic.' },
+    JSON_FLAG,
+    FD,
+  ],
+};
+
+// Attach declared flags onto an imported handler without mutating the original.
+function withFlags(handler: VerbHandler, flags: ReadonlyArray<FlagDecl>): VerbHandler {
+  return { ...handler, flags };
+}
+
 // ── Registry ─────────────────────────────────────────────────────────────────
 
 export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, VerbHandler>>([
   // Read-only band.
-  ['phases', phasesHandler],
-  ['doctor', doctorHandler],
-  ['questions', questionsHandler],
-  ['status', statusHandler],
-  ['dashboard', dashboardHandler],
-  ['attach', attachHandler],
-  ['spec-diff', specDiffHandler],
-  ['guardrail-check', guardrailCheckHandler],
-  ['render-worker-prompt', renderWorkerPromptHandler],
+  ['phases', withFlags(phasesHandler, FLAG_DECLS['phases']!)],
+  ['doctor', withFlags(doctorHandler, FLAG_DECLS['doctor']!)],
+  ['questions', withFlags(questionsHandler, FLAG_DECLS['questions']!)],
+  ['status', withFlags(statusHandler, FLAG_DECLS['status']!)],
+  ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
+  ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
+  ['spec-diff', withFlags(specDiffHandler, FLAG_DECLS['spec-diff']!)],
+  ['guardrail-check', withFlags(guardrailCheckHandler, FLAG_DECLS['guardrail-check']!)],
+  ['render-worker-prompt', withFlags(renderWorkerPromptHandler, FLAG_DECLS['render-worker-prompt']!)],
   ['run', new Map<string, VerbHandler>([
-    ['start', runStartHandler],
-    ['list', runListHandler],
+    ['start', withFlags(runStartHandler, RUN_SUB_FLAG_DECLS['start']!)],
+    ['list', withFlags(runListHandler, RUN_SUB_FLAG_DECLS['list']!)],
   ])],
   // Mutating band.
-  ['ensure-worktree', ensureWorktreeHandler],
-  ['claim', claimHandler],
-  ['dispatch', dispatchHandler],
-  ['heartbeat', heartbeatHandler],
-  ['question', questionWriteHandler],
-  ['answer', answerHandler],
-  ['event', eventHandler],
-  ['complete', completeHandler],
-  ['cancel', cancelHandler],
-  ['reconcile', reconcileHandler],
-  ['apply-decision', applyDecisionHandler],
-  ['amend-roadmap', amendRoadmapHandler],
-  ['gc', gcHandler],
-  ['second-opinion', secondOpinionHandler],
+  ['ensure-worktree', withFlags(ensureWorktreeHandler, FLAG_DECLS['ensure-worktree']!)],
+  ['claim', withFlags(claimHandler, FLAG_DECLS['claim']!)],
+  ['dispatch', withFlags(dispatchHandler, FLAG_DECLS['dispatch']!)],
+  ['heartbeat', withFlags(heartbeatHandler, FLAG_DECLS['heartbeat']!)],
+  ['question', withFlags(questionWriteHandler, FLAG_DECLS['question']!)],
+  ['answer', withFlags(answerHandler, FLAG_DECLS['answer']!)],
+  ['event', withFlags(eventHandler, FLAG_DECLS['event']!)],
+  ['complete', withFlags(completeHandler, FLAG_DECLS['complete']!)],
+  ['cancel', withFlags(cancelHandler, FLAG_DECLS['cancel']!)],
+  ['reconcile', withFlags(reconcileHandler, FLAG_DECLS['reconcile']!)],
+  ['apply-decision', withFlags(applyDecisionHandler, FLAG_DECLS['apply-decision']!)],
+  ['amend-roadmap', withFlags(amendRoadmapHandler, FLAG_DECLS['amend-roadmap']!)],
+  ['gc', withFlags(gcHandler, FLAG_DECLS['gc']!)],
+  ['second-opinion', withFlags(secondOpinionHandler, FLAG_DECLS['second-opinion']!)],
 ]);
 
 // Order used for --help rendering. Read-only first, then mutating, then nested.
@@ -314,6 +534,76 @@ export const HELP_ORDER: readonly string[] = [
   'gc',
   'second-opinion',
 ];
+
+// FORGE-134: value-aware --help detection. Scan the verb's args left-to-right
+// using its OWN flag declarations. A token immediately following a declared
+// `takesValue: true` flag (in `--flag value` form) is that flag's VALUE and is
+// never treated as --help. We intercept only a `--help`/`-h` sitting in FLAG
+// position. Unknown `--x` tokens are treated as boolean for the scan (declarations
+// are required to be complete for this batch). `--flag=value` forms consume no
+// following token.
+function wantsHelp(args: readonly string[], flags: ReadonlyArray<FlagDecl> | undefined): boolean {
+  // Build the set of long names that consume the next token.
+  const valueTakers = new Set<string>();
+  for (const f of flags ?? []) {
+    if (f.takesValue) {
+      valueTakers.add(f.flag);
+      for (const a of f.aliases ?? []) valueTakers.add(a);
+    }
+  }
+  for (let i = 0; i < args.length; i += 1) {
+    const tok = args[i] ?? '';
+    if (tok === '--help' || tok === '-h') return true;
+    if (tok.startsWith('--') && !tok.includes('=')) {
+      const name = tok.slice(2);
+      if (valueTakers.has(name) && i + 1 < args.length) {
+        // Next token is this flag's value — skip it so a `--help` there is a value.
+        i += 1;
+      }
+    }
+  }
+  return false;
+}
+
+// Render the per-verb help: `forge orchestrate <verb> — <synopsis>` + aligned
+// flag table + a footer pointing at the top-level help. In --json mode an ok
+// envelope `{ verb, band, synopsis, flags }` is returned instead.
+function renderVerbHelp(verb: string, handler: VerbHandler, json: boolean): string {
+  const flags = handler.flags ?? [];
+  if (json) {
+    return `${JSON.stringify({
+      ok: true,
+      data: {
+        verb,
+        band: handler.band,
+        synopsis: handler.synopsis,
+        flags: flags.map((f) => ({
+          flag: f.flag,
+          takesValue: f.takesValue,
+          description: f.description,
+          ...(f.aliases && f.aliases.length > 0 ? { aliases: f.aliases } : {}),
+        })),
+      },
+    })}\n`;
+  }
+  const left = (f: FlagDecl): string => {
+    const base = f.takesValue ? `--${f.flag} ${f.valueLabel ?? '<value>'}` : `--${f.flag}`;
+    const alias = f.aliases && f.aliases.length > 0 ? ` (alias: ${f.aliases.map((a) => `--${a}`).join(', ')})` : '';
+    return base + alias;
+  };
+  const cols = flags.map(left);
+  const width = cols.reduce((m, c) => Math.max(m, c.length), 0);
+  const lines: string[] = [`forge orchestrate ${verb} — ${handler.synopsis}`, ''];
+  if (flags.length > 0) {
+    lines.push('Flags:');
+    flags.forEach((f, idx) => {
+      lines.push(`  ${cols[idx]!.padEnd(width)}  ${f.description}`);
+    });
+    lines.push('');
+  }
+  lines.push('See `forge orchestrate --help` for the full verb list.');
+  return `${lines.join('\n')}\n`;
+}
 
 export async function dispatchOrchestrate(
   rest: readonly string[],
@@ -354,9 +644,22 @@ export async function dispatchOrchestrate(
       );
       return { exitCode: emit(envelope, { json: hasFlag(rest, 'json') }) };
     }
-    return handler.run(rest.slice(2), opts);
+    const subArgs = rest.slice(2);
+    if (wantsHelp(subArgs, handler.flags)) {
+      // --help wins over --json execution; if --json present, emit the help envelope.
+      process.stdout.write(renderVerbHelp(`${sub} ${subSub}`, handler, hasFlag(subArgs, 'json')));
+      return { exitCode: 0 };
+    }
+    return handler.run(subArgs, opts);
   }
-  return entry.run(rest.slice(1), opts);
+  const verbArgs = rest.slice(1);
+  if (wantsHelp(verbArgs, entry.flags)) {
+    // --help wins over --json execution (FORGE-134). With --json, return the
+    // ok envelope { verb, band, synopsis, flags } via renderVerbHelp.
+    process.stdout.write(renderVerbHelp(sub, entry, hasFlag(verbArgs, 'json')));
+    return { exitCode: 0 };
+  }
+  return entry.run(verbArgs, opts);
 }
 
 function usage(): string {

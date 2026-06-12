@@ -851,11 +851,25 @@ function formatRemoveResults(
 //
 // Stdout is untouched, so JSON consumers of `phases --ready --json` are
 // unaffected. Precedent: phases.ts:91 emits the freshness line to stderr.
+//
+// FORGE-149: in addition to its long-standing stderr side effect (unchanged for
+// all callers — back-compat), this now RETURNS the same divergences as a
+// structured array so opt-in JSON surfaces (`phases --ready --json
+// --include-warnings`, `status --json --include-warnings`) can put them on
+// stdout. Callers that ignore the return value see byte-identical behavior.
+export interface GcCheapWarning {
+  readonly row_id: number;
+  readonly task_id: string;
+  readonly action: string;
+  readonly severity: 'warning';
+  readonly suggestion: 'run `forge orchestrate gc` to apply';
+}
+
 export function detectCheapDivergences(
   forgeDir: string,
   err: NodeJS.WritableStream,
   now: Date,
-): void {
+): GcCheapWarning[] {
   let snapshot: OrchestratorSnapshot;
   try {
     snapshot = buildSnapshot(forgeDir, now, 'cheap');
@@ -865,15 +879,24 @@ export function detectCheapDivergences(
     // continues regardless. (Codex 3rd-pass IMPROVEMENT 5.)
     const msg = e instanceof Error ? e.message : String(e);
     err.write(`[gc] auto-detect failed (continuing): ${msg}\n`);
-    return;
+    return [];
   }
   const plan = planGc(snapshot);
-  if (plan.rows.length === 0) return;
+  if (plan.rows.length === 0) return [];
+  const warnings: GcCheapWarning[] = [];
   for (const row of plan.rows) {
     err.write(
       `[gc] ${row.taskId}: row ${row.rowId} (${row.action}) — run \`forge orchestrate gc\` to apply\n`,
     );
+    warnings.push({
+      row_id: row.rowId,
+      task_id: row.taskId,
+      action: row.action,
+      severity: 'warning',
+      suggestion: 'run `forge orchestrate gc` to apply',
+    });
   }
+  return warnings;
 }
 
 function buildSnapshot(

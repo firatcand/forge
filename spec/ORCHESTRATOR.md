@@ -151,19 +151,24 @@ forge orchestrate doctor [--scope spec-code|all] [--json]
     # Honors settings.doctor.spec_code_check_enabled (default true).
     # Exit codes: 0 clean, 1 warnings, 2 drift detected.
 
-forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]
+forge orchestrate status [--run <run-id>] [--json] [--include-warnings]
     # Snapshot of task state(s). Also used for session re-grounding.
+    # --json: stable ok envelope mirroring the text snapshot (run id, started_at,
+    #   pid, worker status counts). --include-warnings adds the auto-gc cheap
+    #   divergences as a `warnings` array (FORGE-149).
 
 forge orchestrate questions [--open] [--run <run-id>] [--json]
     # List questions.
 
 forge orchestrate phases [--ready] [--phase implement|review|ship] \
-    [--blocked-by <task-id>] [--limit N] [--run <run-id>] [--json]
+    [--blocked-by <task-id>] [--limit N] [--run <run-id>] [--json] [--include-warnings]
     # Read-only graph state inspection. With --ready, returns tasks ready for the given phase
     # (deps shipped + merged + no worktree overlap for implement). Used by the dispatch skill to
     # present options to the user before user-approved claim+dispatch.
+    # --include-warnings (with --ready --json): adds the auto-gc cheap divergences
+    #   as a `warnings` array on the result data; omitted entirely otherwise (FORGE-149).
 
-forge orchestrate attach --run <run-id> [--type <event-types>] [--json]
+forge orchestrate attach --run <run-id>
     # Tail .forge/orchestrator/runs/<run-id>/notifications.jsonl. Read-only (consumer side).
 
 forge orchestrate render-worker-prompt --task <task-id> --attempt <attempt-id> \
@@ -211,7 +216,7 @@ forge orchestrate question <task-id> --attempt <attempt-id> \
     # integration: when a worker emits a drift event before writing the question, link them so the
     # supervisor's dispatch skill can suggest the right routing skill (/update-spec --apply or /amend-roadmap).
 
-forge orchestrate answer <question-id> --answer <text> [--json]
+forge orchestrate answer <question-id> --option <id> [--note <text>]
     # Supervisor answers a question.
 
 forge orchestrate event <task-id> --attempt <attempt-id> \
@@ -252,7 +257,7 @@ forge orchestrate amend-roadmap [--from-file <yaml>] [--task-id <id>] \
     # Mid-flight new-task creation. Writes to phases.yaml AND pushes to tracker atomically (local rollback
     # on tracker failure; resumable journal under .forge/orchestrator/global/amend-journal/).
 
-forge orchestrate reconcile {--pull|--push} [--task <task-id>] [--dry-run] [--json]
+forge orchestrate reconcile {--pull|--push} [--dry-run] [--json]
     # Bi-directional phases.yaml ↔ tracker sync.
     # --pull: tracker → phases.yaml (detects new issues, status changes); conflict prompts user.
     # --push: phases.yaml → tracker (mirrors local canonical state).
