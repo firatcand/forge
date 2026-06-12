@@ -1,21 +1,37 @@
 ![banner](forge-cover-v1--horizon-banner-3x1@2x.png)
 # 🔨 Forge
 
-> The delivery state machine for coding agents. Spec your project once, push it to your tracker, and let agents plan, build, test, review, and ship — gated by you only where it matters.
+<p align="center">
+  <a href="https://www.npmjs.com/package/@firatcand/forge"><img src="https://img.shields.io/npm/v/%40firatcand%2Fforge?style=flat&color=black" alt="npm version"></a>
+  <a href="https://github.com/firatcand/forge/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/firatcand/forge/ci.yml?branch=main&style=flat&label=CI" alt="CI status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg?style=flat" alt="MIT License"></a>
+</p>
 
-You already use Claude Code or Codex every day. You already know the failure modes: the agent that confidently rewrites the wrong abstraction, the PR that compiles but ignores the spec, the session that starts cold and re-derives last week's decisions, the review that's just the same model agreeing with itself.
+<p align="center">
+  <a href="docs/QUICKSTART.md">Quickstart</a> · <a href="ETHOS.md">Ethos</a> · <a href="spec/SPEC.md">Spec</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="CONTRIBUTING.md">Contributing</a>
+</p>
 
-Forge fixes this the way engineering orgs always have — with process — except the process is *executable*. It runs inside your coding agent as a set of skills backed by a real state machine: every task is claimed atomically, planned before it's coded, built in an isolated worktree, tested before review, reviewed by a **different model** than the one that wrote it, and shipped through gates that refuse weak work. Your tracker (Linear, GitHub Issues, or Notion) is the source of truth the whole time, so you watch progress where your team already looks.
+**Forge** is a _delivery framework for coding agents_. It runs inside Claude Code, Codex CLI, Cursor, or Gemini CLI as a set of skills backed by a state machine, turns your idea into a spec and a dependency graph of tasks in Linear, GitHub Issues, or Notion — then drives each task through plan → build → test → review → ship. Your tracker is the source of truth the whole time; the agent is just the worker.
 
-The destination is full autonomy: you describe what you want, answer the architectural questions only you can answer, and the loop delivers — ticket by ticket, phase by phase, routing each task to the cheapest model that can actually do it. The v0.5 roadmap below is that loop. Everything under it already ships today.
+If you ship production code with agents and want every PR planned, tested, and reviewed like a team would — without babysitting the session — this is it.
 
-## How it works
+Every failure mode of agent-driven development gets a named mechanism:
 
-Three layers, one contract:
+- **AI slop** → nothing reaches main without a plan you approved, tests that pass, and review by a model that didn't write the code
+- **Spec drift** → the spec lives in-repo as the agent's required reading; `doctor` flags when SPEC symbols stop matching the source tree
+- **Cold sessions** → tasks resume from tracker state, never from a dead transcript; leases expire and work is recoverable
+- **Parallel collisions** → worktree-per-task isolation, overlap classification, and dependency-aware dispatch keep concurrent agents off each other's files
 
-1. **A spec spine.** `/forge` interviews you into a BRIEF; `/draft-prd` and `/draft-spec` turn it into product and architecture truth; `/decompose` breaks it into a dependency graph of tasks; `/push-to-tracker` makes your tracker the live execution record. Each artifact owns specific fields — the tracker owns status, the SPEC owns architecture — so agents never act on a stale mental model.
-2. **A state machine.** A CLI control plane (`forge orchestrate` — claim, dispatch, heartbeat, question, complete, reconcile, ~25 verbs) owns the task lifecycle: atomic claims with leases, isolated git worktrees per task, structured question/answer escalation, crash-safe resumable journals. Skills own the UX; verbs own the state. Nothing mutates state outside a verb, which is why the same machinery serves an interactive session and an autonomous loop.
-3. **Enforced methodology.** Eight principles installed as gates, not advice: no fixes without root-cause analysis, no multi-file changes without an approved plan, no PR without tests, no critical-path merge without a second model's review, no secrets in the repo — and when the agent is confused, it asks you instead of guessing.
+<table>
+<tr><td><b>Spec-driven from day one</b></td><td><code>/forge</code> interviews your idea into BRIEF → PRD → SPEC → a dependency graph of tasks pushed to your tracker. Weak inputs are refused, not papered over.</td></tr>
+<tr><td><b>A real state machine</b></td><td>~25 CLI verbs own the task lifecycle: atomic claims, expiring leases, isolated git worktrees, crash-safe resumable journals. Skills own the UX; verbs own the state — interactive and autonomous flows share one code path.</td></tr>
+<tr><td><b>Your tracker is the truth</b></td><td>Linear, GitHub Issues, or Notion behind one adapter. Status, sequencing, and blockers live where your team already looks; local files are derived snapshots, never the authority.</td></tr>
+<tr><td><b>Cross-model review</b></td><td>The model that wrote the code never reviews it. Paths listed in your <code>CRITICAL.md</code> require a second model's verdict before merge.</td></tr>
+<tr><td><b>Methodology as gates, not advice</b></td><td>No fix without root-cause analysis, no multi-file change without an approved plan, no PR without tests, no secrets in the repo. A confused agent asks you instead of guessing.</td></tr>
+<tr><td><b>Drift handled, not hoped away</b></td><td><code>/reconcile</code> syncs tracker ↔ local; one accepted decision propagates to SPEC + PRD + phases + tracker atomically via <code>/update-spec</code>; <code>/amend-roadmap</code> adds tasks mid-flight with journaled writes.</td></tr>
+<tr><td><b>Multi-host</b></td><td>Claude Code (slash commands), Codex CLI (natural language), Cursor (beta host adapter), Gemini CLI. One installer detects and wires all of them.</td></tr>
+<tr><td><b>Autonomous delivery <em>(v0.5 roadmap)</em></b></td><td><code>/goal</code> drives a ticket to <em>shipped or parked</em>; <code>/deliver</code> loops it across a phase or product; you answer architecture questions from an async inbox while model routing sends each task to the cheapest model that can actually do it.</td></tr>
+</table>
 
 ## Lifecycle at a glance
 
@@ -39,21 +55,9 @@ PHASE → /phase-gate → /retro → next phase
 
 > The `/`-prefixed names are the Claude Code experience. The same skills install into Codex CLI, Cursor, and Gemini CLI — see [Cross-tool support](#cross-tool-support).
 
-## What it protects you from
-
-- **AI slop** — no code reaches main without a plan you approved, tests that pass, and dual-model review on critical paths. The reviewer is never the model that wrote the code.
-- **Spec drift** — the spec lives in the repo and is the agent's required reading; `doctor` flags when SPEC symbols stop matching the source tree; accepted decisions propagate everywhere at once via ephemeral ADRs.
-- **Agent inertia** — tasks resume from tracker state, never from a cold transcript. Leases expire, work is recoverable, nothing depends on a session staying alive.
-- **Collision** — worktree-per-task isolation plus an overlap classifier mean parallel agents don't trample each other; dependency-aware dispatch means nothing ships before what it depends on.
-
 ## The road to v0.5: the autonomous loop
 
-Forge v0.4 is a disciplined loop you drive. v0.5 is the same loop driving itself — built on the same verbs, which is the point of the state machine:
-
-- **`/goal`** — a per-ticket driver whose exit condition is *shipped or parked*: plan → your approval → implement → bounded self-heal → dual review → merge.
-- **`/deliver`** — the layer above: hand it a phase or a whole product, and it loops `/goal` over the dependency graph with themed batching and gate ceremonies.
-- **A decision inbox, not a babysitting session** — plans and architectural questions park in a typed queue you drain async; everything mechanical runs unattended.
-- **Model routing** — an agent-refreshed model catalog plus per-task capability floors, so the loop sends frontier models only where the task needs them and routes the rest cheaper — across hosts, not just within one.
+Forge v0.4 is a disciplined loop you drive. v0.5 is the same loop driving itself — built on the same verbs, which is the point of the state machine. `/goal` takes one ticket from ready to *shipped or parked* (plan → your approval → implement → bounded self-heal → dual review → merge); `/deliver` loops `/goal` over a whole phase or product; plans and architectural questions park in a typed async inbox instead of holding a session hostage; and a model router with an agent-refreshed catalog sends each task to the cheapest model that clears its capability floor.
 
 This isn't speculative: the maintainer ships Forge with Forge, and the v0.4 releases on this very repo were delivered by exactly this loop run by hand — every ticket planned, cross-reviewed by a second model on a ≥8/10 gate, and merged on green CI.
 
