@@ -4,6 +4,20 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-12
+
+### Added
+
+- **`forge orchestrate <verb> --help` prints real help (FORGE-134)** — synopsis + reality-matched flag tables for every verb; value-aware interception; `--help --json` emits an envelope. Previously `--help` RAN the verb.
+- **Auto-gc warnings reach machine consumers (FORGE-149)** — `phases --ready --json --include-warnings` and the new `status --json [--include-warnings]`.
+- **`reconcile --task <id>` scoping (FORGE-119)** and **`reconcile --pull --check` live drift probe (FORGE-123)** — `Tracker.getCurrentRevision()` mints opaque provider-native tokens (`source.tracker_revision`); a matching check refreshes the freshness stamp and exits without fetching the issue list.
+- **JSONL soft rotation (FORGE-85)** — `events.jsonl`/`claim-history.jsonl` rotate at `agents.log_rotate_max_bytes` (default 10 MiB, single `.1` generation, interprocess lock-or-skip); readers merge; claim-generation continuity preserved.
+- **`second_opinion` naming (FORGE-150)** — `second_opinion.auto_enabled`, `FORGE_AUTO_SECOND_OPINION`, `forge second-opinion suggest`; every legacy codex-prefixed name still works with deprecation warnings (**removal in v0.6**); `forge migrate` renames the block keeping an old-CLI compat mirror.
+- **Tracked `methodology_version` pin (FORGE-161)** — upgrade stamps it comment-preservingly; the CLI warns on pin↔installed mismatch.
+- **Doctor symbol-mention drift (FORGE-131)** — backtick identifiers in SPEC/PRD/ORCHESTRATOR are checked against the source tree (shape filter + allowlists).
+- **Ship-time SPEC-change signal (FORGE-164)** — `spec-diff --all-active` lists active claims predating spec/ changes; `/ship` adds an informational PR section.
+- **`OrchestratorError.safeDetails()` (FORGE-86)** and the `overwriteAtomicLink` ENOENT contract comment (FORGE-84).
+
 ### Added
 
 - **Cursor host (FORGE-160).** `cursor` is now a first-class `AgentKind`. Its
@@ -46,6 +60,11 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
   `### ⚠ SPEC changes since this task was claimed` PR-body section — it never
   blocks the ship. Together with the on-resume block this closes both halves of
   the FORGE-114 SPEC-drift mitigation.
+
+### Fixed
+
+- **Symlink-class closure** — parent/component guards (one shared `src/core/symlink-guard.ts`) now cover the nested Cursor artifact, init scaffold promotion, every host's skill/agent farm dirs (apply/prune/eject — a pre-existing gap for claude/codex/gemini), and `.forge` itself (init/upgrade/migrate-claudemd refuse upfront).
+- **Tracker body-mutation hardening (FORGE-118)** — `withRetry` on `updateIssueBody`/`setBlockedBy` (+ GitHub `setClaimFence`); footer parsing unified to the trailing region (fence-aware; mid-body/fenced examples are literal text, never promoted or stripped); duplicate footers dedup last-wins; opt-in claim-token CAS (`CLAIM_MISMATCH`).
 
 ## [0.4.2] - 2026-06-12
 

@@ -320,7 +320,7 @@ export const SettingsSchema = z.object({
     .default({}),
   // Legacy block (FORGE-105 → renamed by FORGE-150): OPTIONAL, no default — it
   // materializes only when present in the file. Honored by the resolver for
-  // back-compat (an un-migrated repo's disable still works); removed in v0.5.
+  // back-compat (an un-migrated repo's disable still works); removed in v0.6.
   codex: z
     .object({
       auto_codex_enabled: z.boolean().default(true),
@@ -1058,7 +1058,7 @@ Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026
 
 Each suggestion is a printed line at skill end: `"💡 Suggested next: /second-opinion review-decision (run with FORGE_AUTO_SECOND_OPINION=0 to disable)"`. User types or skips. No automatic execution.
 
-FORGE-150 adopted the "everything is second-opinion, suggest is a mode" naming, shipped NOW (overriding the original v0.5 deferral): the verb is `forge second-opinion suggest <event>`, the settings field is `second_opinion.auto_enabled`, and the env var is `FORGE_AUTO_SECOND_OPINION`. The legacy names are deprecation-shimmed — the `forge codex-suggest` verb is an alias that prints a one-time stderr deprecation note then delegates; `FORGE_AUTO_CODEX` is still honored (with a once-per-invocation note when it is the active disable source); and an un-migrated `codex.auto_codex_enabled` settings block is still honored by the resolver. `forge migrate` renames the settings block while KEEPING a mirrored `codex` block for old-CLI compat. All legacy names are REMOVED in v0.5.
+FORGE-150 adopted the "everything is second-opinion, suggest is a mode" naming, shipped NOW (overriding the original v0.5 deferral): the verb is `forge second-opinion suggest <event>`, the settings field is `second_opinion.auto_enabled`, and the env var is `FORGE_AUTO_SECOND_OPINION`. The legacy names are deprecation-shimmed — the `forge codex-suggest` verb is an alias that prints a one-time stderr deprecation note then delegates; `FORGE_AUTO_CODEX` is still honored (with a once-per-invocation note when it is the active disable source); and an un-migrated `codex.auto_codex_enabled` settings block is still honored by the resolver. `forge migrate` renames the settings block while KEEPING a mirrored `codex` block for old-CLI compat. All legacy names are REMOVED in v0.6 (one full minor release of warnings).
 
 Env var `FORGE_AUTO_SECOND_OPINION=0` disables suggestions entirely (legacy `FORGE_AUTO_CODEX=0` still honored until v0.5).
 
@@ -1202,7 +1202,7 @@ ETHOS principle 6 ("Multi-model Second Opinion on critical paths") **upgrades to
 
 For interactive (non-orchestrator) work, `/second-opinion` is auto-triggered on CRITICAL.md hits by `/ship` (block-severity findings halt PR creation) and by `/review` (advisory — folded into severity bucketing, gated on `review_host_cli !== null`). The universal-review behaviour in the orchestrator's REVIEW phase (Flow 3b) uses the same verb and the same verdict envelope, so interactive and orchestrated paths share one code path.
 
-The old `skills/codex/` slug is kept as a description-only deprecation alias in v0.4.x and removed in v0.5.0.
+The old `skills/codex/` slug is kept as a description-only deprecation alias in v0.4.x and removed in v0.6.0.
 
 `/ship` enforces both: the in-host `/review` skill must have been run, and (when orchestrator-driven) the REVIEW phase verdict file must show `pass`.
 

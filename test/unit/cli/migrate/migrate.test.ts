@@ -482,10 +482,10 @@ test('FORGE-150 — legacy codex block → second_opinion seeded from value + co
   const after = parseYaml(f!.edit!.after) as Record<string, unknown>;
   // second_opinion seeded from the legacy disable value (false preserved).
   assert.deepEqual(after.second_opinion, { auto_enabled: false });
-  // codex block KEPT, mirrored to the same value (old-CLI compat; removal v0.5).
+  // codex block KEPT, mirrored to the same value (old-CLI compat; removal v0.6).
   assert.deepEqual(after.codex, { auto_codex_enabled: false });
   // Mirror comment present in the rendered YAML.
-  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.5/);
+  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.6/);
   // decisions/doctor added with defaults.
   assert.deepEqual(after.decisions, SETTINGS_DEFAULT_BLOCKS.decisions);
   assert.deepEqual(after.doctor, SETTINGS_DEFAULT_BLOCKS.doctor);
@@ -514,7 +514,7 @@ test('FORGE-150 — both blocks present + DISAGREE → codex mirror refreshed to
   // The change is recorded in the finding detail.
   assert.match(f!.detail, /codex/);
   // Mirror comment preserved.
-  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.5/);
+  assert.match(f!.edit!.after, /# legacy mirror — removed in v0\.6/);
   // Result re-parses cleanly and old-CLI lever now agrees with new-CLI lever.
   const reparsed = SettingsSchema.parse(after);
   assert.equal(reparsed.second_opinion.auto_enabled, true);

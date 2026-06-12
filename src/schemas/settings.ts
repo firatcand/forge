@@ -24,7 +24,7 @@ const NotionTrackerConfigSchema = z.object({
     mcp_command: z.array(z.string()).optional(),
     /**
      * @deprecated FORGE-117 — accepted and ignored (see mcp_command above);
-     * removed in v0.5.
+     * removed in v0.6.
      */
     mcp_env: z.record(z.string(), z.string()).optional(),
   }),
@@ -309,7 +309,7 @@ export const SettingsSchema = z.object({
   // FORGE-150: primary disable surface for in-skill second-opinion suggestions.
   second_opinion: SecondOpinionSchema,
   // FORGE-150: legacy block — optional, no default. Honored by the resolver for
-  // back-compat; removed in v0.5.
+  // back-compat; removed in v0.6.
   codex: CodexSchema,
   decisions: DecisionsSchema,
   doctor: DoctorSchema,

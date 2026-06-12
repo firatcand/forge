@@ -12,9 +12,9 @@ import type { Settings } from '../schemas/index.ts';
 // suggesting the matching /second-opinion review-* verb.
 // Disable levers (in precedence order):
 //   1. env `FORGE_AUTO_SECOND_OPINION=0` (primary) OR legacy `FORGE_AUTO_CODEX=0`
-//      (honored with a once-per-invocation deprecation note; removal v0.5)
+//      (honored with a once-per-invocation deprecation note; removal v0.6)
 //   2. settings `second_opinion.auto_enabled: false` (primary) OR, when only the
-//      legacy block is present, `codex.auto_codex_enabled: false` (removal v0.5)
+//      legacy block is present, `codex.auto_codex_enabled: false` (removal v0.6)
 // Token-cap accounting is NOT implemented in this verb — see FORGE-124.
 
 const SETTINGS_REL_PATH = '.forge/settings.yaml';
@@ -173,7 +173,7 @@ function readExplicitLevers(settingsPath: string): ExplicitLevers {
 //      in BOTH directions (new true beats legacy false; new false beats legacy
 //      true).
 //   2. else explicit legacy codex.auto_codex_enabled in the file → use it
-//      (back-compat for un-migrated repos; removal v0.5)
+//      (back-compat for un-migrated repos; removal v0.6)
 //   3. else true
 // Falls back to `enabled: true` when settings.yaml is absent OR malformed.
 // Never throws — suggestion must not crash the parent skill on bad config.
@@ -227,7 +227,7 @@ function printUsage(stderrTarget: RunSecondOpinionSuggestOptions['stderr']): voi
 }
 
 const LEGACY_ENV_DEPRECATION =
-  'forge: FORGE_AUTO_CODEX is deprecated — use FORGE_AUTO_SECOND_OPINION; removal in v0.5.';
+  'forge: FORGE_AUTO_CODEX is deprecated — use FORGE_AUTO_SECOND_OPINION; removal in v0.6.';
 
 export function runSecondOpinionSuggest(
   opts: RunSecondOpinionSuggestOptions,

@@ -217,9 +217,9 @@ if (command === 'init') {
   process.exit(result.exitCode);
 } else if (command === 'codex-suggest') {
   // FORGE-150: deprecation alias for `forge second-opinion suggest`. Prints ONE
-  // stderr warning, then delegates with identical behavior. Removal in v0.5.
+  // stderr warning, then delegates with identical behavior. Removal in v0.6.
   process.stderr.write(
-    'forge codex-suggest is deprecated — use `forge second-opinion suggest`; removal in v0.5.\n',
+    'forge codex-suggest is deprecated — use `forge second-opinion suggest`; removal in v0.6.\n',
   );
   const result = runSecondOpinionSuggest({ cwd: process.cwd(), argv: args.slice(1) });
   process.exit(result.exitCode);
