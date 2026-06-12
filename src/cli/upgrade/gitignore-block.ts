@@ -40,6 +40,13 @@ const BLOCK_BODY = [
   '/.codex/agents/',
   '/.gemini/skills/',
   '/.gemini/agents/',
+  // FORGE-160: cursor host. `.agents/skills/` is the canonical cross-tool skill
+  // farm root; `.cursor/agents/` holds subagent defs; the `.mdc` rule inlines
+  // the methodology and is regenerated per machine (same rationale as
+  // .forge/CONTEXT.md), so all three are forge-managed + gitignored.
+  '/.agents/skills/',
+  '/.cursor/agents/',
+  '/.cursor/rules/forge-context.mdc',
 ].join('\n');
 
 const FULL_BLOCK = `${MARKER_OPEN}\n${BLOCK_BODY}\n${MARKER_CLOSE}\n`;

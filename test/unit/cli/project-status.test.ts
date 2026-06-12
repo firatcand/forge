@@ -17,6 +17,7 @@ import { PassThrough } from 'node:stream';
 import { runProjectStatus } from '../../../src/cli/project-status.ts';
 import { readBundledMethodologyVersion } from '../../../src/cli/upgrade/version-check.ts';
 import { locatePackageRoot } from '../../../src/cli/upgrade/skill-farm.ts';
+import { buildCursorRuleFile } from '../../../src/cli/upgrade/agent-root-files.ts';
 
 function capture(): { stdout: PassThrough; out: () => string } {
   const stdout = new PassThrough();
@@ -192,6 +193,52 @@ test('reads agent root file markers and user-body bytes', () => {
     assert.equal(files['CLAUDE.md'].hasForgeMarker, true);
     assert.equal(files['CLAUDE.md'].userBodyBytes, Buffer.byteLength(userBody, 'utf8'));
     assert.equal(files['GEMINI.md'].exists, false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// FORGE-160 (GPT-5.5 review): cursor .mdc is `frontmatter + marker block`, both
+// forge-owned. A pristine artifact must report 0 user bytes — the generic
+// bodyWithoutPrefixBlock would miscount the frontmatter as user content.
+test('FORGE-160: pristine cursor .mdc reports 0 user bytes (frontmatter not counted)', () => {
+  const cwd = freshDir();
+  try {
+    writeSettings(cwd);
+    const mdc = buildCursorRuleFile(
+      { repoUrl: 'https://github.com/firatcand/forge' },
+      '# Forge methodology\n\nsome inlined context\n',
+    );
+    mkdirSync(join(cwd, '.cursor', 'rules'), { recursive: true });
+    writeFileSync(join(cwd, '.cursor/rules/forge-context.mdc'), mdc);
+
+    const { data } = runJson(cwd);
+    const files = data.agentRootFiles as Record<string, Record<string, unknown>>;
+    const info = files['.cursor/rules/forge-context.mdc'];
+    assert.equal(info.exists, true);
+    assert.equal(info.hasForgeMarker, true);
+    assert.equal(info.userBodyBytes, 0, 'pristine cursor .mdc must report 0 user bytes');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-160: cursor .mdc with one appended user line counts only that line', () => {
+  const cwd = freshDir();
+  try {
+    writeSettings(cwd);
+    const base = buildCursorRuleFile(
+      { repoUrl: 'https://github.com/firatcand/forge' },
+      '# Forge methodology\n\nsome inlined context\n',
+    );
+    const userLine = 'my own note\n';
+    mkdirSync(join(cwd, '.cursor', 'rules'), { recursive: true });
+    writeFileSync(join(cwd, '.cursor/rules/forge-context.mdc'), `${base}\n${userLine}`);
+
+    const { data } = runJson(cwd);
+    const files = data.agentRootFiles as Record<string, Record<string, unknown>>;
+    const info = files['.cursor/rules/forge-context.mdc'];
+    assert.equal(info.userBodyBytes, Buffer.byteLength(userLine, 'utf8'), 'only the appended user line is counted');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

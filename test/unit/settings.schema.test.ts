@@ -359,18 +359,41 @@ test('regression — invalid primary_host_cli enum value rejected', () => {
   assert.equal(result.success, false);
 });
 
-// FORGE-88: enum tightening — cursor no longer accepted anywhere; claude
-// no longer accepted as a review_host_cli; gemini gated on env var.
+// FORGE-88: enum tightening — claude no longer accepted as a review_host_cli;
+// gemini gated on env var.
+// FORGE-160: cursor is now a VALID primary host, BUT only behind the
+// cursor_host_beta_opt_in gate; it remains rejected as a review host (review
+// lineage stays codex | gemini).
 
-test('FORGE-88 — primary_host_cli=cursor rejected (no longer supported)', () => {
+test('FORGE-160 — primary_host_cli=cursor WITHOUT cursor_host_beta_opt_in rejected (beta gate)', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
     tracker: { type: 'linear', config: { team_id: 'T' } },
     secrets: { manager: 'env_file' },
-    agents: { primary_host_cli: 'cursor' },
+    agents: { primary_host_cli: 'cursor', review_host_cli: 'codex' },
   });
   assert.equal(result.success, false);
+  if (!result.success) {
+    // The error must NAME the flag so the adopter knows the fix.
+    assert.match(result.error.message, /cursor_host_beta_opt_in/);
+  }
+});
+
+test('FORGE-160 — primary_host_cli=cursor WITH cursor_host_beta_opt_in accepted', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'cursor', review_host_cli: 'codex', cursor_host_beta_opt_in: true },
+  });
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.data.agents.primary_host_cli, 'cursor');
+    // cursor in enabled_root_files is auto-promoted from primary.
+    assert.deepEqual(result.data.agents.enabled_root_files, ['cursor']);
+  }
 });
 
 test('FORGE-88 — review_host_cli=cursor rejected (no longer supported)', () => {
@@ -511,7 +534,7 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
       poll_interval_ms: number;
       worktree_root: string;
       on_persistent_failure: 'notify' | 'block_task' | 'move_to_next';
-      primary_host_cli: 'claude' | 'codex' | 'gemini';
+      primary_host_cli: 'claude' | 'codex' | 'gemini' | 'cursor';
       review_host_cli: 'codex' | 'gemini' | null;
     };
     design: {
@@ -740,6 +763,22 @@ test('FORGE-152 — enabled_root_files accepts multi-agent selection', () => {
 });
 
 test('FORGE-152 — enabled_root_files rejects unknown agent', () => {
+  // FORGE-160: cursor is now valid; use a genuinely-unknown kind.
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: {
+      primary_host_cli: 'claude',
+      review_host_cli: 'codex',
+      enabled_root_files: ['claude', 'windsurf'],
+    },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-160 — enabled_root_files accepts cursor as a passive breadcrumb (no opt-in needed)', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
@@ -751,7 +790,10 @@ test('FORGE-152 — enabled_root_files rejects unknown agent', () => {
       enabled_root_files: ['claude', 'cursor'],
     },
   });
-  assert.equal(result.success, false);
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.deepEqual(result.data.agents.enabled_root_files, ['claude', 'cursor']);
+  }
 });
 
 test('FORGE-152 — enabled_root_files: explicit [] promotes to [primary_host_cli]', () => {

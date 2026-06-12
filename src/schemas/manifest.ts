@@ -14,7 +14,9 @@ import { z } from 'zod';
 
 export const MANIFEST_VERSION = 1;
 
-const AgentKindEnum = z.enum(['claude', 'codex', 'gemini']);
+// FORGE-160: cursor joins the host enum so manifests can record a cursor-enabled
+// install (its `.agents/skills` + `.cursor/agents` farm + the `.mdc` rule file).
+const AgentKindEnum = z.enum(['claude', 'codex', 'gemini', 'cursor']);
 
 // A forge-managed agent root file (CLAUDE.md / AGENTS.md / GEMINI.md).
 // forgeCreated=true  → forge wrote the file (it did not pre-exist); eject deletes it.

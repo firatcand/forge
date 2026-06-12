@@ -20,10 +20,12 @@ export {
 } from './claude.ts';
 export { CodexHarness, type CodexHarnessOpts } from './codex.ts';
 export { GeminiHarness, type GeminiHarnessOpts } from './gemini.ts';
+export { CursorHarness, type CursorHarnessOpts } from './cursor.ts';
 
 import { ClaudeHarness, type ClaudeSpawnSubagent } from './claude.ts';
 import { CodexHarness } from './codex.ts';
 import { GeminiHarness } from './gemini.ts';
+import { CursorHarness } from './cursor.ts';
 import { HarnessError, type HarnessHost, type IHarness } from './base.ts';
 import type { SpawnSubprocess } from './subprocess.ts';
 
@@ -31,6 +33,12 @@ export interface CreateHarnessOpts {
   readonly spawnSubagent?: ClaudeSpawnSubagent;
   readonly spawnSubprocess?: SpawnSubprocess;
   readonly env?: NodeJS.ProcessEnv;
+  // FORGE-160: explicit beta gate for the cursor host, threaded from loaded
+  // settings (agents.cursor_host_beta_opt_in) AT THE CALL SITE. The factory must
+  // not read settings globally; cursor without `cursorBetaOptIn: true` throws a
+  // typed EXPERIMENTAL_GATE_CLOSED naming the flag (defense in depth with the
+  // schema refine). Ignored for non-cursor hosts.
+  readonly cursorBetaOptIn?: boolean;
 }
 
 export function createHarness(
@@ -60,6 +68,15 @@ export function createHarness(
       return new GeminiHarness({
         spawnSubprocess: opts.spawnSubprocess,
         env: opts.env,
+      });
+    case 'cursor':
+      // The CursorHarness ctor also enforces the gate; the factory passes the
+      // call-site opt-in through. When false/undefined the ctor throws
+      // EXPERIMENTAL_GATE_CLOSED naming agents.cursor_host_beta_opt_in.
+      return new CursorHarness({
+        spawnSubprocess: opts.spawnSubprocess,
+        env: opts.env,
+        betaOptIn: opts.cursorBetaOptIn === true,
       });
   }
 }

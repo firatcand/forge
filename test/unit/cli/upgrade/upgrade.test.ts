@@ -117,14 +117,15 @@ test('upgrade: exit 3 when settings.yaml is missing', async () => {
 test('upgrade: exit 3 BEFORE writes when enabled_root_files contains unknown agent kind', async () => {
   // Codex review (FORGE-153 round 1) caught that an unchecked cast lets
   // settings.agents.enabled_root_files reach the refresh loop with an unknown
-  // value like "cursor", throwing mid-write. With schema validation, this
-  // must fail fast (exit 3) before any disk mutation.
+  // value, throwing mid-write. With schema validation, this must fail fast
+  // (exit 3) before any disk mutation. FORGE-160: `cursor` is now a VALID kind,
+  // so this uses a genuinely-unknown value (`windsurf`).
   const cwd = mkdtempSync(join(tmpdir(), 'forge-upgrade-'));
   try {
     mkdirSync(join(cwd, '.forge'));
     writeFileSync(
       join(cwd, '.forge/settings.yaml'),
-      `version: 1\nproject:\n  name: t\ntracker:\n  type: github\n  config:\n    repo: o/r\nsecrets:\n  manager: env_file\n  env_file_path: ./.env\nagents:\n  primary_host_cli: claude\n  review_host_cli: codex\n  enabled_root_files:\n    - claude\n    - cursor\ndesign:\n  mode: project_owned\n`,
+      `version: 1\nproject:\n  name: t\ntracker:\n  type: github\n  config:\n    repo: o/r\nsecrets:\n  manager: env_file\n  env_file_path: ./.env\nagents:\n  primary_host_cli: claude\n  review_host_cli: codex\n  enabled_root_files:\n    - claude\n    - windsurf\ndesign:\n  mode: project_owned\n`,
     );
     writeFileSync(join(cwd, '.forge/.version'), `${readBundledMethodologyVersion()}\n`);
     // Sentinel file — if upgrade writes anything before validating, it would
@@ -132,7 +133,7 @@ test('upgrade: exit 3 BEFORE writes when enabled_root_files contains unknown age
     writeFileSync(join(cwd, '.forge/CONTEXT.md'), 'SENTINEL\n');
     const result = await upgrade({ cwd });
     assert.equal(result.exitCode, 3);
-    assert.match(result.stderr, /enabled_root_files|cursor|invalid/i);
+    assert.match(result.stderr, /enabled_root_files|windsurf|invalid/i);
     // No writes: CONTEXT.md still has sentinel.
     assert.equal(readFileSync(join(cwd, '.forge/CONTEXT.md'), 'utf8'), 'SENTINEL\n');
   } finally {
@@ -560,7 +561,7 @@ test('upgrade --remove-agent: refuses when removal would empty enabled_root_file
 // FORGE-208 — symlink-safe writes
 // ============================================================================
 
-import { lstatSync, readdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
 
 type FsKind = 'file' | 'dir' | 'symlink' | 'other';
 
@@ -770,6 +771,36 @@ test('upgrade (FORGE-208 #10): symlinked settings.yaml refusal happens before AN
   }
 });
 
+// --- FORGE-160: symlinked `.forge` DIRECTORY (not just the settings.yaml leaf) -
+
+/** Move the whole `.forge` dir out of tree and replace it with a symlink to the
+ * relocated real dir — the escape vector a leaf-only check misses. */
+function symlinkForgeDir(cwd: string): string {
+  const realForge = join(cwd, 'real-forge');
+  renameSync(join(cwd, '.forge'), realForge);
+  symlinkSync('real-forge', join(cwd, '.forge'));
+  return realForge;
+}
+
+test('upgrade (FORGE-160): refuses (exit 1) upfront when `.forge` is a symlinked directory; nothing written through the link', async () => {
+  // Stale version → without the refusal this WOULD rewrite CONTEXT.md + .version
+  // THROUGH the link into the relocated real dir. Assert none of that happened.
+  const cwd = bootstrap({ versionOverride: '0.0.1' });
+  try {
+    const realForge = symlinkForgeDir(cwd);
+    const before = byteSnapshot(realForge);
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /\.forge is a symbolic link/);
+    assert.deepEqual([...result.filesChanged], []);
+    assert.equal(lstatSync(join(cwd, '.forge')).isSymbolicLink(), true, 'link intact');
+    assert.equal(readlinkSync(join(cwd, '.forge')), 'real-forge');
+    assert.deepEqual(byteSnapshot(realForge), before, 'NOTHING written through the link');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
 // --- scenario 7: symlinked .gitignore -----------------------------------------
 
 test('upgrade (FORGE-208 #7): symlinked .gitignore is skipped with notice, exit 0, link intact', async () => {
@@ -810,6 +841,248 @@ test('upgrade --remove-agent (FORGE-208 #11): refuses (exit 1) when the root fil
     assert.equal(readFileSync(join(cwd, 'real-agents.md'), 'utf8'), orig, 'target untouched');
     assert.equal(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'), settingsBefore, 'settings untouched');
     assert.equal(existsSync(join(cwd, 'AGENTS.md.pre-removal.bak')), false, 'no .bak');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// ============================================================================
+// FORGE-160 — cursor host upgrade topology
+// ============================================================================
+
+test('FORGE-160 — add-agent cursor materializes .cursor/rules/forge-context.mdc (frontmatter-first + inlined context)', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude' });
+  try {
+    const result = await upgrade({ cwd, addAgent: 'cursor' });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    const mdcPath = join(cwd, '.cursor/rules/forge-context.mdc');
+    assert.ok(existsSync(mdcPath), '.mdc materialized');
+    const body = readFileSync(mdcPath, 'utf8');
+    assert.ok(body.startsWith('---\n'), 'frontmatter is first bytes');
+    assert.match(body, /^---\nalwaysApply: true\n/);
+    assert.match(body, /<!-- >>> forge-managed/, 'marker block present');
+    // inlined context: the rendered CONTEXT.md heading should appear inside.
+    assert.match(body, /Forge methodology|forge methodology|CLI surface/i);
+    assert.ok(result.filesChanged.includes('.cursor/rules/forge-context.mdc'));
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('FORGE-160 — cursor upgrade twice == once (idempotent, byte-identical, zero changed on 2nd run)', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude' });
+  try {
+    // First: add cursor (materializes the .mdc + farm).
+    const add = await upgrade({ cwd, addAgent: 'cursor' });
+    assert.equal(add.exitCode, 0);
+    const snapshot = byteSnapshot(cwd);
+
+    // Second: plain upgrade (no flags) must be a no-op.
+    const second = await upgrade({ cwd });
+    assert.equal(second.exitCode, 0);
+    assert.equal(
+      second.filesChanged.length,
+      0,
+      `second run should be a no-op, changed: ${JSON.stringify(second.filesChanged)}`,
+    );
+    const after = byteSnapshot(cwd);
+    assert.deepEqual([...after.entries()].sort(), [...snapshot.entries()].sort());
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('FORGE-160 — remove-agent cursor deletes the .mdc with no --confirm and leaves no forge-owned residue', async () => {
+  const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude' });
+  try {
+    await upgrade({ cwd, addAgent: 'cursor' });
+    assert.ok(existsSync(join(cwd, '.cursor/rules/forge-context.mdc')));
+    assert.ok(existsSync(join(cwd, '.agents/skills')), 'cursor farm created');
+
+    // remove-agent cursor: no --confirm needed (the .mdc is fully forge-owned).
+    const rm = await upgrade({ cwd, removeAgent: 'cursor' });
+    assert.equal(rm.exitCode, 0, `stderr: ${rm.stderr}`);
+    assert.equal(existsSync(join(cwd, '.cursor/rules/forge-context.mdc')), false, '.mdc removed');
+
+    // Farm entries pruned (cursor was the only host on .agents/skills).
+    const agentsSkills = join(cwd, '.agents/skills');
+    if (existsSync(agentsSkills)) {
+      assert.equal(readdirSync(agentsSkills).length, 0, '.agents/skills emptied of forge entries');
+    }
+    // settings no longer lists cursor.
+    const settings = yamlParse(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8')) as {
+      agents: { enabled_root_files: string[] };
+    };
+    assert.equal(settings.agents.enabled_root_files.includes('cursor'), false);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// ============================================================================
+// FORGE-208 (one level up) — symlinked PARENT directory of cursor's nested .mdc
+// ============================================================================
+
+/** Enable cursor in settings (so the refresh loop tries to write its .mdc) but
+ * DON'T create root files — the test installs a symlinked .cursor parent
+ * instead, and CLAUDE.md is irrelevant here. `skipRootFiles` also avoids the
+ * bootstrap helper calling buildPrefixBlock('cursor') (which throws by design).
+ * CLAUDE.md is written explicitly so the claude refresh-loop iteration is a
+ * no-op and the only stderr line is the cursor parent-symlink skip notice. */
+function bootstrapCursorEnabled(): string {
+  const cwd = bootstrap({ enabledAgents: ['claude', 'cursor'], primary: 'claude', skipRootFiles: true });
+  writeFileSync(join(cwd, 'CLAUDE.md'), buildPrefixBlock('claude', { repoUrl: FORGE_REPO_URL }));
+  return cwd;
+}
+
+test('upgrade (FORGE-208 parent #1): symlinked `.cursor` dir → cursor refresh skips with notice, nothing written through the link, link intact', async () => {
+  const cwd = bootstrapCursorEnabled();
+  try {
+    // Replace the bootstrap's real .cursor (farm dir) with a symlink to an
+    // out-of-tree real directory — the escape vector under test.
+    rmSync(join(cwd, '.cursor'), { recursive: true, force: true });
+    const escapeRoot = mkdtempSync(join(tmpdir(), 'forge-escape-'));
+    symlinkSync(escapeRoot, join(cwd, '.cursor'));
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+
+    // Skip notice naming the symlinked parent; .mdc never enters `changed`.
+    assert.match(result.stderr, /\.cursor\/rules\/forge-context\.mdc \(parent \.cursor is a symlink/);
+    assert.equal(
+      result.filesChanged.includes('.cursor/rules/forge-context.mdc'),
+      false,
+      'skipped cursor artifact must not enter changed',
+    );
+
+    // The link is intact and NOTHING was written through it.
+    assert.equal(lstatSync(join(cwd, '.cursor')).isSymbolicLink(), true, '.cursor still a symlink');
+    assert.equal(readlinkSync(join(cwd, '.cursor')), escapeRoot);
+    assert.equal(existsSync(join(escapeRoot, 'rules')), false, 'no write-through to the link target');
+    rmSync(escapeRoot, { recursive: true, force: true });
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade (FORGE-208 parent #2): symlinked `.cursor/rules` dir → cursor refresh skips with notice, link intact, no write-through', async () => {
+  const cwd = bootstrapCursorEnabled();
+  try {
+    // .cursor is a real dir; .cursor/rules is a symlink to an out-of-tree dir.
+    mkdirSync(join(cwd, '.cursor'), { recursive: true });
+    const escapeRoot = mkdtempSync(join(tmpdir(), 'forge-escape-'));
+    symlinkSync(escapeRoot, join(cwd, '.cursor/rules'));
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+
+    assert.match(
+      result.stderr,
+      /\.cursor\/rules\/forge-context\.mdc \(parent \.cursor\/rules is a symlink/,
+    );
+    assert.equal(result.filesChanged.includes('.cursor/rules/forge-context.mdc'), false);
+
+    assert.equal(lstatSync(join(cwd, '.cursor/rules')).isSymbolicLink(), true, '.cursor/rules still a symlink');
+    assert.equal(
+      existsSync(join(escapeRoot, 'forge-context.mdc')),
+      false,
+      'no write-through to the link target',
+    );
+    rmSync(escapeRoot, { recursive: true, force: true });
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// ============================================================================
+// FORGE-160 (round 2) — --remove-agent cursor with a symlinked PARENT directory
+// of the nested .mdc. The leaf check alone would let unlinkSync reach THROUGH
+// the link and delete a file outside the working tree. The parent guard must
+// fire FIRST: skip the deletion with a notice, leave the link + target intact,
+// but still remove cursor from enabled_root_files.
+// ============================================================================
+
+/** Enable claude (primary) + cursor; place a REAL forge-context.mdc at an
+ * out-of-tree target and symlink `parentRel` to that target's tree, proving a
+ * through-symlink delete would destroy the target file if the guard regressed. */
+function bootstrapRemoveCursorSymlinkedParent(parentRel: '.cursor' | '.cursor/rules'): {
+  cwd: string;
+  escapeRoot: string;
+  mdcAtTarget: string;
+} {
+  const cwd = bootstrap({ enabledAgents: ['claude', 'cursor'], primary: 'claude', skipRootFiles: true });
+  writeFileSync(join(cwd, 'CLAUDE.md'), buildPrefixBlock('claude', { repoUrl: FORGE_REPO_URL }));
+  const escapeRoot = mkdtempSync(join(tmpdir(), 'forge-escape-'));
+
+  if (parentRel === '.cursor') {
+    mkdirSync(join(escapeRoot, 'rules'), { recursive: true });
+    writeFileSync(join(escapeRoot, 'rules', 'forge-context.mdc'), '---\nforge: owned\n---\n');
+    rmSync(join(cwd, '.cursor'), { recursive: true, force: true });
+    symlinkSync(escapeRoot, join(cwd, '.cursor'));
+    return { cwd, escapeRoot, mdcAtTarget: join(escapeRoot, 'rules', 'forge-context.mdc') };
+  }
+  writeFileSync(join(escapeRoot, 'forge-context.mdc'), '---\nforge: owned\n---\n');
+  mkdirSync(join(cwd, '.cursor'), { recursive: true });
+  symlinkSync(escapeRoot, join(cwd, '.cursor/rules'));
+  return { cwd, escapeRoot, mdcAtTarget: join(escapeRoot, 'forge-context.mdc') };
+}
+
+test('upgrade --remove-agent cursor (FORGE-160 parent #1): symlinked `.cursor` → nothing deleted through the link, link intact, notice emitted', async () => {
+  const { cwd, escapeRoot, mdcAtTarget } = bootstrapRemoveCursorSymlinkedParent('.cursor');
+  try {
+    const result = await upgrade({ cwd, removeAgent: 'cursor' });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+
+    assert.match(result.stderr, /\.cursor\/rules\/forge-context\.mdc \(parent \.cursor is a symlink/);
+    assert.equal(result.filesChanged.includes('.cursor/rules/forge-context.mdc'), false);
+
+    assert.equal(lstatSync(join(cwd, '.cursor')).isSymbolicLink(), true, '.cursor still a symlink');
+    assert.equal(readlinkSync(join(cwd, '.cursor')), escapeRoot);
+    assert.equal(existsSync(mdcAtTarget), true, 'target .mdc must survive — no delete-through');
+
+    const settings = yamlParse(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'));
+    assert.equal(settings.agents.enabled_root_files.includes('cursor'), false);
+
+    rmSync(escapeRoot, { recursive: true, force: true });
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade --remove-agent cursor (FORGE-160 parent #2): symlinked `.cursor/rules` → nothing deleted through the link, link intact, notice emitted', async () => {
+  const { cwd, escapeRoot, mdcAtTarget } = bootstrapRemoveCursorSymlinkedParent('.cursor/rules');
+  try {
+    const result = await upgrade({ cwd, removeAgent: 'cursor' });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+
+    assert.match(
+      result.stderr,
+      /\.cursor\/rules\/forge-context\.mdc \(parent \.cursor\/rules is a symlink/,
+    );
+    assert.equal(result.filesChanged.includes('.cursor/rules/forge-context.mdc'), false);
+
+    assert.equal(lstatSync(join(cwd, '.cursor/rules')).isSymbolicLink(), true, '.cursor/rules still a symlink');
+    assert.equal(existsSync(mdcAtTarget), true, 'target .mdc must survive — no delete-through');
+
+    const settings = yamlParse(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'));
+    assert.equal(settings.agents.enabled_root_files.includes('cursor'), false);
+
+    rmSync(escapeRoot, { recursive: true, force: true });
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade --remove-agent cursor (FORGE-160 parent #3): dry-run parity — notice + changed identical to real run, target untouched', async () => {
+  const { cwd, escapeRoot, mdcAtTarget } = bootstrapRemoveCursorSymlinkedParent('.cursor');
+  try {
+    const dry = await upgrade({ cwd, removeAgent: 'cursor', dryRun: true });
+    assert.equal(dry.exitCode, 0, `stderr: ${dry.stderr}`);
+    assert.match(dry.stderr, /\.cursor\/rules\/forge-context\.mdc \(parent \.cursor is a symlink/);
+    assert.equal(dry.filesChanged.includes('.cursor/rules/forge-context.mdc'), false);
+    assert.equal(existsSync(mdcAtTarget), true, 'dry-run must not delete the target');
+    assert.equal(lstatSync(join(cwd, '.cursor')).isSymbolicLink(), true);
+    rmSync(escapeRoot, { recursive: true, force: true });
   } finally {
     cleanup(cwd);
   }

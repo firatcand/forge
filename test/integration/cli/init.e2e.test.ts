@@ -142,6 +142,54 @@ test('e2e (FORGE-152): forge init writes all three root files when enabled_root_
   }
 });
 
+// FORGE-160 (GPT-5.5 review): cursor-as-primary answers. init never produces
+// the beta opt-in flag, so this must be rejected at ANSWERS VALIDATION — before
+// any artifact is written.
+const CURSOR_PRIMARY_ANSWERS = {
+  ...VALID_ANSWERS,
+  agents: {
+    max_concurrent: 10,
+    retry_attempts: 10,
+    primary_host_cli: 'cursor',
+    review_host_cli: 'codex',
+    enabled_root_files: ['cursor'],
+  },
+};
+
+test('e2e (FORGE-160): non-interactive cursor-primary answers → early validation error, ZERO files written', async () => {
+  const cwd = tmp();
+  mkdirSync(join(cwd, '.git'), { recursive: true });
+  writeFileSync(join(cwd, 'package.json'), JSON.stringify({ name: 'consumer-cursor' }));
+  writeFileSync(join(cwd, '.env.local'), 'X=1\n');
+
+  const result = await execa(tsxBin, [entry, 'init'], {
+    cwd,
+    reject: false,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: '',
+      FORGE_INIT_NONINTERACTIVE: '1',
+      FORGE_INIT_ANSWERS_JSON: JSON.stringify(CURSOR_PRIMARY_ANSWERS),
+      FORGE_INIT_SKIP_VALIDATION: '1',
+    },
+  });
+
+  // Rejected (exit non-zero) with a message naming the beta opt-in flag.
+  assert.notEqual(result.exitCode, 0, 'cursor-primary must be rejected');
+  assert.match(result.stderr + result.stdout, /cursor_host_beta_opt_in/);
+
+  // ZERO artifacts written — the refusal happens before scaffold.
+  for (const f of [
+    'spec/BRIEF.md',
+    'CRITICAL.md',
+    '.cursor/rules/forge-context.mdc',
+    '.forge/settings.yaml',
+    '.forge/CONTEXT.md',
+  ]) {
+    assert.equal(existsSync(join(cwd, f)), false, `${f} must NOT exist after a rejected init`);
+  }
+});
+
 test('e2e (FORGE-152): forge init with primary=codex writes only AGENTS.md (no CLAUDE.md)', async () => {
   const cwd = tmp();
   mkdirSync(join(cwd, '.git'), { recursive: true });

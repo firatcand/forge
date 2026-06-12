@@ -90,7 +90,10 @@ export const SCAN_MAX_ENTRIES = 50_000;
 export const SETTINGS_DEFAULT_BLOCKS: Record<string, Record<string, unknown>> = {
   second_opinion: { auto_enabled: true },
   decisions: { decision_dir: './spec/decisions', stale_draft_threshold_days: 7 },
-  doctor: { spec_code_check_enabled: true },
+  // FORGE-131: symbol_allowlist joins the doctor block default (empty array).
+  // Must mirror DoctorSchema in src/schemas/settings.ts exactly — enforced by
+  // the SETTINGS_DEFAULT_BLOCKS equality test.
+  doctor: { spec_code_check_enabled: true, symbol_allowlist: [] },
 };
 
 const INHERIT_LINE = /^@inherit\b.*$/gm;

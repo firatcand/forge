@@ -25,12 +25,14 @@ import {
 import {
   ROOT_FILE_BY_AGENT,
   bodyWithoutPrefixBlock,
+  cursorUserBody,
   extractPrefixBlock,
   type AgentKind,
 } from './upgrade/agent-root-files.ts';
 import { classifyHostFarm, locatePackageRoot, type FarmProvenanceCounts } from './upgrade/skill-farm.ts';
 
-const ALL_HOSTS: readonly AgentKind[] = ['claude', 'codex', 'gemini'];
+// FORGE-160: cursor joins the host roster `forge status` censuses.
+const ALL_HOSTS: readonly AgentKind[] = ['claude', 'codex', 'gemini', 'cursor'];
 const SPEC_FILES = ['BRIEF.md', 'PRD.md', 'SPEC.md', 'DESIGN.md'] as const;
 // The only placeholder markers the templates ship today is `<!-- REQUIRED:`.
 // `<!-- TODO:` is matched too for forward-compat (harmless if never present).
@@ -131,10 +133,16 @@ function gatherAgentRootFiles(cwd: string): Record<string, RootFileInfo> {
       out[filename] = { exists: false };
       continue;
     }
+    // FORGE-160 (GPT-5.5 review): cursor's `.mdc` is `frontmatter + marker
+    // block`, both forge-owned. The generic bodyWithoutPrefixBlock strips only
+    // the marker block, so the forge frontmatter would be miscounted as user
+    // bytes and a pristine artifact would look user-edited. Use the cursor-aware
+    // extractor (strips frontmatter + marker block) for the cursor host only.
+    const userBody = host === 'cursor' ? cursorUserBody(contents) : bodyWithoutPrefixBlock(contents);
     out[filename] = {
       exists: true,
       hasForgeMarker: extractPrefixBlock(contents) !== null,
-      userBodyBytes: Buffer.byteLength(bodyWithoutPrefixBlock(contents), 'utf8'),
+      userBodyBytes: Buffer.byteLength(userBody, 'utf8'),
     };
   }
   return out;

@@ -269,6 +269,69 @@ test('render-worker-prompt: settings.yaml absent defaults host to "claude"', asy
   assert.equal(env.data.host, 'claude');
 });
 
+// FORGE-160: a cursor-primary run must map host → 'cursor' (not fold into
+// claude) and source conventions from the .cursor/rules/forge-context.mdc
+// marker-block body (frontmatter + markers stripped), falling back to
+// AGENTS.md / CLAUDE.md when the rule file is absent.
+test('FORGE-160 — render-worker-prompt: cursor host maps through and sources .mdc conventions', async (t) => {
+  const fix = buildFixture({ withConventions: false });
+  const { lines } = captureStdout(t);
+  t.after(fix.cleanup);
+
+  // settings → cursor primary; write a cursor rule file with an inlined body.
+  writeFileSync(join(fix.forgeDir, 'settings.yaml'), "primary_host_cli: 'cursor'\n");
+  mkdirSync(join(fix.repoRoot, '.cursor', 'rules'), { recursive: true });
+  writeFileSync(
+    join(fix.repoRoot, '.cursor', 'rules', 'forge-context.mdc'),
+    [
+      '---',
+      'alwaysApply: true',
+      '---',
+      '',
+      '<!-- >>> forge-managed (do not edit between markers) >>> -->',
+      'CURSOR CONVENTIONS BODY',
+      '<!-- <<< forge-managed <<< -->',
+      '',
+    ].join('\n'),
+  );
+
+  const result = await runOrchestrateRenderWorkerPrompt({
+    taskId: fix.taskId,
+    attemptId: fix.attemptId,
+    forgeDir: fix.forgeDir,
+    repoRoot: fix.repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.data.host, 'cursor');
+  // Conventions came from the .mdc body — frontmatter + markers stripped.
+  assert.match(env.data.prompt, /CURSOR CONVENTIONS BODY/);
+  assert.ok(!/alwaysApply/.test(env.data.prompt), 'frontmatter not leaked into conventions');
+  assert.ok(!/forge-managed/.test(env.data.prompt), 'markers not leaked into conventions');
+});
+
+test('FORGE-160 — render-worker-prompt: cursor falls back to AGENTS.md when .mdc absent', async (t) => {
+  const fix = buildFixture({ withConventions: false });
+  const { lines } = captureStdout(t);
+  t.after(fix.cleanup);
+
+  writeFileSync(join(fix.forgeDir, 'settings.yaml'), "primary_host_cli: 'cursor'\n");
+  writeFileSync(join(fix.repoRoot, 'AGENTS.md'), '# AGENTS fallback conventions\n');
+
+  const result = await runOrchestrateRenderWorkerPrompt({
+    taskId: fix.taskId,
+    attemptId: fix.attemptId,
+    forgeDir: fix.forgeDir,
+    repoRoot: fix.repoRoot,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.data.host, 'cursor');
+  assert.match(env.data.prompt, /AGENTS fallback conventions/);
+});
+
 test('render-worker-prompt: malformed task_id rejected by schema (INVALID_ARGS)', async (t) => {
   const fix = buildFixture();
   const { lines } = captureStdout(t);

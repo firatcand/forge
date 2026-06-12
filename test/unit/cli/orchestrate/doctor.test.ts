@@ -316,3 +316,26 @@ test('FORGE-150 — doctor emits no settings warning when both blocks present', 
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.deepEqual(env.data.settingsWarnings, []);
 });
+
+// ── FORGE-131: self-clean gate — the symbol-mention check must produce ZERO
+// drift against forge's OWN spec/ (the base allowlist is tuned for it). ──
+
+import { detectSpecCodeDrift } from '../../../../src/orchestrator/drift.ts';
+
+test('FORGE-131 — self-clean: symbol check produces zero drift on the real forge SPEC', () => {
+  // Walk up from this test file to the forge repo root (where spec/ + src/ live).
+  // test/unit/cli/orchestrate/doctor.test.ts → 5 levels up = repo root.
+  const here = dirname(fileURLToPath(import.meta.url));
+  const repoRoot = resolve(here, '..', '..', '..', '..');
+  const r = detectSpecCodeDrift({ repoRoot });
+  const symbolDrift = r.drift.filter((d) => d.kind === 'missing_symbol');
+  assert.deepEqual(
+    symbolDrift,
+    [],
+    `self-clean gate: unexpected symbol drift — add genuine prose terms to ` +
+      `BASE_SYMBOL_ALLOWLIST (categorized). Offenders: ` +
+      symbolDrift.map((d) => `${d.source}:${d.target}`).join(', '),
+  );
+  // The whole spec-code report must be clean too (file-path + symbol).
+  assert.deepEqual(r.drift, [], 'self-clean gate: forge spec-code report must be empty');
+});

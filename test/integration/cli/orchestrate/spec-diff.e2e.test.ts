@@ -276,3 +276,208 @@ test('e2e: forge orchestrate spec-diff via tsx exits 0 and prints block', async 
   }
 });
 
+
+// ---- FORGE-164: --all-active enumeration ----
+
+import { stateFilePath, leaseFilePath, taskDir } from '../../../../src/orchestrator/questions/paths.ts';
+
+// Seed an ACTIVE task: lease.json (via acquire) + a state.json with an active state.
+function seedActiveTask(
+  repo: string,
+  forgeDir: string,
+  taskId: string,
+  state: 'dispatched' | 'running' | 'blocked_on_question',
+  opts: { expired?: boolean } = {},
+): void {
+  const lease = acquire({
+    forgeDir,
+    taskId,
+    runId: 'run-1',
+    specRevision: computeSpecRevisionSync(repo),
+    repoRoot: repo,
+  });
+  // Overwrite expires_at to simulate an expired lease if requested.
+  if (opts.expired) {
+    const expired = { ...lease, expires_at: new Date(Date.now() - 60_000).toISOString() };
+    writeFileSync(leaseFilePath(forgeDir, taskId), JSON.stringify(expired));
+  }
+  // Write a minimal valid state.json in an ACTIVE state.
+  const now = new Date().toISOString();
+  const stateRecord = {
+    version: 1,
+    task_id: taskId,
+    state,
+    state_version: 1,
+    attempt_count: 1,
+    current_attempt_id: 'att-1',
+    updated_at: now,
+    updated_by: { run_id: 'run-1', claim_id: lease.claim_id, generation: lease.generation },
+  };
+  mkdirSync(taskDir(forgeDir, taskId), { recursive: true });
+  writeFileSync(stateFilePath(forgeDir, taskId), JSON.stringify(stateRecord));
+}
+
+test('FORGE-164 — --all-active lists only the stale claim, not the fresh one', async () => {
+  const repo = mkTmp();
+  try {
+    gitInit(repo);
+    writeSpec(repo, 'spec/SPEC.md', 'v0');
+    gitCommit(repo, 'init');
+
+    const forgeDir = join(repo, '.forge');
+    mkdirSync(forgeDir, { recursive: true });
+
+    // STALE: claimed at v0, then a spec/ commit lands.
+    seedActiveTask(repo, forgeDir, 'TASK-STALE', 'running');
+    writeSpec(repo, 'spec/SPEC.md', 'v1');
+    gitCommit(repo, 'spec: change after stale claim');
+
+    // FRESH: claimed AFTER the change → no diff since its claim.
+    seedActiveTask(repo, forgeDir, 'TASK-FRESH', 'dispatched');
+
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateSpecDiff({
+      taskId: '',
+      forgeDir,
+      repoRoot: repo,
+      allActive: true,
+      json: true,
+      stdout: out.stream,
+      stderr: err.stream,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.buffer.join('').trim());
+    assert.equal(payload.ok, true);
+    assert.equal(payload.data.length, 1);
+    assert.equal(payload.data[0].task_id, 'TASK-STALE');
+    assert.equal(payload.data[0].commit_count, 1);
+    assert.equal(payload.data[0].lease_expired, false);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-164 — --all-active includes blocked_on_question and flags expired leases', async () => {
+  const repo = mkTmp();
+  try {
+    gitInit(repo);
+    writeSpec(repo, 'spec/SPEC.md', 'v0');
+    gitCommit(repo, 'init');
+
+    const forgeDir = join(repo, '.forge');
+    mkdirSync(forgeDir, { recursive: true });
+
+    seedActiveTask(repo, forgeDir, 'TASK-BLOCKED', 'blocked_on_question', { expired: true });
+    writeSpec(repo, 'spec/SPEC.md', 'v1');
+    gitCommit(repo, 'spec: change');
+
+    const out = captureStream();
+    const result = await runOrchestrateSpecDiff({
+      taskId: '',
+      forgeDir,
+      repoRoot: repo,
+      allActive: true,
+      json: true,
+      stdout: out.stream,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.buffer.join('').trim());
+    assert.equal(payload.data.length, 1);
+    assert.equal(payload.data[0].task_id, 'TASK-BLOCKED');
+    assert.equal(payload.data[0].lease_expired, true);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-164 — --all-active empty state → empty list, exit 0', async () => {
+  const repo = mkTmp();
+  try {
+    gitInit(repo);
+    writeSpec(repo, 'spec/SPEC.md', 'v0');
+    gitCommit(repo, 'init');
+    const forgeDir = join(repo, '.forge');
+    mkdirSync(forgeDir, { recursive: true });
+
+    const out = captureStream();
+    const result = await runOrchestrateSpecDiff({
+      taskId: '',
+      forgeDir,
+      repoRoot: repo,
+      allActive: true,
+      json: true,
+      stdout: out.stream,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.buffer.join('').trim());
+    assert.deepEqual(payload.data, []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-164 — --all-active: terminal-state task is excluded', async () => {
+  const repo = mkTmp();
+  try {
+    gitInit(repo);
+    writeSpec(repo, 'spec/SPEC.md', 'v0');
+    gitCommit(repo, 'init');
+    const forgeDir = join(repo, '.forge');
+    mkdirSync(forgeDir, { recursive: true });
+
+    // Seed an active task, then overwrite state.json to a terminal state.
+    seedActiveTask(repo, forgeDir, 'TASK-DONE', 'running');
+    writeSpec(repo, 'spec/SPEC.md', 'v1');
+    gitCommit(repo, 'spec: change');
+    const now = new Date().toISOString();
+    writeFileSync(
+      stateFilePath(forgeDir, 'TASK-DONE'),
+      JSON.stringify({
+        version: 1, task_id: 'TASK-DONE', state: 'shipped', state_version: 2,
+        attempt_count: 1, current_attempt_id: null, updated_at: now,
+        updated_by: { run_id: 'run-1', claim_id: 'c', generation: 0 },
+      }),
+    );
+
+    const out = captureStream();
+    const result = await runOrchestrateSpecDiff({
+      taskId: '', forgeDir, repoRoot: repo, allActive: true, json: true, stdout: out.stream,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.buffer.join('').trim());
+    assert.deepEqual(payload.data, []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-164 — --all-active: corrupt lease → skip + stderr note, never fails', async () => {
+  const repo = mkTmp();
+  try {
+    gitInit(repo);
+    writeSpec(repo, 'spec/SPEC.md', 'v0');
+    gitCommit(repo, 'init');
+    const forgeDir = join(repo, '.forge');
+    mkdirSync(forgeDir, { recursive: true });
+
+    seedActiveTask(repo, forgeDir, 'TASK-CORRUPT', 'running');
+    writeSpec(repo, 'spec/SPEC.md', 'v1');
+    gitCommit(repo, 'spec: change');
+    // Corrupt the lease.
+    writeFileSync(leaseFilePath(forgeDir, 'TASK-CORRUPT'), '{ not json');
+
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateSpecDiff({
+      taskId: '', forgeDir, repoRoot: repo, allActive: true, json: true,
+      stdout: out.stream, stderr: err.stream,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.buffer.join('').trim());
+    assert.deepEqual(payload.data, []);
+    assert.match(err.buffer.join(''), /TASK-CORRUPT/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});

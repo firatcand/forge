@@ -91,11 +91,13 @@ const SecretsSchema = z.discriminatedUnion('manager', [
 
 // FORGE-88: primary/review enums diverge. Primary may be any of the three
 // supported harnesses; review excludes claude (different-model-lineage rule).
-const PrimaryHostCliEnum = z.enum(['claude', 'codex', 'gemini']);
+// FORGE-160: cursor joins primary (beta — gated by cursor_host_beta_opt_in in
+// the settings schema) and enabled_root_files (passive breadcrumb, ungated).
+const PrimaryHostCliEnum = z.enum(['claude', 'codex', 'gemini', 'cursor']);
 const ReviewHostCliEnum = z.enum(['codex', 'gemini']);
-// FORGE-152: enabled_root_files uses the same triple. Init writes one root
-// file per selected agent (CLAUDE.md / AGENTS.md / GEMINI.md).
-const EnabledRootFileEnum = z.enum(['claude', 'codex', 'gemini']);
+// FORGE-152/FORGE-160: enabled_root_files. Init writes one root file per
+// selected agent (CLAUDE.md / AGENTS.md / GEMINI.md / .cursor/rules/forge-context.mdc).
+const EnabledRootFileEnum = z.enum(['claude', 'codex', 'gemini', 'cursor']);
 
 const AgentsAnswersSchema = z
   .object({
@@ -124,6 +126,19 @@ const AgentsAnswersSchema = z
     message:
       'enabled_root_files must include primary_host_cli — the primary harness needs its root file',
     path: ['enabled_root_files'],
+  })
+  // FORGE-160 (GPT-5.5 review): init NEVER produces the beta opt-in flag, yet
+  // cursor-as-primary requires `agents.cursor_host_beta_opt_in: true` to pass
+  // the SettingsSchema check. A non-interactive answer set with
+  // `primary_host_cli: cursor` (the interactive prompt can't select it) would
+  // otherwise write every artifact, THEN fail the final settings validation —
+  // leaving a broken half-init. Reject it HERE, at the answers-validation stage,
+  // BEFORE any artifact is written. cursor stays fine in enabled_root_files
+  // (the passive breadcrumb); only cursor-as-PRIMARY is gated.
+  .refine((d) => d.primary_host_cli !== 'cursor', {
+    message:
+      'primary_host_cli: cursor is not supported by `forge init` — it requires agents.cursor_host_beta_opt_in: true, and init never produces that beta flag. Init with a non-cursor primary (cursor may stay in enabled_root_files as a passive breadcrumb), then set primary_host_cli: cursor and cursor_host_beta_opt_in: true in .forge/settings.yaml manually.',
+    path: ['primary_host_cli'],
   });
 
 const DesignAnswersSchema = z.object({
@@ -388,7 +403,7 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   const primaryHostCli = (await loggerPrompt('Primary host CLI (writes code)?', {
     choices: primaryHostCliChoices() as unknown as readonly string[],
     default: 'claude',
-  })) as 'claude' | 'codex' | 'gemini';
+  })) as 'claude' | 'codex' | 'gemini' | 'cursor';
 
   // 10. review host cli — re-prompt on collision
   const reviewChoices = [...reviewHostCliChoices(), 'none'] as const;
@@ -444,6 +459,15 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
       value: 'gemini',
       checked: primaryHostCli === 'gemini',
     },
+    // FORGE-160: cursor breadcrumb. Adds the gitignored
+    // .cursor/rules/forge-context.mdc rule + the .agents/skills / .cursor/agents
+    // farm. Selecting it here is the PASSIVE breadcrumb (ungated); cursor as the
+    // PRIMARY dispatch host is set in settings.yaml behind cursor_host_beta_opt_in.
+    {
+      name: 'Cursor (.cursor/rules/forge-context.mdc)',
+      value: 'cursor',
+      checked: primaryHostCli === 'cursor',
+    },
   ] as const;
   const enabledRootFilesRaw = (await checkbox({
     message:
@@ -457,8 +481,8 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
       }
       return true;
     },
-  })) as readonly ('claude' | 'codex' | 'gemini')[];
-  const enabledRootFiles: ('claude' | 'codex' | 'gemini')[] = [...enabledRootFilesRaw];
+  })) as readonly ('claude' | 'codex' | 'gemini' | 'cursor')[];
+  const enabledRootFiles: ('claude' | 'codex' | 'gemini' | 'cursor')[] = [...enabledRootFilesRaw];
 
   const answers: InitAnswers = {
     project: {

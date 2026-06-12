@@ -35,6 +35,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import { execaSync } from 'execa';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { FsWriteError } from '../../core/errors.ts';
+import { firstSymlinkedParent, isSymlinkAt } from '../../core/symlink-guard.ts';
 import {
   ForgeManifestSchema,
   TaskStateSchema,
@@ -311,13 +312,30 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
   for (const rf of manifest.rootFiles) {
     const p = within(cwd, rf.path);
     if (!p || !existsSync(p)) continue;
+    // FORGE-160 (round 2): a NESTED root file (cursor's
+    // `.cursor/rules/forge-context.mdc`) can sit under a symlinked PARENT
+    // directory (`.cursor` or `.cursor/rules`). The leaf checks below see the
+    // symlink TARGET's regular file, so unlinkSync / writeAtomic would reach
+    // THROUGH the link and mutate a file outside the working tree. Guard the
+    // parent FIRST, before either branch, for BOTH forgeCreated kinds. Skip +
+    // warn (consistent with the leaf-symlink policy); dry-run never reaches
+    // here (applyPlan only runs on confirm). Flat root files (CLAUDE.md etc.)
+    // have no parent components, so firstSymlinkedParent returns null and the
+    // existing leaf guards still apply.
+    const symlinkedParent = firstSymlinkedParent(cwd, rf.path);
+    if (symlinkedParent !== null) {
+      warnings.push(
+        `skipped: ${rf.path} (parent ${symlinkedParent} is a symlink) — not writing/deleting through a symlinked parent directory`,
+      );
+      continue;
+    }
     if (rf.forgeCreated) {
       // FORGE-208: a forge-created file may since have been REPLACED by a user
       // with a symlink (e.g. CLAUDE.md → AGENTS.md for host parity). Deleting
       // it here would destroy that link, not a forge-owned regular file. lstat
       // (not stat) so we see the link's own type; skip + warn rather than
       // delete.
-      if (isSymlink(p)) {
+      if (isSymlinkAt(p)) {
         warnings.push(
           `skipped: ${rf.path} (symlink) — forge-created file was replaced by a symlink; not deleting the link`,
         );
@@ -355,7 +373,7 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
     if (ig.created) {
       // FORGE-208: same guard as root files — a forge-created ignore file may
       // have been swapped for a symlink; never delete the link.
-      if (isSymlink(p)) {
+      if (isSymlinkAt(p)) {
         warnings.push(
           `skipped: ${ig.path} (symlink) — forge-created file was replaced by a symlink; not deleting the link`,
         );
@@ -390,9 +408,22 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
   for (const fe of manifest.farmEntries) {
     const p = within(cwd, fe.path);
     if (!p || !pathPresent(p)) continue;
+    // FORGE-160 symlink guard: a PARENT component of the recorded farm entry
+    // (e.g. `.agents` or `.agents/skills` for cursor, `.claude`/`.claude/skills`
+    // for claude) may be a symlink an adopter created (dotfiles repo). rmSync
+    // would follow it and delete OUTSIDE the working tree. Skip + warn; never
+    // delete through the link. (The leaf entry has its own symlink-mode guard
+    // below — this covers the parent dirs the leaf lives under.)
+    const symlinkedParent = firstSymlinkedParent(cwd, fe.path);
+    if (symlinkedParent) {
+      warnings.push(
+        `skipped: ${fe.path} — '${symlinkedParent}' is a symlink; removing through it would delete outside the working tree. Remove the forge farm entry from the link target manually if needed.`,
+      );
+      continue;
+    }
     // For symlink mode, only remove if it's still a symlink (a user replacement
     // with a real file at the same path is left alone).
-    if (fe.mode === 'symlink' && !isSymlink(p)) continue;
+    if (fe.mode === 'symlink' && !isSymlinkAt(p)) continue;
     rmSync(p, { recursive: true, force: true });
     farmParents.add(dirname(p));
   }
@@ -510,14 +541,6 @@ function pathPresent(p: string): boolean {
   }
 }
 
-function isSymlink(p: string): boolean {
-  try {
-    return lstatSync(p).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 /** Copy a file/dir/symlink to dest, recreating symlinks as symlinks. */
 function copyPreservingLinks(src: string, dest: string): void {
   if (!pathPresent(src)) return;
@@ -577,25 +600,38 @@ function deriveLegacyManifest(cwd: string): ForgeManifest {
   };
 }
 
-const LEGACY_FARM_DIRS = ['skills', 'agents'] as const;
-const HOST_PREFIX: Record<string, string> = { claude: '.claude', codex: '.codex', gemini: '.gemini' };
+// FORGE-160: per-host farm dirs. claude/codex/gemini follow the uniform
+// `.X/skills` + `.X/agents` shape; cursor splits across `.agents/skills` (the
+// cross-tool skill root) + `.cursor/agents`. Listed explicitly so the legacy
+// eject fallback walks the right dirs for every host.
+const LEGACY_FARM_DIRS_BY_HOST: Record<string, readonly string[]> = {
+  claude: ['.claude/skills', '.claude/agents'],
+  codex: ['.codex/skills', '.codex/agents'],
+  gemini: ['.gemini/skills', '.gemini/agents'],
+  cursor: ['.agents/skills', '.cursor/agents'],
+};
 
 // Enumerate existing farm entries by walking the host dirs and recording any
 // symlink (provenance can't be re-checked without the package, so we record
 // symlinks only — never a user's real file).
 function legacyFarmEntries(cwd: string, hosts: readonly string[]): ForgeManifest['farmEntries'] {
   const out: ForgeManifest['farmEntries'] = [];
+  const seen = new Set<string>();
   for (const host of hosts) {
-    const prefix = HOST_PREFIX[host];
-    if (!prefix) continue;
-    for (const sub of LEGACY_FARM_DIRS) {
-      const farmDir = resolve(cwd, prefix, sub);
+    const dirs = LEGACY_FARM_DIRS_BY_HOST[host];
+    if (!dirs) continue;
+    for (const dir of dirs) {
+      const farmDir = resolve(cwd, dir);
       if (!existsSync(farmDir)) continue;
       for (const name of readdirSync(farmDir)) {
         const p = resolve(farmDir, name);
-        if (isSymlink(p)) {
-          out.push({ path: relative(cwd, p), mode: 'symlink' });
-        }
+        if (!isSymlinkAt(p)) continue;
+        const rel = relative(cwd, p);
+        // FORGE-160: a shared root (cursor's .agents/skills) could be walked by
+        // two enabled hosts — dedupe so eject doesn't list the same path twice.
+        if (seen.has(rel)) continue;
+        seen.add(rel);
+        out.push({ path: rel, mode: 'symlink' });
       }
     }
   }

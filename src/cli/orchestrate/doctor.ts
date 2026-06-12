@@ -103,8 +103,10 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
   // mid-path (e.g. /tmp/my.forgedir); path.dirname has no such edge case.
   const repoRoot = opts.repoRoot ?? path.dirname(opts.forgeDir);
 
-  // (5) Pure drift detection.
-  const specResult = detectSpecCodeDrift({ repoRoot });
+  // (5) Pure drift detection. FORGE-131: thread the adopter's symbol allowlist
+  // (settings.doctor.symbol_allowlist) into the symbol-mention check.
+  const symbolAllowlist = readSymbolAllowlist(opts.forgeDir);
+  const specResult = detectSpecCodeDrift({ repoRoot, symbolAllowlist });
   const result: DoctorReport = { ...specResult, settingsWarnings };
 
   // (6) Exit-code mapping. emit() default returns 0 for ok envelopes;
@@ -160,6 +162,18 @@ function readSpecCodeCheckEnabled(forgeDir: string): boolean {
     // Missing, unreadable, or invalid settings.yaml → defaults apply.
     // The schema default for spec_code_check_enabled is true.
     return true;
+  }
+}
+
+// FORGE-131: best-effort read of settings.doctor.symbol_allowlist. Missing /
+// unreadable / invalid settings → empty extension (BASE_SYMBOL_ALLOWLIST still
+// applies inside detectSpecCodeDrift).
+function readSymbolAllowlist(forgeDir: string): readonly string[] {
+  try {
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return settings.doctor.symbol_allowlist;
+  } catch {
+    return [];
   }
 }
 

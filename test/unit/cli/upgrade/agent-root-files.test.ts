@@ -175,3 +175,90 @@ test('drift gate: GEMINI.project.template.md marker block matches buildPrefixBlo
   const actual = extractTemplateMarkerBlock(template);
   assert.equal(actual, expected);
 });
+
+// ── FORGE-160: cursor host (frontmatter-first .mdc assembly) ──
+
+import {
+  ROOT_FILE_BY_AGENT as RFBA_CURSOR,
+  MATERIALIZE_WHEN_ENABLED,
+  buildCursorRuleFile,
+  buildCursorBlock,
+  writeCursorRuleBody,
+  cursorConventionsBody,
+} from '../../../../src/cli/upgrade/agent-root-files.ts';
+
+const INLINED = '# forge methodology\n\nThis is the rendered CONTEXT.md.';
+
+test('FORGE-160 — ROOT_FILE_BY_AGENT.cursor is the nested .mdc path', () => {
+  assert.equal(RFBA_CURSOR.cursor, '.cursor/rules/forge-context.mdc');
+});
+
+test('FORGE-160 — MATERIALIZE_WHEN_ENABLED: only cursor is create-when-missing', () => {
+  assert.equal(MATERIALIZE_WHEN_ENABLED.cursor, true);
+  assert.equal(MATERIALIZE_WHEN_ENABLED.claude, false);
+  assert.equal(MATERIALIZE_WHEN_ENABLED.codex, false);
+  assert.equal(MATERIALIZE_WHEN_ENABLED.gemini, false);
+});
+
+test('FORGE-160 — buildCursorRuleFile: frontmatter is the FIRST bytes, then marker block', () => {
+  const file = buildCursorRuleFile({ repoUrl: REPO_URL }, INLINED);
+  assert.ok(file.startsWith('---\n'), 'must start with .mdc frontmatter');
+  assert.match(file, /^---\nalwaysApply: true\n/);
+  // marker block appears AFTER the frontmatter close.
+  const fmEnd = file.indexOf('\n---\n');
+  const markerIdx = file.indexOf('<!-- >>> forge-managed');
+  assert.ok(markerIdx > fmEnd, 'marker block must come after frontmatter');
+  // inlined context is present verbatim.
+  assert.ok(file.includes(INLINED), 'rendered context must be inlined verbatim');
+});
+
+test('FORGE-160 — buildPrefixBlock throws for cursor (generic path must not be used)', () => {
+  assert.throws(() => buildPrefixBlock('cursor', { repoUrl: REPO_URL }), /buildCursorRuleFile/);
+});
+
+test('FORGE-160 — writeCursorRuleBody: marker round-trip preserves frontmatter + replaces block', () => {
+  const original = buildCursorRuleFile({ repoUrl: REPO_URL }, 'OLD CONTEXT');
+  const newBlock = buildCursorBlock({ repoUrl: REPO_URL }, 'NEW CONTEXT');
+  const updated = writeCursorRuleBody(original, newBlock);
+  assert.ok(updated.startsWith('---\n'), 'frontmatter still first');
+  assert.ok(updated.includes('NEW CONTEXT'), 'context refreshed');
+  assert.ok(!updated.includes('OLD CONTEXT'), 'old context removed');
+  // idempotent: applying the same block again is a no-op.
+  const again = writeCursorRuleBody(updated, newBlock);
+  assert.equal(again, updated);
+});
+
+test('FORGE-160 — writeCursorRuleBody: inline-content refresh on context change', () => {
+  const v1 = buildCursorRuleFile({ repoUrl: REPO_URL }, 'CONTEXT v1');
+  const v2 = writeCursorRuleBody(v1, buildCursorBlock({ repoUrl: REPO_URL }, 'CONTEXT v2'));
+  assert.notEqual(v1, v2);
+  assert.ok(v2.includes('CONTEXT v2'));
+});
+
+test('FORGE-160 — writeCursorRuleBody preserves user-edited frontmatter', () => {
+  const custom = '---\nalwaysApply: true\ndescription: my custom desc\nglobs: "**/*.ts"\n---\n\n';
+  const block = buildCursorBlock({ repoUrl: REPO_URL }, INLINED);
+  const file = custom + block;
+  const updated = writeCursorRuleBody(file, buildCursorBlock({ repoUrl: REPO_URL }, 'CHANGED'));
+  assert.match(updated, /description: my custom desc/);
+  assert.match(updated, /globs: "\*\*\/\*\.ts"/);
+  assert.ok(updated.includes('CHANGED'));
+});
+
+test('FORGE-160 — writeCursorRuleBody re-attaches frontmatter when absent', () => {
+  const updated = writeCursorRuleBody('', buildCursorBlock({ repoUrl: REPO_URL }, INLINED));
+  assert.ok(updated.startsWith('---\nalwaysApply: true\n'), 'canonical frontmatter re-attached');
+  assert.ok(updated.includes(INLINED));
+});
+
+test('FORGE-160 — cursorConventionsBody strips frontmatter AND markers, keeps inlined body', () => {
+  const file = buildCursorRuleFile({ repoUrl: REPO_URL }, INLINED);
+  const body = cursorConventionsBody(file);
+  assert.ok(!body.includes('---'), 'frontmatter stripped');
+  assert.ok(!body.includes('forge-managed'), 'markers stripped');
+  assert.ok(body.includes(INLINED), 'inlined context retained');
+});
+
+test('FORGE-160 — cursorConventionsBody returns "" when no marker block present', () => {
+  assert.equal(cursorConventionsBody('---\nalwaysApply: true\n---\n\njust prose'), '');
+});

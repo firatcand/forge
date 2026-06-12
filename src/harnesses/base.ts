@@ -2,7 +2,9 @@ import type { ReviewVerdict } from '../schemas/verdict.ts';
 
 export type { ReviewVerdict } from '../schemas/verdict.ts';
 
-export type HarnessHost = 'claude' | 'codex' | 'gemini';
+// FORGE-160: `cursor` joins as a beta primary host. Review hosts remain
+// codex | gemini (cursor.runReview throws NOT_SUPPORTED).
+export type HarnessHost = 'claude' | 'codex' | 'gemini' | 'cursor';
 
 export interface DispatchOpts {
   readonly cwd: string;
