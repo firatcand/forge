@@ -215,6 +215,9 @@ function makeFakeTracker(
     async setBlockedBy(issueId: string, blockerId: string) {
       blockedByCalls.push({ issueId, blockerId });
     },
+    async getCurrentRevision() {
+      return 'linear:lifecycle-rev';
+    },
     async healthCheck() {
       return { ok: true };
     },

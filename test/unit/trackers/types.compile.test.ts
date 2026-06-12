@@ -52,6 +52,7 @@ const fakeAdapter: Tracker = {
   }),
   createIssue: async (_p: CreateIssuePayload) => fakeIssue,
   setBlockedBy: async () => {},
+  getCurrentRevision: async () => 'github:compile-rev',
   healthCheck: async () => ({ ok: true }),
 };
 

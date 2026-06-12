@@ -10,7 +10,7 @@ Forge supports three trackers as the durable task system, chosen per project in 
 | [GitHub](./github.md) | `github` | `GitHubTracker` via `gh` CLI (`src/trackers/github.ts`, shipped in FORGE-15) | Code adapter live; full deep-dive in [`docs/adapters/github.md`](../adapters/github.md) |
 | [Notion](./notion.md) | `notion` | `NotionTracker` via the official `ntn` CLI (`src/trackers/notion.ts`; MCP transport replaced in FORGE-117) | Code adapter live; see [`docs/adapters/notion.md`](../adapters/notion.md) |
 
-All three speak the same `Tracker` interface (`src/trackers/base.ts`) — `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`.
+All three speak the same `Tracker` interface (`src/trackers/base.ts`) — `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `getCurrentRevision`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`.
 
 ## Schema
 

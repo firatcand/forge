@@ -275,6 +275,10 @@ interface ParsedArgs {
   readonly json: boolean;
   readonly confirmPrune: boolean;
   readonly noPrune: boolean;
+  // FORGE-119: scope the run to a single task id (post-diff filter).
+  readonly task?: string;
+  // FORGE-123: --pull --check short-circuit (only valid with --pull).
+  readonly check: boolean;
 }
 
 interface JsonOk {
@@ -295,6 +299,13 @@ interface ReconcileData {
   readonly mutations?: number;
   // Task ids inserted from stagedAdditions this run (absent when none staged).
   readonly staged_added?: readonly string[];
+  // FORGE-119: present when --task scoped the run; the task id the plan was
+  // filtered to.
+  readonly scoped_to?: string;
+  // FORGE-123: present on `--pull --check` runs — 'match' short-circuited
+  // (refreshed freshness stamp, no issue list fetched); 'mismatch'/'missing'/
+  // 'probe_failure' fell through to a full pull.
+  readonly check?: 'match' | 'mismatch' | 'missing' | 'probe_failure';
 }
 
 interface PushAttemptResult {
@@ -313,8 +324,11 @@ export function parseReconcileArgv(argv: readonly string[]): ParsedArgs | { erro
   let json = false;
   let confirmPrune = false;
   let noPrune = false;
+  let task: string | undefined;
+  let check = false;
 
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
     switch (arg) {
       case '--pull':
         if (direction) return { error: '--pull and --push are mutually exclusive' };
@@ -336,6 +350,19 @@ export function parseReconcileArgv(argv: readonly string[]): ParsedArgs | { erro
       case '--no-prune':
         noPrune = true;
         break;
+      case '--check':
+        check = true;
+        break;
+      case '--task': {
+        // Value flag: consume the next token.
+        const value = argv[i + 1];
+        if (value === undefined || value.startsWith('--')) {
+          return { error: 'missing value for --task' };
+        }
+        task = value;
+        i++;
+        break;
+      }
       default:
         return { error: `unknown flag: ${arg}` };
     }
@@ -347,7 +374,155 @@ export function parseReconcileArgv(argv: readonly string[]): ParsedArgs | { erro
   if (confirmPrune && noPrune) {
     return { error: '--confirm-prune and --no-prune are mutually exclusive' };
   }
-  return { direction, dryRun, json, confirmPrune, noPrune };
+  if (check && direction !== 'pull') {
+    return { error: '--check is only valid with --pull' };
+  }
+  return {
+    direction,
+    dryRun,
+    json,
+    confirmPrune,
+    noPrune,
+    check,
+    ...(task !== undefined ? { task } : {}),
+  };
+}
+
+// ---- FORGE-119: --task scoping ---------------------------------------------
+//
+// A scoped run filters the POST-diff plan to only entries that concern the one
+// target task. Filtering happens before plan emission, apply, AND prune — a
+// scoped run must never apply/prune anything outside its scope. The match key
+// is the local task id; for entries that originate tracker-side (PullPlan
+// added/unmanaged carry no task_id), we additionally match the tracker issue id
+// when the target task binds one in phases.yaml.
+
+// Resolve the tracker_issue_id (if any) that the target task binds in
+// phases.yaml. Used to scope tracker-origin entries (added/unmanaged) to the
+// target. Returns undefined when the task is absent or unbound.
+function trackerIdForTask(phases: Phases, taskId: string): string | undefined {
+  for (const phase of phases.phases) {
+    for (const task of phase.tasks) {
+      if (task.id === taskId) return task.tracker_issue_id;
+    }
+  }
+  return undefined;
+}
+
+function taskExistsInPhases(phases: Phases, taskId: string): boolean {
+  for (const phase of phases.phases) {
+    for (const task of phase.tasks) {
+      if (task.id === taskId) return true;
+    }
+  }
+  return false;
+}
+
+// Map a tracker_issue_id bound in phases.yaml back to its local task id.
+// Returns undefined when no local task binds that tracker id.
+function taskIdForTrackerId(phases: Phases, trackerId: string): string | undefined {
+  for (const phase of phases.phases) {
+    for (const task of phase.tasks) {
+      if (task.tracker_issue_id === trackerId) return task.id;
+    }
+  }
+  return undefined;
+}
+
+// ---- MAJOR fix (GPT-5.5 review): --task id resolver -------------------------
+//
+// `--task <id>` may name EITHER a local task id OR a tracker issue id. Filtering
+// by the raw string mishandled the latter (a tracker-id input filtered
+// updated/removed by task_id, missing the bound task's entries; and a VALID
+// tracker id with zero diff was rejected INVALID_ARGS because no plan entry
+// carried it). The resolver canonicalizes the requested id ONCE, up front, into
+// a stable { localTaskId, trackerId } pair so both PullPlan and PushPlan scope
+// consistently. Resolution order:
+//   1. local task_id present in phases            → { local, its bound tracker id }
+//   2. tracker_issue_id bound in phases           → { mapped local id, that tracker id }
+//   3. tracker_issue_id present in the fetched     → { undefined, that tracker id }
+//      tracker page (added/unmanaged scoping)
+//   4. otherwise unknown                          → null (caller errors INVALID_ARGS)
+//
+// Steps 1–2 resolve against phases.yaml alone (cheap, no fetch). Step 3 needs
+// the fetched tracker plan and is supplied by the caller after the diff.
+export interface ScopeResolution {
+  // The canonical local task id, when the target binds (or is) one. Undefined
+  // for a brand-new tracker issue not yet materialized in phases.yaml.
+  readonly localTaskId: string | undefined;
+  // The tracker issue id the target binds/is, when known. Undefined for a
+  // local-only task with no tracker binding.
+  readonly trackerId: string | undefined;
+}
+
+// Resolve against phases.yaml only (no tracker page). Returns null when the id
+// is neither a local task id nor a bound tracker id — the caller may still
+// accept it via the tracker-page fallback (resolveScopeAgainstPlan).
+export function resolveScopeFromPhases(
+  phases: Phases,
+  requested: string,
+): ScopeResolution | null {
+  if (taskExistsInPhases(phases, requested)) {
+    return { localTaskId: requested, trackerId: trackerIdForTask(phases, requested) };
+  }
+  const mappedLocal = taskIdForTrackerId(phases, requested);
+  if (mappedLocal !== undefined) {
+    return { localTaskId: mappedLocal, trackerId: requested };
+  }
+  return null;
+}
+
+// Filter a PullPlan to entries concerning the resolved scope. updated/removed
+// (phases-origin) match by the canonical local task_id; added/unmanaged
+// (tracker-origin, no task_id) match by tracker issue id. Both keys are taken
+// from the ScopeResolution so a tracker-id input and a local-id input that name
+// the same task scope identically.
+function scopePullPlan(plan: PullPlan, scope: ScopeResolution): PullPlan {
+  const { localTaskId, trackerId } = scope;
+  return {
+    updated:
+      localTaskId === undefined
+        ? []
+        : plan.updated.filter((u) => u.task_id === localTaskId),
+    removed:
+      localTaskId === undefined
+        ? []
+        : plan.removed.filter((r) => r.task_id === localTaskId),
+    added:
+      trackerId === undefined
+        ? []
+        : plan.added.filter((a) => a.tracker_issue_id === trackerId),
+    unmanaged:
+      trackerId === undefined
+        ? []
+        : plan.unmanaged.filter((u) => u.tracker_issue_id === trackerId),
+  };
+}
+
+function scopePushPlan(plan: PushPlan, scope: ScopeResolution): PushPlan {
+  const { localTaskId } = scope;
+  if (localTaskId === undefined) {
+    // A tracker-only scope (brand-new issue not in phases.yaml) can carry no
+    // push bodies — push only ever sends bodies for materialized local tasks.
+    return { bodies: [], skipped: [] };
+  }
+  return {
+    bodies: plan.bodies.filter((b) => b.task_id === localTaskId),
+    skipped: plan.skipped.filter((s) => s.task_id === localTaskId),
+  };
+}
+
+// Does any pull-plan entry carry `trackerId` as its tracker issue id? Used to
+// accept a `--task <id>` whose id is NOT in phases.yaml but DOES surface as a
+// tracker_issue_id on an added/unmanaged entry (so a scoped run can target a
+// brand-new tracker issue by its tracker id).
+function pullPlanCarriesTrackerId(plan: PullPlan, id: string): boolean {
+  return (
+    plan.added.some((a) => a.tracker_issue_id === id) ||
+    plan.unmanaged.some((u) => u.tracker_issue_id === id) ||
+    plan.updated.some((u) => u.tracker_issue_id === id) ||
+    plan.removed.some((r) => r.tracker_issue_id === id)
+  );
 }
 
 function noopLogger(): Logger {
@@ -532,6 +707,123 @@ async function runPull(
   stagedAdditions?: readonly StagedAddition[],
   lock?: PhasesWriteLock,
 ): Promise<OrchestrateReconcileResult> {
+  // FORGE-119 scope precondition: a `--task <id>` that is neither in phases.yaml
+  // (as a local task id OR a bound tracker issue id) nor surfaced by the fetched
+  // tracker page is a malformed call. The phases.yaml side resolves cheaply up
+  // front; the tracker-page side is re-checked after the diff (a brand-new
+  // tracker issue may carry it).
+  //
+  // MAJOR fix (GPT-5.5 review): resolve the requested id to a canonical
+  // { localTaskId, trackerId } BEFORE filtering so a tracker-issue-id input
+  // scopes the bound local task's updated/removed entries, not a phantom
+  // task_id === <tracker-id> filter.
+  const scopeTask = args.task;
+  const phasesScope =
+    scopeTask !== undefined ? resolveScopeFromPhases(loaded.phases, scopeTask) : null;
+  const scopeKnownInPhases = phasesScope !== null;
+
+  // FORGE-123: when --check falls through to a full pull, this records which
+  // signal drove the fall-through so the JSON output reports it.
+  let checkOutcome: ReconcileData['check'] | undefined;
+
+  // FORGE-119 × FORGE-123: a scoped run whose --task is resolvable against
+  // phases.yaml alone (local task id OR bound tracker id) is check-eligible — no
+  // fetch needed to confirm it. An id that can ONLY be a brand-new tracker issue
+  // requires the full issue list to validate, so it bypasses the --check
+  // short-circuit and falls through to a full pull (where the unknown-id
+  // INVALID_ARGS check runs against the real plan).
+  const checkEligible = scopeTask === undefined || scopeKnownInPhases;
+
+  // FORGE-123: --pull --check. Probe the cheap upstream revision BEFORE fetching
+  // the (expensive) full issue list.
+  //   match    → refresh the freshness stamp (synced_at + spec_revision + the
+  //              unchanged tracker_revision) and exit 0; issue list NEVER fetched.
+  //   mismatch / no stored revision → fall through to a normal pull.
+  //   probe failure (getCurrentRevision throws) → warn + fall through.
+  if (args.check && checkEligible) {
+    const stored = loaded.phases.source?.tracker_revision;
+    let current: string | undefined;
+    let probeFailed = false;
+    try {
+      current = await tracker.getCurrentRevision();
+    } catch (e) {
+      probeFailed = true;
+      const message = e instanceof Error ? e.message : String(e);
+      err.write(
+        `warning: --check revision probe failed (${message}); falling back to a full pull.\n`,
+      );
+    }
+    if (!probeFailed && stored !== undefined && current === stored) {
+      // BLOCKER fix (GPT-5.5 review): a dry-run check must NEVER write
+      // phases.yaml or refresh the stamp — and dry-run pulls take no
+      // phases-write lock, so a stamp write here would be an UNLOCKED write.
+      // Report the match (human line + JSON check:'match') and exit, leaving
+      // the document byte-identical. Only the non-dry-run path below refreshes
+      // the stamp, and it does so under the lock acquired in
+      // runOrchestrateReconcile (assertFresh guards the write).
+      if (args.dryRun) {
+        writeJson(out, {
+          ok: true,
+          data: {
+            direction: 'pull',
+            dry_run: true,
+            applied: false,
+            check: 'match',
+            ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
+          },
+        });
+        err.write('reconcile --check: no upstream changes (dry-run, phases.yaml untouched)\n');
+        return { exitCode: 0 };
+      }
+      // Verified fresh: refresh the freshness stamp so a verified-fresh snapshot
+      // stops tripping staleness warnings on subsequent reads. Reuses the
+      // existing setSourceOnDocument + phases-write-lock save path.
+      let nextSource: Source;
+      try {
+        nextSource = resolveSourceForPull(loaded, tracker.type, cwd, current);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        writeJson(err, {
+          ok: false,
+          error: { code: 'SOURCE_RESOLUTION_FAILED', message },
+        });
+        return { exitCode: 3 };
+      }
+      setSourceOnDocument(loaded.doc, nextSource);
+      if (lock) {
+        try {
+          lock.assertFresh();
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          writeJson(err, { ok: false, error: { code: 'PHASES_LOCK_EXPIRED', message } });
+          return { exitCode: 4 };
+        }
+      }
+      writeAtomic(
+        phasesPath,
+        loaded.doc.toString({ lineWidth: 0, flowCollectionPadding: false }),
+      );
+      writeJson(out, {
+        ok: true,
+        data: {
+          direction: 'pull',
+          dry_run: false,
+          applied: false,
+          check: 'match',
+          ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
+        },
+      });
+      err.write('reconcile --check: no upstream changes\n');
+      return { exitCode: 0 };
+    }
+    // Fall through to a normal pull. Note which signal drove it for the JSON.
+    checkOutcome = probeFailed
+      ? 'probe_failure'
+      : stored === undefined
+        ? 'missing'
+        : 'mismatch';
+  }
+
   let page;
   try {
     // Pull orphan detection needs the FULL issue set, including done/cancelled:
@@ -555,15 +847,59 @@ async function runPull(
     );
   }
 
-  const plan = diffPull(page.issues, loaded.phases, {
+  const fullPlan = diffPull(page.issues, loaded.phases, {
     trackerViewTruncated: page.truncated,
   });
+
+  // FORGE-119: scope the plan to the target task BEFORE emission/apply/prune so
+  // a scoped run never applies or prunes outside its scope. Resolution order
+  // (MAJOR fix): phases.yaml (local id or bound tracker id) first, then the
+  // fetched tracker page (a brand-new tracker issue surfaced as added/unmanaged).
+  // An id resolvable by NEITHER is INVALID_ARGS at exit 3 (exit 1 is reserved
+  // for PRUNE_PENDING). A VALID id with zero diff is accepted and yields an
+  // empty scoped plan — it must NOT be rejected.
+  let plan = fullPlan;
+  if (scopeTask !== undefined) {
+    let scope = phasesScope;
+    if (scope === null) {
+      // Not in phases.yaml. Accept it only if the fetched tracker page carries
+      // it as a tracker issue id (brand-new / unmanaged issue).
+      if (!pullPlanCarriesTrackerId(fullPlan, scopeTask)) {
+        writeJson(err, {
+          ok: false,
+          error: { code: 'INVALID_ARGS', message: `unknown task id: ${scopeTask}` },
+        });
+        return { exitCode: 3 };
+      }
+      // diffPull can bind a tracker issue to an UNBOUND local task via
+      // issue.forgeTaskId — its updated/removed entry then carries this tracker
+      // id alongside the matched local task_id. Resolve through the plan's own
+      // entries first so tracker-id scoping keeps that task's changes; a
+      // tracker-only scope (no local task id) is reserved for added/unmanaged
+      // brand-new issues (Codex impl-review r2).
+      const planEntry =
+        fullPlan.updated.find((u) => u.tracker_issue_id === scopeTask) ??
+        fullPlan.removed.find((r) => r.tracker_issue_id === scopeTask);
+      scope = { localTaskId: planEntry?.task_id, trackerId: scopeTask };
+    }
+    plan = scopePullPlan(fullPlan, scope);
+  }
 
   if (args.dryRun) {
     writeJson(out, {
       ok: true,
-      data: { direction: 'pull', dry_run: true, pull: plan, applied: false },
+      data: {
+        direction: 'pull',
+        dry_run: true,
+        pull: plan,
+        applied: false,
+        ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
+        ...(checkOutcome !== undefined ? { check: checkOutcome } : {}),
+      },
     });
+    if (scopeTask !== undefined) {
+      err.write(`reconcile: scoped to ${scopeTask} only\n`);
+    }
     // If there are orphan removals, exit 1 (PRUNE_PENDING) so the skill knows
     // it must confirm before a real --pull. The skill re-invokes with
     // --confirm-prune (or --no-prune to keep them).
@@ -578,7 +914,14 @@ async function runPull(
     // data.pull.removed.length > 0 — both signals consistent.
     writeJson(out, {
       ok: true,
-      data: { direction: 'pull', dry_run: false, pull: plan, applied: false },
+      data: {
+        direction: 'pull',
+        dry_run: false,
+        pull: plan,
+        applied: false,
+        ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
+        ...(checkOutcome !== undefined ? { check: checkOutcome } : {}),
+      },
     });
     err.write(
       `forge orchestrate reconcile: ${plan.removed.length} orphan task(s) — re-run with --confirm-prune or --no-prune\n`,
@@ -624,13 +967,28 @@ async function runPull(
     }
   }
 
+  // FORGE-123: stamp source.tracker_revision best-effort on every full pull.
+  // A flaky revision probe must NOT fail the pull — on throw, warn and stamp
+  // nothing (leave any prior tracker_revision as resolveSourceForPull carries
+  // it). When --check already probed the revision (mismatch path), reuse it to
+  // avoid a redundant call.
+  let trackerRevision: string | undefined;
+  try {
+    trackerRevision = await tracker.getCurrentRevision();
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    err.write(
+      `warning: could not stamp source.tracker_revision (${message}); pull continues without it.\n`,
+    );
+  }
+
   // Resolve + stamp the source stanza on every successful --pull. synced_at
   // bumps even when the diff is empty: the semantic is "last successful sync
   // attempt", not "last mutation". This means --pull always writes the file
   // (single rewrite — minor thrash, big upside on honest staleness).
   let nextSource: Source;
   try {
-    nextSource = resolveSourceForPull(loaded, tracker.type, cwd);
+    nextSource = resolveSourceForPull(loaded, tracker.type, cwd, trackerRevision);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     writeJson(err, {
@@ -674,32 +1032,49 @@ async function runPull(
       applied: mutationsDoc > 0,
       mutations: mutationsDoc,
       ...(stagedAdditions ? { staged_added: stagedAdded } : {}),
+      ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
+      ...(checkOutcome !== undefined ? { check: checkOutcome } : {}),
     },
   });
 
   return { exitCode: 0 };
 }
 
-// Pick a project_id for the source stanza, preferring (in order):
-//   1. The existing source.project_id (preserved across --pull runs)
-//   2. The legacy top-level `tracker_project_id` in the raw Document
-//      (v0.3.x migration path — schema-stripped but still present in YAML)
-// Throws if neither is found — fail loudly rather than fabricate an ID.
+// Read a legacy top-level Document key as a string, handling both the Scalar
+// node form (doc.get(k, true)) and a plain string. Returns undefined when
+// absent/empty/non-string. Shared by the tracker_project_id and (FORGE-127)
+// tracker_url migrations.
+function readLegacyTopLevelString(
+  doc: ReturnType<typeof parseDocument>,
+  key: string,
+): string | undefined {
+  const legacy = doc.get(key, true);
+  if (legacy && typeof (legacy as { toJSON?: unknown }).toJSON === 'function') {
+    const value = (legacy as { toJSON: () => unknown }).toJSON();
+    if (typeof value === 'string' && value.length > 0) return value;
+  } else if (typeof legacy === 'string' && legacy.length > 0) {
+    return legacy;
+  }
+  return undefined;
+}
+
+// Pick the source stanza for a --pull, preferring (in order):
+//   project_id: existing source.project_id, else the legacy top-level
+//     `tracker_project_id` (v0.3.x migration; schema-stripped but in YAML).
+//   tracker_url: existing source.tracker_url, else the legacy top-level
+//     `tracker_url` (FORGE-127 migration — same Scalar/string handling).
+// Throws if no project_id is found — fail loudly rather than fabricate an ID.
+// `tracker_revision` is computed best-effort by the caller (probe may fail) and
+// passed in; undefined leaves the field unstamped.
 function resolveSourceForPull(
   loaded: { phases: Phases; doc: ReturnType<typeof parseDocument> },
   trackerType: Source['tracker'],
   cwd: string,
+  trackerRevision: string | undefined,
 ): Source {
-  let project_id: string | undefined = loaded.phases.source?.project_id;
-  if (!project_id) {
-    const legacy = loaded.doc.get('tracker_project_id', true);
-    if (legacy && typeof legacy.toJSON === 'function') {
-      const value = legacy.toJSON() as unknown;
-      if (typeof value === 'string' && value.length > 0) project_id = value;
-    } else if (typeof legacy === 'string' && legacy.length > 0) {
-      project_id = legacy;
-    }
-  }
+  const project_id =
+    loaded.phases.source?.project_id ??
+    readLegacyTopLevelString(loaded.doc, 'tracker_project_id');
   if (!project_id) {
     throw new Error(
       'phases.yaml has no source.project_id and no legacy tracker_project_id ' +
@@ -707,11 +1082,25 @@ function resolveSourceForPull(
         'to bootstrap the upstream project binding.',
     );
   }
+  // FORGE-127: preserve an existing source.tracker_url; otherwise migrate the
+  // legacy top-level key. Carried into source only when non-empty.
+  const tracker_url =
+    loaded.phases.source?.tracker_url ??
+    readLegacyTopLevelString(loaded.doc, 'tracker_url');
+  // FORGE-123: prefer the freshly-probed revision; when the probe failed
+  // (undefined), keep the previously-stored token rather than wiping it.
+  const tracker_revision = trackerRevision ?? loaded.phases.source?.tracker_revision;
   return {
     tracker: trackerType,
     project_id,
     synced_at: new Date().toISOString(),
     spec_revision: computeSpecRevision(cwd),
+    ...(tracker_url !== undefined && tracker_url.length > 0
+      ? { tracker_url }
+      : {}),
+    ...(tracker_revision !== undefined && tracker_revision.length > 0
+      ? { tracker_revision }
+      : {}),
   };
 }
 
@@ -726,10 +1115,18 @@ function setSourceOnDocument(
   doc.setIn(['source', 'project_id'], source.project_id);
   doc.setIn(['source', 'synced_at'], source.synced_at);
   doc.setIn(['source', 'spec_revision'], source.spec_revision);
-  // Migration: remove the legacy top-level tracker_project_id once we've
-  // recorded the value inside source. Idempotent — `deleteIn` returns false
-  // when the path is already gone.
+  if (source.tracker_url !== undefined) {
+    doc.setIn(['source', 'tracker_url'], source.tracker_url);
+  }
+  if (source.tracker_revision !== undefined) {
+    doc.setIn(['source', 'tracker_revision'], source.tracker_revision);
+  }
+  // Migration: remove the legacy top-level keys once we've recorded their
+  // values inside source. Idempotent — `deleteIn` returns false when the path
+  // is already gone. FORGE-127 adds tracker_url to the long-standing
+  // tracker_project_id cleanup.
   doc.deleteIn(['tracker_project_id']);
+  doc.deleteIn(['tracker_url']);
 }
 
 async function runPush(
@@ -749,7 +1146,28 @@ async function runPush(
     return { exitCode: 4 };
   }
 
-  const plan = diffPush(loaded.phases, issues);
+  const fullPlan = diffPush(loaded.phases, issues);
+
+  // FORGE-119: scope to the target task BEFORE emission/apply so a scoped run
+  // never pushes bodies outside its scope. MAJOR fix: resolve the requested id
+  // (local task id OR bound tracker issue id) to its canonical local task id
+  // BEFORE filtering, so a tracker-id input scopes the bound task's bodies. A
+  // VALID id with zero diff yields an empty scoped plan; a genuinely unknown id
+  // (neither a local task nor a bound tracker id) is INVALID_ARGS at exit 3.
+  // Push has no tracker-page fallback: it only ever sends bodies for local tasks.
+  const scopeTask = args.task;
+  let plan = fullPlan;
+  if (scopeTask !== undefined) {
+    const scope = resolveScopeFromPhases(loaded.phases, scopeTask);
+    if (scope === null || scope.localTaskId === undefined) {
+      writeJson(err, {
+        ok: false,
+        error: { code: 'INVALID_ARGS', message: `unknown task id: ${scopeTask}` },
+      });
+      return { exitCode: 3 };
+    }
+    plan = scopePushPlan(fullPlan, scope);
+  }
 
   if (args.dryRun) {
     writeJson(out, {
@@ -759,8 +1177,12 @@ async function runPush(
         dry_run: true,
         push: { plan, succeeded: [], failed: [] },
         applied: false,
+        ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
       },
     });
+    if (scopeTask !== undefined) {
+      err.write(`reconcile: scoped to ${scopeTask} only\n`);
+    }
     return { exitCode: 0 };
   }
 
@@ -784,6 +1206,7 @@ async function runPush(
       dry_run: false,
       push: { plan, succeeded, failed },
       applied: succeeded.length > 0,
+      ...(scopeTask !== undefined ? { scoped_to: scopeTask } : {}),
     },
   });
 

@@ -98,6 +98,9 @@ function makeFakeTracker(initial: Issue[]): {
       throw new Error('unused');
     },
     async setBlockedBy() {},
+    async getCurrentRevision() {
+      return 'linear:e2e-rev';
+    },
     async healthCheck() {
       return { ok: true };
     },
@@ -223,6 +226,53 @@ test('e2e — round-trip: pull → push → re-pull yields no further updates', 
     const p3: JsonPayload = JSON.parse(r3.out);
     assert.equal(p3.data?.pull?.updated.length, 0);
     assert.equal(p3.data?.pull?.removed.length, 0);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('e2e — FORGE-119 scoped --pull applies the in-scope change and leaves the out-of-scope task untouched', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: PHASES_FIXTURE });
+  try {
+    // BOTH tasks have a title diff upstream. A run scoped to P1-T01 must apply
+    // ONLY P1-T01's change and never touch P1-T02.
+    const fake = makeFakeTracker([
+      { id: 't-1', identifier: 'F-1', title: 'Task one RENAMED', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+      { id: 't-2', identifier: 'F-2', title: 'Task two RENAMED', state: 'todo', blockerIds: ['t-1'], forgeTaskId: 'P1-T02' },
+    ]);
+    const r = await runVerb({
+      cwd: wt.dir,
+      argv: ['--pull', '--task', 'P1-T01'],
+      tracker: fake.tracker,
+    });
+    assert.equal(r.exitCode, 0);
+    const p = JSON.parse(r.out) as { data?: { scoped_to?: string; pull?: { updated: { task_id: string }[] } } };
+    assert.equal(p.data?.scoped_to, 'P1-T01');
+    assert.equal(p.data?.pull?.updated.length, 1);
+    assert.equal(p.data?.pull?.updated[0]?.task_id, 'P1-T01');
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.match(after, /Task one RENAMED/);
+    assert.match(after, /Task two/); // out-of-scope title unchanged
+    assert.doesNotMatch(after, /Task two RENAMED/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('e2e — FORGE-119 scoped --push pushes ONLY the in-scope task body', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: PHASES_FIXTURE });
+  try {
+    const fake = makeFakeTracker([
+      { id: 't-1', identifier: 'F-1', title: 'Task one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+      { id: 't-2', identifier: 'F-2', title: 'Task two', state: 'todo', blockerIds: ['t-1'], forgeTaskId: 'P1-T02' },
+    ]);
+    const r = await runVerb({
+      cwd: wt.dir,
+      argv: ['--push', '--task', 'P1-T02'],
+      tracker: fake.tracker,
+    });
+    assert.equal(r.exitCode, 0);
+    assert.deepEqual(fake.callsToUpdateBody, ['t-2']);
   } finally {
     wt.cleanup();
   }

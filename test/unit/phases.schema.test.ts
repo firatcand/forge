@@ -499,7 +499,11 @@ test('TaskSchema accepts tracker_issue_id', () => {
   assert.equal(result.data.tracker_issue_id, 'gh#42');
 });
 
-test('PhasesSchema accepts tracker_url at top level', () => {
+test('PhasesSchema tolerates a legacy top-level tracker_url and strips it (FORGE-127)', () => {
+  // FORGE-127 moved tracker_url into source. PhasesSchema is non-strict, so an
+  // unmigrated file with a top-level tracker_url still PARSES (no validation
+  // error) but the field is silently stripped from the parsed object — the
+  // first --pull migrates it into source.tracker_url.
   const data = {
     ...basePhases(),
     tracker_url: 'https://github.com/org/repo',
@@ -507,7 +511,48 @@ test('PhasesSchema accepts tracker_url at top level', () => {
   const result = PhasesSchema.safeParse(data);
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.equal(result.data.tracker_url, 'https://github.com/org/repo');
+  assert.equal(
+    (result.data as Record<string, unknown>).tracker_url,
+    undefined,
+    'legacy top-level tracker_url must be stripped on parse',
+  );
+});
+
+test('SourceSchema accepts tracker_url (FORGE-127)', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'github' as const,
+      project_id: 'proj_abc',
+      synced_at: '2026-05-17T22:17:11Z',
+      spec_revision: 'abc1234',
+      tracker_url: 'https://github.com/org/repo',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.source?.tracker_url, 'https://github.com/org/repo');
+});
+
+test('SourceSchema accepts tracker_revision (FORGE-123)', () => {
+  const data = {
+    ...basePhases(),
+    source: {
+      tracker: 'linear' as const,
+      project_id: 'proj_abc',
+      synced_at: '2026-05-17T22:17:11Z',
+      spec_revision: 'abc1234',
+      tracker_revision: 'linear:2026-05-17T22:17:11.000Z',
+    },
+  };
+  const result = PhasesSchema.safeParse(data);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(
+    result.data.source?.tracker_revision,
+    'linear:2026-05-17T22:17:11.000Z',
+  );
 });
 
 test('PhasesSchema accepts optional source block', () => {
@@ -561,6 +606,8 @@ test('PhasesSchema rejects non-ISO synced_at in source', () => {
 });
 
 test('PhasesSchema rejects extra keys inside source (strict)', () => {
+  // tracker_revision and tracker_url are now legitimate SourceSchema fields
+  // (FORGE-123 / FORGE-127); use a genuinely-unknown key to prove .strict().
   const data = {
     ...basePhases(),
     source: {
@@ -568,7 +615,7 @@ test('PhasesSchema rejects extra keys inside source (strict)', () => {
       project_id: 'proj_abc',
       synced_at: '2026-05-17T22:17:11Z',
       spec_revision: 'abc1234',
-      tracker_revision: 'sneaky-extra-field',
+      sneaky_extra_field: 'nope',
     },
   };
   const result = PhasesSchema.safeParse(data);

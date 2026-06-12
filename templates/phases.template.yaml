@@ -1,5 +1,4 @@
 project: "{{PROJECT_NAME}}"
-tracker_url: ""          # populated by /push-to-tracker
 # Default gate. typecheck is the hard requirement; e2e and lint use
 # --if-present so a project that hasn't defined those scripts isn't blocked.
 # Edit this to match your project's actual verification commands.
@@ -8,11 +7,14 @@ gate_check_command: "npm run e2e --if-present && npm run typecheck && npm run li
 # Source provenance: written by /reconcile --pull on every regeneration.
 # /push-to-tracker bootstraps source.project_id on first sync; do not
 # hand-edit. Absence prints "no source metadata" on every read.
+# FORGE-127: tracker_url now lives INSIDE this block (was a top-level key).
 # source:
 #   tracker: linear|github|notion
 #   project_id: ""           # populated by /push-to-tracker
 #   synced_at: "<ISO-8601>"
 #   spec_revision: "<sha>"
+#   tracker_url: ""          # populated by /push-to-tracker (was top-level)
+#   tracker_revision: ""     # FORGE-123: opaque upstream-equality token
 
 phases:
   - id: phase-1

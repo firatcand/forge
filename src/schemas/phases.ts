@@ -36,15 +36,21 @@ export const TRACKER_TYPES = ['linear', 'github', 'notion'] as const;
 // Provenance stanza written by /reconcile --pull when phases.yaml is
 // regenerated from upstream tracker state. Read by every CLI verb that
 // loads phases.yaml to print a one-line freshness summary to stderr.
-// `tracker_revision` was deliberately omitted in v0.4: equality-only
-// drift detection currently has no consumer; the cheap-rev adapter
-// method is filed as a follow-up if/when a consumer appears.
+//
+// FORGE-127: `tracker_url` moved here from the (now-removed) top-level
+// PhasesSchema key. `.min(1)` (not `.url()`): the template ships
+// `tracker_url: ""` and adopter values may be non-URL tracker references.
+// FORGE-123: `tracker_revision` is an OPAQUE provider-native equality token
+// (Tracker.getCurrentRevision()) stamped best-effort on --pull and consumed
+// by `--pull --check` to short-circuit when upstream is unchanged.
 export const SourceSchema = z
   .object({
     tracker: z.enum(TRACKER_TYPES),
     project_id: z.string().min(1),
     synced_at: z.string().datetime({ offset: true }),
     spec_revision: z.string().min(1),
+    tracker_url: z.string().min(1).optional(),
+    tracker_revision: z.string().min(1).optional(),
   })
   .strict();
 
@@ -121,7 +127,11 @@ const DONE = 2;
 export const PhasesSchema = z
   .object({
     project: z.string().min(1),
-    tracker_url: z.string().optional(),
+    // FORGE-127: top-level `tracker_url` removed — the value now lives in
+    // `source.tracker_url`. PhasesSchema is non-strict, so a legacy top-level
+    // `tracker_url` in an unmigrated file is silently STRIPPED on parse (no
+    // validation error); resolveSourceForPull migrates it into source on the
+    // first --pull. (Test: phases.schema.test.ts proves the tolerated-strip.)
     gate_check_command: z.string().optional(),
     source: SourceSchema.optional(),
     phases: z.array(PhaseSchema).min(1),

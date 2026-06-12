@@ -33,6 +33,8 @@ export interface MockGhIssue {
   labels: string[];
   state: 'open' | 'closed';
   closeReason?: 'completed' | 'not planned';
+  /** ISO updatedAt — projected for getCurrentRevision (FORGE-123). */
+  updatedAt?: string;
 }
 
 export interface MockGhMilestone {
@@ -468,6 +470,7 @@ function projectIssue(
     labels,
     body: issue.body,
     url: issue.url,
+    updatedAt: issue.updatedAt ?? '2026-01-01T00:00:00Z',
   };
   if (fields === undefined) return all;
   const out: Record<string, unknown> = {};

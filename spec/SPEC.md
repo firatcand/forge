@@ -57,6 +57,8 @@ source:
   project_id: <tracker-project-id>
   synced_at: 2026-05-17T15:30:00Z
   spec_revision: <git sha of HEAD when SPEC last touched OR content digest if SPEC untracked>
+  tracker_url: <tracker project URL>   # FORGE-127: moved here from the top level
+  tracker_revision: <opaque upstream-equality token>  # FORGE-123: optional
 ```
 
 Every CLI verb that reads `phases.yaml` prints a one-line freshness summary to stderr before its main output:
@@ -75,9 +77,9 @@ When `synced_at` is older than 24h, the line is prefixed with `⚠ STALE — ` s
 
 Not auto-sync; just honest staleness.
 
-**`tracker_revision` is intentionally absent.** v0.4 has no consumer for an upstream-equality token (no doctor drift-check, no `/reconcile --pull --check`). If a consumer appears, the right shape is a `Tracker.getCurrentRevision()` adapter method (each tracker mints a cheap provider-native revision: Linear `max(updatedAt)`, GitHub list ETag, Notion timestamp). A canonical-projection hash bolted onto reconcile would ship the schema field without the live-drift capability. Filed as a follow-up issue (FORGE-123 — `Add Tracker.getCurrentRevision() for live drift detection`) for when v0.5+ wants it.
+**`tracker_revision` shipped in FORGE-123.** `SourceSchema` carries an optional `tracker_revision` — an OPAQUE provider-native equality token minted by `Tracker.getCurrentRevision()` (Linear `max(updatedAt)`, GitHub latest-updated issue, Notion combined database + newest-page `last_edited_time` — the database timestamp alone does not advance on page edits; archiving a page may advance neither, an accepted edge reconciled by any unconditioned `--pull`; each prefixed with a provider tag so cross-provider equality is never accidentally true). `/reconcile --pull` stamps it best-effort (a flaky probe warns and is skipped, never failing the pull). `/reconcile --pull --check` consumes it: it probes the current revision and, when it equals the stored token, refreshes the freshness stamp and exits 0 WITHOUT fetching the issue list; on mismatch / missing stored token / probe failure it falls through to a full pull.
 
-**Breaking change vs v0.3.x:** the top-level `tracker_project_id` field is removed from `PhasesSchema`; the value moves into `source.project_id`. `tracker_url` stays at the top level. Migration is automatic: the first `/reconcile --pull` after upgrade transplants the legacy key from the raw Document into `source.project_id` and deletes it. No adopter action required.
+**Breaking change vs v0.3.x:** the top-level `tracker_project_id` field is removed from `PhasesSchema`; the value moves into `source.project_id`. **FORGE-127:** `tracker_url` likewise moves from the top level into `source.tracker_url`. Migration is automatic: the first `/reconcile --pull` after upgrade transplants both legacy top-level keys from the raw Document into the `source` block and deletes them. `PhasesSchema` is non-strict, so an unmigrated file with a top-level `tracker_url` still parses (the field is silently stripped) until that first pull. No adopter action required.
 
 ### SPEC changes — no contradiction gate in v0.4
 
@@ -340,6 +342,8 @@ export const SourceSchema = z
     project_id: z.string().min(1),
     synced_at: z.string().datetime({ offset: true }),
     spec_revision: z.string().min(1),
+    tracker_url: z.string().min(1).optional(),       // FORGE-127 (moved from top level)
+    tracker_revision: z.string().min(1).optional(),  // FORGE-123 (opaque equality token)
   })
   .strict();
 
@@ -390,7 +394,9 @@ export const PhaseSchema = z.object({
 export const PhasesSchema = z
   .object({
     project: z.string().min(1),
-    tracker_url: z.string().optional(),
+    // FORGE-127: top-level tracker_url removed — moved into source.tracker_url.
+    // PhasesSchema is non-strict, so a legacy top-level tracker_url parses and
+    // is silently stripped; the first --pull migrates it into source.
     gate_check_command: z.string().optional(),
     source: SourceSchema.optional(),
     phases: z.array(PhaseSchema).min(1),

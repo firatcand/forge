@@ -52,8 +52,7 @@ The agent classifies adapter errors via `src/trackers/errors.ts` codes and retri
 
 Tracker-agnostic keys:
 
-- top level: `tracker_url`
-- in `source` block: `tracker`, `project_id`, `synced_at`, `spec_revision`
+- in `source` block: `tracker`, `project_id`, `synced_at`, `spec_revision`, `tracker_url` (FORGE-127: moved here from the top level), `tracker_revision` (FORGE-123)
 - per phase: `tracker_milestone_id`
 - per task: `tracker_issue_id`
 

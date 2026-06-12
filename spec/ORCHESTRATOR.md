@@ -258,9 +258,15 @@ forge orchestrate amend-roadmap [--from-file <yaml>] [--task-id <id>] \
     # on tracker failure; resumable journal under .forge/orchestrator/global/amend-journal/).
 
 forge orchestrate reconcile {--pull|--push} [--dry-run] [--json]
+                            [--confirm-prune|--no-prune] [--task <task-id>] [--check]
     # Bi-directional phases.yaml ↔ tracker sync.
     # --pull: tracker → phases.yaml (detects new issues, status changes); conflict prompts user.
     # --push: phases.yaml → tracker (mirrors local canonical state).
+    # --confirm-prune / --no-prune: resolve orphan-task removals (PRUNE_PENDING exits 1 until one is given).
+    # --task <id> (FORGE-119): scope the run to one task — a scoped run never applies/prunes/pushes
+    #   outside that task; unknown id → INVALID_ARGS exit 3.
+    # --check (FORGE-123, --pull only): probe the cheap upstream revision first; on a match, refresh the
+    #   freshness stamp and exit 0 WITHOUT fetching the issue list; mismatch/missing/probe-failure → full pull.
 
 forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-run] [--json]
     # Invoked by /update-spec --apply and /amend-roadmap to proactively flag active worktrees whose task

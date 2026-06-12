@@ -417,6 +417,8 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     { flag: 'dry-run', takesValue: false, description: 'Plan only; write nothing.' },
     { flag: 'confirm-prune', takesValue: false, description: 'Confirm pruning of removed tasks.' },
     { flag: 'no-prune', takesValue: false, description: 'Never prune removed tasks.' },
+    { flag: 'task', takesValue: true, description: 'Scope the run to a single task id.', valueLabel: '<task-id>' },
+    { flag: 'check', takesValue: false, description: 'With --pull: short-circuit when upstream is unchanged.' },
     JSON_FLAG,
   ],
   'apply-decision': [

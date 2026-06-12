@@ -1426,3 +1426,62 @@ test('NOTION_* constants + CLAIM_SETTLE_MS exported', () => {
   assert.equal(NOTION_BODY_MAX_BYTES, 65_536);
   assert.equal(NOTION_API_VERSION, '2026-03-11');
 });
+
+// ─── getCurrentRevision (FORGE-123) ──────────────────────────────────────────
+
+test('getCurrentRevision — combines db + newest-page last_edited_time (Codex r3: db timestamp alone misses page edits)', async () => {
+  const { tracker, mock } = makeTracker([
+    okResult({
+      object: 'database',
+      id: DB_ID,
+      last_edited_time: '2026-06-03T08:00:00.000Z',
+      data_sources: [{ id: 'ds', name: 'x' }],
+    }),
+    // resolveDataSourceId re-fetches the database object
+    okResult({
+      object: 'database',
+      id: DB_ID,
+      data_sources: [{ id: 'ds', name: 'x' }],
+    }),
+    // top-1 query sorted by last_edited_time desc
+    okResult({
+      object: 'list',
+      results: [{ object: 'page', id: 'pg-1', last_edited_time: '2026-06-04T09:30:00.000Z' }],
+      has_more: false,
+      next_cursor: null,
+    }),
+  ]);
+  const rev = await tracker.getCurrentRevision();
+  assert.equal(rev, 'notion:2026-06-03T08:00:00.000Z|2026-06-04T09:30:00.000Z');
+  assert.deepEqual(apiOf(mock.calls[0]!), {
+    path: `v1/databases/${DB_ID}`,
+    method: 'GET',
+  });
+  assertVersionPinned(mock.calls[0]!);
+  const queryCall = mock.calls[2]!;
+  assert.deepEqual(apiOf(queryCall), { path: 'v1/data_sources/ds/query', method: 'POST' });
+  const body = JSON.parse(queryCall.input!);
+  assert.equal(body.page_size, 1);
+  assert.deepEqual(body.sorts, [{ timestamp: 'last_edited_time', direction: 'descending' }]);
+});
+
+test('getCurrentRevision — missing timestamps and empty query → notion:none|none', async () => {
+  const { tracker } = makeTracker([
+    okResult({ object: 'database', id: DB_ID, data_sources: [{ id: 'ds' }] }),
+    okResult({ object: 'database', id: DB_ID, data_sources: [{ id: 'ds' }] }),
+    okResult({ object: 'list', results: [], has_more: false, next_cursor: null }),
+  ]);
+  assert.equal(await tracker.getCurrentRevision(), 'notion:none|none');
+});
+
+test('getCurrentRevision — malformed query response (no results array) THROWS instead of degrading to none (Codex r4)', async () => {
+  const { tracker } = makeTracker([
+    okResult({ object: 'database', id: DB_ID, last_edited_time: '2026-06-03T08:00:00.000Z', data_sources: [{ id: 'ds' }] }),
+    okResult({ object: 'database', id: DB_ID, data_sources: [{ id: 'ds' }] }),
+    okResult({ object: 'error-ish' }),
+  ]);
+  await assert.rejects(
+    () => tracker.getCurrentRevision(),
+    (err: unknown) => err instanceof TrackerError && err.code === 'VALIDATION',
+  );
+});

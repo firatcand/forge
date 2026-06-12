@@ -265,6 +265,64 @@ export class GitHubTracker extends BaseTracker<GithubTrackerConfig> {
     this.retryOpts = options.retry ?? {};
   }
 
+  // ─── getCurrentRevision — cheap upstream-equality probe (FORGE-123) ─────────
+  //
+  // Opaque token = `github:<iso>` where <iso> is the updatedAt of the single
+  // most-recently-updated issue in the repo (any state). One `gh issue list`
+  // with `sort:updated-desc --limit 1`. `github:none` when the repo has no
+  // issues. The provider-tag prefix keeps cross-provider equality from ever
+  // being accidentally true. Errors normalize like every other gh call so the
+  // caller can fall back to a full pull on a probe throw.
+  async getCurrentRevision(): Promise<string> {
+    return this.withRetry(
+      'getCurrentRevision',
+      async () => {
+        const args = [
+          'issue',
+          'list',
+          '--repo',
+          this.repo,
+          '--state',
+          'all',
+          '--search',
+          'sort:updated-desc',
+          '--limit',
+          '1',
+          '--json',
+          'updatedAt',
+        ];
+        let result: GhExecResult;
+        try {
+          result = await this.gh(args);
+        } catch (err) {
+          throw this.normalizeError(
+            'getCurrentRevision',
+            err,
+            classifyGitHubError(err),
+          );
+        }
+        let parsed: Array<{ updatedAt: string }>;
+        try {
+          const raw = JSON.parse(result.stdout) as unknown;
+          parsed = z
+            .array(z.object({ updatedAt: z.string().min(1) }))
+            .parse(raw);
+        } catch (err) {
+          throw this.normalizeError('getCurrentRevision', err, {
+            code: 'VALIDATION',
+            details: {
+              reason: 'gh-json-parse-failed',
+              stdoutPreview: result.stdout.slice(0, 200),
+            },
+          });
+        }
+        const iso = parsed[0]?.updatedAt;
+        return `github:${iso ?? 'none'}`;
+      },
+      this.retryOpts,
+    );
+  }
+
   // ─── healthCheck — never throws ────────────────────────────────────────────
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
