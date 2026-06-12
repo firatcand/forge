@@ -1042,7 +1042,7 @@ In v0.4, workers consult §Authority by field (line 34) when artifacts disagree 
 - **Exit codes**: 0 clean, 1 warnings (e.g. required `spec/SPEC.md` is missing), 2 drift detected
 - **Settings**: honors `settings.doctor.spec_code_check_enabled` (default `true`). When `false`, doctor short-circuits with an empty drift report and exits 0
 - **Implementation**: `src/cli/orchestrate/doctor.ts` (CLI handler) delegates to the pure `detectSpecCodeDrift()` in `src/orchestrator/drift.ts`
-- **Exported-name / symbol grep deferred to v0.5** — false-positive rate against backtick-fenced prose was deemed too high for v0.4
+- **Symbol-mention drift (FORGE-131)**: alongside file-path drift, doctor flags identifier-shaped backtick spans in the spec files that appear NOWHERE in `src/**/*.ts`, emitting a `missing_symbol` drift entry (same exit-2 semantics). This is a **bounded MENTION check, NOT export analysis**: a symbol present only in a comment or a test still counts as "present", and a renamed export with stale prose is caught only when the old name vanishes from `src` entirely. Candidates are filtered to a code shape (CamelCase ≥2 humps / camelCase / `ALL_CAPS_SNAKE`, length ≥4) so ordinary prose nouns are not flagged. A built-in `BASE_SYMBOL_ALLOWLIST` (external CLI/library/product names, host-tool primitives, documented env vars, illustrative concept names) plus the adopter-declared `settings.doctor.symbol_allowlist` exclude legitimate prose. It does NOT grow toward AST analysis in this batch.
 
 ---
 

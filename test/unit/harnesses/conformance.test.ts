@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   ClaudeHarness,
   CodexHarness,
+  CursorHarness,
   GeminiHarness,
   createHarness,
 } from '../../../src/harnesses/index.ts';
@@ -44,6 +45,11 @@ function makeHarnesses(): { name: string; harness: IHarness }[] {
         env: { FORGE_GEMINI_EXPERIMENTAL: '1' },
         spawnSubprocess: okSpawn,
       }),
+    },
+    {
+      // FORGE-160: cursor is primary-only, beta-gated; opt in for conformance.
+      name: 'cursor',
+      harness: new CursorHarness({ betaOptIn: true, spawnSubprocess: okSpawn }),
     },
   ];
 }

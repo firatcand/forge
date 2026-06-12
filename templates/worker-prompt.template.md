@@ -116,6 +116,15 @@ If the freshness line says **synced > 24h ago**, treat phases.yaml as advisory a
 - Do not invoke commands that escape the worktree (e.g. `cd /`, `git -C <other-repo>`).
 <!-- /host -->
 
+<!-- host: cursor -->
+# Working directory rules
+
+- The orchestrator spawned the Cursor CLI (`agent -p --force --output-format json`) with cwd pinned to `{{WORKTREE_PATH}}` (Node `spawn({ cwd })`); your shell-tool calls inherit it.
+- Treat the worktree root as your working directory. Use relative paths within it.
+- Do not invoke commands that escape the worktree (e.g. `cd /`, `git -C <other-repo>`).
+- NOTE: the Cursor CLI is beta. Confirm any action that writes outside `{{WORKTREE_PATH}}` before running it.
+<!-- /host -->
+
 # Heartbeat protocol
 
 Every ~5 minutes of active work:

@@ -236,11 +236,11 @@ if (command === 'init') {
 
       // Reject ambiguous flag states early — fail before any work.
       if (addAgentParse === 'MISSING_VALUE') {
-        console.error('forge upgrade: --add-agent requires a value (claude, codex, or gemini)');
+        console.error('forge upgrade: --add-agent requires a value (claude, codex, gemini, or cursor)');
         process.exit(1);
       }
       if (removeAgentParse === 'MISSING_VALUE') {
-        console.error('forge upgrade: --remove-agent requires a value (claude, codex, or gemini)');
+        console.error('forge upgrade: --remove-agent requires a value (claude, codex, gemini, or cursor)');
         process.exit(1);
       }
       const addAgent = addAgentParse;
@@ -250,11 +250,11 @@ if (command === 'init') {
         process.exit(1);
       }
       if (addAgent !== null && !isValidAgentKind(addAgent)) {
-        console.error(`forge upgrade: --add-agent: unknown agent '${addAgent}' (expected: claude, codex, gemini)`);
+        console.error(`forge upgrade: --add-agent: unknown agent '${addAgent}' (expected: claude, codex, gemini, cursor)`);
         process.exit(1);
       }
       if (removeAgent !== null && !isValidAgentKind(removeAgent)) {
-        console.error(`forge upgrade: --remove-agent: unknown agent '${removeAgent}' (expected: claude, codex, gemini)`);
+        console.error(`forge upgrade: --remove-agent: unknown agent '${removeAgent}' (expected: claude, codex, gemini, cursor)`);
         process.exit(1);
       }
       // FORGE-154 (plan Q3): --migrate-claudemd is mutually exclusive with
@@ -372,6 +372,6 @@ function readFlagValue(flags: string[], name: string): string | 'MISSING_VALUE' 
   return null;
 }
 
-function isValidAgentKind(v: string | null): v is 'claude' | 'codex' | 'gemini' {
-  return v === 'claude' || v === 'codex' || v === 'gemini';
+function isValidAgentKind(v: string | null): v is 'claude' | 'codex' | 'gemini' | 'cursor' {
+  return v === 'claude' || v === 'codex' || v === 'gemini' || v === 'cursor';
 }

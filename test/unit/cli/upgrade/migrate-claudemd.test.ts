@@ -464,3 +464,32 @@ test('migrateClaudemd (FORGE-208 #12b): refuses upfront when .forge/CONTEXT.md i
     cleanup(cwd);
   }
 });
+
+test('migrateClaudemd (FORGE-160): refuses upfront when `.forge` is a symlinked DIRECTORY — no writes through the link, link intact', async () => {
+  const cwd = bootstrapLegacy();
+  try {
+    const { symlinkSync, lstatSync, readlinkSync, renameSync, readdirSync } = await import('node:fs');
+    // Relocate the real .forge dir and replace it with a symlink — the escape
+    // vector the leaf checks (settings.yaml/CONTEXT.md/.version) all miss: the
+    // mkdirSync(.forge) + writeAtomic(CONTEXT.md/.version) below would land
+    // THROUGH the link into the relocated dir.
+    const realForge = join(cwd, 'real-forge');
+    renameSync(join(cwd, '.forge'), realForge);
+    symlinkSync('real-forge', join(cwd, '.forge'));
+    const before = readdirSync(realForge).sort();
+
+    const result = await migrateClaudemd({ cwd });
+    assert.equal(result.exitCode, 1);
+    assert.match(result.stderr, /\.forge is a symbolic link/i);
+    assert.deepEqual([...result.filesChanged], []);
+
+    // Upfront refusal — nothing written anywhere, including through the link.
+    assert.ok(!existsSync(join(cwd, 'CLAUDE.md.pre-migration.bak')), 'no .bak');
+    assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), LEGACY_CLAUDEMD, 'CLAUDE.md unchanged');
+    assert.equal(lstatSync(join(cwd, '.forge')).isSymbolicLink(), true, 'link intact');
+    assert.equal(readlinkSync(join(cwd, '.forge')), 'real-forge');
+    assert.deepEqual(readdirSync(realForge).sort(), before, 'nothing written through the link (no CONTEXT.md/.version added)');
+  } finally {
+    cleanup(cwd);
+  }
+});

@@ -28,7 +28,9 @@ export class UnterminatedHostBlockError extends Error {
 // FORGE-88: gemini joins the supported worker hosts. The renderer's
 // stripOtherHostBlocks regex is already host-agnostic; this widening
 // only affects callers that branch on host.
-export type WorkerHost = 'claude' | 'codex' | 'gemini';
+// FORGE-160: cursor joins as a beta primary worker host. Its host block in
+// templates/worker-prompt.template.md mirrors how gemini joined in FORGE-88.
+export type WorkerHost = 'claude' | 'codex' | 'gemini' | 'cursor';
 
 export interface PriorAttemptSummary {
   readonly attemptId: string;

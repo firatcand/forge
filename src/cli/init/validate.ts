@@ -51,12 +51,24 @@ export interface ValidateOptions {
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 
-// FORGE-88: HOST_CLI_INSTALL covers the three live primary harnesses.
-// `cursor` removed (never wired to a runtime adapter).
-const HOST_CLI_INSTALL: Record<'claude' | 'codex' | 'gemini', string> = {
+// FORGE-88 / FORGE-160: HOST_CLI_INSTALL covers the live primary harnesses,
+// including `cursor` (beta — its CLI binary is `agent`; see CURSOR_BIN in
+// src/harnesses/cursor.ts). The probe is best-effort guidance; cursor as primary
+// is only reachable via a manual settings edit behind cursor_host_beta_opt_in.
+const HOST_CLI_INSTALL: Record<'claude' | 'codex' | 'gemini' | 'cursor', string> = {
   claude: 'https://docs.claude.com/claude-code',
   codex: 'https://github.com/openai/codex',
   gemini: 'https://github.com/google-gemini/gemini-cli',
+  cursor: 'https://cursor.com/docs/cli',
+};
+
+// FORGE-160: cursor's probe binary differs from its host key (the CLI is `agent`,
+// not `cursor`). All other hosts probe their own name.
+const HOST_CLI_BIN: Record<'claude' | 'codex' | 'gemini' | 'cursor', string> = {
+  claude: 'claude',
+  codex: 'codex',
+  gemini: 'gemini',
+  cursor: 'agent',
 };
 
 function parseGitVersion(stdout: string): { major: number; minor: number } | null {
@@ -129,21 +141,23 @@ async function probeGit(exec: ExecaLike, timeoutMs: number): Promise<ProbeResult
 
 async function probeHostCli(
   key: string,
-  cli: 'claude' | 'codex' | 'gemini',
+  cli: 'claude' | 'codex' | 'gemini' | 'cursor',
   label: string,
   exec: ExecaLike,
   timeoutMs: number,
 ): Promise<ProbeResult> {
+  // FORGE-160: cursor's CLI binary is `agent`, not `cursor`.
+  const bin = HOST_CLI_BIN[cli];
   return runProbe(
     key,
     label,
     HOST_CLI_INSTALL[cli],
     exec,
-    cli,
+    bin,
     ['--version'],
     timeoutMs,
-    (r) => (r.exitCode === 0 ? true : `${cli} --version exited ${r.exitCode}`),
-    `${label} host CLI \`${cli}\` not found on PATH.`,
+    (r) => (r.exitCode === 0 ? true : `${bin} --version exited ${r.exitCode}`),
+    `${label} host CLI \`${bin}\` not found on PATH.`,
   );
 }
 

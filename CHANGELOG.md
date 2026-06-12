@@ -4,6 +4,49 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- **Cursor host (FORGE-160).** `cursor` is now a first-class `AgentKind`. Its
+  managed artifact is `.cursor/rules/forge-context.mdc` — YAML frontmatter
+  (`alwaysApply: true`) FIRST, then a forge marker block that INLINES the
+  rendered methodology context verbatim (Cursor `.mdc` rules cannot reliably
+  `@file`-import, so the breadcrumb is self-contained). The file is gitignored
+  and regenerated per machine by `forge upgrade` (same determinism rationale as
+  `.forge/CONTEXT.md`), and — unlike the product-owned root files of the other
+  hosts — it is **materialized when enabled** (created if absent). Skill farm:
+  `.agents/skills` (Cursor's native cross-tool skill root) + `.cursor/agents`.
+  `forge init`'s root-file checkbox gains a Cursor option; `settings.yaml`
+  `enabled_root_files` and `primary_host_cli` accept `cursor`. Cursor as the
+  PRIMARY dispatch host is **beta-gated** behind
+  `agents.cursor_host_beta_opt_in: true` (selecting it without the flag is a
+  parse error naming the flag); under opt-in a subprocess-backed `CursorHarness`
+  (`agent -p --force --output-format json`, `CURSOR_API_KEY` passthrough) drives
+  primary dispatch — `runReview` is NOT_SUPPORTED (review hosts stay codex |
+  gemini). `forge upgrade --add-agent cursor` / `--remove-agent cursor`,
+  `.gitignore` block entries, and the eject path all handle the nested artifact
+  and the shared `.agents/skills` farm root (prune-safe when another enabled
+  host shares it).
+- **Doctor symbol-mention drift (FORGE-131).** `forge orchestrate doctor
+  --scope spec-code` now flags identifier-shaped backtick spans in the spec
+  files that appear nowhere in `src/**/*.ts` (`missing_symbol` drift entries,
+  exit-2 semantics unchanged). This is a **bounded mention check, not export
+  analysis**: a symbol in a comment or test counts as present, and a renamed
+  export with stale prose is caught only when the old name vanishes from `src`
+  entirely. A code-shape filter (CamelCase ≥2 humps / camelCase /
+  `ALL_CAPS_SNAKE`, len ≥4) plus a built-in `BASE_SYMBOL_ALLOWLIST` and the new
+  adopter-declared `settings.doctor.symbol_allowlist` keep prose nouns and
+  external names out of the drift list.
+- **`spec-diff --all-active` + ship-time SPEC signal (FORGE-164).** `forge
+  orchestrate spec-diff --all-active` enumerates every active task
+  (`dispatched` | `running` | `blocked_on_question`) whose claim predates a
+  `spec/` change, emitting `{ task_id, commit_count, files_affected,
+  lease_expired }[]` (corrupt/missing state or lease → skip with a stderr note;
+  expired leases still listed with `lease_expired: true`; no-diff tasks omitted;
+  always exits 0). `/ship` surfaces the single-task signal as an informational
+  `### ⚠ SPEC changes since this task was claimed` PR-body section — it never
+  blocks the ship. Together with the on-resume block this closes both halves of
+  the FORGE-114 SPEC-drift mitigation.
+
 ## [0.4.2] - 2026-06-12
 
 ### Fixed

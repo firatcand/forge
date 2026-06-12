@@ -16,6 +16,7 @@ import {
   type RenderWorkerPromptArgs,
 } from '../../schemas/cli-args.ts';
 import { QuestionBudgetSchema } from '../../schemas/settings.ts';
+import { cursorConventionsBody } from '../upgrade/agent-root-files.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import {
@@ -130,7 +131,22 @@ function findTaskInPhases(
   );
 }
 
-function readConventions(repoRoot: string): string {
+function readConventions(repoRoot: string, host: WorkerHost): string {
+  // FORGE-160: a cursor-primary run sources conventions from the marker-block
+  // BODY of .cursor/rules/forge-context.mdc (frontmatter + markers stripped),
+  // falling back to AGENTS.md then CLAUDE.md when the rule file is absent.
+  if (host === 'cursor') {
+    const cursorPath = path.join(repoRoot, '.cursor', 'rules', 'forge-context.mdc');
+    if (existsSync(cursorPath)) {
+      const body = cursorConventionsBody(readFileSync(cursorPath, 'utf8'));
+      if (body.length > 0) return body;
+    }
+    const agentsPath = path.join(repoRoot, 'AGENTS.md');
+    if (existsSync(agentsPath)) return readFileSync(agentsPath, 'utf8');
+    const claudePath = path.join(repoRoot, 'CLAUDE.md');
+    if (existsSync(claudePath)) return readFileSync(claudePath, 'utf8');
+    return '';
+  }
   const claudePath = path.join(repoRoot, 'CLAUDE.md');
   if (existsSync(claudePath)) {
     return readFileSync(claudePath, 'utf8');
@@ -152,7 +168,9 @@ function readHost(forgeDir: string): WorkerHost {
   // Cheap line-scan: avoid taking a yaml dep just for one field.
   const match = raw.match(/^\s*primary_host_cli:\s*['"]?([a-z]+)['"]?/m);
   const value = match?.[1] ?? 'claude';
-  if (value === 'codex' || value === 'gemini') return value;
+  // FORGE-160: map cursor through (was previously folded into claude, rendering
+  // the wrong host block for a cursor-primary run).
+  if (value === 'codex' || value === 'gemini' || value === 'cursor') return value;
   return 'claude';
 }
 
@@ -268,8 +286,8 @@ export async function runOrchestrateRenderWorkerPrompt(
   try {
     const manifest = readManifest(opts.forgeDir, opts.taskId, opts.attemptId);
     const { description, acceptance, questionBudget } = findTaskInPhases(repoRoot, opts.taskId);
-    const conventions = readConventions(repoRoot);
     const host = readHost(opts.forgeDir);
+    const conventions = readConventions(repoRoot, host);
     const priorAttempts = readPriorAttempts(opts.forgeDir, opts.taskId, opts.attemptId);
     const answeredQuestions = readAnsweredQuestions(opts.forgeDir, opts.taskId);
     const budget = resolveBudget(loadGlobalQuestionBudget(opts.forgeDir), questionBudget);

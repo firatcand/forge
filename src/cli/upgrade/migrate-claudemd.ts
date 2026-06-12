@@ -24,6 +24,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { resolve } from 'node:path';
 import { parse as yamlParse } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { firstSymlinkedComponent } from '../../core/symlink-guard.ts';
 import { SettingsSchema } from '../../schemas/index.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import { buildPrefixBlock, extractPrefixBlock } from './agent-root-files.ts';
@@ -178,6 +179,23 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
   const versionPath = resolve(cwd, '.forge/.version');
   const settingsPath = resolve(cwd, '.forge/settings.yaml');
   const gitignorePath = resolve(cwd, '.gitignore');
+
+  // Precondition 0 (FORGE-160): refuse UPFRONT when `.forge` itself (or a parent
+  // component of it) is a symbolic link — BEFORE any read/mutation. The leaf
+  // checks below (settings.yaml, CONTEXT.md, .version) all pass when `.forge` is
+  // a symlinked directory (the leaves are real files under the link), then the
+  // mkdirSync(.forge) + writeAtomic(CONTEXT.md/.version) below write THROUGH the
+  // link, escaping the working tree. Refusing here keeps the refusal idempotent
+  // (exit 1, nothing written, link intact). Consistent with the leaf refusals.
+  const forgeLink = firstSymlinkedComponent(cwd, '.forge');
+  if (forgeLink !== null) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr:
+        'forge upgrade --migrate-claudemd: .forge is a symbolic link. Refusing migration — destructive writes through symlinks could mutate files outside the working tree. Resolve the symlink or replace with a regular directory first.',
+    };
+  }
 
   // Precondition 1: CLAUDE.md must exist and must NOT be a symlink.
   // Symlink refusal is a defense for adopters who fetched a malicious repo —

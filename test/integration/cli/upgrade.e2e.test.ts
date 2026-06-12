@@ -220,14 +220,15 @@ test('e2e: forge upgrade --add-agent + --remove-agent are mutually exclusive (Co
 test('e2e: forge upgrade --add-agent rejects unknown agent name', async () => {
   const cwd = bootstrapInitdRepo();
 
+  // FORGE-160: `cursor` is now a valid agent kind; use a genuinely unknown one.
   const result = await execa(
     tsxBin,
-    [entry, 'upgrade', '--add-agent', 'cursor'],
+    [entry, 'upgrade', '--add-agent', 'windsurf'],
     { cwd, reject: false },
   );
 
   assert.notEqual(result.exitCode, 0);
-  assert.match(result.stderr, /unknown agent 'cursor'/);
+  assert.match(result.stderr, /unknown agent 'windsurf'/);
 });
 
 test('e2e: forge upgrade --add-agent supports --flag=value form', async () => {

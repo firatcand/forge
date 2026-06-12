@@ -98,12 +98,17 @@ const AgentsSchema = z
     on_persistent_failure: z
       .enum(['notify', 'block_task', 'move_to_next'])
       .default('notify'),
-    // FORGE-88: primary harnesses are claude / codex / gemini. `cursor` was
-    // never wired up to a runtime adapter and is dropped without a back-compat
-    // shim (CLAUDE.md "no backwards-compat shims" convention).
+    // FORGE-88 / FORGE-160: primary harnesses are claude / codex / gemini, plus
+    // `cursor` as a BETA primary — gated behind `cursor_host_beta_opt_in: true`
+    // via the refine below (the Cursor CLI is officially beta; the flag is the
+    // honesty mechanism). cursor may appear in `enabled_root_files` WITHOUT the
+    // opt-in (passive breadcrumb + farms); only primary dispatch is gated.
     primary_host_cli: z
-      .enum(['claude', 'codex', 'gemini'])
+      .enum(['claude', 'codex', 'gemini', 'cursor'])
       .default('claude'),
+    // FORGE-160: opt-in for the beta Cursor CLI as the primary dispatch host.
+    // Required to set primary_host_cli: cursor (see refine below).
+    cursor_host_beta_opt_in: z.boolean().default(false),
     // FORGE-88: review hosts are codex / gemini. Claude is excluded as a
     // reviewer — second-opinion review requires a different model lineage
     // than the primary worker. `null` disables second-opinion review entirely.
@@ -145,7 +150,7 @@ const AgentsSchema = z
     // [primary_host_cli] by the .transform() below — see
     // test/unit/settings.schema.test.ts for the contract.
     enabled_root_files: z
-      .array(z.enum(['claude', 'codex', 'gemini']))
+      .array(z.enum(['claude', 'codex', 'gemini', 'cursor']))
       .default([]),
     // FORGE-65: per-task ceiling on the TOTAL number of architectural questions
     // a single task may write across all its attempts (spec/ORCHESTRATOR.md:936).
@@ -204,6 +209,18 @@ const AgentsSchema = z
       ],
     }),
   )
+  // FORGE-160: cursor as the PRIMARY dispatch host is beta-gated. The Cursor CLI
+  // is officially beta ("security safeguards still evolving"); selecting it
+  // without the opt-in flag is a parse error naming the flag + the caveat.
+  // cursor in enabled_root_files (passive breadcrumb) is NOT gated.
+  .refine(
+    (d) => d.primary_host_cli !== 'cursor' || d.cursor_host_beta_opt_in === true,
+    {
+      message:
+        'primary_host_cli: cursor requires agents.cursor_host_beta_opt_in: true — the Cursor CLI is beta (security safeguards still evolving). Set the flag to opt in.',
+      path: ['primary_host_cli'],
+    },
+  )
   .default({});
 
 const DesignSchema = z
@@ -256,6 +273,11 @@ const DecisionsSchema = z
 const DoctorSchema = z
   .object({
     spec_code_check_enabled: z.boolean().default(true),
+    // FORGE-131: adopter-declared symbols treated as legitimate SPEC prose by
+    // the doctor symbol-mention check (merged with the built-in
+    // BASE_SYMBOL_ALLOWLIST). Use this for project-specific external library /
+    // product names that look code-shaped but are not source symbols.
+    symbol_allowlist: z.array(z.string().min(1)).default([]),
   })
   .default({});
 

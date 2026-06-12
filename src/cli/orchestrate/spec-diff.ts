@@ -8,10 +8,15 @@
 // directly — they go through CLI verbs. This verb is purely read-side.
 
 import { dirname } from 'node:path';
-import { readFileSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { isNodeFsError } from '../../orchestrator/questions/errors.ts';
-import { leaseFilePath } from '../../orchestrator/questions/paths.ts';
+import {
+  leaseFilePath,
+  stateFilePath,
+  tasksRootDir,
+} from '../../orchestrator/questions/paths.ts';
 import { LeaseSchema } from '../../schemas/lease.ts';
+import { TaskStateSchema } from '../../schemas/task-state.ts';
 import {
   computeSpecDiffSinceClaim,
   type SpecDiffNotification,
@@ -19,9 +24,30 @@ import {
 
 const LEASE_FILE_MAX_BYTES = 64 * 1024; // 64 KiB — leases are small
 
+// FORGE-164: states that count as ACTIVE for --all-active enumeration. A claim
+// in any of these predates a spec/ change that could affect in-flight work — the
+// signal we surface. blocked_on_question is INCLUDED (the worker is paused but
+// still owns the task). Terminal/respawn-pending states are excluded.
+const ACTIVE_STATES = new Set(['dispatched', 'running', 'blocked_on_question']);
+
+// FORGE-164: one entry per active task whose claim predates a spec/ change.
+export interface AllActiveSpecDiffEntry {
+  readonly task_id: string;
+  readonly commit_count: number;
+  readonly files_affected: readonly string[];
+  /** True when the active task's lease has expired (claim still predates the change). */
+  readonly lease_expired: boolean;
+}
+
 export interface OrchestrateSpecDiffOptions {
   readonly taskId: string;
   readonly forgeDir: string;
+  /**
+   * FORGE-164: enumerate ALL active tasks (dispatched|running|blocked_on_question)
+   * whose claim predates a spec/ change, instead of inspecting a single task.
+   * When set, taskId is ignored.
+   */
+  readonly allActive?: boolean;
   /**
    * Working directory for git invocations and digest fallback walks. Defaults to
    * dirname(forgeDir). Trust boundary: this value is forwarded directly to
@@ -59,6 +85,11 @@ export async function runOrchestrateSpecDiff(
   const err = opts.stderr ?? process.stderr;
   const json = opts.json ?? false;
   const repoRoot = opts.repoRoot ?? dirname(opts.forgeDir);
+
+  // FORGE-164: --all-active enumeration. Always exits 0 (strictly informational).
+  if (opts.allActive) {
+    return runAllActive({ ...opts, out, err, json, repoRoot });
+  }
 
   if (!opts.taskId) {
     const msg = 'task_id is required (positional argument)';
@@ -148,4 +179,136 @@ export async function runOrchestrateSpecDiff(
 
   out.write(result.rendered + '\n');
   return { exitCode: 0 };
+}
+
+// FORGE-164: enumerate every active task whose claim predates a spec/ change.
+//
+// Walk .forge/orchestrator/tasks/<id>/, reading state.json + lease.json:
+//   - state ∉ ACTIVE_STATES                 → skip (not in flight)
+//   - state.json / lease.json missing       → skip (no active claim to inspect)
+//   - corrupt lease/state (parse/schema)    → SKIP + one stderr note (never fail)
+//   - EXPIRED lease                         → still inspected; lease_expired:true
+//   - no spec diff since the claim          → omitted from the list
+//   - spec diff present                     → { task_id, commit_count, files_affected, lease_expired }
+//
+// Always exits 0 (strictly informational — the push-time half of the FORGE-114
+// SPEC-change mitigation). JSON: { ok:true, data: AllActiveSpecDiffEntry[] }.
+async function runAllActive(args: {
+  forgeDir: string;
+  repoRoot: string;
+  json: boolean;
+  out: NodeJS.WritableStream;
+  err: NodeJS.WritableStream;
+}): Promise<OrchestrateSpecDiffResult> {
+  const { forgeDir, repoRoot, json, out, err } = args;
+  const entries: AllActiveSpecDiffEntry[] = [];
+
+  let taskIds: string[];
+  try {
+    taskIds = readdirSync(tasksRootDir(forgeDir), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .sort();
+  } catch {
+    // No tasks dir → empty list, exit 0.
+    taskIds = [];
+  }
+
+  const now = Date.now();
+
+  for (const taskId of taskIds) {
+    // ── state.json: gate on ACTIVE state ──
+    let statePath: string;
+    let leasePath: string;
+    try {
+      statePath = stateFilePath(forgeDir, taskId);
+      leasePath = leaseFilePath(forgeDir, taskId);
+    } catch {
+      // Invalid id segment (shouldn't happen for a real task dir) — skip quietly.
+      continue;
+    }
+
+    const stateRaw = tryReadSmall(statePath);
+    if (stateRaw === null) continue; // no state.json → not an active claim
+    let stateParsed: unknown;
+    try {
+      stateParsed = JSON.parse(stateRaw);
+    } catch {
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (state.json is not valid JSON)\n`);
+      continue;
+    }
+    const stateValidation = TaskStateSchema.safeParse(stateParsed);
+    if (!stateValidation.success) {
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (state.json failed schema validation)\n`);
+      continue;
+    }
+    if (!ACTIVE_STATES.has(stateValidation.data.state)) continue;
+
+    // ── lease.json: must exist + validate ──
+    const leaseRaw = tryReadSmall(leasePath);
+    if (leaseRaw === null) {
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (active state but no lease.json)\n`);
+      continue;
+    }
+    let leaseParsed: unknown;
+    try {
+      leaseParsed = JSON.parse(leaseRaw);
+    } catch {
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (lease.json is not valid JSON)\n`);
+      continue;
+    }
+    const leaseValidation = LeaseSchema.safeParse(leaseParsed);
+    if (!leaseValidation.success) {
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (lease.json failed schema validation)\n`);
+      continue;
+    }
+    const lease = leaseValidation.data;
+    const leaseExpired = Date.parse(lease.expires_at) < now;
+
+    // ── compute the diff since the stamped claim revision ──
+    const diff = await computeSpecDiffSinceClaim(repoRoot, lease.spec_revision);
+    if (diff === null) continue; // no-diff tasks omitted
+
+    entries.push({
+      task_id: taskId,
+      commit_count: diff.commitCount,
+      files_affected: diff.filesAffected,
+      lease_expired: leaseExpired,
+    });
+  }
+
+  if (json) {
+    writeJsonAllActive(out, entries);
+    return { exitCode: 0 };
+  }
+
+  if (entries.length === 0) {
+    out.write('No active tasks have spec/ changes since they were claimed.\n');
+    return { exitCode: 0 };
+  }
+
+  for (const e of entries) {
+    const files = e.files_affected.length > 0 ? e.files_affected.join(', ') : 'spec/';
+    const expired = e.lease_expired ? ' [lease expired]' : '';
+    out.write(`${e.task_id}: ${e.commit_count} spec commit(s) affecting ${files}${expired}\n`);
+  }
+  return { exitCode: 0 };
+}
+
+/** Read a small file (lease/state-sized), returning null on absence/oversize/IO error. */
+function tryReadSmall(p: string): string | null {
+  try {
+    const s = statSync(p);
+    if (s.isDirectory() || s.size > LEASE_FILE_MAX_BYTES) return null;
+    return readFileSync(p, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonAllActive(
+  stream: NodeJS.WritableStream,
+  data: readonly AllActiveSpecDiffEntry[],
+): void {
+  stream.write(JSON.stringify({ ok: true, data }) + '\n');
 }

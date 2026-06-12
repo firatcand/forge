@@ -387,3 +387,125 @@ test('eject: forge-created ignore file replaced by a symlink is NOT deleted (FOR
     `expected a symlink-skip warning, got: ${JSON.stringify(res.warnings)}`,
   );
 });
+
+// ============================================================================
+// FORGE-160 (round 2) — nested manifest rootFile under a symlinked PARENT dir.
+// cursor's `.cursor/rules/forge-context.mdc` has a leaf that resolves to the
+// symlink TARGET's regular file, so the leaf check passes and unlinkSync /
+// writeAtomic reach THROUGH the symlinked `.cursor` parent into another tree.
+// The parent guard must fire for BOTH forgeCreated kinds: skip + warn, leaving
+// the link AND the target file intact.
+// ============================================================================
+
+test('eject (FORGE-160 parent): forgeCreated:true nested .mdc under symlinked `.cursor` is NOT deleted through the link', async () => {
+  const { lstatSync, readlinkSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  // Out-of-tree target tree holding the real .mdc the link points into.
+  const escape = mkdtempSync(join(tmpdir(), 'forge-eject-escape-'));
+  mkdirSync(join(escape, 'rules'), { recursive: true });
+  const targetMdc = join(escape, 'rules', 'forge-context.mdc');
+  writeFileSync(targetMdc, '---\nforge: owned\n---\n');
+  symlinkSync(escape, join(cwd, '.cursor'));
+  writeManifest(
+    cwd,
+    baseManifest({ rootFiles: [{ path: '.cursor/rules/forge-context.mdc', forgeCreated: true }] }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject completes despite the symlinked parent');
+  assert.equal(lstatSync(join(cwd, '.cursor')).isSymbolicLink(), true, '.cursor link intact');
+  assert.equal(readlinkSync(join(cwd, '.cursor')), escape);
+  assert.equal(existsSync(targetMdc), true, 'target .mdc NOT deleted through the symlinked parent');
+  assert.ok(
+    res.warnings.some(
+      (w) => w.includes('.cursor/rules/forge-context.mdc') && w.includes('parent') && w.includes('symlink'),
+    ),
+    `expected a parent-symlink skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});
+
+test('eject (FORGE-160 parent): forgeCreated:false nested .mdc under symlinked `.cursor` is NOT stripped through the link', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  const escape = mkdtempSync(join(tmpdir(), 'forge-eject-escape-'));
+  mkdirSync(join(escape, 'rules'), { recursive: true });
+  const targetMdc = join(escape, 'rules', 'forge-context.mdc');
+  const targetBody = `${MARKER}\n# user content in the target\n`;
+  writeFileSync(targetMdc, targetBody);
+  symlinkSync(escape, join(cwd, '.cursor'));
+  writeManifest(
+    cwd,
+    baseManifest({ rootFiles: [{ path: '.cursor/rules/forge-context.mdc', forgeCreated: false }] }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject completes despite the symlinked parent');
+  assert.equal(lstatSync(join(cwd, '.cursor')).isSymbolicLink(), true, '.cursor link intact');
+  assert.equal(
+    readFileSync(targetMdc, 'utf8'),
+    targetBody,
+    'target .mdc untouched (marker NOT stripped through the link)',
+  );
+  assert.ok(
+    res.warnings.some(
+      (w) => w.includes('.cursor/rules/forge-context.mdc') && w.includes('parent') && w.includes('symlink'),
+    ),
+    `expected a parent-symlink skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});
+
+// ============================================================================
+// FORGE-160 (farm cleanup) — manifest-recorded farm entries under a symlinked
+// PARENT dir. A recorded entry like `.agents/skills/forge` (cursor) or
+// `.claude/skills/forge` (claude) whose PARENT `.agents` / `.claude` is a
+// symlink would let rmSync delete OUTSIDE the working tree. The parent guard
+// must fire per recorded entry: skip + warn, leaving the link AND the target
+// intact. Proven for cursor AND claude so the guard is uniform.
+// ============================================================================
+
+test('eject (FORGE-160 farm): recorded entry under symlinked `.agents` (cursor) is NOT deleted through the link', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  // Out-of-tree dir `.agents` points into, holding the real farm entry.
+  const escape = mkdtempSync(join(tmpdir(), 'forge-eject-escape-agents-'));
+  mkdirSync(join(escape, 'skills', 'forge'), { recursive: true });
+  const targetSkill = join(escape, 'skills', 'forge', 'SKILL.md');
+  writeFileSync(targetSkill, '# forge skill in the link target — must survive\n');
+  symlinkSync(escape, join(cwd, '.agents'));
+  writeManifest(
+    cwd,
+    baseManifest({ farmEntries: [{ path: '.agents/skills/forge', mode: 'symlink' }] }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject completes despite the symlinked farm parent');
+  assert.equal(lstatSync(join(cwd, '.agents')).isSymbolicLink(), true, '.agents link intact');
+  assert.equal(existsSync(targetSkill), true, 'target farm entry NOT deleted through the link');
+  assert.ok(
+    res.warnings.some((w) => w.includes('.agents/skills/forge') && w.includes('symlink')),
+    `expected a farm parent-symlink skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});
+
+test('eject (FORGE-160 farm): recorded entry under symlinked `.claude` proves the farm guard is uniform', async () => {
+  const { lstatSync, symlinkSync } = await import('node:fs');
+  const cwd = project();
+  const escape = mkdtempSync(join(tmpdir(), 'forge-eject-escape-claude-'));
+  mkdirSync(join(escape, 'skills', 'forge'), { recursive: true });
+  const targetSkill = join(escape, 'skills', 'forge', 'SKILL.md');
+  writeFileSync(targetSkill, '# forge skill in the link target — must survive\n');
+  symlinkSync(escape, join(cwd, '.claude'));
+  writeManifest(
+    cwd,
+    baseManifest({ farmEntries: [{ path: '.claude/skills/forge', mode: 'symlink' }] }),
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true });
+  assert.equal(res.exitCode, 0, 'eject completes despite the symlinked farm parent');
+  assert.equal(lstatSync(join(cwd, '.claude')).isSymbolicLink(), true, '.claude link intact');
+  assert.equal(existsSync(targetSkill), true, 'target farm entry NOT deleted through the link');
+  assert.ok(
+    res.warnings.some((w) => w.includes('.claude/skills/forge') && w.includes('symlink')),
+    `expected a farm parent-symlink skip warning, got: ${JSON.stringify(res.warnings)}`,
+  );
+});

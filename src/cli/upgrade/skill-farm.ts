@@ -39,6 +39,7 @@ import {
 } from 'node:fs';
 import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { firstSymlinkedComponent } from '../../core/symlink-guard.ts';
 import type { AgentKind } from './agent-root-files.ts';
 
 // `symlink` is the happy path; `copy` is the Windows fallback because
@@ -52,6 +53,12 @@ const HOST_DIRS: Readonly<Record<AgentKind, { readonly skills: string; readonly 
   claude: { skills: '.claude/skills', agents: '.claude/agents' },
   codex: { skills: '.codex/skills', agents: '.codex/agents' },
   gemini: { skills: '.gemini/skills', agents: '.gemini/agents' },
+  // FORGE-160 (USER CHOICE B): `.agents/skills` is Cursor's NATIVE cross-tool
+  // skill root (one root all tools can read); subagent definitions farm into
+  // `.cursor/agents/`. Note `.agents/skills` is a SHARED root — pruneHostFarm
+  // must not remove it while another enabled host still maps to it (none do
+  // today, but the enabled-host guard makes that future-proof).
+  cursor: { skills: '.agents/skills', agents: '.cursor/agents' },
 } as const;
 
 export interface SkillFarmOptions {
@@ -76,6 +83,13 @@ export interface SkillFarmResult {
   readonly skipped: readonly string[];
   /** Effective mode (after platform detection if not overridden). */
   readonly mode: FarmMode;
+  /**
+   * FORGE-160 symlink guard: human-readable notices for hosts whose farm was
+   * SKIPPED because a component of the host's skills/agents dir is a symlink
+   * (writing/renaming through it would escape the working tree). One entry per
+   * skipped (host, kind) pair. Empty in the common case.
+   */
+  readonly notices: readonly string[];
 }
 
 /** POSIX → symlink, Windows → copy. Override via opts.mode for tests. */
@@ -268,6 +282,7 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
   const created: string[] = [];
   const refreshed: string[] = [];
   const skipped: string[] = [];
+  const notices: string[] = [];
 
   // Canonicalize cwd and packageRoot — on macOS, /tmp is a symlink to
   // /private/tmp, so `mkdtemp` returns one form but a child process
@@ -288,28 +303,51 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
   for (const agent of opts.enabledAgents) {
     const hostDirs = HOST_DIRS[agent];
 
-    for (const name of skillNames) {
-      const outcome = applyOne({
-        src: resolve(skillsRoot, name),
-        dest: resolve(cwd, hostDirs.skills, name),
-        mode,
-        dryRun,
-      });
-      pushOutcome(outcome, resolve(cwd, hostDirs.skills, name), created, refreshed, skipped);
+    // FORGE-160 symlink guard. The farm dir (e.g. cursor's `.agents/skills` or
+    // `.cursor/agents`, claude's `.claude/skills`/`.claude/agents`) is a
+    // directory forge mkdir/symlinks/renames INTO. If ANY component of that dir
+    // path is a symlink — `.agents` (dotfiles repo) OR `.agents/skills`, and
+    // equally `.claude` for the claude host — mkdirSync/symlinkSync/renameSync
+    // would follow the link and create/rename forge entries OUTSIDE the working
+    // tree. Skip THIS host's skills/agents farm with a surfaced notice; other
+    // enabled hosts are unaffected. dryRun behaves identically (we check the
+    // real filesystem either way, and never write).
+    const skillsLink = firstSymlinkedComponent(cwd, hostDirs.skills);
+    if (skillsLink) {
+      notices.push(
+        `skipped ${agent} skill farm: '${skillsLink}' is a symlink — materializing '${hostDirs.skills}' through it would escape the working tree`,
+      );
+    } else {
+      for (const name of skillNames) {
+        const outcome = applyOne({
+          src: resolve(skillsRoot, name),
+          dest: resolve(cwd, hostDirs.skills, name),
+          mode,
+          dryRun,
+        });
+        pushOutcome(outcome, resolve(cwd, hostDirs.skills, name), created, refreshed, skipped);
+      }
     }
 
-    for (const fileName of agentFiles) {
-      const outcome = applyOne({
-        src: resolve(agentsRoot, fileName),
-        dest: resolve(cwd, hostDirs.agents, fileName),
-        mode,
-        dryRun,
-      });
-      pushOutcome(outcome, resolve(cwd, hostDirs.agents, fileName), created, refreshed, skipped);
+    const agentsLink = firstSymlinkedComponent(cwd, hostDirs.agents);
+    if (agentsLink) {
+      notices.push(
+        `skipped ${agent} agent farm: '${agentsLink}' is a symlink — materializing '${hostDirs.agents}' through it would escape the working tree`,
+      );
+    } else {
+      for (const fileName of agentFiles) {
+        const outcome = applyOne({
+          src: resolve(agentsRoot, fileName),
+          dest: resolve(cwd, hostDirs.agents, fileName),
+          mode,
+          dryRun,
+        });
+        pushOutcome(outcome, resolve(cwd, hostDirs.agents, fileName), created, refreshed, skipped);
+      }
     }
   }
 
-  return { created, refreshed, skipped, mode };
+  return { created, refreshed, skipped, mode, notices };
 }
 
 function pushOutcome(
@@ -346,20 +384,77 @@ function pushOutcome(
  * `--remove-agent` need to manually `rm .X/skills/` if they want the
  * stale forge copies gone. Tracked as a v0.3.1+ improvement.
  *
- * Returns the relative paths it removed (or would remove under dryRun)
- * so the caller can report them in `filesChanged`.
+ * Returns the relative paths it removed (or would remove under dryRun) plus any
+ * symlink-guard notices, so the caller can report them in `filesChanged`.
  */
+export interface PruneHostFarmResult {
+  /** Relative paths removed (or, under dryRun, that would be removed). */
+  readonly removed: readonly string[];
+  /**
+   * FORGE-160 symlink guard: notices for roots SKIPPED because a component of
+   * the host's skills/agents dir is a symlink — rmSync through it would delete
+   * OUTSIDE the working tree. Empty in the common case.
+   */
+  readonly notices: readonly string[];
+}
+
 export function pruneHostFarm(
-  opts: { cwd: string; host: AgentKind; packageRoot: string; dryRun?: boolean },
-): readonly string[] {
+  opts: {
+    cwd: string;
+    host: AgentKind;
+    packageRoot: string;
+    dryRun?: boolean;
+    /**
+     * FORGE-160 shared-root prune safety: hosts that REMAIN enabled after this
+     * removal. If one of them maps to the same `skills`/`agents` root as the
+     * host being pruned (e.g. cursor + a future host both using `.agents/skills`),
+     * that shared root is LEFT IN PLACE — pruning it would orphan the still-
+     * enabled host's discovery. Omitted/empty ⇒ no host shares the root (legacy
+     * behavior: prune everything forge-owned).
+     */
+    enabledHosts?: readonly AgentKind[];
+  },
+): PruneHostFarmResult {
   const cwd = canonicalizeIfExists(opts.cwd);
   const packageRoot = canonicalizeIfExists(opts.packageRoot);
   const hostDirs = HOST_DIRS[opts.host];
   const skillNames = listBundledSkills(resolve(packageRoot, 'skills'));
   const agentFiles = listBundledAgents(resolve(packageRoot, 'agents'));
   const removed: string[] = [];
+  const notices: string[] = [];
+
+  // Roots still claimed by another enabled host — never prune these.
+  const stillEnabled = (opts.enabledHosts ?? []).filter((h) => h !== opts.host);
+  const sharedSkillsRoots = new Set(stillEnabled.map((h) => HOST_DIRS[h].skills));
+  const sharedAgentsRoots = new Set(stillEnabled.map((h) => HOST_DIRS[h].agents));
+  const skillsRootShared = sharedSkillsRoots.has(hostDirs.skills);
+  const agentsRootShared = sharedAgentsRoots.has(hostDirs.agents);
+
+  if (skillsRootShared && agentsRootShared) {
+    // Both roots are still in use by another enabled host — nothing to prune.
+    return { removed, notices };
+  }
+
+  // FORGE-160 symlink guard. Before ANY rmSync, verify no component of the
+  // host's farm dir path is a symlink — `.agents` / `.agents/skills` (cursor)
+  // or `.claude` / `.claude/skills` (claude). rmSync through a symlinked
+  // component would delete the link's TARGET, outside the working tree. Skip
+  // that root entirely with a notice; never delete through the link.
+  const skillsLink = firstSymlinkedComponent(cwd, hostDirs.skills);
+  if (skillsLink) {
+    notices.push(
+      `skipped pruning ${opts.host} skill farm: '${skillsLink}' is a symlink — removing under '${hostDirs.skills}' would delete through the link`,
+    );
+  }
+  const agentsLink = firstSymlinkedComponent(cwd, hostDirs.agents);
+  if (agentsLink) {
+    notices.push(
+      `skipped pruning ${opts.host} agent farm: '${agentsLink}' is a symlink — removing under '${hostDirs.agents}' would delete through the link`,
+    );
+  }
 
   for (const name of skillNames) {
+    if (skillsRootShared || skillsLink) break;
     const dest = resolve(cwd, hostDirs.skills, name);
     const src = resolve(packageRoot, 'skills', name);
     if (!isForgeOwnedSymlink(dest, src)) continue;
@@ -367,6 +462,7 @@ export function pruneHostFarm(
     removed.push(`${hostDirs.skills}/${name}`);
   }
   for (const name of agentFiles) {
+    if (agentsRootShared || agentsLink) break;
     const dest = resolve(cwd, hostDirs.agents, name);
     const src = resolve(packageRoot, 'agents', name);
     if (!isForgeOwnedSymlink(dest, src)) continue;
@@ -374,7 +470,7 @@ export function pruneHostFarm(
     removed.push(`${hostDirs.agents}/${name}`);
   }
 
-  return removed;
+  return { removed, notices };
 }
 
 /**

@@ -1,6 +1,5 @@
 import {
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -15,6 +14,7 @@ import { SettingsSchema } from '../../schemas/index.ts';
 import type { ForgeManifest, ManifestFarmEntry } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { FsWriteError } from '../../core/errors.ts';
+import { firstSymlinkedComponent, firstSymlinkedParent, isSymlinkAt } from '../../core/symlink-guard.ts';
 import {
   buildManifest,
   farmEntriesFromResult,
@@ -30,6 +30,7 @@ import {
   ROOT_FILE_BY_AGENT,
   applyGitignoreBlock,
   applySkillFarm,
+  buildCursorRuleFile,
   locatePackageRoot,
   type AgentKind,
 } from '../upgrade/index.ts';
@@ -152,15 +153,6 @@ function safeReadConfig(filePath: string): string | null {
   }
 }
 
-/** FORGE-208: true when the path itself is a symbolic link (lstat — the
- * link's own type). False when absent or a regular file/dir. */
-function isSymlinkAt(absPath: string): boolean {
-  try {
-    return lstatSync(absPath).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
 
 interface Artifact {
   // Path relative to cwd.
@@ -333,7 +325,14 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
   return result;
 }
 
-const TEMPLATE_BY_AGENT: Readonly<Record<AgentKind, string>> = {
+// FORGE-160: forge's canonical repo URL, inlined into the cursor rule breadcrumb
+// (mirrors the FORGE_REPO_URL the upgrade verb passes to buildPrefixBlock).
+const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
+
+// Static project templates for the marker-block hosts. cursor is EXCLUDED — its
+// `.mdc` artifact is assembled by buildCursorRuleFile (frontmatter + inlined
+// context), so it is never looked up here.
+const TEMPLATE_BY_AGENT: Readonly<Record<Exclude<AgentKind, 'cursor'>, string>> = {
   claude: 'CLAUDE.project.template.md',
   codex: 'AGENTS.project.template.md',
   gemini: 'GEMINI.project.template.md',
@@ -357,22 +356,13 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
   const briefRaw = renderTemplate(templatesDir, 'BRIEF.template.md', vars);
   const brief = injectBriefGoal(briefRaw, opts.answers.goal);
 
-  // FORGE-152: one root file per enabled agent. CLAUDE.md only when 'claude'
-  // is enabled, AGENTS.md only when 'codex', etc. Per-agent prefix marker
-  // block comes from each template (which matches buildPrefixBlock byte-for-
-  // byte — enforced by drift-gate tests in agent-root-files.test.ts).
-  const rootFileArtifacts: Artifact[] = opts.answers.agents.enabled_root_files.map(
-    (agent) => ({
-      relPath: ROOT_FILE_BY_AGENT[agent],
-      contents: renderTemplate(templatesDir, TEMPLATE_BY_AGENT[agent], vars),
-    }),
-  );
-
   // FORGE-152: render .forge/CONTEXT.md from the methodology template +
   // CLI registry. Gitignored after this commit (the marker block in
   // .gitignore added below covers it), but materializes at init so the
   // first session has the methodology immediately. Phase B's forge upgrade
   // will use the same renderContext to refresh it.
+  // (Computed BEFORE the root files because FORGE-160's cursor artifact inlines
+  // this rendered context.)
   const contextTemplate = readFileSync(
     resolve(templatesDir, 'CONTEXT.template.md'),
     'utf8',
@@ -383,6 +373,27 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
     verbs: CLI_VERBS,
     slashCommands: SLASH_COMMANDS,
   });
+
+  // FORGE-152: one root file per enabled agent. CLAUDE.md only when 'claude'
+  // is enabled, AGENTS.md only when 'codex', etc. Per-agent prefix marker
+  // block comes from each template (which matches buildPrefixBlock byte-for-
+  // byte — enforced by drift-gate tests in agent-root-files.test.ts).
+  // FORGE-160: cursor is the exception — its `.cursor/rules/forge-context.mdc`
+  // is assembled by buildCursorRuleFile (frontmatter-first + inlined context),
+  // NOT a static template, so it stays byte-identical to what `forge upgrade`
+  // would regenerate.
+  const rootFileArtifacts: Artifact[] = opts.answers.agents.enabled_root_files.map(
+    (agent) =>
+      agent === 'cursor'
+        ? {
+            relPath: ROOT_FILE_BY_AGENT.cursor,
+            contents: buildCursorRuleFile({ repoUrl: FORGE_REPO_URL }, renderedContext),
+          }
+        : {
+            relPath: ROOT_FILE_BY_AGENT[agent],
+            contents: renderTemplate(templatesDir, TEMPLATE_BY_AGENT[agent], vars),
+          },
+  );
 
   const artefacts: Artifact[] = [
     { relPath: 'spec/BRIEF.md', contents: brief },
@@ -444,6 +455,23 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     DESIGN_MODE: opts.answers.design.mode,
     DESIGN_REFERENCE: opts.answers.design.reference ?? '',
   };
+  // FORGE-160: refuse init BEFORE any `.forge`-touching operation when `.forge`
+  // itself (or any parent component of it) is a symbolic link. The staging-dir
+  // rmSync/mkdirSync/writeFileSync below and the later init-warnings/manifest
+  // writes all rely on leaf-only symlink checks, so a symlinked `.forge`
+  // directory would be silently FOLLOWED — every forge-managed write would
+  // escape the working tree. lstat semantics: a dangling symlinked `.forge` is
+  // caught too. ZERO writes happen before this guard, so refusing here leaves
+  // the link + its target fully intact.
+  const forgeLink = firstSymlinkedComponent(opts.cwd, '.forge');
+  if (forgeLink !== null) {
+    throw new FsWriteError(
+      'SYMLINK_TARGET_REFUSED',
+      '.forge is a symbolic link — forge will not write through it; replace with a real directory',
+      { path: forgeLink },
+    );
+  }
+
   const artefacts = buildArtifacts(opts, vars);
   const overwrite = opts.overwrite ?? {};
   const stagingRoot = resolve(opts.cwd, STAGING_DIR);
@@ -485,6 +513,20 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
       symlinkWarnings.push({
         target: a.relPath,
         snippet: `${a.relPath} is a symbolic link, so forge left it untouched (replacing it would destroy the link). Resolve the symlink or replace it with a regular file, then re-run \`forge init\` / \`forge upgrade\` if you want forge to manage it.`,
+      });
+      continue;
+    }
+    // FORGE-208 (one level up): a NESTED artifact (cursor's .mdc) whose PARENT
+    // directory (.cursor or .cursor/rules) is a symlink would be promoted
+    // THROUGH the link by the mkdirSync + renameSync below, escaping the working
+    // tree. Skip with a warning into the init-warnings surface — consistent with
+    // the leaf-symlink skip above.
+    const symlinkedParent = firstSymlinkedParent(opts.cwd, a.relPath);
+    if (symlinkedParent !== null) {
+      skipped.push(a.relPath);
+      symlinkWarnings.push({
+        target: a.relPath,
+        snippet: `${a.relPath} was not written because its parent directory \`${symlinkedParent}\` is a symbolic link (writing through it would escape the working tree). Resolve the symlinked parent or replace it with a regular directory, then re-run \`forge init\` / \`forge upgrade\`.`,
       });
       continue;
     }
@@ -583,6 +625,12 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
     for (const p of farm.refreshed) {
       const rel = p.startsWith(`${opts.cwd}/`) ? p.slice(opts.cwd.length + 1) : p;
       written.push(rel);
+    }
+    // FORGE-160: surface symlink-guard skips (a host's farm dir was a symlink
+    // — materializing through it would escape the working tree) via the same
+    // init-warnings sidecar used for other non-fatal farm issues.
+    for (const n of farm.notices) {
+      tooling.warned.push({ target: 'skill-farm', snippet: n });
     }
     // FORGE-158: record exact farm entries (path + mode) for eject.
     farmEntries = farmEntriesFromResult(opts.cwd, farm);

@@ -247,16 +247,18 @@ const gcHandler: VerbHandler = {
 
 const specDiffHandler: VerbHandler = {
   band: 'read',
-  synopsis: 'Show spec/ commits since claim.spec_revision for a task.',
+  synopsis: 'Show spec/ commits since claim.spec_revision for a task (or --all-active for every active claim).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const taskId = firstPositional(rest) ?? '';
     const json = hasFlag(rest, 'json');
+    const allActive = hasFlag(rest, 'all-active');
     const repoRoot = parseFlag(rest, 'repo-root');
     const result = await runOrchestrateSpecDiff({
       taskId,
       forgeDir,
       json,
+      ...(allActive ? { allActive } : {}),
       ...(repoRoot ? { repoRoot } : {}),
     });
     return { exitCode: result.exitCode };
@@ -321,6 +323,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   'spec-diff': [
+    { flag: 'all-active', takesValue: false, description: 'List every active task (dispatched|running|blocked_on_question) whose claim predates a spec/ change.' },
     { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
     JSON_FLAG,
     FD,

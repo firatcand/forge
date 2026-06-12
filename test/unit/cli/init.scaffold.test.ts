@@ -538,3 +538,64 @@ test('appendToolingExcludes (FORGE-208): symlinked .eslintignore is skipped + wa
     'warned entry present for the symlinked ignore file',
   );
 });
+
+// fixtureAnswers, but with cursor in enabled_root_files (claude stays primary so
+// the answers pass schema; cursor's nested .mdc is the artifact under test).
+function cursorEnabledAnswers(): InitAnswers {
+  const a = fixtureAnswers();
+  return { ...a, agents: { ...a.agents, enabled_root_files: ['claude', 'cursor'] } };
+}
+
+test('scaffold (FORGE-208 parent): symlinked `.cursor` dir → cursor .mdc skipped with warning, no write-through, link intact', async () => {
+  const { lstatSync, readlinkSync, symlinkSync, rmSync } = await import('node:fs');
+  const cwd = tmp();
+  // .cursor is a symlink to an out-of-tree real directory (escape vector).
+  const escapeRoot = mkdtempSync(join(tmpdir(), 'forge-escape-'));
+  symlinkSync(escapeRoot, resolve(cwd, '.cursor'));
+
+  const result = scaffoldProject({
+    cwd,
+    answers: cursorEnabledAnswers(),
+    templatesDir,
+    isoDate: '2026-06-12',
+  });
+
+  // The .mdc was skipped, not promoted, and nothing escaped through the link.
+  assert.ok(result.skipped.includes('.cursor/rules/forge-context.mdc'), 'cursor .mdc reported skipped');
+  assert.equal(result.written.includes('.cursor/rules/forge-context.mdc'), false);
+  assert.equal(lstatSync(resolve(cwd, '.cursor')).isSymbolicLink(), true, '.cursor link intact');
+  assert.equal(readlinkSync(resolve(cwd, '.cursor')), escapeRoot);
+  assert.equal(existsSync(join(escapeRoot, 'rules')), false, 'no write-through to the link target');
+  assert.ok(result.warningsPath, 'init-warnings sidecar written');
+  assert.match(
+    readFileSync(result.warningsPath!, 'utf8'),
+    /parent directory `\.cursor` is a symbolic link/,
+    'warning names the symlinked parent',
+  );
+  rmSync(escapeRoot, { recursive: true, force: true });
+});
+
+test('scaffold (FORGE-160): symlinked `.forge` dir → init refuses, ZERO writes through the link, link + target intact', async () => {
+  const { lstatSync, readlinkSync, symlinkSync, readdirSync, rmSync } = await import('node:fs');
+  const cwd = tmp();
+  // .forge is a symlink to an out-of-tree real directory (escape vector). The
+  // staging dir + every forge-managed write would otherwise land THROUGH it.
+  const escapeRoot = mkdtempSync(join(tmpdir(), 'forge-escape-'));
+  symlinkSync(escapeRoot, resolve(cwd, '.forge'));
+
+  assert.throws(
+    () => scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-06-12' }),
+    /\.forge is a symbolic link/,
+    'init refuses with a clear message',
+  );
+
+  // Link itself is intact and still points at the out-of-tree target.
+  assert.equal(lstatSync(resolve(cwd, '.forge')).isSymbolicLink(), true, '.forge link intact');
+  assert.equal(readlinkSync(resolve(cwd, '.forge')), escapeRoot);
+  // ZERO writes through the link — the staging dir, settings.yaml, CONTEXT.md,
+  // manifest etc. would all have landed in escapeRoot had the guard not fired.
+  assert.deepEqual(readdirSync(escapeRoot), [], 'nothing written through the link');
+  // And nothing leaked into the working tree either (no sibling spec/ etc.).
+  assert.equal(existsSync(resolve(cwd, 'spec')), false, 'no partial scaffold in the working tree');
+  rmSync(escapeRoot, { recursive: true, force: true });
+});

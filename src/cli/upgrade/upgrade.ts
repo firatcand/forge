@@ -16,7 +16,6 @@
 import { createHash } from 'node:crypto';
 import {
   existsSync,
-  lstatSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
@@ -26,6 +25,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { parse as yamlParse, parseDocument, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
+import { firstSymlinkedComponent, firstSymlinkedParent, isSymlinkAt } from '../../core/symlink-guard.ts';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
 import {
   MANIFEST_RELPATH,
@@ -36,10 +36,14 @@ import {
 } from '../manifest.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import {
+  MATERIALIZE_WHEN_ENABLED,
   ROOT_FILE_BY_AGENT,
+  buildCursorBlock,
+  buildCursorRuleFile,
   buildPrefixBlock,
   bodyWithoutPrefixBlock,
   replacePrefixBlock,
+  writeCursorRuleBody,
   type AgentKind,
 } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
@@ -78,22 +82,18 @@ function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
-/** FORGE-208: true when the path itself is a symbolic link (lstat — the
- * link's own type, never the target's). False when absent or a regular
- * file/dir. Catches a dangling symlink too (lstat succeeds on those). */
-function isSymlinkAt(absPath: string): boolean {
-  try {
-    return lstatSync(absPath).isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 /** FORGE-208: skip notice for a symlinked forge-managed file. Printed in BOTH
  * dry-run and real mode (dry-run parity AC) and the path never enters the
  * `changed` array. */
 function symlinkSkipNotice(fileName: string, absPath: string): string {
   return `skipped: ${fileName} (symlink → ${readlinkSync(absPath)}) — forge does not manage symlinked root files; managing the target if enabled`;
+}
+
+/** FORGE-208: skip notice for a forge artifact whose PARENT directory is a
+ * symlink. Mirrors {@link symlinkSkipNotice}'s shape (printed in dry-run + real
+ * mode; path never enters `changed`). */
+function symlinkParentSkipNotice(fileName: string, parentRel: string, cwd: string): string {
+  return `skipped: ${fileName} (parent ${parentRel} is a symlink → ${readlinkSync(resolve(cwd, parentRel))}) — forge does not write through symlinked parent directories`;
 }
 
 /**
@@ -139,6 +139,23 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   // with exit 0 — a symlinked root file is a deliberate adopter topology
   // (e.g. CLAUDE.md → AGENTS.md parity), not an error.
   const notices: string[] = [];
+
+  // FORGE-160: refuse UPFRONT when `.forge` itself (or a parent component of it)
+  // is a symbolic link — BEFORE the existsSync(settingsPath) probe and ANY
+  // read/mutation. A symlinked `.forge` directory passes the leaf settings.yaml
+  // check below (the leaf is a real file under the link), then writeAtomic writes
+  // CONTEXT.md/.version/settings.yaml THROUGH the link, escaping the working
+  // tree. Refusing here keeps the refusal idempotent (exit 1, nothing written,
+  // link intact). Message consistent with the leaf settings.yaml refusal.
+  const forgeLink = firstSymlinkedComponent(cwd, '.forge');
+  if (forgeLink !== null) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr:
+        'forge upgrade: .forge is a symbolic link. Refusing — destructive writes through symlinks could mutate files outside the working tree. Resolve the symlink or replace with a regular directory first.',
+    };
+  }
 
   // 0. Settings must exist (design §9 exit code 3).
   if (!existsSync(settingsPath)) {
@@ -226,7 +243,7 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   }
 
   if (opts.removeAgent) {
-    const result = applyRemoveAgent(opts, settings, cwd, changed);
+    const result = applyRemoveAgent(opts, settings, cwd, changed, notices);
     if (result) return result;
   }
 
@@ -307,6 +324,40 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       notices.push(symlinkSkipNotice(fileName, filePath));
       continue;
     }
+    // FORGE-160: cursor's `.cursor/rules/forge-context.mdc` is forge-owned and
+    // MATERIALIZE_WHEN_ENABLED — created here when absent (other hosts keep
+    // skip-if-missing because their root file is product-owned). The cursor
+    // write path ALWAYS routes through the frontmatter-first wrapper; the
+    // generic replacePrefixBlock is never invoked for cursor (it would put the
+    // marker block above the required .mdc frontmatter).
+    if (agent === 'cursor') {
+      // FORGE-208 (one level up): a symlinked PARENT (.cursor or .cursor/rules)
+      // would be followed by the mkdirSync/writeAtomic below, escaping the
+      // working tree. Skip with a notice — consistent with the leaf-symlink
+      // skip policy above. Checked before existsSync so a write through the link
+      // is never even contemplated. The leaf itself is still guarded by the
+      // isSymlinkAt(filePath) check earlier in this loop body.
+      const symlinkedParent = firstSymlinkedParent(cwd, fileName);
+      if (symlinkedParent !== null) {
+        notices.push(symlinkParentSkipNotice(fileName, symlinkedParent, cwd));
+        continue;
+      }
+      const exists = existsSync(filePath);
+      if (!exists && !MATERIALIZE_WHEN_ENABLED.cursor) continue;
+      const desiredBlock = buildCursorBlock({ repoUrl: FORGE_REPO_URL }, desiredContext);
+      const updated = exists
+        ? writeCursorRuleBody(readFileSync(filePath, 'utf8'), desiredBlock)
+        : buildCursorRuleFile({ repoUrl: FORGE_REPO_URL }, desiredContext);
+      const prior = exists ? readFileSync(filePath, 'utf8') : '';
+      if (updated !== prior) {
+        if (!opts.dryRun) {
+          mkdirSync(dirname(filePath), { recursive: true });
+          writeAtomic(filePath, updated);
+        }
+        changed.push(fileName);
+      }
+      continue;
+    }
     if (!existsSync(filePath)) continue;
     const fileContents = readFileSync(filePath, 'utf8');
     const desiredPrefix = buildPrefixBlock(agent, { repoUrl: FORGE_REPO_URL });
@@ -345,6 +396,8 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   });
   for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
   for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
+  // FORGE-160: surface symlink-guard skips (a host's farm dir was a symlink).
+  for (const n of farm.notices) notices.push(n);
 
   // 10. FORGE-158: refresh .forge/manifest.json so `forge eject` has an
   //     up-to-date record. Preserves install-time truth (ignoreFiles + each
@@ -443,7 +496,13 @@ function applyAddAgent(
   const fileName = ROOT_FILE_BY_AGENT[agent];
   const filePath = resolve(cwd, fileName);
 
-  if (!existsSync(filePath)) {
+  // FORGE-160: cursor's artifact inlines the rendered methodology context, which
+  // is not yet computed at this point in upgrade() (step 3 vs step 4). Rather
+  // than recompute it here, DON'T write the cursor file in add-agent and DON'T
+  // mark it recentlyWritten — the refresh loop (step 7) materializes it with the
+  // inlined context because cursor is MATERIALIZE_WHEN_ENABLED. The settings
+  // mutation below still records cursor in enabled_root_files.
+  if (agent !== 'cursor' && !existsSync(filePath)) {
     // Write a fresh root file with ONLY the marker prefix block. User adds
     // product content below as needed. Keeping the body empty means a future
     // --remove-agent can run without requiring --confirm (per plan §4b
@@ -477,6 +536,7 @@ function applyRemoveAgent(
   settings: SettingsYaml,
   cwd: string,
   changed: string[],
+  notices: string[],
 ): UpgradeResult | null {
   const agent = opts.removeAgent!;
 
@@ -505,21 +565,34 @@ function applyRemoveAgent(
   const fileName = ROOT_FILE_BY_AGENT[agent];
   const filePath = resolve(cwd, fileName);
 
-  // FORGE-208: hard refusal (exit 1) when the root file is a symlink — the
-  // unlinkSync below would destroy the parity link (and a .pre-removal.bak
-  // would snapshot the TARGET's content, not the link). Same message style
-  // as --add-agent. Checked before any settings/file mutation.
-  if (isSymlinkAt(filePath)) {
+  // FORGE-160 (round 2): a NESTED forge artifact (cursor's
+  // `.cursor/rules/forge-context.mdc`) can have a symlinked PARENT directory
+  // (`.cursor` or `.cursor/rules`). The leaf check below sees a regular file
+  // (the symlink TARGET's file), so unlinkSync would reach THROUGH the link and
+  // delete a file outside the working tree. Guard the parent BEFORE the leaf
+  // check and before any file mutation: skip the deletion with a notice (the
+  // .pre-removal.bak would also snapshot through the link), then fall through so
+  // the agent is still removed from enabled_root_files + its farm pruned. Same
+  // skip-don't-refuse policy and dry-run parity as the refresh write path.
+  const symlinkedParent = firstSymlinkedParent(cwd, fileName);
+  if (symlinkedParent !== null) {
+    notices.push(symlinkParentSkipNotice(fileName, symlinkedParent, cwd));
+  } else if (isSymlinkAt(filePath)) {
+    // FORGE-208: hard refusal (exit 1) when the root file itself is a symlink —
+    // the unlinkSync below would destroy the parity link (and a .pre-removal.bak
+    // would snapshot the TARGET's content, not the link). Same message style
+    // as --add-agent. Checked before any settings/file mutation.
     return {
       exitCode: 1,
       filesChanged: changed,
       stderr: `forge upgrade --remove-agent: ${fileName} is a symbolic link. Refusing — removing it would destroy the link. Resolve the symlink or replace with a regular file first.`,
     };
-  }
-
-  if (existsSync(filePath)) {
+  } else if (existsSync(filePath)) {
     const contents = readFileSync(filePath, 'utf8');
-    const userBody = bodyWithoutPrefixBlock(contents).trim();
+    // FORGE-160: cursor's `.mdc` is fully forge-owned (frontmatter + marker
+    // block, gitignored, no user content). Treat its body as empty so removal
+    // never requires --confirm — the frontmatter is forge's, not the user's.
+    const userBody = agent === 'cursor' ? '' : bodyWithoutPrefixBlock(contents).trim();
     if (userBody.length > 0 && !opts.confirm) {
       return {
         exitCode: 1,
@@ -555,8 +628,14 @@ function applyRemoveAgent(
     host: agent,
     packageRoot: locatePackageRoot(),
     dryRun: opts.dryRun,
+    // FORGE-160 shared-root prune safety: the agent was already filtered out of
+    // enabled_root_files above; pass the SURVIVORS so a root the removed host
+    // shared with a still-enabled host (e.g. cursor's `.agents/skills`) is kept.
+    enabledHosts: settings.agents.enabled_root_files,
   });
-  for (const p of pruned) changed.push(p);
+  for (const p of pruned.removed) changed.push(p);
+  // FORGE-160: surface symlink-guard skips (a pruned host's farm dir was a symlink).
+  for (const n of pruned.notices) notices.push(n);
 
   return null;
 }

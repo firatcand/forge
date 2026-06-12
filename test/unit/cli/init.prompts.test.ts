@@ -260,6 +260,30 @@ test('collectAnswers — happy path linear + env_file via scripted prompts', asy
   assert.equal(answers.agents.review_host_cli, 'codex');
 });
 
+test('FORGE-160 — collectAnswers: checkbox can add cursor as an enabled root file', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'cursor-app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'ship with cursor' },
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'TEAM-9' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      { match: /Primary host CLI/, value: 'claude' },
+      { match: /Review host CLI/, value: 'codex' },
+    ]),
+  );
+  // Checkbox selects claude (primary, required) + cursor (breadcrumb).
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10], ['claude', 'cursor']));
+  const answers = await collectAnswers({ cwd: '/tmp/cursor-proj' });
+  assert.deepEqual([...answers.agents.enabled_root_files].sort(), ['claude', 'cursor']);
+});
+
 test('collectAnswers — positional name skips prompt 1', async (t) => {
   t.after(() => {
     __resetForTests();

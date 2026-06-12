@@ -340,7 +340,7 @@ test('pruneHostFarm: removes forge-owned symlinks for bundled entries', () => {
     // Adopter's project-level Codex config the prune must leave alone.
     writeFileSync(resolve(cwd, '.codex/config.toml'), 'model = "o3"\n');
 
-    const removed = pruneHostFarm({ cwd, host: 'codex', packageRoot: pkg });
+    const { removed } = pruneHostFarm({ cwd, host: 'codex', packageRoot: pkg });
 
     assert.deepEqual(
       [...removed].sort(),
@@ -409,7 +409,7 @@ test('pruneHostFarm: user-EJECTED skill at bundled name (real dir replacing syml
     rmSync(resolve(cwd, '.claude/skills/plan-task'));
     symlinkSync(decoy, resolve(cwd, '.claude/skills/plan-task'), 'dir');
 
-    const removed = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+    const { removed } = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
 
     // Both ejected entries survive — neither is a forge-owned symlink.
     assert.equal(removed.length, 0, `expected 0 removed (both ejected); got ${JSON.stringify(removed)}`);
@@ -441,7 +441,7 @@ test('pruneHostFarm: copy-mode entries are NOT pruned (Windows limitation)', () 
 
     applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'copy' });
 
-    const removed = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+    const { removed } = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
 
     assert.equal(removed.length, 0);
     assert.ok(existsSync(resolve(cwd, '.claude/skills/forge')), 'copy survives prune by design');
@@ -455,7 +455,7 @@ test('pruneHostFarm: dryRun reports what would be removed without touching disk'
     mkdirSync(cwd, { recursive: true });
     applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['gemini'], mode: 'symlink' });
 
-    const removed = pruneHostFarm({ cwd, host: 'gemini', packageRoot: pkg, dryRun: true });
+    const { removed } = pruneHostFarm({ cwd, host: 'gemini', packageRoot: pkg, dryRun: true });
 
     assert.deepEqual([...removed], ['.gemini/skills/forge']);
     assert.ok(existsSync(resolve(cwd, '.gemini/skills/forge')), 'dryRun must not touch disk');
@@ -486,5 +486,249 @@ test('applySkillFarm: created paths use the project cwd, not the package root', 
         `created path should start with canonical cwd ${canonicalCwd}; got: ${p}`,
       );
     }
+  });
+});
+
+// ── FORGE-160: cursor host (.agents/skills + .cursor/agents) ──
+
+test('FORGE-160 — applySkillFarm: cursor farms into .agents/skills + .cursor/agents', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'plan-task'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['cursor'],
+      mode: 'symlink',
+    });
+
+    // 2 skills + 1 agent created.
+    assert.equal(result.created.length, 3, `created=${JSON.stringify(result.created)}`);
+    assert.ok(existsSync(resolve(cwd, '.agents/skills/forge')), '.agents/skills/forge exists');
+    assert.ok(existsSync(resolve(cwd, '.agents/skills/plan-task')));
+    assert.ok(existsSync(resolve(cwd, '.cursor/agents/code-reviewer.md')), '.cursor/agents/code-reviewer.md exists');
+    assert.ok(lstatSync(resolve(cwd, '.agents/skills/forge')).isSymbolicLink());
+    assert.match(readFileSync(resolve(cwd, '.agents/skills/forge/SKILL.md'), 'utf8'), /Fake skill body/);
+  });
+});
+
+test('FORGE-160 — pruneHostFarm: cursor-alone prunes its .agents/skills entries', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['cursor'], mode: 'symlink' });
+
+    // cursor is the only host → no shared root → prune everything forge-owned.
+    const { removed } = pruneHostFarm({ cwd, host: 'cursor', packageRoot: pkg, enabledHosts: [] });
+    assert.deepEqual([...removed].sort(), ['.agents/skills/forge', '.cursor/agents/code-reviewer.md']);
+    assert.equal(existsSync(resolve(cwd, '.agents/skills/forge')), false);
+    assert.equal(existsSync(resolve(cwd, '.cursor/agents/code-reviewer.md')), false);
+  });
+});
+
+test('FORGE-160 — pruneHostFarm shared-root safety: removing claude while cursor stays enabled isolates the prune', () => {
+  // No two PRODUCTION hosts share a skills/agents root today (cursor uses
+  // .agents/skills + .cursor/agents; the others use .X/skills + .X/agents), so
+  // the shared-root SKIP branch is future-proofing for a hypothetical second
+  // host on .agents/skills. This test proves the guard does NOT over-skip: with
+  // a survivor (cursor) that shares NO root with the pruned host (claude),
+  // claude's entries are fully removed and cursor's are untouched.
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude', 'cursor'], mode: 'symlink' });
+
+    const { removed } = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg, enabledHosts: ['cursor'] });
+    assert.deepEqual([...removed].sort(), ['.claude/agents/code-reviewer.md', '.claude/skills/forge']);
+    assert.equal(existsSync(resolve(cwd, '.claude/skills/forge')), false);
+    assert.ok(existsSync(resolve(cwd, '.agents/skills/forge')), "cursor's shared-style farm untouched");
+    assert.ok(existsSync(resolve(cwd, '.cursor/agents/code-reviewer.md')));
+  });
+});
+
+// ── FORGE-160: symlink guard — farm dir component is a symlink ──
+// A symlinked `.agents` / `.agents/skills` / `.cursor/agents` (cursor) — and
+// equally a symlinked `.claude` (claude, proving the guard is uniform, not
+// cursor-special) — would let forge create/rename/delete OUTSIDE the working
+// tree. apply must SKIP with a notice; prune must SKIP with a notice; nothing
+// is ever written/deleted through the link, and the out-of-tree target is
+// left intact.
+
+test('FORGE-160 symlink guard — applySkillFarm: symlinked .agents (cursor skills root parent) skips with notice', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    // Out-of-tree dir the adopter symlinked `.agents` to (e.g. dotfiles repo).
+    const outside = resolve(tmp, 'dotfiles-agents');
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, resolve(cwd, '.agents'), 'dir');
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['cursor'],
+      mode: 'symlink',
+    });
+
+    // Skills farm (.agents/skills) skipped; agents farm (.cursor/agents) still applied.
+    assert.ok(
+      result.notices.some((n) => n.includes('.agents') && n.includes('skill farm')),
+      `expected a skills-farm skip notice; got ${JSON.stringify(result.notices)}`,
+    );
+    assert.equal(
+      result.created.filter((p) => p.includes(`${sep}skills${sep}`)).length,
+      0,
+      'no skill entries created',
+    );
+    // Nothing written through the link.
+    assert.equal(existsSync(resolve(outside, 'skills')), false, 'out-of-tree target untouched');
+    assert.equal(existsSync(resolve(outside, 'forge')), false);
+    // The .cursor/agents farm (no symlinked component) is materialized normally.
+    assert.ok(existsSync(resolve(cwd, '.cursor/agents/code-reviewer.md')), 'agent farm still applied');
+  });
+});
+
+test('FORGE-160 symlink guard — applySkillFarm: symlinked .cursor/agents skips agent farm with notice', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    // Symlink the LEAF component `.cursor/agents` (parent `.cursor` is a real dir).
+    mkdirSync(resolve(cwd, '.cursor'), { recursive: true });
+    const outside = resolve(tmp, 'dotfiles-cursor-agents');
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, resolve(cwd, '.cursor/agents'), 'dir');
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['cursor'],
+      mode: 'symlink',
+    });
+
+    assert.ok(
+      result.notices.some((n) => n.includes('.cursor/agents') && n.includes('agent farm')),
+      `expected an agent-farm skip notice; got ${JSON.stringify(result.notices)}`,
+    );
+    assert.equal(existsSync(resolve(outside, 'code-reviewer.md')), false, 'nothing written through link');
+    // Skills farm (.agents/skills, no symlink) is materialized normally.
+    assert.ok(existsSync(resolve(cwd, '.agents/skills/forge')), 'skill farm still applied');
+  });
+});
+
+test('FORGE-160 symlink guard — applySkillFarm: symlinked .claude proves the guard is uniform (not cursor-special)', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    const outside = resolve(tmp, 'dotfiles-claude');
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, resolve(cwd, '.claude'), 'dir');
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['claude'],
+      mode: 'symlink',
+    });
+
+    // BOTH skills and agents roots live under the symlinked `.claude` → both skipped.
+    assert.equal(result.created.length, 0, `nothing created; got ${JSON.stringify(result.created)}`);
+    assert.ok(
+      result.notices.some((n) => n.includes('skill farm')) &&
+        result.notices.some((n) => n.includes('agent farm')),
+      `expected both skill + agent farm skip notices; got ${JSON.stringify(result.notices)}`,
+    );
+    assert.equal(existsSync(resolve(outside, 'skills')), false, 'nothing written through .claude link');
+    assert.equal(existsSync(resolve(outside, 'agents')), false);
+  });
+});
+
+test('FORGE-160 symlink guard — applySkillFarm: dry-run parity — symlinked root skips with notice, no writes', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    const outside = resolve(tmp, 'dotfiles-agents');
+    mkdirSync(outside, { recursive: true });
+    symlinkSync(outside, resolve(cwd, '.agents'), 'dir');
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['cursor'],
+      mode: 'symlink',
+      dryRun: true,
+    });
+
+    assert.ok(
+      result.notices.some((n) => n.includes('.agents') && n.includes('skill farm')),
+      `dry-run must surface the same skip notice; got ${JSON.stringify(result.notices)}`,
+    );
+    assert.equal(existsSync(resolve(outside, 'skills')), false, 'dry-run wrote nothing through link');
+  });
+});
+
+test('FORGE-160 symlink guard — pruneHostFarm: symlinked .agents skips skill-farm prune, target intact', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    // Out-of-tree dir with a sentinel file that must survive.
+    const outside = resolve(tmp, 'dotfiles-agents');
+    mkdirSync(resolve(outside, 'skills'), { recursive: true });
+    writeFileSync(resolve(outside, 'skills', 'sentinel.txt'), 'do not delete\n');
+    symlinkSync(outside, resolve(cwd, '.agents'), 'dir');
+
+    const { removed, notices } = pruneHostFarm({
+      cwd,
+      host: 'cursor',
+      packageRoot: pkg,
+      enabledHosts: [],
+    });
+
+    // Skills root (.agents/skills) prune skipped; .cursor/agents prune unaffected.
+    assert.ok(
+      notices.some((n) => n.includes('.agents') && n.includes('skill farm')),
+      `expected a skills-prune skip notice; got ${JSON.stringify(notices)}`,
+    );
+    assert.equal(
+      removed.filter((p) => p.includes('skills')).length,
+      0,
+      'no skill entries removed through the link',
+    );
+    assert.ok(
+      existsSync(resolve(outside, 'skills', 'sentinel.txt')),
+      'out-of-tree target intact — never deleted through the link',
+    );
+  });
+});
+
+test('FORGE-160 symlink guard — pruneHostFarm: symlinked .claude proves the prune guard is uniform', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    const outside = resolve(tmp, 'dotfiles-claude');
+    mkdirSync(resolve(outside, 'skills', 'forge'), { recursive: true });
+    writeFileSync(resolve(outside, 'skills', 'forge', 'SKILL.md'), 'survive\n');
+    symlinkSync(outside, resolve(cwd, '.claude'), 'dir');
+
+    const { removed, notices } = pruneHostFarm({ cwd, host: 'claude', packageRoot: pkg });
+
+    assert.equal(removed.length, 0, `nothing removed through .claude link; got ${JSON.stringify(removed)}`);
+    assert.ok(
+      notices.some((n) => n.includes('skill farm')) && notices.some((n) => n.includes('agent farm')),
+      `expected both skill + agent prune skip notices; got ${JSON.stringify(notices)}`,
+    );
+    assert.ok(
+      existsSync(resolve(outside, 'skills', 'forge', 'SKILL.md')),
+      'out-of-tree target intact',
+    );
   });
 });

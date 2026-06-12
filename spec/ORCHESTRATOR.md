@@ -676,6 +676,8 @@ When the matrix is unclear, the worker writes a standard question via the existi
 
 The dispatch skill emits an informational `SPEC changed since claim — N commits` block on worker resume (powered by `forge orchestrate spec-diff <task>`, P2.5-T18 / FORGE-114). The worker treats it as informational and proceeds unless the diff conflicts with current scope, in which case it writes a question.
 
+**Push-time half (FORGE-164).** `forge orchestrate spec-diff --all-active` enumerates every task in an ACTIVE state (`dispatched` | `running` | `blocked_on_question`) whose claim `spec_revision` predates a `spec/` change, emitting `{ task_id, commit_count, files_affected, lease_expired }[]`. Corrupt/missing state or lease → skip with a stderr note (never fails the listing); an expired lease is still listed with `lease_expired: true` (the stale claim is exactly the signal); no-diff tasks are omitted; it always exits 0. `/ship` runs the single-task form between its preflight and gates and, when non-null, adds an informational `### ⚠ SPEC changes since this task was claimed` PR-body section (it never blocks the ship). This is the mechanism-not-policy push-time complement to the on-resume pull-time block above — together they close both halves of the FORGE-114 SPEC-drift mitigation.
+
 ### phases.yaml freshness
 
 CLI verbs that read `phases.yaml` print a freshness line on stderr (P2.5-T17 / FORGE-113). If the snapshot is > 24h old, the worker treats phases.yaml as advisory and asks before relying on it for scope. Tracker is the source of truth.
@@ -1040,6 +1042,8 @@ This complements (does not replace) worker-side drift detection. The guard bound
 ### 3. Doctor checks (v0.4)
 
 `forge orchestrate doctor` (read-only) enforces SPEC↔code drift only in v0.4 — for each TypeScript path under `src/` mentioned in `spec/SPEC.md`, `spec/PRD.md`, or `spec/ORCHESTRATOR.md`, doctor asserts the file exists under `repoRoot`. Stale ADR drafts and pending apply-journal scopes are deferred to v0.5 (see SPEC §21). Honors `settings.doctor.spec_code_check_enabled` (default `true`). Exit codes: 0 clean, 1 warnings, 2 drift detected. See SPEC §Doctor enforcement (v0.4) for the canonical contract.
+
+**Symbol-mention drift (FORGE-131).** Doctor additionally flags identifier-shaped backtick spans in the spec files that appear nowhere in `src/**/*.ts` (`missing_symbol` drift entries, same exit-2 semantics). This is a **bounded mention check, not export analysis** — a symbol in a comment or test counts as present; a renamed export with stale prose is caught only when the old name disappears from `src` entirely; it will not grow toward AST analysis. The shape filter (CamelCase ≥2 humps / camelCase / `ALL_CAPS_SNAKE`, len ≥4) plus a built-in `BASE_SYMBOL_ALLOWLIST` and the adopter-declared `settings.doctor.symbol_allowlist` keep prose nouns and external names out of the drift list.
 
 ### Files the orchestrator does NOT own
 

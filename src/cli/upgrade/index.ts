@@ -12,6 +12,13 @@ export {
   extractPrefixBlock,
   bodyWithoutPrefixBlock,
   ROOT_FILE_BY_AGENT,
+  // FORGE-160: cursor host assembly + frontmatter-first wrapper.
+  MATERIALIZE_WHEN_ENABLED,
+  buildCursorBlock,
+  buildCursorRuleFile,
+  writeCursorRuleBody,
+  cursorConventionsBody,
+  cursorUserBody,
 } from './agent-root-files.ts';
 export type { AgentKind, PrefixBlockInput } from './agent-root-files.ts';
 
