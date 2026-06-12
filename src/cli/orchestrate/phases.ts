@@ -24,7 +24,7 @@ import { PhasesArgsSchema, type PhasesArgs } from '../../schemas/cli-args.ts';
 import type { VerbHandler } from './index.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
-import { detectCheapDivergences } from './gc.ts';
+import { detectCheapDivergences, type GcCheapWarning } from './gc.ts';
 import { readTaskState } from '../../orchestrator/state-machine.ts';
 import {
   DEFAULT_RETRY_POLICY,
@@ -64,6 +64,9 @@ export interface PhasesResultData {
   // surface here as manual checkpoints so they stay queue-visible without being
   // auto-claimed by the dispatch loop.
   readonly human_checkpoints: readonly HumanCheckpointOut[];
+  // FORGE-149: present ONLY when --include-warnings is set (with --json on
+  // --ready). Omitted entirely otherwise so legacy output is byte-identical.
+  readonly warnings?: readonly GcCheapWarning[];
 }
 
 // FORGE-176: cap on the number of issue bullets rendered into the human stderr
@@ -174,7 +177,7 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   // the dump form stays minimal. Writes warnings to stderr (matching the
   // freshness-line precedent above); never mutates state. JSON stdout is
   // unaffected.
-  detectCheapDivergences(opts.forgeDir, process.stderr, new Date());
+  const cheapWarnings = detectCheapDivergences(opts.forgeDir, process.stderr, new Date());
 
   // --ready filter pipeline.
   const doneTaskIds = new Set<string>();
@@ -271,6 +274,9 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
     tasks: limited,
     overlap_check: 'enabled',
     human_checkpoints: humanCheckpoints,
+    // FORGE-149: opt-in. Field omitted entirely when the flag is absent so the
+    // JSON shape is byte-identical to the pre-change output for existing consumers.
+    ...(opts.includeWarnings ? { warnings: cheapWarnings } : {}),
   };
   // Human (stderr) surfacing: keep human checkpoints visible in the non-JSON
   // form too, where the envelope renderer only dumps `tasks`. JSON stdout is
@@ -298,10 +304,12 @@ export const phasesHandler: VerbHandler = {
     const limitRaw = parseFlag(rest, 'limit');
     const limit = limitRaw ? Number.parseInt(limitRaw, 10) : undefined;
     const runId = parseFlag(rest, 'run-id') ?? parseFlag(rest, 'run');
+    const includeWarnings = hasFlag(rest, 'include-warnings');
     const args: PhasesArgs = {
       ready,
       forgeDir,
       json,
+      includeWarnings,
       ...(phase ? { phase: phase as 'implement' | 'review' | 'ship' } : {}),
       ...(blockedBy ? { blockedBy } : {}),
       ...(limit && !Number.isNaN(limit) ? { limit } : {}),

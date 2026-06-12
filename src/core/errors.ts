@@ -154,6 +154,47 @@ export interface OrchestratorErrorDetails {
   readonly [key: string]: unknown;
 }
 
+// FORGE-86: keys in `details` that are safe to expose across a serialization
+// boundary (IPC / HTTP / structured log). These are identifier-ish, non-secret,
+// non-path values — they carry coordination meaning but never leak filesystem
+// layout, host paths, or wrapped error objects (which may embed paths/stacks).
+const SAFE_DETAIL_KEYS: ReadonlySet<string> = new Set([
+  'taskId',
+  'runId',
+  'attemptId',
+  'claimId',
+  'questionId',
+  'decisionKey',
+  'rowId',
+  'state',
+  'fromState',
+  'toState',
+  'expected',
+  'actual',
+  'generation',
+  'stateVersion',
+  // FORGE-149: snake_case lease-/state-coordination identifier keys actually
+  // constructed in src/orchestrator (state-machine.ts, leases.ts, decision-
+  // classifier.ts). These are non-secret, non-path coordination ids; they carry
+  // the (stored vs caller vs expected) identity-mismatch story across a
+  // serialization boundary. Path/dir/cause and anything filesystem-ish are
+  // deliberately EXCLUDED — they stay redacted.
+  'stored_claim_id',
+  'caller_claim_id',
+  'expected_claim_id',
+  'stored_generation',
+  'caller_generation',
+  'expected_generation',
+  'from_generation',
+  'stored_run_id',
+  'caller_run_id',
+  'stored_owner_run_id',
+  'expected_owner_run_id',
+  'task_id',
+  'decision_key',
+  'current_state',
+]);
+
 export class OrchestratorError extends Error {
   readonly code: OrchestratorErrorCode;
   readonly details: OrchestratorErrorDetails;
@@ -167,5 +208,28 @@ export class OrchestratorError extends Error {
     this.name = 'OrchestratorError';
     this.code = code;
     this.details = details;
+  }
+
+  /**
+   * Allow-listed projection of `details` safe to cross a serialization boundary.
+   *
+   * Local CLI human output MAY keep using the raw `details` object (today's
+   * envelope is local stdout, which the FORGE-86 trigger condition treats as a
+   * non-remote surface). But ANY future IPC / HTTP / structured-log
+   * serialization of an OrchestratorError MUST go through `safeDetails()` — this
+   * is the M4 trigger condition: block remote-API tasks until they do.
+   *
+   * Behavior: keys in SAFE_DETAIL_KEYS pass through verbatim. Every other key is
+   * PRESERVED (so the shape stays debuggable) but its value is replaced with the
+   * sentinel string `'[redacted]'`. Non-allow-listed nested objects are always
+   * redacted wholesale — never recursed into — so a path/cause buried inside a
+   * nested object cannot leak.
+   */
+  safeDetails(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(this.details)) {
+      out[key] = SAFE_DETAIL_KEYS.has(key) ? this.details[key] : '[redacted]';
+    }
+    return out;
   }
 }

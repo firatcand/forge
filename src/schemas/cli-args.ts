@@ -61,6 +61,11 @@ export const PhasesArgsSchema = z.object({
   runId: RunIdSchema.optional(),
   forgeDir: ForgeDirField,
   json: JsonFlag,
+  // FORGE-149: opt-in. When set with --json on --ready, surfaces auto-gc cheap
+  // divergences as a `warnings` array in the result data. Omitted → byte-identical
+  // legacy output. Optional (not defaulted) so existing call sites that omit it
+  // keep type-checking and behave as `false`.
+  includeWarnings: z.boolean().optional(),
 });
 export type PhasesArgs = z.infer<typeof PhasesArgsSchema>;
 

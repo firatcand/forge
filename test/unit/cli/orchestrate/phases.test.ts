@@ -379,3 +379,65 @@ test('FORGE-176 — human-mode PHASES_PARSE_ERROR renders bulleted issues on std
   assert.match(stderr, /phases schema validation failed:/);
   assert.match(stderr, /- phases\.0\.tasks\.0\.acceptance:/);
 });
+
+// ── FORGE-149: --include-warnings opt-in JSON surface ────────────────────────
+
+function seedCheapDivergence(forgeDir: string, taskId: string): void {
+  const dir = join(forgeDir, 'orchestrator', 'tasks', taskId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'state.json'),
+    JSON.stringify({
+      version: 1,
+      task_id: taskId,
+      state: 'shipped',
+      state_version: 0,
+      attempt_count: 0,
+      current_attempt_id: null,
+      updated_at: '2026-05-19T10:00:00.000Z',
+      updated_by: { run_id: 'r', claim_id: 'c', generation: 0 },
+    }),
+  );
+  writeFileSync(
+    join(dir, 'lease.json'),
+    JSON.stringify({
+      version: 1,
+      claim_id: 'claim-X',
+      task_id: taskId,
+      attempt_id: null,
+      owner_run_id: 'run-X',
+      acquired_at: '2026-05-19T09:00:00.000Z',
+      expires_at: '2026-05-19T09:30:00.000Z',
+      last_heartbeat_at: '2026-05-19T09:00:00.000Z',
+      generation: 0,
+      spec_revision: 'git:0000000000000000000000000000000000000000',
+    }),
+  );
+}
+
+test('phases --ready --json --include-warnings adds the warnings array', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo, forgeDir } = makeRepoWithPhases(ONE_TASK);
+  seedCheapDivergence(forgeDir, 'TASK-Q');
+  const result = await runOrchestratePhases({
+    ready: true,
+    forgeDir,
+    json: true,
+    includeWarnings: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.ok(Array.isArray(env.data.warnings));
+  assert.ok(env.data.warnings.some((w: { task_id: string }) => w.task_id === 'TASK-Q'));
+  void repo;
+});
+
+test('phases --ready --json WITHOUT --include-warnings omits the warnings key entirely', async (t) => {
+  const stdout = captureStdout(t);
+  const { forgeDir } = makeRepoWithPhases(ONE_TASK);
+  seedCheapDivergence(forgeDir, 'TASK-Q');
+  const result = await runOrchestratePhases({ ready: true, forgeDir, json: true });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.ok(!('warnings' in env.data), 'warnings key must be absent without the flag');
+});

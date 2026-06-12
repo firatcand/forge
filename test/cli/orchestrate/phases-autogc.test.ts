@@ -170,3 +170,42 @@ test('status.ts imports detectCheapDivergences from gc.ts', async () => {
   assert.match(statusSrc, /detectCheapDivergences/);
   assert.match(statusSrc, /from '\.\/gc\.ts'/);
 });
+
+// ── FORGE-149: detectCheapDivergences returns structured warnings ────────────
+
+test('detectCheapDivergences: returns structured GcCheapWarning[] AND still emits stderr', () => {
+  const fd = freshForgeDir();
+  try {
+    writeState(fd, 'TASK-W', 'shipped');
+    writeLease(fd, 'TASK-W');
+    const { stream, out } = captureStream();
+    const warnings = detectCheapDivergences(fd, stream, NOW);
+    // stderr side effect preserved
+    assert.match(out(), /\[gc\] TASK-W: row 14/);
+    // structured return
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0]!.task_id, 'TASK-W');
+    assert.equal(warnings[0]!.row_id, 14);
+    assert.equal(warnings[0]!.severity, 'warning');
+    assert.equal(warnings[0]!.suggestion, 'run `forge orchestrate gc` to apply');
+    assert.equal(typeof warnings[0]!.action, 'string');
+  } finally {
+    rmSync(fd.replace(/\/\.forge$/, ''), { recursive: true, force: true });
+  }
+});
+
+test('detectCheapDivergences: clean tree → empty array', () => {
+  const fd = freshForgeDir();
+  try {
+    const { stream } = captureStream();
+    assert.deepEqual(detectCheapDivergences(fd, stream, NOW), []);
+  } finally {
+    rmSync(fd.replace(/\/\.forge$/, ''), { recursive: true, force: true });
+  }
+});
+
+test('detectCheapDivergences: failure path returns [] (and notes on stderr)', () => {
+  const fakeDir = '/tmp/forge-autogc-nonexistent-' + Math.random();
+  const { stream } = captureStream();
+  assert.deepEqual(detectCheapDivergences(fakeDir, stream, NOW), []);
+});
