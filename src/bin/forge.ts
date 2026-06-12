@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parse as yamlParse } from 'yaml';
 import { loadForgeEnv } from '../core/forge-env.ts';
 import { runInit } from '../cli/init.ts';
-import { runCodexSuggest } from '../cli/codex-suggest.ts';
+import { runSecondOpinionSuggest } from '../cli/second-opinion-suggest.ts';
 import { runProjectStatus } from '../cli/project-status.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 import { upgrade } from '../cli/upgrade/upgrade.ts';
@@ -131,6 +132,40 @@ function maybeWarnDrift(cmd: string): void {
 }
 maybeWarnDrift(command);
 
+// FORGE-161: methodology-pin mismatch pre-hook. Fires once per CLI invocation
+// when the repo's TRACKED `.forge/settings.yaml` `methodology_version` pin
+// disagrees with the installed CLI's bundled version. Distinct from
+// maybeWarnDrift (which compares the gitignored `.forge/.version` runtime
+// marker): the pin is a reviewable, committed team contract.
+// - Suppressed for upgrade/migrate (same rationale as drift: those verbs ARE
+//   the fix path) and by FORGE_QUIET=1.
+// - Best-effort + hardened: lstat first (skip symlinks), size-bound the read,
+//   require `typeof methodology_version === 'string'` before comparing.
+//   Absent file/field → silent. All errors swallowed.
+const PIN_READ_MAX_BYTES = 256 * 1024;
+function maybeWarnMethodologyPin(cmd: string): void {
+  if (cmd === 'upgrade' || cmd === 'migrate') return;
+  if (process.env.FORGE_QUIET === '1') return;
+  try {
+    const settingsPath = resolve(process.cwd(), '.forge/settings.yaml');
+    const st = lstatSync(settingsPath);
+    // Skip symlinks (never follow) and over-large files.
+    if (st.isSymbolicLink() || !st.isFile()) return;
+    if (st.size > PIN_READ_MAX_BYTES) return;
+    const parsed = yamlParse(readFileSync(settingsPath, 'utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return;
+    const pin = (parsed as { methodology_version?: unknown }).methodology_version;
+    if (typeof pin !== 'string') return;
+    if (pin === version) return;
+    process.stderr.write(
+      `forge: this repo pins methodology ${pin}, installed CLI is ${version} — run \`forge upgrade\` (or align installs).\n`,
+    );
+  } catch {
+    // Swallow — pin warnings are best-effort.
+  }
+}
+maybeWarnMethodologyPin(command);
+
 // FORGE per-repo tracker credentials: seed process.env from .forge/.env (if any)
 // before any command dispatches. Allowlisted + no-override; best-effort.
 loadForgeEnv(process.cwd());
@@ -162,10 +197,31 @@ if (command === 'init') {
   // writes; always exits 0 (a non-forge dir or degraded section is information).
   const result = runProjectStatus({ cwd: process.cwd(), rest: args.slice(1) });
   process.exit(result.exitCode);
+} else if (command === 'second-opinion') {
+  // FORGE-150: in-skill second-opinion hint emitter. The `suggest <event>`
+  // subcommand prints the next-step nudge at skill end. Synchronous + stateless.
+  // NOTE: distinct from `forge orchestrate second-opinion` (the review dispatch
+  // verb under the orchestrate namespace) — this is the suggestion emitter.
+  const sub = args[1];
+  if (sub !== 'suggest') {
+    console.error(
+      [
+        `forge: second-opinion: unknown subcommand '${sub ?? ''}'.`,
+        'usage: forge second-opinion suggest <event>',
+        '(for review dispatch, see `forge orchestrate second-opinion`)',
+      ].join('\n'),
+    );
+    process.exit(1);
+  }
+  const result = runSecondOpinionSuggest({ cwd: process.cwd(), argv: args.slice(2) });
+  process.exit(result.exitCode);
 } else if (command === 'codex-suggest') {
-  // FORGE-105: in-skill auto-codex hint emitter. Synchronous + stateless;
-  // safe to call from /plan-task and /ship at skill end.
-  const result = runCodexSuggest({ cwd: process.cwd(), argv: args.slice(1) });
+  // FORGE-150: deprecation alias for `forge second-opinion suggest`. Prints ONE
+  // stderr warning, then delegates with identical behavior. Removal in v0.5.
+  process.stderr.write(
+    'forge codex-suggest is deprecated — use `forge second-opinion suggest`; removal in v0.5.\n',
+  );
+  const result = runSecondOpinionSuggest({ cwd: process.cwd(), argv: args.slice(1) });
   process.exit(result.exitCode);
 } else if (command === 'upgrade') {
   void (async () => {

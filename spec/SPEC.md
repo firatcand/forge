@@ -129,6 +129,7 @@ Drafted in `spec/decisions/2026-05-21-claudemd-methodology-split.md` (in-flight 
 - **`.forge/manifest.json` records what forge wrote** (FORGE-158). Gitignored (regenerable, like `.version`). Written by `forge init`, refreshed idempotently by `forge upgrade`. Captures created-vs-appended state for root files and ignore files, plus exact host-farm entries — the authoritative input to `forge eject`. Absence is tolerated: eject falls back to settings + provenance derivation with a warning.
 - **`forge eject` is the reversible clean-uninstall verb** (FORGE-158). Top-level only (not under `orchestrate`). Dry-run by default; `--confirm` applies; `--no-backup` skips the snapshot; `--restore <dir>` undoes an eject. Reverses root-file marker blocks (preserving user content byte-for-byte), the `.gitignore`/`.eslintignore`/`.prettierignore` modifications, the host farms, and `.forge/` itself. Leaves `spec/`, `plans/`, `CRITICAL.md`, and source untouched. Refuses while an active worktree or non-terminal task state exists, or a forge-managed file is dirty in git.
 - **CLI drift warning** on every `forge` invocation when `.forge/.version` differs from bundled methodology version. `FORGE_QUIET=1` or `--quiet` suppresses.
+- **Tracked methodology-version pin** (FORGE-161). `methodology_version` is an optional top-level field in the *tracked* `.forge/settings.yaml` — a reviewable, committed team contract, distinct from the *gitignored* `.forge/.version` runtime marker. `.version` records what a developer's local CLI last rendered (per-checkout, regenerable); the pin records the version the team agreed the repo targets. `forge upgrade` stamps the pin comment-preservingly (surgical YAML `setIn`, ordered after any `--add-agent`/`--remove-agent` rewrite so neither write clobbers the other). On every `forge` invocation a best-effort pre-hook warns once when the pin disagrees with the installed CLI's bundled version (`run forge upgrade (or align installs)`); absent pin → silent (pre-pin repos stay quiet). Same suppressions as the drift warning (skipped for `upgrade`/`migrate`; `FORGE_QUIET=1`; all errors swallowed).
 - **Legacy migration:** one-shot `forge upgrade --migrate-claudemd`, strict-match-only against a pinned v0.4 fixture; bails to manual recipe on any drift; saves `CLAUDE.md.pre-migration.bak`.
 - **`.gitignore` marker block** ignores `/.forge/*` except `!/.forge/settings.yaml`; written/replaced by shared `gitignore-block.ts` (used by init + upgrade).
 - **Name collision noted, not blocking:** existing `spec/CONTEXT.md` (project synthesis from `/ingest-spec`) coexists with new `.forge/CONTEXT.md` (methodology) — distinct paths, distinct purposes, both files survive.
@@ -142,7 +143,7 @@ The methodology doc in `.forge/CONTEXT.md` includes the §Ephemeral ADR workflow
 - Auto-postinstall hooks that touch cwd (npm best practice forbids; init stays explicit)
 - Renaming `spec/CONTEXT.md` to avoid the filename overlap with `.forge/CONTEXT.md` (acceptable; distinct paths)
 - `forge downgrade` verb (methodology versions only move forward)
-- Pinning methodology version per-repo (no v0.5 use case yet)
+- ~~Pinning methodology version per-repo~~ — SHIPPED in FORGE-161 as the tracked `methodology_version` pin (see §Decisions above)
 
 ---
 
@@ -309,12 +310,26 @@ export const SettingsSchema = z.object({
       reference: z.string().optional(),
     })
     .default({}),
-  // Added 2026-05-17 (closed-loop workflow control — minimal surface after dropping Feature 7)
-  codex: z
+  // FORGE-150 (2026-06-11) — "everything is second-opinion, suggest is a mode".
+  // Primary disable surface for in-skill suggestions at /plan-task end, ADR
+  // draft, pre-/ship.
+  second_opinion: z
     .object({
-      auto_codex_enabled: z.boolean().default(true),         // in-skill auto-suggest at /plan-task end, ADR draft, pre-/ship
+      auto_enabled: z.boolean().default(true),
     })
     .default({}),
+  // Legacy block (FORGE-105 → renamed by FORGE-150): OPTIONAL, no default — it
+  // materializes only when present in the file. Honored by the resolver for
+  // back-compat (an un-migrated repo's disable still works); removed in v0.5.
+  codex: z
+    .object({
+      auto_codex_enabled: z.boolean().default(true),
+    })
+    .optional(),
+  // FORGE-161 — tracked methodology-version pin: a reviewable, committed team
+  // contract (distinct from the gitignored .forge/.version runtime marker).
+  // Absent ⇒ no warning (pre-pin repos stay quiet); stamped by `forge upgrade`.
+  methodology_version: z.string().min(1).optional(),
   decisions: z
     .object({
       decision_dir: z.string().default('./spec/decisions'),    // where draft ADRs live (ephemeral)
@@ -1031,9 +1046,9 @@ In v0.4, workers consult §Authority by field (line 34) when artifacts disagree 
 
 ---
 
-## Auto-codex skill-level hooks (added 2026-05-17)
+## Second-opinion suggest hooks (added 2026-05-17; renamed FORGE-150 2026-06-11)
 
-Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026-05-17. The only host-integration retained is in-skill auto-codex suggestion, which fires inside skills at architectural decision points — NOT via host hooks.
+Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026-05-17. The only host-integration retained is the in-skill second-opinion suggestion, which fires inside skills at architectural decision points — NOT via host hooks.
 
 | Trigger point (inside skill) | Suggested invocation |
 |---|---|
@@ -1041,9 +1056,11 @@ Feature 7 (host-level SessionStart/Stop/UserPromptSubmit hooks) was DROPPED 2026
 | `/update-spec --draft` writes a draft ADR | `/second-opinion review-decision` |
 | `/ship` pre-PR finalize | `/second-opinion review-impl` |
 
-Each suggestion is a printed line at skill end: `"💡 Suggested next: /second-opinion review-decision (run with FORGE_AUTO_CODEX=0 to disable)"`. User types or skips. No automatic execution. The `forge codex-suggest` CLI verb, `codex.auto_codex_enabled` settings field, and `FORGE_AUTO_CODEX` env var keep their `codex`-prefixed names in v0.4 (rename deferred to v0.5 per FORGE-89 plan §7 to avoid a settings-schema migration).
+Each suggestion is a printed line at skill end: `"💡 Suggested next: /second-opinion review-decision (run with FORGE_AUTO_SECOND_OPINION=0 to disable)"`. User types or skips. No automatic execution.
 
-Env var `FORGE_AUTO_CODEX=0` disables suggestions entirely.
+FORGE-150 adopted the "everything is second-opinion, suggest is a mode" naming, shipped NOW (overriding the original v0.5 deferral): the verb is `forge second-opinion suggest <event>`, the settings field is `second_opinion.auto_enabled`, and the env var is `FORGE_AUTO_SECOND_OPINION`. The legacy names are deprecation-shimmed — the `forge codex-suggest` verb is an alias that prints a one-time stderr deprecation note then delegates; `FORGE_AUTO_CODEX` is still honored (with a once-per-invocation note when it is the active disable source); and an un-migrated `codex.auto_codex_enabled` settings block is still honored by the resolver. `forge migrate` renames the settings block while KEEPING a mirrored `codex` block for old-CLI compat. All legacy names are REMOVED in v0.5.
+
+Env var `FORGE_AUTO_SECOND_OPINION=0` disables suggestions entirely (legacy `FORGE_AUTO_CODEX=0` still honored until v0.5).
 
 ### Why no host hooks
 
@@ -1202,7 +1219,8 @@ Forge consumes:
 | `FORGE_PRIMARY_HOST_CLI` | no | Override `agents.primary_host_cli` from settings | from settings.yaml |
 | `FORGE_REVIEW_HOST_CLI` | no | Override `agents.review_host_cli`; set to `none` to disable second-opinion | from settings.yaml |
 | `FORGE_SETTINGS_PATH` | no | Override `.forge/settings.yaml` location | `./.forge/settings.yaml` |
-| `FORGE_AUTO_CODEX` | no | Set to `0` to disable the in-skill `/second-opinion` review suggestions emitted by `/plan-task`, `/ship`, etc. (Env var keeps its `CODEX`-suffixed name in v0.4 — see FORGE-89 plan §7 for v0.5 rename.) | unset (suggestions on) |
+| `FORGE_AUTO_SECOND_OPINION` | no | Set to `0` to disable the in-skill `/second-opinion` review suggestions emitted by `/plan-task`, `/ship`, etc. (FORGE-150 primary name.) | unset (suggestions on) |
+| `FORGE_AUTO_CODEX` | no | DEPRECATED alias for `FORGE_AUTO_SECOND_OPINION` — still honored when the primary var is unset (a once-per-invocation stderr deprecation note fires when it is the active disable source). Removed in v0.5. | unset |
 
 Tracker / secret-manager adapters consume their own conventional vars (e.g. `ANTHROPIC_API_KEY` if `secrets.manager: env_file`, `OP_SERVICE_ACCOUNT_TOKEN` for 1Password). These are documented per-adapter in `docs/adapters/`.
 

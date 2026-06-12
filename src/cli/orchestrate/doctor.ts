@@ -18,7 +18,9 @@
 //
 // Exit codes: 0 clean, 1 warnings (e.g. required SPEC.md missing), 2 drift detected.
 
+import { lstatSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { parse as yamlParse } from 'yaml';
 
 import { DoctorArgsSchema, type DoctorArgs } from '../../schemas/cli-args.ts';
 import { loadSettings } from '../../core/settings.ts';
@@ -26,6 +28,22 @@ import { detectSpecCodeDrift, type SpecCodeDriftReport } from '../../orchestrato
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
+
+// FORGE-150: typed doctor settings warnings. NOT bare strings pushed into the
+// drift list — each entry carries a stable `kind` + message so JSON consumers
+// can branch on it. `drift` stays reserved for spec↔code path drift.
+export interface DoctorSettingsWarning {
+  readonly kind: 'legacy-codex-settings';
+  readonly message: string;
+}
+
+// The doctor report = the pure spec-code report PLUS doctor-owned settings
+// warnings. Spreading the spec-code report preserves `scope`/`warnings`/`drift`
+// (so the `drift: []` gate and existing JSON consumers are unaffected) and adds
+// the new typed channel.
+export interface DoctorReport extends SpecCodeDriftReport {
+  readonly settingsWarnings: readonly DoctorSettingsWarning[];
+}
 
 // Legacy scope strings that adopters may still type from v0.3.x scripts or
 // shell history. Pre-parse rejects them with a v0.5-pointing message before
@@ -62,10 +80,19 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
   // have a settings.yaml yet — doctor must not refuse to run.
   const specCodeEnabled = readSpecCodeCheckEnabled(opts.forgeDir);
 
+  // FORGE-150: typed legacy-codex settings warning. Computed for every scope so
+  // the `--scope all` ≡ `--scope spec-code` data-equality contract holds.
+  const settingsWarnings = detectLegacyCodexWarning(opts.forgeDir);
+
   // (3) Feature flag short-circuit. Adopter opted out of spec-code drift;
   // return an empty report (exit 0) so CI gates don't trip.
   if (!specCodeEnabled) {
-    const emptyReport: SpecCodeDriftReport = { scope: 'spec-code', warnings: [], drift: [] };
+    const emptyReport: DoctorReport = {
+      scope: 'spec-code',
+      warnings: [],
+      drift: [],
+      settingsWarnings,
+    };
     return { exitCode: emit(ok(emptyReport), { json: opts.json }) };
   }
 
@@ -77,7 +104,8 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
   const repoRoot = opts.repoRoot ?? path.dirname(opts.forgeDir);
 
   // (5) Pure drift detection.
-  const result = detectSpecCodeDrift({ repoRoot });
+  const specResult = detectSpecCodeDrift({ repoRoot });
+  const result: DoctorReport = { ...specResult, settingsWarnings };
 
   // (6) Exit-code mapping. emit() default returns 0 for ok envelopes;
   // doctor overrides when severity > 0 so the exit code carries severity
@@ -89,6 +117,39 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
 
   const envelopeExit = emit(ok(result), { json: opts.json });
   return { exitCode: envelopeExit === 0 ? severityExit : envelopeExit };
+}
+
+// FORGE-150: warn when settings.yaml carries a legacy `codex` block WITHOUT a
+// `second_opinion` block. Best-effort + hardened (lstat first, size-bound the
+// read, typeof-checked); absent/unreadable/symlinked → no warning. Reads the
+// RAW YAML (not the schema-parsed Settings) because the parsed `second_opinion`
+// block always materializes via its schema default, which would mask whether
+// the file actually contains it.
+const SETTINGS_READ_MAX_BYTES = 256 * 1024;
+function detectLegacyCodexWarning(forgeDir: string): DoctorSettingsWarning[] {
+  try {
+    const settingsPath = path.join(forgeDir, 'settings.yaml');
+    const st = lstatSync(settingsPath);
+    if (st.isSymbolicLink() || !st.isFile()) return [];
+    if (st.size > SETTINGS_READ_MAX_BYTES) return [];
+    const parsed = yamlParse(readFileSync(settingsPath, 'utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return [];
+    const obj = parsed as Record<string, unknown>;
+    const hasCodex = Object.prototype.hasOwnProperty.call(obj, 'codex');
+    const hasSecondOpinion = Object.prototype.hasOwnProperty.call(obj, 'second_opinion');
+    if (hasCodex && !hasSecondOpinion) {
+      return [
+        {
+          kind: 'legacy-codex-settings',
+          message:
+            'legacy codex.* settings — run `forge migrate` (mirrored for compatibility; removal in v0.5).',
+        },
+      ];
+    }
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 function readSpecCodeCheckEnabled(forgeDir: string): boolean {

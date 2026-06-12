@@ -65,10 +65,10 @@ test('every verb invocation the skill references exists with those flags', () =>
   }
   assert.match(SKILL, /forge orchestrate apply-decision <slug> --json/);
 
-  // The auto-codex hook event must stay registered in codex-suggest.
-  const codexSuggest = readFileSync(join(ROOT, 'src', 'cli', 'codex-suggest.ts'), 'utf8');
-  assert.match(codexSuggest, /'update-spec': 'review-decision'/);
-  assert.match(SKILL, /forge codex-suggest update-spec/);
+  // FORGE-150: the second-opinion suggest hook event must stay registered.
+  const suggest = readFileSync(join(ROOT, 'src', 'cli', 'second-opinion-suggest.ts'), 'utf8');
+  assert.match(suggest, /'update-spec': 'review-decision'/);
+  assert.match(SKILL, /forge second-opinion suggest update-spec/);
 });
 
 test('journal worked example matches ApplyJournalSchema exactly', async () => {

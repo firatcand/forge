@@ -213,8 +213,23 @@ const DesignSchema = z
   })
   .default({});
 
+// FORGE-150: "everything is second-opinion, suggest is a mode" naming.
+// auto_enabled is the disable lever consumed by `forge second-opinion suggest`.
+// Mounted as `second_opinion` on SettingsSchema; replaces the old `codex` block
+// as the primary surface.
+const SecondOpinionSchema = z
+  .object({
+    auto_enabled: z.boolean().default(true),
+  })
+  .default({});
+
 // Added 2026-05-18 (FORGE-105 P2.5-T13) — closed-loop workflow control.
-// auto_codex_enabled is the disable lever consumed by `forge codex-suggest`.
+// auto_codex_enabled WAS the disable lever consumed by `forge codex-suggest`.
+// FORGE-150 superseded it with second_opinion.auto_enabled (above). The block
+// is now OPTIONAL WITHOUT a default — it materializes only when present in the
+// file, so a fresh parse exposes `second_opinion` but NOT `codex`. Legacy
+// settings.yaml files that still carry it are honored by the resolver
+// (codex-suggest.ts) for back-compat; block removal is v0.5.
 // Decision A (FORGE-124): the token-cap field was dropped — passive suggestions
 // bound nothing meaningful; budget enforcement deferred indefinitely.
 // Legacy settings.yaml files that still carry the stale key are silently
@@ -223,7 +238,7 @@ const CodexSchema = z
   .object({
     auto_codex_enabled: z.boolean().default(true),
   })
-  .default({});
+  .optional();
 
 // Added 2026-05-18 (FORGE-105) — declared per SPEC §Settings schema for
 // adopter forward-compat. Consumers land with the /update-spec skill (separate
@@ -269,9 +284,16 @@ export const SettingsSchema = z.object({
   secrets: SecretsSchema,
   agents: AgentsSchema,
   design: DesignSchema,
+  // FORGE-150: primary disable surface for in-skill second-opinion suggestions.
+  second_opinion: SecondOpinionSchema,
+  // FORGE-150: legacy block — optional, no default. Honored by the resolver for
+  // back-compat; removed in v0.5.
   codex: CodexSchema,
   decisions: DecisionsSchema,
   doctor: DoctorSchema,
+  // FORGE-150: tracked methodology-version pin (FORGE-161). Absent ⇒ no warning
+  // (pre-pin repos stay quiet); stamped by `forge upgrade`.
+  methodology_version: z.string().min(1).optional(),
   // FORGE-168: optional — unset ⇒ skip verification with a warning.
   verify: VerifySchema.optional(),
 });

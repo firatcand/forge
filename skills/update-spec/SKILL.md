@@ -56,11 +56,11 @@ Collect via AskUserQuestion batches (≤4 per call):
    ✓ ADR drafted: spec/decisions/<date>-<slug>.md (status: proposed)
      Review it, edit freely, then flip `status: accepted` to unlock /update-spec --apply <slug>.
    ```
-3. End with the auto-codex hook (silent under `FORGE_AUTO_CODEX=0` or settings `codex.auto_codex_enabled: false`):
+3. End with the second-opinion hook (silent under `FORGE_AUTO_SECOND_OPINION=0` or settings `second_opinion.auto_enabled: false`):
    ```bash
-   forge codex-suggest update-spec
+   forge second-opinion suggest update-spec
    ```
-   (Emits `💡 Suggested next: /second-opinion review-decision …` — the v0.4 name; `/codex` is its deprecated alias.)
+   (Emits `💡 Suggested next: /second-opinion review-decision …` — `/codex` is its deprecated alias.)
 
 ---
 

@@ -28,9 +28,11 @@ function bootstrapInitdRepo(opts: { enabled?: AgentKind[]; primary?: AgentKind; 
   const cwd = mkdtempSync(join(tmpdir(), 'forge-upgrade-e2e-'));
   mkdirSync(join(cwd, '.forge'));
 
+  // FORGE-161: pin to the bundled version so a clean repo stays a true no-op
+  // on upgrade (the pin write only fires on a mismatch).
   writeFileSync(
     join(cwd, '.forge/settings.yaml'),
-    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: ${primary}\n  review_host_cli: ${primary === 'codex' ? 'gemini' : 'codex'}\n  enabled_root_files:\n${enabled.map((a) => `    - ${a}`).join('\n')}\ndesign:\n  mode: project_owned\n`,
+    `version: 1\nproject:\n  name: test-project\ntracker:\n  type: github\n  config:\n    repo: org/repo\nsecrets:\n  manager: env_file\n  env_file_path: ./.env.local\nagents:\n  primary_host_cli: ${primary}\n  review_host_cli: ${primary === 'codex' ? 'gemini' : 'codex'}\n  enabled_root_files:\n${enabled.map((a) => `    - ${a}`).join('\n')}\ndesign:\n  mode: project_owned\nmethodology_version: ${version}\n`,
   );
   writeFileSync(join(cwd, '.forge/.version'), `${version}\n`);
 

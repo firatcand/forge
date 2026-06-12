@@ -47,12 +47,12 @@ fi
    - **Questions asked & answers applied** (not "decisions decided" — list each question, who answered, and the resulting branch in the plan)
 7. Show plan to user, wait for approval
 8. On approval: commit plan, unlock /implement
-9. Emit the auto-codex suggestion hint (one printed line; user types or skips):
+9. Emit the second-opinion suggestion hint (one printed line; user types or skips):
    ```bash
-   forge codex-suggest plan-task
+   forge second-opinion suggest plan-task
    ```
-   Prints `💡 Suggested next: /second-opinion review-plan (run with FORGE_AUTO_CODEX=0 to disable)`.
-   Silent when `FORGE_AUTO_CODEX=0` is set or `codex.auto_codex_enabled: false` in `.forge/settings.yaml`.
+   Prints `💡 Suggested next: /second-opinion review-plan (run with FORGE_AUTO_SECOND_OPINION=0 to disable)`.
+   Silent when `FORGE_AUTO_SECOND_OPINION=0` is set or `second_opinion.auto_enabled: false` in `.forge/settings.yaml`.
 
 ## Fork severity filter
 

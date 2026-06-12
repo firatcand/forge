@@ -77,11 +77,18 @@ export const SCAN_MAX_DEPTH = 12;
 export const SCAN_MAX_ENTRIES = 50_000;
 
 // Schema-default blocks inserted into a stale settings.yaml. Values mirror
-// src/schemas/settings.ts CodexSchema/DecisionsSchema/DoctorSchema defaults —
-// the unit tests assert this equality against SettingsSchema.parse output so
-// the two can never drift apart silently.
+// src/schemas/settings.ts SecondOpinionSchema/DecisionsSchema/DoctorSchema
+// defaults — the unit tests assert this equality against SettingsSchema.parse
+// output so the two can never drift apart silently.
+//
+// FORGE-150: the legacy `codex` block was replaced by `second_opinion` here.
+// Absent-both files seed `second_opinion` only (the schema's `codex` block is
+// now optional-without-default, so it must NOT be inserted on a fresh migrate).
+// A file that ALREADY carries a legacy `codex` block is handled by the
+// rename-with-mirror path in detectSettings (which keeps a mirrored codex block
+// for old-CLI compat); it does not flow through this missing-block seeding.
 export const SETTINGS_DEFAULT_BLOCKS: Record<string, Record<string, unknown>> = {
-  codex: { auto_codex_enabled: true },
+  second_opinion: { auto_enabled: true },
   decisions: { decision_dir: './spec/decisions', stale_draft_threshold_days: 7 },
   doctor: { spec_code_check_enabled: true },
 };
@@ -285,12 +292,94 @@ function detectSettings(cwd: string): DriftFinding[] {
       },
     ];
   }
-  const missing = Object.keys(SETTINGS_DEFAULT_BLOCKS).filter((key) => !doc.has(key));
-  if (missing.length === 0) return [];
+  // FORGE-150 — ONE COMPOSED EDIT. A v0.2.x/v0.4 settings.yaml may carry a
+  // legacy `codex` block but no `second_opinion` block. The migrate must (a)
+  // seed `second_opinion.auto_enabled` from the legacy disable value, (b) KEEP
+  // a mirrored `codex.auto_codex_enabled` block (old-CLI compat; removed in
+  // v0.5) carrying the SAME value, and (c) add any other missing default
+  // blocks (decisions/doctor) — all in a SINGLE finding, never a rename finding
+  // racing a missing-block finding over the same file.
+  const hasLegacyCodex = doc.has('codex');
+  const hasSecondOpinion = doc.has('second_opinion');
 
-  for (const key of missing) {
-    doc.set(key, SETTINGS_DEFAULT_BLOCKS[key]);
+  // Derive the legacy disable value (default true when the key is absent or
+  // not a boolean — mirrors SecondOpinionSchema/CodexSchema defaults). Used to
+  // SEED second_opinion when only the legacy block exists (un-migrated repo).
+  let legacyValue = true;
+  if (hasLegacyCodex) {
+    const raw = doc.getIn(['codex', 'auto_codex_enabled']);
+    if (typeof raw === 'boolean') legacyValue = raw;
   }
+
+  // Derive the second_opinion value (default true when absent or not a boolean).
+  // When BOTH blocks exist, second_opinion is the SOURCE OF TRUTH (GPT-5.5
+  // review F2): the legacy codex mirror is refreshed to MATCH this value, so
+  // old-CLI and new-CLI behavior never diverge after a migrate.
+  let secondOpinionValue = true;
+  if (hasSecondOpinion) {
+    const raw = doc.getIn(['second_opinion', 'auto_enabled']);
+    if (typeof raw === 'boolean') secondOpinionValue = raw;
+  }
+
+  // Compute which default blocks are missing. `second_opinion` is handled
+  // explicitly below (so its value can carry the legacy mirror), so exclude it
+  // from the generic default-seeding loop.
+  const missing = Object.keys(SETTINGS_DEFAULT_BLOCKS).filter((key) => !doc.has(key));
+  const missingOther = missing.filter((key) => key !== 'second_opinion');
+
+  // Nothing to do: second_opinion present AND no other missing blocks AND no
+  // legacy mirror to refresh (i.e. either no codex block, or codex already
+  // mirrors second_opinion). The "already mirrored" case is detected by
+  // comparing values when both blocks exist.
+  const codexMirrorInSync =
+    !hasLegacyCodex ||
+    (hasSecondOpinion &&
+      doc.getIn(['second_opinion', 'auto_enabled']) ===
+        doc.getIn(['codex', 'auto_codex_enabled']));
+  if (hasSecondOpinion && missingOther.length === 0 && codexMirrorInSync) {
+    return [];
+  }
+
+  const changes: string[] = [];
+
+  if (!hasSecondOpinion) {
+    doc.set('second_opinion', { auto_enabled: legacyValue });
+    changes.push('second_opinion');
+  }
+
+  // Keep / refresh the legacy mirror only when a codex block already exists in
+  // the file. Absent-both files seed second_opinion only (no codex block).
+  //
+  // The mirror value tracks whichever block is the SOURCE OF TRUTH:
+  //   - both blocks present → second_opinion wins; codex is refreshed to MATCH
+  //     it (GPT-5.5 review F2 — without this, both-present-disagreeing left old-
+  //     CLI and new-CLI divergent and recorded no change).
+  //   - only the legacy block present → we just seeded second_opinion FROM it,
+  //     so the mirror keeps that same legacyValue.
+  if (hasLegacyCodex) {
+    const mirrorValue = hasSecondOpinion ? secondOpinionValue : legacyValue;
+    const codexChanged = doc.getIn(['codex', 'auto_codex_enabled']) !== mirrorValue;
+    doc.setIn(['codex', 'auto_codex_enabled'], mirrorValue);
+    const codexNode = doc.get('codex', true) as
+      | { commentBefore?: string | null }
+      | undefined;
+    if (codexNode && typeof codexNode === 'object') {
+      codexNode.commentBefore = ' legacy mirror — removed in v0.5';
+    }
+    if (!hasSecondOpinion) {
+      changes.push('codex (mirrored for compatibility)');
+    } else if (codexChanged) {
+      changes.push('codex (mirror refreshed to match second_opinion)');
+    }
+  }
+
+  for (const key of missingOther) {
+    doc.set(key, SETTINGS_DEFAULT_BLOCKS[key]);
+    changes.push(key);
+  }
+
+  if (changes.length === 0) return [];
+
   const after = doc.toString({ lineWidth: 0, flowCollectionPadding: false });
 
   // Fail-closed: only offer the edit if the RESULT validates. A v0.2.x file
@@ -305,7 +394,7 @@ function detectSettings(cwd: string): DriftFinding[] {
         class: 'warning',
         relPath: rel,
         detail:
-          `settings.yaml would still fail the v0.4 schema after adding ${missing.join('/')} ` +
+          `settings.yaml would still fail the v0.4 schema after adding ${changes.join('/')} ` +
           `(${issue?.path.join('.')}: ${issue?.message}) — migrate it manually (compare with \`forge init\` output).`,
       },
     ];
@@ -315,7 +404,7 @@ function detectSettings(cwd: string): DriftFinding[] {
       kind: 'settings-missing-blocks',
       class: 'actionable',
       relPath: rel,
-      detail: `settings.yaml lacks the v0.4 ${missing.join(', ')} block(s) — adding schema defaults.`,
+      detail: `settings.yaml lacks the v0.4 ${changes.join(', ')} block(s) — adding schema defaults.`,
       edit: { relPath: rel, before: raw, after },
     },
   ];

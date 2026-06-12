@@ -3,10 +3,16 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { runCodexSuggest, __TEST_ONLY } from '../../../src/cli/codex-suggest.ts';
+import {
+  runSecondOpinionSuggest,
+  __TEST_ONLY,
+} from '../../../src/cli/second-opinion-suggest.ts';
+// FORGE-150: codex-suggest.ts is a back-compat re-export; assert it still
+// resolves the renamed implementation.
+import { runCodexSuggest } from '../../../src/cli/codex-suggest.ts';
 
 function tmp(): string {
-  return mkdtempSync(join(tmpdir(), 'forge-codex-suggest-'));
+  return mkdtempSync(join(tmpdir(), 'forge-second-opinion-suggest-'));
 }
 
 function capture(): {
@@ -30,34 +36,43 @@ function capture(): {
   return { stdout, stderr };
 }
 
-function writeSettings(cwd: string, codex: { auto_codex_enabled?: boolean } | null): void {
+// Write settings with a chosen block shape. `block` = 'second_opinion' writes
+// the primary block; 'codex' writes only the legacy block; 'both' writes both.
+function writeSettings(
+  cwd: string,
+  opts: { secondOpinion?: boolean; codex?: boolean } = {},
+): void {
   const dir = join(cwd, '.forge');
   mkdirSync(dir, { recursive: true });
-  const codexYaml =
-    codex === null
-      ? ''
-      : `\ncodex:\n  auto_codex_enabled: ${codex.auto_codex_enabled ?? true}\n`;
+  let blocks = '';
+  if (opts.secondOpinion !== undefined) {
+    blocks += `\nsecond_opinion:\n  auto_enabled: ${opts.secondOpinion}\n`;
+  }
+  if (opts.codex !== undefined) {
+    blocks += `\ncodex:\n  auto_codex_enabled: ${opts.codex}\n`;
+  }
   const yaml = `version: 1
 project:
-  name: test-codex-suggest
+  name: test-second-opinion-suggest
 tracker:
   type: linear
   config:
     team_id: T
 secrets:
   manager: env_file
-${codexYaml}`;
+${blocks}`;
   writeFileSync(join(dir, 'settings.yaml'), yaml, 'utf8');
 }
 
-test('FORGE-105 — FORGE_AUTO_CODEX=0 silences output', () => {
+// ── env disable resolution ───────────────────────────────────────────────────
+
+test('FORGE-150 — FORGE_AUTO_SECOND_OPINION=0 silences output', () => {
   const cwd = tmp();
-  writeSettings(cwd, { auto_codex_enabled: true });
   const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
+  const result = runSecondOpinionSuggest({
     cwd,
     argv: ['plan-task'],
-    env: { FORGE_AUTO_CODEX: '0' },
+    env: { FORGE_AUTO_SECOND_OPINION: '0' },
     stdout,
     stderr,
   });
@@ -66,190 +81,233 @@ test('FORGE-105 — FORGE_AUTO_CODEX=0 silences output', () => {
   assert.equal(stderr.buf, '');
 });
 
-test('FORGE-105 — FORGE_AUTO_CODEX=false silences output', () => {
-  const cwd = tmp();
-  const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: { FORGE_AUTO_CODEX: 'false' },
-    stdout,
-    stderr,
-  });
-  assert.equal(result.exitCode, 0);
-  assert.equal(stdout.buf, '');
-});
-
-test('FORGE-105 — FORGE_AUTO_CODEX=no silences output', () => {
-  const cwd = tmp();
-  const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: { FORGE_AUTO_CODEX: 'no' },
-    stdout,
-    stderr,
-  });
-  assert.equal(result.exitCode, 0);
-  assert.equal(stdout.buf, '');
-});
-
-test('FORGE-105 — no settings.yaml uses defaults and prints suggestion', () => {
-  const cwd = tmp();
-  const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: {},
-    stdout,
-    stderr,
-  });
-  assert.equal(result.exitCode, 0);
-  assert.match(stdout.buf, /\/second-opinion review-plan/);
-  assert.match(stdout.buf, /FORGE_AUTO_CODEX=0 to disable/);
-});
-
-test('FORGE-105 — settings auto_codex_enabled: true prints suggestion', () => {
-  const cwd = tmp();
-  writeSettings(cwd, { auto_codex_enabled: true });
-  const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: {},
-    stdout,
-    stderr,
-  });
-  assert.equal(result.exitCode, 0);
-  assert.match(stdout.buf, /\/second-opinion review-plan/);
-});
-
-test('FORGE-105 — settings auto_codex_enabled: false silences output', () => {
-  const cwd = tmp();
-  writeSettings(cwd, { auto_codex_enabled: false });
-  const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: {},
-    stdout,
-    stderr,
-  });
-  assert.equal(result.exitCode, 0);
-  assert.equal(stdout.buf, '');
-});
-
-test('FORGE-105 — event plan-task maps to /second-opinion review-plan', () => {
+test('FORGE-150 — FORGE_AUTO_SECOND_OPINION=false silences output', () => {
   const cwd = tmp();
   const { stdout } = capture();
-  runCodexSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: { FORGE_AUTO_SECOND_OPINION: 'false' },
+    stdout,
+    stderr: capture().stderr,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(stdout.buf, '');
+});
+
+test('FORGE-150 — legacy FORGE_AUTO_CODEX=0 still honored, with deprecation note', () => {
+  const cwd = tmp();
+  const { stdout, stderr } = capture();
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: { FORGE_AUTO_CODEX: '0' },
+    stdout,
+    stderr,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(stdout.buf, ''); // disabled
+  // Deprecation note fires exactly once.
+  assert.match(stderr.buf, /FORGE_AUTO_CODEX is deprecated/);
+  assert.equal((stderr.buf.match(/FORGE_AUTO_CODEX is deprecated/g) ?? []).length, 1);
+});
+
+test('FORGE-150 — legacy deprecation note suppressed by FORGE_QUIET=1', () => {
+  const cwd = tmp();
+  const { stdout, stderr } = capture();
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: { FORGE_AUTO_CODEX: '0', FORGE_QUIET: '1' },
+    stdout,
+    stderr,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(stdout.buf, ''); // still disabled
+  assert.equal(stderr.buf, ''); // note suppressed
+});
+
+test('FORGE-150 — primary var wins over legacy (primary=1 ignores legacy=0)', () => {
+  const cwd = tmp();
+  const { stdout, stderr } = capture();
+  runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: { FORGE_AUTO_SECOND_OPINION: '1', FORGE_AUTO_CODEX: '0' },
+    stdout,
+    stderr,
+  });
+  // Primary present → legacy ignored entirely → suggestion fires, no note.
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
+  assert.equal(stderr.buf, '');
+});
+
+// ── settings precedence ──────────────────────────────────────────────────────
+
+test('FORGE-150 — no settings.yaml uses defaults and prints suggestion', () => {
+  const cwd = tmp();
+  const { stdout } = capture();
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: {},
+    stdout,
+    stderr: capture().stderr,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
+  assert.match(stdout.buf, /FORGE_AUTO_SECOND_OPINION=0 to disable/);
+});
+
+test('FORGE-150 — second_opinion.auto_enabled: false silences output', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { secondOpinion: false });
+  const { stdout } = capture();
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: {},
+    stdout,
+    stderr: capture().stderr,
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(stdout.buf, '');
+});
+
+test('FORGE-150 — legacy-only codex.auto_codex_enabled: false honored (un-migrated repo)', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { codex: false });
+  const { stdout } = capture();
+  const result = runSecondOpinionSuggest({
+    cwd,
+    argv: ['plan-task'],
+    env: {},
+    stdout,
+    stderr: capture().stderr,
+  });
+  // second_opinion materializes via default (true), but the present legacy
+  // block disables → silent.
+  assert.equal(result.exitCode, 0);
+  assert.equal(stdout.buf, '');
+});
+
+test('FORGE-150 — legacy false is not silently lost when codex block present', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { codex: false });
+  const { stdout } = capture();
+  runSecondOpinionSuggest({ cwd, argv: ['ship'], env: {}, stdout, stderr: capture().stderr });
+  assert.equal(stdout.buf, '');
+});
+
+test('FORGE-150 — explicit second_opinion.false wins even with legacy codex.true', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { secondOpinion: false, codex: true });
+  const { stdout } = capture();
+  runSecondOpinionSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
+  assert.equal(stdout.buf, '');
+});
+
+// GPT-5.5 review F1: the OTHER conflict direction. Explicit primary `true` must
+// win over a legacy `false` — the bug was the resolver couldn't tell explicit-
+// true from defaulted-true, so legacy `false` wrongly overrode it.
+test('FORGE-150 — explicit second_opinion.true wins even with legacy codex.false', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { secondOpinion: true, codex: false });
+  const { stdout } = capture();
+  runSecondOpinionSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
   assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
 
-test('FORGE-105 — event ship maps to /second-opinion review-impl', () => {
+test('FORGE-150 — second_opinion.true with no legacy block prints suggestion', () => {
+  const cwd = tmp();
+  writeSettings(cwd, { secondOpinion: true });
+  const { stdout } = capture();
+  runSecondOpinionSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
+  assert.match(stdout.buf, /\/second-opinion review-plan/);
+});
+
+// ── event vocabulary + suggestion snapshot ───────────────────────────────────
+
+test('FORGE-150 — suggestion text snapshot (new hint)', () => {
   const cwd = tmp();
   const { stdout } = capture();
-  runCodexSuggest({ cwd, argv: ['ship'], env: {}, stdout, stderr: capture().stderr });
+  runSecondOpinionSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
+  assert.equal(
+    stdout.buf,
+    '💡 Suggested next: /second-opinion review-plan (run with FORGE_AUTO_SECOND_OPINION=0 to disable)\n',
+  );
+});
+
+test('FORGE-150 — event ship maps to /second-opinion review-impl', () => {
+  const cwd = tmp();
+  const { stdout } = capture();
+  runSecondOpinionSuggest({ cwd, argv: ['ship'], env: {}, stdout, stderr: capture().stderr });
   assert.match(stdout.buf, /\/second-opinion review-impl/);
 });
 
-test('FORGE-105 — event update-spec maps to /second-opinion review-decision (reserved)', () => {
+test('FORGE-150 — event update-spec maps to /second-opinion review-decision (reserved)', () => {
   const cwd = tmp();
   const { stdout } = capture();
-  runCodexSuggest({ cwd, argv: ['update-spec'], env: {}, stdout, stderr: capture().stderr });
+  runSecondOpinionSuggest({ cwd, argv: ['update-spec'], env: {}, stdout, stderr: capture().stderr });
   assert.match(stdout.buf, /\/second-opinion review-decision/);
 });
 
-test('FORGE-105 — unknown event exits 1 and writes stderr', () => {
+test('FORGE-150 — unknown event exits 1 and writes stderr', () => {
   const cwd = tmp();
   const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['bogus'],
-    env: {},
-    stdout,
-    stderr,
-  });
+  const result = runSecondOpinionSuggest({ cwd, argv: ['bogus'], env: {}, stdout, stderr });
   assert.equal(result.exitCode, 1);
   assert.equal(stdout.buf, '');
   assert.match(stderr.buf, /unknown event 'bogus'/);
 });
 
-test('FORGE-105 — missing event arg exits 1 with usage', () => {
+test('FORGE-150 — missing event arg exits 1 with usage', () => {
   const cwd = tmp();
   const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: [],
-    env: {},
-    stdout,
-    stderr,
-  });
+  const result = runSecondOpinionSuggest({ cwd, argv: [], env: {}, stdout, stderr });
   assert.equal(result.exitCode, 1);
   assert.equal(stdout.buf, '');
   assert.match(stderr.buf, /missing event arg/);
-  assert.match(stderr.buf, /usage: forge codex-suggest/);
+  assert.match(stderr.buf, /usage: forge second-opinion suggest/);
 });
 
-test('FORGE-105 — malformed settings.yaml falls back to defaults with stderr warning', () => {
+test('FORGE-150 — malformed settings.yaml falls back to defaults with stderr warning', () => {
   const cwd = tmp();
   mkdirSync(join(cwd, '.forge'), { recursive: true });
   writeFileSync(join(cwd, '.forge', 'settings.yaml'), 'this: is: not: valid yaml:::\n', 'utf8');
   const { stdout, stderr } = capture();
-  const result = runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: {},
-    stdout,
-    stderr,
-  });
-  // Never crashes the parent skill — exit 0, fall back to defaults.
+  const result = runSecondOpinionSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr });
   assert.equal(result.exitCode, 0);
   assert.match(stdout.buf, /\/second-opinion review-plan/);
   assert.match(stderr.buf, /could not be parsed/);
 });
 
-test('FORGE-105 — EVENT_TO_VERB locked vocabulary surface', () => {
-  // Compile-time + runtime guarantee that the event vocabulary matches SPEC.
-  // If this set changes, SPEC §Auto-codex skill-level hooks must change too.
+test('FORGE-150 — EVENT_TO_VERB locked vocabulary surface', () => {
   assert.deepEqual(__TEST_ONLY.KNOWN_EVENTS, ['plan-task', 'ship', 'update-spec']);
   assert.equal(__TEST_ONLY.EVENT_TO_VERB['plan-task'], 'review-plan');
   assert.equal(__TEST_ONLY.EVENT_TO_VERB['ship'], 'review-impl');
   assert.equal(__TEST_ONLY.EVENT_TO_VERB['update-spec'], 'review-decision');
 });
 
-test('FORGE-105 — FORGE_AUTO_CODEX=1 leaves default behavior (suggestion fires)', () => {
+test('FORGE-150 — codex-suggest.ts re-export still resolves the implementation', () => {
   const cwd = tmp();
   const { stdout } = capture();
-  runCodexSuggest({
-    cwd,
-    argv: ['plan-task'],
-    env: { FORGE_AUTO_CODEX: '1' },
-    stdout,
-    stderr: capture().stderr,
-  });
+  runCodexSuggest({ cwd, argv: ['plan-task'], env: {}, stdout, stderr: capture().stderr });
   assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
 
 // Codex F1 (confidence 8): GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR env vars
-// can redirect `git rev-parse --git-common-dir` to an attacker-chosen repo.
-// codex-suggest sanitizes the env before invoking git so resolution stays
-// anchored on cwd. This test plants a poisoned GIT_DIR pointing at a tmp
-// directory whose `.forge/settings.yaml` would disable codex-suggest; if
-// the sanitization works, the suggestion still fires (cwd has no settings
-// and falls through to defaults).
-test('FORGE-105 — GIT_DIR/GIT_WORK_TREE env cannot redirect settings discovery', () => {
-  // Set up an attacker-controlled "settings" dir with auto_codex_enabled: false
+// can redirect `git rev-parse --git-common-dir`. The verb sanitizes the env
+// before invoking git so resolution stays anchored on cwd.
+test('FORGE-150 — GIT_DIR/GIT_WORK_TREE env cannot redirect settings discovery', () => {
   const attackerRoot = tmp();
-  writeSettings(attackerRoot, { auto_codex_enabled: false });
-  // The victim cwd is a fresh tmp dir with no .forge/settings.yaml
+  writeSettings(attackerRoot, { secondOpinion: false });
   const victimCwd = tmp();
   const { stdout } = capture();
-  runCodexSuggest({
+  runSecondOpinionSuggest({
     cwd: victimCwd,
     argv: ['plan-task'],
     env: {
-      // Poisoned env that an unsanitized git invocation would honor.
       GIT_DIR: `${attackerRoot}/.git`,
       GIT_WORK_TREE: attackerRoot,
       GIT_COMMON_DIR: `${attackerRoot}/.git`,
@@ -257,7 +315,5 @@ test('FORGE-105 — GIT_DIR/GIT_WORK_TREE env cannot redirect settings discovery
     stdout,
     stderr: capture().stderr,
   });
-  // Sanitization works → git resolves to cwd's parent tree (or null) → no
-  // attacker settings consumed → defaults expand → suggestion fires.
   assert.match(stdout.buf, /\/second-opinion review-plan/);
 });
