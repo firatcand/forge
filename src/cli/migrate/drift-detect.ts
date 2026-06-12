@@ -367,7 +367,7 @@ function detectSettings(cwd: string): DriftFinding[] {
       | { commentBefore?: string | null }
       | undefined;
     if (codexNode && typeof codexNode === 'object') {
-      codexNode.commentBefore = ' legacy mirror — removed in v0.5';
+      codexNode.commentBefore = ' legacy mirror — removed in v0.6';
     }
     if (!hasSecondOpinion) {
       changes.push('codex (mirrored for compatibility)');

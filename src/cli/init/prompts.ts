@@ -45,7 +45,7 @@ const TrackerGithubSchema = z.object({
 });
 // FORGE-117: init emits only database_id for Notion. The legacy
 // mcp_command/mcp_env fields are deprecated (accepted+ignored by the settings
-// schema; removed in v0.5) — new projects must not be born with them.
+// schema; removed in v0.6) — new projects must not be born with them.
 const TrackerNotionSchema = z.object({
   type: z.literal('notion'),
   config: z.object({

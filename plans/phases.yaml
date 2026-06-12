@@ -3,8 +3,8 @@ gate_check_command: npm run typecheck && npm run test && npm run build
 source:
   tracker: linear
   project_id: 768871a9-7f95-4bd8-a5da-2ab1b290753a
-  synced_at: 2026-06-11T05:46:57Z
-  spec_revision: d4e07fbaf301cf7a8983f79c54d7948dc7bee2c4
+  synced_at: 2026-06-11T23:39:57.832Z
+  spec_revision: d9919008a9514bbde992fd3f4854fbbaf177a4c6
 phases:
   - id: phase-2.5
     name: Closed-loop workflow control
@@ -16,7 +16,7 @@ phases:
     tasks:
       - id: P2.5-T01
         tracker_issue_id: FORGE-93
-        title: Build /update-spec draft and apply skill
+        title: "[P2.5-T02] /update-spec --draft and /update-spec --apply skill (two modes)"
         description: "Single skill, two modes. --draft scaffolds spec/decisions/<date>-<slug>.md from template (refuses if a draft exists). --apply <slug> requires frontmatter status: accepted, shows per-artifact diff (SPEC+PRD+phases+tracker), writes a journal, deletes the ADR on success and uses its content as the commit body; --resume/--yes-all supported. Delegates atomic mutations to the apply-decision verb."
         type: skill
         priority: P0
@@ -29,7 +29,7 @@ phases:
           - On success ADR deleted, rationale becomes commit body; --resume continues from journal
       - id: P2.5-T02
         tracker_issue_id: FORGE-101
-        title: Build /amend-roadmap skill and verb
+        title: "[P2.5-T10] /amend-roadmap skill + forge orchestrate amend-roadmap verb"
         description: "skills/amend-roadmap + src/cli/orchestrate/amend-roadmap.ts for mid-flight task creation: prompt for title/description/type/ACs/depends_on/owner_type, write phases.yaml and push to tracker atomically (rollback both on failure), resumable journal under .forge/orchestrator/global/amend-journal/<task-id>.json, auto-invoke worktree-drift-guard after success."
         type: skill
         priority: P0
@@ -42,7 +42,7 @@ phases:
           - Invokes worktree-drift-guard --dry-run preview after success
       - id: P2.5-T03
         tracker_issue_id: FORGE-116
-        title: Build /wrap-up post-merge housekeeping skill
+        title: "[P2.5-T20] /wrap-up skill — end-of-task housekeeping (merged PR → prune worktree, branch, ff main, reconcile)"
         description: "New skills/wrap-up composing existing engines into post-merge cleanup: detect task scope from worktree branch, verify PR merged via gh, run reconcile --pull, show a cleanup preview, then on approval prune the worktree via gc, delete the branch and fast-forward main. Suggest-don't-force; --all batch mode."
         type: skill
         priority: P1
@@ -55,7 +55,7 @@ phases:
           - On approval removes worktree via gc, deletes branch, fast-forwards main
       - id: P2.5-T04
         tracker_issue_id: FORGE-118
-        title: Harden tracker body-mutation methods
+        title: "Tracker adapters: harden body-mutation methods (retry, dedup, fenced-code-blocks, CAS)"
         description: "Codex/review follow-ups deferred from the updateIssueBody work: wrap updateIssueBody/setBlockedBy in withRetry on Linear+GitHub; dedup parseExtraForgeFooters by KEY; stop matching forge comments inside fenced code blocks; decide CAS/single-writer contract; verify or remove the Linear description byte cap."
         type: backend
         priority: P2
@@ -68,7 +68,7 @@ phases:
           - CAS/single-writer contract decided and documented
       - id: P2.5-T05
         tracker_issue_id: FORGE-119
-        title: Add /reconcile --task id filter
+        title: "[follow-up] /reconcile --task &lt;id&gt; filter (deferred from FORGE-100)"
         description: "Add --task <id> to parseReconcileArgv: filter diffPull/diffPush to the matching task (by id or tracker_issue_id), error INVALID_ARGS on unknown id, surface the scope in dry-run. Thin filter layer over the working diff functions."
         type: backend
         priority: P2
@@ -81,7 +81,7 @@ phases:
           - Integration test covers both pull and push directions with the filter
       - id: P2.5-T06
         tracker_issue_id: FORGE-120
-        title: Constrain TaskSchema.status with typed enum
+        title: "[hardening] Constrain TaskSchema.status with a typed enum (deferred from FORGE-100 security review)"
         description: "Replace the unconstrained status: z.string().optional() on TaskSchema with z.enum(TASK_STATUSES) covering active/deferred-v0.5/dropped/paused; export TASK_STATUSES + TaskStatus."
         type: data
         priority: P2
@@ -94,7 +94,7 @@ phases:
           - Unit test rejects a garbage status value
       - id: P2.5-T07
         tracker_issue_id: FORGE-123
-        title: Add Tracker.getCurrentRevision for drift detection
+        title: Add Tracker.getCurrentRevision() for live drift detection (FORGE-113 follow-up)
         description: "Extend the Tracker base with getCurrentRevision(): an opaque provider-native revision token (Linear max(updatedAt), GitHub ETag, Notion last_edited_time). Add source.tracker_revision, stamp on reconcile --pull, wire one consumer (doctor drift or --pull --check short-circuit)."
         type: backend
         priority: P2
@@ -107,7 +107,7 @@ phases:
           - Per-adapter unit tests + integration test for --pull --check skip-on-match
       - id: P2.5-T08
         tracker_issue_id: FORGE-124
-        title: Drop auto_codex_token_cap budget from SPEC
+        title: "SPEC amendment: drop auto_codex_token_cap budget language from §Auto-codex skill-level hooks"
         description: "Remove the legacy budget language in SPEC.md Auto-codex hooks (passive suggestions cost zero codex tokens so the cap bounds nothing): drop the Bounded-by sentence + env ref, the schema field + scaffold default + matching tests, and clean the PRD line."
         type: docs
         priority: P2
@@ -120,7 +120,7 @@ phases:
           - Existing adopter settings.yaml still parse
       - id: P2.5-T09
         tracker_issue_id: FORGE-127
-        title: Move tracker_url into source block
+        title: Move `tracker_url` into `source` block for consistency with `project_id`
         description: Add tracker_url to SourceSchema and remove it from top-level PhasesSchema (mirrors the project_id migration). Migrate legacy top-level tracker_url into source on reconcile --pull; update fixtures/templates/docs/SPEC.
         type: data
         priority: P2
@@ -133,7 +133,7 @@ phases:
           - SPEC + adopter docs updated
       - id: P2.5-T10
         tracker_issue_id: FORGE-129
-        title: Refresh stale phases.yaml schema in SPEC
+        title: Refresh stale §`phases.yaml` schema code block in spec/SPEC.md
         description: Replace the stale TaskSchema/PhaseSchema/PhasesSchema code block in spec/SPEC.md with the current shape from src/schemas/phases.ts (lifecycle fields, source block, superRefine); describe superRefine in prose, keep the schema file canonical.
         type: docs
         priority: P2
@@ -146,7 +146,7 @@ phases:
           - Stale see-also pointer removed
       - id: P2.5-T11
         tracker_issue_id: FORGE-131
-        title: Add doctor exported-name drift detection
+        title: "[FOLLOWUP] forge orchestrate doctor: exported-name grep (v0.5)"
         description: Extend doctor --scope spec-code to detect exported-name drift beyond file-path drift. Requires resolving an architectural fork (inline-link vs grep+allowlist vs AST/ts-morph) to avoid false positives from prose backtick spans in SPEC.md.
         type: backend
         priority: P2
@@ -159,7 +159,7 @@ phases:
           - Exit-code semantics unchanged; existing doctor e2e still passes
       - id: P2.5-T12
         tracker_issue_id: FORGE-134
-        title: Make orchestrate verb --help print help
+        title: "[FOLLOWUP] forge orchestrate <verb> --help should print verb help, not run the verb"
         description: forge orchestrate <verb> --help silently runs the verb. Intercept --help in the dispatcher before verb.run across all 23 verbs, honoring --json precedence; choose synopsis footer vs per-verb flag table from each verb Zod args schema.
         type: backend
         priority: P2
@@ -172,7 +172,7 @@ phases:
           - 2-3 verb tests lock the intercept
       - id: P2.5-T13
         tracker_issue_id: FORGE-137
-        title: Add src/harnesses to SPEC module layout
+        title: "[FOLLOWUP] spec hygiene: add src/harnesses/ to SPEC.md §Module layout (post-FORGE-88)"
         description: SPEC.md Module layout omits the shipped src/harnesses/ subtree (IHarness abstraction). Add a harnesses/ subtree listing the 7 files (base, subprocess, verdict-parser, claude, codex, gemini, index) with one-line role comments, matching the existing code-fence style.
         type: docs
         priority: P2
@@ -194,7 +194,7 @@ phases:
     tasks:
       - id: P3-T01
         tracker_issue_id: FORGE-109
-        title: Build forge migrate v0.2.x to v0.4
+        title: "[P3-T02] forge migrate command for v0.2.x → v0.4 upgrade"
         description: src/cli/migrate.ts detects v0.2.x drift signatures (@inherit, /push-to-linear refs, missing settings.yaml, dropped verbs), shows a chalk diff, updates SettingsSchema (codex/decisions/doctor blocks), rewrites renamed-verb call sites, archives orphan state, backs up to .forge/backup-<ts>/, applies on accept.
         type: backend
         priority: P0
@@ -207,7 +207,7 @@ phases:
           - Backup holds pristine originals; aborts cleanly on reject; idempotent re-run
       - id: P3-T02
         tracker_issue_id: FORGE-110
-        title: Build E2E fixtures and cross-host CI matrix
+        title: "[P3-T03] E2E fixtures + cross-host CI matrix covering closed-loop workflow"
         description: examples/ fixture projects (greenfield github/linear/notion); CI runs the full v0.4 closed-loop lifecycle (init through /ship and /reconcile) on Claude primary + Codex review per fixture, including mid-flight /update-spec draft/apply, ADR deletion, drift events, multi-main CAS, resume-from-failure.
         type: integration
         priority: P0
@@ -222,7 +222,7 @@ phases:
           - "Multi-main CAS test: exactly one session wins; CI matrix Claude+Codex green, Cursor+Gemini smoke"
       - id: P3-T03
         tracker_issue_id: FORGE-111
-        title: Release v0.4.0 to npm and GitHub
+        title: "[P3-T04] Release v0.4.0 to npm + GitHub"
         description: "Cut the release: bump package.json to 0.4.0, tag v0.4.0, npm publish --access public, GitHub release with CHANGELOG excerpt + migration note. Headline = multi-agent host abstraction + dogfood-able upgrade path; closed-loop drift deferred to v0.5."
         type: infra
         priority: P0
@@ -237,7 +237,7 @@ phases:
           - npx @firatcand/forge@0.4.0 --version prints 0.4.0 on a fresh machine
       - id: P3-T04
         tracker_issue_id: FORGE-117
-        title: Refactor NotionTracker to ntn CLI transport
+        title: Refactor NotionTracker to `ntn` CLI transport + implement updateIssueBody
         description: Refactor NotionTracker off the Notion MCP transport onto the ntn CLI (execa seam like GitHubTracker) and implement updateIssueBody via ntn api PATCH. Remove notion-mcp-transport.ts and @modelcontextprotocol/sdk and the NOT_IMPLEMENTED stub; update Notion adapter docs.
         type: integration
         priority: P1
@@ -250,7 +250,7 @@ phases:
           - NOT_IMPLEMENTED stub + MCP transport + sdk dep removed; docs updated
       - id: P3-T05
         tracker_issue_id: FORGE-138
-        title: Resolve codex auto_codex_token_cap reserved field
+        title: "[FOLLOWUP] codex auto_codex_token_cap: implement budget enforcement or remove RESERVED schema field"
         description: "Resolve the SPEC-to-code gap on codex.auto_codex_token_cap (default 50000, no consumer): either implement per-session token budget enforcement or remove the RESERVED field as a deliberate v0.5+ deferral. Cap stays RESERVED through v0.4 ship."
         type: data
         priority: P2
@@ -272,7 +272,7 @@ phases:
     tasks:
       - id: P4-T01
         tracker_issue_id: FORGE-184
-        title: Park architectural escalations from review
+        title: "[Autopilot I1.1] State-machine: park architectural escalations from ready_for_review"
         description: An architectural escalation raised while a task is ready_for_review writes the question but never parks the task, so the auto-review loop re-escalates forever. Add the ready_for_review:question_written -> blocked_on_question transition and broaden the post-write guard to cover ready_for_review.
         type: backend
         priority: P2
@@ -285,7 +285,7 @@ phases:
           - "Unit tests: new transition legal, others illegal; question from ready_for_review parks"
       - id: P4-T02
         tracker_issue_id: FORGE-185
-        title: Add review-queue read verb and scanner
+        title: "[Autopilot I1.2] review-queue read verb + shared collectTasksByState scanner"
         description: No reader enumerates ready_for_review tasks. Add forge orchestrate review-queue --json and factor a shared collectTasksByState scanner in readiness.ts that review-queue reuses.
         type: backend
         priority: P2
@@ -298,7 +298,7 @@ phases:
           - Registered in the read band + help; corrupt state.json skipped; unit tests
       - id: P4-T03
         tracker_issue_id: FORGE-186
-        title: Build review-compose pure module and policy
+        title: "[Autopilot I1.3] review-compose pure module (ReviewVerdict↔Verdict bridge + policy)"
         description: Pure module combining the primary-host review and optional Codex second opinion into one complete-verb Verdict, bridging ReviewVerdict {pass|changes_requested} and worker Verdict {ready_for_review|changes_needed|blocked}. Encodes pass/changes/architectural policy with no I/O.
         type: backend
         priority: P2
@@ -311,7 +311,7 @@ phases:
           - Output satisfies VerdictSchema; every branch unit-tested
       - id: P4-T04
         tracker_issue_id: FORGE-187
-        title: Build auto-review skill and goal driver
+        title: "[Autopilot I1.4] auto-review skill (Claude host) + /goal drain driver + host-adapter interface"
         description: "Interactive Claude-host skill driven by a /goal whose exit is review-queue-empty. Per round: pull queue head, diff, run code-reviewer for a ReviewVerdict, detect architectural paths via guardrail-check, optionally request a Codex second opinion, then compose + complete or escalate via question. Written to a 4-touchpoint host-adapter interface."
         type: skill
         priority: P2
@@ -327,7 +327,7 @@ phases:
           - "Integration test: pass -> reviewed; architectural finding -> blocked_on_question"
       - id: P4-T05
         tracker_issue_id: FORGE-188
-        title: Build bounded self-heal executor loop
+        title: "[Autopilot I2] Executor / bounded self-heal loop (implement→test→fix ≤3)"
         description: After plan approval a worker implements test-first then loops run -> diagnose -> fix (<=3 rounds); still-failing or architecture-smell escalates to the user (HITL during implementation). Driven per-ticket by /goal (exit = shipped-OR-parked). Builds on settings.verify, gc executors, complete.ts retry policy.
         type: backend
         priority: P2
@@ -341,7 +341,7 @@ phases:
           - Per-ticket /goal drives the loop with exit shipped-OR-parked
       - id: P4-T06
         tracker_issue_id: FORGE-189
-        title: Add ship and auto-merge with PR fallback
+        title: "[Autopilot I3] Ship + auto-merge via GitHub branch protection (auto-PR fallback)"
         description: "Net-new: after dual-review passes, push the branch, open a PR, enable auto-merge gated by GitHub branch protection + required checks. Non-GitHub trackers fall back to auto-PR + human merge. Includes a dependency merge gate and rebase-on-drift before merge."
         type: integration
         priority: P2
@@ -355,7 +355,7 @@ phases:
           - Dependency merge gate + rebase-on-drift before merge
       - id: P4-T07
         tracker_issue_id: FORGE-190
-        title: Build watcher loop and plan-approval queue
+        title: "[Autopilot I4] Watcher /loop + plan-approval queue (per-ticket /goal)"
         description: The always-running front-end. A perpetual host /loop (Claude) / cron+codex exec (Codex) pulls ready, non-colliding tickets and launches a per-ticket /goal (exit = shipped-OR-parked). Plans park in an async plan-approval queue reusing question/answer + blocked_on_question; user drains async. CLI stays daemon-free.
         type: backend
         priority: P2
@@ -369,7 +369,7 @@ phases:
           - CLI stays daemon-free; parks-and-goes-quiet at the human gate
       - id: P4-T08
         tracker_issue_id: FORGE-191
-        title: Add parallelism and resilience to runs
+        title: "[Autopilot I5] Parallelism + resilience (overlap serialize, checkpoint/resume, 529 survival)"
         description: Run multiple tickets concurrently with the overlap gate serializing file-colliding merges + rebase-on-drift; survive transient API failures (529, output-token-max) via per-stage checkpoint + resume and backoff, so a long run resumes instead of restarting.
         type: backend
         priority: P2
@@ -383,7 +383,7 @@ phases:
           - A long run resumes from checkpoint instead of restarting
       - id: P4-T09
         tracker_issue_id: FORGE-192
-        title: Add separate-process worker and host adapters
+        title: "[Autopilot I6] (backlog) Separate-process worker mode + Codex-primary adapter + Gemini/Cursor"
         description: "Future/backlog: (1) opt-in metered separate-process worker mode (claude -p / Agent SDK) behind explicit opt-in per the billing invariant; (2) Codex-as-primary host adapter gated on a billing-safe review path (.codex/agents/*.toml reviewer); (3) Gemini/Cursor adapters."
         type: integration
         priority: P2
@@ -397,7 +397,7 @@ phases:
           - Gemini / Cursor adapters fill the remaining host slots
       - id: P4-T10
         tracker_issue_id: FORGE-178
-        title: Build read-only multi-subagent /audit skill
+        title: "[feature] /audit — multi-subagent read-only repo audit → work-order → issues / fix-handoff"
         description: A /audit skill spawns parallel read-only subagents to sweep the repo for dead code, duplication, bloat and safe simplifications, producing a work-order (file:line, classification, evidence, proposed change, blast radius). Never edits source. From the work-order, file one issue per finding or hand off to a dual-reviewed fix flow.
         type: skill
         priority: P2
@@ -410,7 +410,7 @@ phases:
           - --create-issues files per-finding issues on the configured tracker
       - id: P4-T11
         tracker_issue_id: FORGE-179
-        title: Build core read-only audit verbs and schema
+        title: "[/audit P1] Core read-only audit (plan + collect verbs, schema, skill, scope-discovery, principles)"
         description: "Phase 1 of /audit: forge orchestrate audit plan + collect verbs, a Finding/WorkOrder schema with 6-way classification, AuditSchema in settings, scope auto-discovery via git ls-files ranking (no hardcoded src/), CRITICAL.md parser, path-free principles template, and the audit SKILL.md fanning out read-only subagents."
         type: backend
         priority: P2
@@ -423,7 +423,7 @@ phases:
           - collect writes only .forge/audits/<ts>/work-order.{md,json}; git status clean
       - id: P4-T12
         tracker_issue_id: FORGE-180
-        title: Add --create-issues via configured tracker
+        title: "[/audit P2] Issue creation (--create-issues via configured tracker)"
         description: "Phase 2 of /audit: turn a work-order into one tracker issue per finding via the adopter's configured tracker adapter (no new tracker code). Reuses resolveTrackerForCLI/createIssue/CreateIssuePayload; optional umbrella + sub-issues; hard-refuses on NoopTracker."
         type: integration
         priority: P2
@@ -436,7 +436,7 @@ phases:
           - Refuses with NO_TRACKER_CONFIGURED when tracker is Noop
       - id: P4-T13
         tracker_issue_id: FORGE-181
-        title: Migrate forge to dogfood /audit plus docs
+        title: "[/audit P3] Forge dogfood migration + docs"
         description: "Phase 3 of /audit: forge becomes just another adopter — its specifics live in its own CRITICAL.md + settings.verify, the shipped feature carries none. Add DO-NOT-SIMPLIFY paths to forge CRITICAL.md, hold the full gate in verify.commands, commit prior-art docs + generalized principles template, add /audit to CONTEXT.md + CHANGELOG."
         type: docs
         priority: P2
@@ -449,7 +449,7 @@ phases:
           - forge /audit reads its protected set from CRITICAL.md, not from code
       - id: P4-T14
         tracker_issue_id: FORGE-182
-        title: Add repo-agnostic read-only validation tests
+        title: "[/audit P4] Repo-agnostic + read-only validation tests"
         description: "Phase 4 of /audit: prove the feature is genuinely repo-agnostic and read-only and enforce the audit+gate-must-be-a-pair lesson. Integration test runs audit plan+collect on a non-forge fixture, asserting auto-discovery without assuming src/, no forge strings, provably read-only git status, and a gate-pair warning when verify is unset."
         type: backend
         priority: P2
@@ -463,7 +463,7 @@ phases:
           - read-only + gate-pair-warning tests green; full gate green
       - id: P4-T15
         tracker_issue_id: FORGE-195
-        title: Add inbox read verb and shared scanner
+        title: "[Plan-mode I0.5.2] inbox read verb + shared collectTasksByState scanner"
         description: "I0.5 foundation: forge orchestrate inbox --json lists parked decisions (blocked_on_question tasks) with their open questions, tagged by classification. Extracts a shared collectTasksByState from readiness.ts, correlates questions via listOpenQuestionsAcrossTree, emits unified JSON. Powers /inbox and the plan-approval queue."
         type: backend
         priority: P2
@@ -476,7 +476,7 @@ phases:
           - Shared collectTasksByState reused by readiness + inbox; unit tests
       - id: P4-T16
         tracker_issue_id: FORGE-196
-        title: Build /inbox skill for draining decisions
+        title: "[Plan-mode I0.5.3] /inbox skill — digest → pick → deep-dive → answer"
         description: "I0.5 foundation: interactive /inbox skill, the unified surface to drain parked decisions. Reads inbox --json, shows a tagged digest with age, lets the user pick + deep-dive a full question + options + recommendation via AskUserQuestion, routes answers through the answer verb."
         type: skill
         priority: P2
@@ -490,7 +490,7 @@ phases:
           - "Contract test: references inbox/answer; no orchestrator writes; no sleep/watch/loop"
       - id: P4-T17
         tracker_issue_id: FORGE-197
-        title: Add forge statusline and host-config writer
+        title: "[Plan-mode I0.5.4] forge statusline + statusLine host-config writer + settings schema"
         description: "I0.5 foundation: a display-only badge showing parked-decision count, plus the first narrow opt-in host-settings writer. forge statusline reads state.json via collectTasksByState; a host-config writer writes only the statusLine key into ~/.claude/settings.json (atomic, deep-merge, non-clobbering, opt-in); hosts.claude.status_line schema flag default off."
         type: infra
         priority: P2
@@ -505,7 +505,7 @@ phases:
           - schema default off; count/perf/empty + write/merge/atomic/idempotent tests
       - id: P4-T18
         tracker_issue_id: FORGE-198
-        title: Build Loom graph memory replacing flat recall
+        title: "[feature] Loom — graph memory (code · decisions · deps · tasks) replacing flat learning recall"
         description: "Epic: replace flat agent-guessed learning recall with a queryable graph linking code symbols/files, decisions, the task dependency graph and tasks/learnings. Native graph schema (one node table + one edge table by kind) behind a pluggable MemoryBackend (local SQLite default). Node ids are pure functions of source so reindex is idempotent; tracker stays authoritative."
         type: data
         priority: P2
@@ -518,7 +518,7 @@ phases:
           - No new runtime dependency (node:sqlite is built-in)
       - id: P4-T19
         tracker_issue_id: FORGE-200
-        title: Build local SQLite Loom backend and recall
+        title: "[Loom I1] local SQLite(WAL)+FTS5 backend + dependency-aware recall (MVP — replaces guessed recall)"
         description: "Increment 1 of Loom: node:sqlite WAL + busy_timeout + FTS5; task+learning nodes, depends_on+learned_from edges; reindex walkers for phases.yaml + learnings; loom index/reindex/recall/status verbs; MemorySchema default local. recallForTask walks depends_on ancestors + FTS, ranking structural over FTS with a why provenance, rewiring /pickup-task."
         type: data
         priority: P2
@@ -532,7 +532,7 @@ phases:
           - /pickup-task shows Loom recall; canonical DB via git-common-dir; worktrees carry no loom.db
       - id: P4-T20
         tracker_issue_id: FORGE-199
-        title: Build Tripwire prompt-injection defense layer
+        title: "[feature] Tripwire — runtime prompt-injection defense + Sentinel Marks"
         description: "Epic: a runtime content-trust layer orthogonal to the static security-auditor. Tripwire inspects untrusted input a worker will consume (Scan injection heuristics) and behavior that looks compromised (Sentinel Marks decoys). Kill-switch is agents.tripwire.mode. Requires an I0 gate proving the untrusted-content data path before any code."
         type: backend
         priority: P2
@@ -545,7 +545,7 @@ phases:
           - CRITICAL.md covers src/security/** so the layer auto-triggers /second-opinion on its own changes
       - id: P4-T21
         tracker_issue_id: FORGE-201
-        title: Write THREAT-MODEL and prove data path
+        title: "[Tripwire I0] THREAT-MODEL.md + prove the untrusted-content data path (gate — blocks all Tripwire code)"
         description: "I0 gate for Tripwire (blocks all Tripwire code). Investigation + doc: trace end-to-end how externally-authored text (issue body, reconcile --pull, answered questions, prior attempts, future search/browser results) reaches the rendered worker prompt, with file:line evidence; write spec/THREAT-MODEL.md with the proven data-path table and a verdict."
         type: docs
         priority: P2
@@ -558,7 +558,7 @@ phases:
           - What Tripwire does NOT defend section includes the Sentinel-Marks network-exfil limitation
       - id: P4-T22
         tracker_issue_id: FORGE-202
-        title: Build deterministic injection scanner MVP
+        title: "[Tripwire I1] deterministic injection scanner + boundary wrapping + report-only mode (MVP)"
         description: Increment 1 of Tripwire (blocked by the I0 gate). Deterministic, model-free, report-only, no new dep. Pure scanText producing a TripwireReport with severity + spans; rules for instruction_override/tool_coercion/secret_egress/encoded_payload/role_confusion; boundary wrapping in the CLI hydration layer (renderer stays pure); mode:mark never blocks; standalone scan verb.
         type: backend
         priority: P2
@@ -572,7 +572,7 @@ phases:
           - scan --task <id> --json prints a report; build/typecheck/lint green; no new dep; no model call
       - id: P4-T23
         tracker_issue_id: FORGE-203
-        title: Build pluggable browser provider adapters
+        title: "[feature] Browser provider adapters (Playwright default; Browserbase / BrowserUse opt-in)"
         description: "Epic (deferred; decompose when reached): make browser capability a pluggable provider adapter (tracker/secrets mold) with playwright default (no key), browserbase, browser-use; resolve decision D3 (core adapters vs skill-level wrappers) first. Keys via secrets manager, never in subprocess env. Every result passes scanText Tripwire at the base."
         type: integration
         priority: P2
@@ -586,7 +586,7 @@ phases:
           - Results Tripwire-scanned at the base; no mandatory heavy dep for non-users
       - id: P4-T24
         tracker_issue_id: FORGE-204
-        title: Build pluggable search provider adapters
+        title: "[feature] Search provider adapters (Exa / Parallel / Perplexity; native passthrough default)"
         description: "Epic (deferred; decompose when reached): make web search a pluggable provider adapter with native host passthrough as zero-key default plus exa/parallel/perplexity opt-in. Same D3 decision as the browser adapters. base.ts normalizes result-list (Exa/Parallel) and answer-shaped (Perplexity) responses. Keys via secrets manager. All results Tripwire-scanned at the base."
         type: integration
         priority: P2
@@ -600,7 +600,7 @@ phases:
           - base.ts normalizes both response shapes; all results Tripwire-scanned
       - id: P4-T25
         tracker_issue_id: FORGE-205
-        title: Add docs-coverage report to doctor
+        title: "[feature] Docs coverage — start as a doctor extension (Contract / Operator / Walkthrough / Rationale / Field Note)"
         description: "Epic (deferred; decompose when reached): start docs coverage as a doctor extension (not a new subsystem) reporting required-but-missing doc categories (Contract / Operator / Walkthrough / Rationale / Field Note; no Diataxis vocabulary) for a diff, mapped via the existing glob engine + preflight_globs. First slice is pure src/docs-coverage/{map,report}.ts + a non-blocking doctor gap report."
         type: backend
         priority: P2
@@ -619,7 +619,7 @@ phases:
     tasks:
       - id: P5-T01
         tracker_issue_id: FORGE-68
-        title: Add clean-room smoke recipe to CONTRIBUTING
+        title: "[docs] CONTRIBUTING.md: add clean-room smoke recipe to Local validation section"
         description: Add a Pre-push smoke subsection to CONTRIBUTING.md Local validation with a clean-room recipe (build, rm node_modules, npm ci --omit=dev, run forge.cjs --version and --help) that catches CJS-packaging bugs the regular checks miss.
         type: docs
         priority: P2
@@ -632,7 +632,7 @@ phases:
           - One line explains why, plus restoring node_modules afterwards
       - id: P5-T02
         tracker_issue_id: FORGE-70
-        title: Install deps in fresh pickup-task worktree
+        title: "[skill] pickup-task: install/rebuild deps in fresh worktree (npm ci)"
         description: After /pickup-task hydration, auto-run npm ci (or lockfile-detected equivalent) in the new worktree when package.json exists, so tests/typecheck/lint work. A failing install is reported best-effort without fataling pickup.
         type: skill
         priority: P2
@@ -657,7 +657,7 @@ phases:
           - Ranking reflects task tags (orchestrator task surfaces concurrency/file-write learnings)
       - id: P5-T04
         tracker_issue_id: FORGE-83
-        title: Enforce UTF-8 byte caps on schema strings
+        title: "[hardening] Enforce UTF-8 byte caps on string fields in attempt/verdict schemas (M1 from FORGE-78 review)"
         description: AttemptEventSchema/VerdictSchema use z.string().max(N), which counts UTF-16 code units not UTF-8 bytes, so emoji can exceed the budget ~2x. Replace .max(N) with a Buffer.byteLength refine on byte-budget-critical fields (or document the gap). M1 from the FORGE-78 review.
         type: data
         priority: P2
@@ -669,7 +669,7 @@ phases:
           - "Regression test: all-emoji input at the documented limit behaves as specified"
       - id: P5-T05
         tracker_issue_id: FORGE-84
-        title: Comment ENOENT cases in overwriteAtomicLink
+        title: "[hardening] Add explicit ENOENT-distinction comment to overwriteAtomicLink (M2 from FORGE-78 review)"
         description: overwriteAtomicLink treats ENOENT from unlinkSync as idempotent, but ENOENT can mean expected prior deletion OR a deletion racing our write. Add an inline comment (or named-case helper) distinguishing the two; no behavior change. M2 from the FORGE-78 review.
         type: backend
         priority: P2
@@ -681,7 +681,7 @@ phases:
           - No behavior change to the lease overwrite path
       - id: P5-T06
         tracker_issue_id: FORGE-85
-        title: Add size cap to JSONL append logs
+        title: "[hardening] Add size cap / rotation to events.jsonl and claim-history.jsonl (M3 from FORGE-78 review)"
         description: appendAttemptEvent (events.jsonl) and appendClaimHistory (claim-history.jsonl) append unbounded, so a tight-loop worker can fill disk. Add a configurable hard size cap refusing to append with a clear code (EVENT_LOG_FULL / CLAIM_HISTORY_FULL) surfaced via status and gc divergence. M3 from the FORGE-78 review.
         type: backend
         priority: P2
@@ -693,7 +693,7 @@ phases:
           - Full-log condition surfaced via status and gc divergence; worker bails via the lease-loss path
       - id: P5-T07
         tracker_issue_id: FORGE-86
-        title: Sanitize OrchestratorError path disclosure
+        title: "[hardening] Sanitize OrchestratorError.details path disclosure before any IPC/HTTP surface (M4 from FORGE-78 review)"
         description: OrchestratorError.details is unsanitized and carries raw cause/path fields disclosing absolute paths — a low-severity info leak if errors are ever exposed over IPC/HTTP. Add a safeDetails() getter filtering through an allowed-keys list; raw details stays for CLI. M4 from the FORGE-78 review.
         type: backend
         priority: P2
@@ -705,7 +705,7 @@ phases:
           - Unit test confirms safeDetails() redacts an unknown key
       - id: P5-T08
         tracker_issue_id: FORGE-87
-        title: Add optional flock locking for lease steal
+        title: "[hardening] Optional flock/fcntl locking for steal+heartbeat to fully close residual nanosecond race (M5 from FORGE-78 Codex re-review)"
         description: "Theoretical hardening: a residual ~1-2 syscall race remains between the verify-read in steal and the unlink+link in overwriteAtomicLink (today made practically unreachable by the post-mutation fence). Add a sidecar lease.lock + flock(LOCK_EX) around acquire/heartbeat/steal/release + gc stale-lock rules. Do not pick up unless a real bug surfaces."
         type: backend
         priority: P2
@@ -717,7 +717,7 @@ phases:
           - gc rule deletes the lockfile when the owning PID and lease holder are both dead
       - id: P5-T09
         tracker_issue_id: FORGE-130
-        title: Unify task-id schema across modules
+        title: Unify task-id schema across schemas/paths/workspace + non-Linear adopter ID normalization
         description: "Three inconsistent task-id regexes (cli-args, paths, workspace) block non-Linear adopters: GitHub #42 and phase-local P2.5-T07 ids fail validation, breaking mutate verbs. Pick one canonical regex source imported everywhere and normalize adapter-emitted ids. Touches src/trackers/** so /codex review required."
         type: data
         priority: P1
@@ -730,7 +730,7 @@ phases:
           - All tests pass; backwards-compat for existing task dirs (migrate or documented break)
       - id: P5-T10
         tracker_issue_id: FORGE-139
-        title: Delete orphan branches on workspace cleanup
+        title: "[FOLLOWUP] `workspace.cleanup()` leaves branch alive when `deleteBranch: false` — orphan branches accumulate"
         description: workspace.cleanup() only deletes the local branch when deleteBranch:true, but the CLI gc path defaults to false, so orphan feat/<task-id> branches accumulate. Decide between flipping the default vs adding a --prune-branches sweep to gc.
         type: backend
         priority: P2
@@ -743,7 +743,7 @@ phases:
           - "Integration test: 3 stale worktrees+branches cleaned in one gc pass"
       - id: P5-T11
         tracker_issue_id: FORGE-140
-        title: Fix ensure-worktree repoRoot path resolution
+        title: "[FOLLOWUP] `ensure-worktree` repoRoot resolution brittle when `git rev-parse --git-common-dir` returns a relative path"
         description: ensure-worktree resolves repoRoot via path.resolve(path.dirname(stdout)) where git --git-common-dir returns relative .git; path.resolve anchors to process.cwd() not the execa cwd, so invoking from a subdir resolves repoRoot wrong and bleeds hydration across worktrees. Anchor path.resolve to the execa cwd.
         type: backend
         priority: P2
@@ -755,7 +755,7 @@ phases:
           - "Regression test: invoke from a cwd outside the repo with explicit forgeDir; worktree lands under main"
       - id: P5-T12
         tracker_issue_id: FORGE-141
-        title: Remove stale FORGE-88 investigation file
+        title: "[FOLLOWUP] Stale untracked `plans/tasks/FORGE-88.investigation.md` in main pollutes every new worktree's hydration manifest"
         description: plans/tasks/FORGE-88.investigation.md is an untracked gitignored leftover from a shipped task; it survives worktree creation, lands in every new worktree manifest, and shows as git-status noise. Delete it (or migrate load-bearing content to docs/learnings/).
         type: infra
         priority: P2
@@ -767,7 +767,7 @@ phases:
           - Optionally add a /wrap-up step prompting deletion of stale *.investigation.md before shipping
       - id: P5-T13
         tracker_issue_id: FORGE-142
-        title: Handle git submodules in hydration filter
+        title: "[FOLLOWUP] `workspace.create()` hydration filter doesn't handle git submodules under hydration roots"
         description: workspace.create() hydration uses git ls-files (a submodule is one mount-point entry) while planCopyRecursive descends into the submodule and emits nested paths absent from the tracked set, so an adopter submodule under spec/plans/docs gets silently hydrated. Detect submodules and refuse, skip, or recurse.
         type: backend
         priority: P2
@@ -779,7 +779,7 @@ phases:
           - "Test: fixture with a submodule under plans/ confirms expected behavior"
       - id: P5-T14
         tracker_issue_id: FORGE-143
-        title: Close TOCTOU window in symlink rejection
+        title: "[FOLLOWUP] `workspace.create()` symlink rejection has a plan-time-only window — TOCTOU between lstat and copyFileSync"
         description: workspace.create() lstat-rejects symlinks at plan time but copies later via copyFileSync (which follows symlinks), leaving a TOCTOU window where a concurrent actor swaps a planned file for a symlink mid-hydration. Use O_NOFOLLOW open (or re-lstat the source fd) in executeCopyPlan.
         type: backend
         priority: P2
@@ -803,7 +803,7 @@ phases:
           - Break into sub-tasks and produce a launch video per product
       - id: P5-T16
         tracker_issue_id: FORGE-149
-        title: Add JSON warning surface to phases/status
+        title: "[FORGE-22 followup] Opt-in JSON warning surface for phases --ready / status (auto-gc visibility)"
         description: Auto-gc divergence warnings from phases --ready and status go only to stderr, so scripts using 2>/dev/null or jq miss them. Add an opt-in --include-warnings flag putting a structured warnings[] array in --json stdout, add JSON mode to status, refactor detectCheapDivergences to return structured rows. Backward-compatible.
         type: backend
         priority: P2
@@ -816,7 +816,7 @@ phases:
           - Flag documented in verb help + ORCHESTRATOR.md CLI surface
       - id: P5-T17
         tracker_issue_id: FORGE-150
-        title: Rename codex-suggest verb to second-opinion
+        title: "[FOLLOWUP] Rename codex-suggest CLI verb / auto_codex_enabled / FORGE_AUTO_CODEX to match /second-opinion skill (v0.5)"
         description: Align the auto-codex CLI verb (codex-suggest), settings field (auto_codex_enabled) and env var (FORGE_AUTO_CODEX) with the shipped /second-opinion skill name. Settings-schema migration with backward-compat shim, deprecation aliases (once-per-session stderr warning), doctor detection of the old schema, dual-shape snapshot tests.
         type: backend
         priority: P2
@@ -842,7 +842,7 @@ phases:
           - Exit code 2 registered in the upgrade exit-code matrix with integration tests
       - id: P5-T19
         tracker_issue_id: FORGE-160
-        title: Add Cursor host adapter for .cursor/rules
+        title: Cursor host adopter — `.cursor/rules/` integration
         description: "Add Cursor as a supported host: add it to AgentKind, define a per-host root-file convention (.cursor/rules/forge.mdc), extend HOST_DIRS/skill-farm and gitignore, wire --add-agent/--remove-agent. Needs a design memo first (root-file shape, skill discovery, subagent convention, @-import semantics, primary_host eligibility)."
         type: integration
         priority: P2
@@ -855,7 +855,7 @@ phases:
           - --add-agent/--remove-agent cursor work idempotently with an integration test + CHANGELOG
       - id: P5-T20
         tracker_issue_id: FORGE-161
-        title: Track methodology-version pin in settings.yaml
+        title: "[arch-review] Track methodology-version pin in .forge/settings.yaml (CONTEXT.md determinism)"
         description: Two devs on different Forge versions silently run different methodology against one repo, and the .forge/.version pin is gitignored so the drift is invisible in review. Add a tracked methodology_version to .forge/settings.yaml that forge upgrade updates intentionally, and warn on any CLI invocation when installed version differs from the pin.
         type: data
         priority: P2
@@ -868,7 +868,7 @@ phases:
           - .forge/CONTEXT.md stays gitignored
       - id: P5-T21
         tracker_issue_id: FORGE-162
-        title: Add ambiguous-field conflict table to CONTEXT
+        title: "[arch-review] Add ambiguous-field conflict table to authority-by-field model (CONTEXT.md)"
         description: The authority-by-field source-of-truth model has boundary ambiguity (acceptance criteria, task scope, dependencies, architecture overlap), so agents improvise. Add a small conflict table to the Source-of-truth section of the CONTEXT.md template giving a deterministic lookup for overlapping cases.
         type: docs
         priority: P2
@@ -880,7 +880,7 @@ phases:
           - Starter rows map readiness/status + sequencing/deps to tracker, ACs to PRD/phases, arch to SPEC
       - id: P5-T22
         tracker_issue_id: FORGE-164
-        title: Surface SPEC changes at PR/push time
+        title: "[arch-review] Surface SPEC changes at PR/push time (non-silent SPEC-change signal)"
         description: The resume-time half of SPEC-change mitigation shipped (spec_revision stamping); the gap is PR/push-time visibility — a dev can push a SPEC.md change silently while another ships against the old assumption. Add a non-gating informational signal via a /ship or PR-description annotation and/or a read-only check listing active worktrees whose claim predates the change.
         type: backend
         priority: P2
@@ -893,7 +893,7 @@ phases:
           - Strictly informational — no gate
       - id: P5-T23
         tracker_issue_id: FORGE-175
-        title: Fix decompose skill acceptance field name
+        title: skills/decompose/SKILL.md emits acceptance_criteria but PhasesSchema requires acceptance
         description: skills/decompose/SKILL.md instructs agents to emit acceptance_criteria, but TaskSchema requires the field named acceptance, so every fresh /decompose produces a phases.yaml that fails with PHASES_PARSE_ERROR. Rename acceptance_criteria -> acceptance in the skill.
         type: skill
         priority: P2
@@ -905,7 +905,7 @@ phases:
           - A /decompose run produces a phases.yaml that parses without PHASES_PARSE_ERROR
       - id: P5-T24
         tracker_issue_id: FORGE-176
-        title: Surface Zod issues in PHASES_PARSE_ERROR
+        title: PHASES_PARSE_ERROR strips inner Zod issues[] — users can't diagnose which field broke
         description: When phases.yaml fails validation, phases returns only the top-level PHASES_PARSE_ERROR without the inner Zod issues[], so users cannot tell which field broke. The issues are already in PhasesError.details but never re-emitted. Append a bulleted issue list to stderr and add issues[] to the --json error envelope.
         type: backend
         priority: P2
@@ -917,7 +917,7 @@ phases:
           - --json error envelope includes a top-level issues[] array with path/message
       - id: P5-T25
         tracker_issue_id: FORGE-177
-        title: Add human owner type to OWNER_TYPES enum
+        title: OWNER_TYPES enum has no value for human-owned bootstrap tasks
         description: OWNER_TYPES has only agent roles and no value for human-owned bootstrap tasks (provisioning accounts, copying API keys, OAuth consent), so /decompose forces misleading workarounds. Add human (or user) to OWNER_TYPES and document that human-owned tasks are not dispatched.
         type: data
         priority: P2
@@ -929,7 +929,7 @@ phases:
           - SPEC documents that human-owned tasks are not dispatched and appear as checkpoints
       - id: P5-T26
         tracker_issue_id: FORGE-206
-        title: Rename Compound Learning to Cumulative Learning
+        title: '[chore] Rename principle "Compound Learning" → "Cumulative Learning" (anti-collision with gstack)'
         description: "Principle #5 Compound Learning collides with gstack compound engineering branding. Rename to Cumulative Learning across ETHOS.md, the principles template (not the generated file), package.json keyword, README and skill prose, with a CHANGELOG methodology-version note. Needs user sign-off since it is a branded principle."
         type: docs
         priority: P2
@@ -940,3 +940,25 @@ phases:
           - User approves the new name (or an alternative)
           - All references updated; forge upgrade regenerates .forge/CONTEXT.md cleanly
           - No remaining Compound Learning / compound-engineering strings except historical CHANGELOG
+      - id: P5-T27
+        tracker_issue_id: FORGE-209
+        title: Harden symlink guards and hardlink preflight
+        description: "Follow-up batch from the FORGE-208 symlink-safe-writes review (PR #323). Five items: (1) symlinkSkipNotice in upgrade.ts calls readlinkSync unguarded — a link removed between the isSymlinkAt check and the notice crashes upgrade with a raw ENOENT instead of skipping; (2) isSymlinkAt swallows ALL lstat errors and returns false, inconsistent with writeAtomic's strict ENOENT-only posture — unify or document the asymmetry; (3) three duplicate symlink helpers (upgrade.ts isSymlinkAt, scaffold.ts isSymlinkAt, eject.ts isSymlink) should be one export next to writeAtomic in core/; (4) UX edge: with claude-only enabled and CLAUDE.md symlinked to AGENTS.md, the skip notice says 'managing the target if enabled' but nothing is enabled for the target — no forge block lands anywhere; the notice should detect and state this; (5) the accepted FORGE-208 gap: renameSync silently detaches hardlinked targets (nlink > 1) — add a preflight to writeAtomic with a typed FsWriteError and per-caller policy, mirroring the symlink guard."
+        type: infra
+        priority: P2
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - "symlinkSkipNotice survives a link vanishing between lstat and readlink: skip notice (or graceful fallback) instead of an unhandled ENOENT — regression test"
+          - "isSymlinkAt error posture unified with writeAtomic: non-ENOENT lstat failures propagate (or the divergence is explicitly documented at the helper) — test for the EACCES path"
+          - exactly one shared symlink-check helper exported from src/core/, consumed by upgrade.ts, scaffold.ts, and eject.ts; duplicates deleted
+          - claude-only + symlinked CLAUDE.md topology produces a notice explicitly stating the target is unmanaged and no methodology block is being maintained anywhere — test
+          - writeAtomic preflights hardlinked targets (nlink > 1) and refuses with a typed FsWriteError code; upgrade/eject/scaffold caller policies and tests mirror the symlink guard; type-preservation property test extended to a hardlink fixture
+        write_globs:
+          - src/core/fs-atomic.ts
+          - src/core/errors.ts
+          - src/cli/upgrade/**
+          - src/cli/eject/**
+          - src/cli/init/**
+          - test/unit/**

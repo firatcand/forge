@@ -144,7 +144,7 @@ function detectLegacyCodexWarning(forgeDir: string): DoctorSettingsWarning[] {
         {
           kind: 'legacy-codex-settings',
           message:
-            'legacy codex.* settings — run `forge migrate` (mirrored for compatibility; removal in v0.5).',
+            'legacy codex.* settings — run `forge migrate` (mirrored for compatibility; removal in v0.6).',
         },
       ];
     }
