@@ -164,6 +164,23 @@ export async function runTrackerConformance(
     );
   }
 
+  // 12. getCurrentRevision — returns an opaque non-empty string token
+  //     (FORGE-123). Equality-only contract; we assert only the shape.
+  const revision = await tracker.getCurrentRevision();
+  assert.equal(
+    typeof revision,
+    'string',
+    'getCurrentRevision must return a string',
+  );
+  assert.ok(
+    revision.length > 0,
+    'getCurrentRevision token must be non-empty',
+  );
+  assert.ok(
+    revision.includes(':'),
+    'getCurrentRevision token must carry a provider-tag prefix (e.g. linear:)',
+  );
+
   // Type-level guard: the `tracker.type` discriminator exists and is one of
   // the three known values. Caught at compile time by `Tracker.type` literal
   // union; runtime is just defensive.

@@ -163,6 +163,11 @@ function fakeTracker(opts: {
     updateIssueBody: notUsed('updateIssueBody') as Tracker['updateIssueBody'],
     setClaimFence: notUsed('setClaimFence') as Tracker['setClaimFence'],
     createProject: notUsed('createProject') as Tracker['createProject'],
+    // amend-roadmap drives the --pull path, which best-effort stamps the
+    // revision (FORGE-123); return a stable token rather than notUsed().
+    async getCurrentRevision() {
+      return 'linear:amend-rev';
+    },
     healthCheck: notUsed('healthCheck') as Tracker['healthCheck'],
   };
 }

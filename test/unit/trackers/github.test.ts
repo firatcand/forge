@@ -1178,3 +1178,24 @@ test('GitHubTracker passes the shared Tracker conformance suite', async () => {
     blockerId: '1',
   });
 });
+
+// ─── getCurrentRevision (FORGE-123) ──────────────────────────────────────────
+
+test('getCurrentRevision — issues the updated-desc top-1 query and returns github:<iso>', async () => {
+  const { tracker, mock } = makeTracker([
+    ok([{ updatedAt: '2026-06-01T12:00:00Z' }]),
+  ]);
+  const rev = await tracker.getCurrentRevision();
+  assert.equal(rev, 'github:2026-06-01T12:00:00Z');
+  const args = mock.calls[0]!;
+  assert.ok(args.includes('issue') && args.includes('list'));
+  assert.equal(args[args.indexOf('--state') + 1], 'all');
+  assert.equal(args[args.indexOf('--search') + 1], 'sort:updated-desc');
+  assert.equal(args[args.indexOf('--limit') + 1], '1');
+  assert.equal(args[args.indexOf('--json') + 1], 'updatedAt');
+});
+
+test('getCurrentRevision — empty repo returns github:none', async () => {
+  const { tracker } = makeTracker([ok([])]);
+  assert.equal(await tracker.getCurrentRevision(), 'github:none');
+});

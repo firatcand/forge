@@ -94,6 +94,7 @@ function makeMockSdk(opts: MockOpts = {}): LinearSdkLike & {
     createIssueLabel: track('createIssueLabel') as LinearSdkLike['createIssueLabel'],
     createProject: track('createProject') as LinearSdkLike['createProject'],
     createIssueRelation: track('createIssueRelation') as LinearSdkLike['createIssueRelation'],
+    latestUpdatedAt: track('latestUpdatedAt') as LinearSdkLike['latestUpdatedAt'],
   };
 }
 
@@ -447,6 +448,7 @@ await test('claim+releaseClaim — 36-char UUID runId (production-shaped input) 
     viewer: async () => ({ id: 'u', email: 'u@x' }),
     issue: async (id) => server.getIssue(id),
     listIssues: async () => server.listIssues(),
+    latestUpdatedAt: async () => '2026-01-01T00:00:00.000Z',
     createIssue: async () => makeIssue(),
     updateIssue: async (id, input) => {
       if (input.addedLabelIds) {
@@ -931,6 +933,7 @@ await test('claim is atomic when two orchestrators race (20× repeat)', async ()
       viewer: async () => ({ id: 'u', email: 'u@x' }),
       issue: async (id) => server.getIssue(id),
       listIssues: async () => server.listIssues(),
+      latestUpdatedAt: async () => '2026-01-01T00:00:00.000Z',
       createIssue: async () => makeIssue(),
       updateIssue: async (id, input) => {
         if (input.addedLabelIds) {
@@ -1787,6 +1790,7 @@ await test('claim+releaseClaim — user labels preserved across full cycle', asy
     viewer: async () => ({ id: 'u', email: 'u@x' }),
     issue: async (id) => server.getIssue(id),
     listIssues: async () => server.listIssues(),
+    latestUpdatedAt: async () => '2026-01-01T00:00:00.000Z',
     createIssue: async () => makeIssue(),
     updateIssue: async (id, input) => {
       if (input.addedLabelIds) {
@@ -1842,6 +1846,7 @@ await test('LinearTracker passes the shared Tracker conformance suite', async ()
     viewer: async () => ({ id: 'u', email: 'u@x' }),
     issue: async (id) => server.getIssue(id),
     listIssues: async () => server.listIssues(),
+    latestUpdatedAt: async () => '2026-01-01T00:00:00.000Z',
     createIssue: async (input) => {
       const created = makeIssue({
         id: 'created-1',
@@ -1904,3 +1909,36 @@ type _Unused =
   | LinearIssueLike
   | typeof DEFAULT_WORKFLOW_STATES
   | typeof STATE_TODO;
+
+// ─── getCurrentRevision (FORGE-123) ──────────────────────────────────────────
+
+await test('getCurrentRevision — calls latestUpdatedAt(teamId) and returns linear:<iso>', async () => {
+  const { tracker, client } = makeTracker({
+    latestUpdatedAt: async () => '2026-06-01T09:30:00.000Z',
+  });
+  const rev = await tracker.getCurrentRevision();
+  assert.equal(rev, 'linear:2026-06-01T09:30:00.000Z');
+  const call = client.calls.find((c) => c.method === 'latestUpdatedAt');
+  assert.ok(call, 'latestUpdatedAt must be invoked');
+  assert.equal(call!.args[0], 'team-uuid-test');
+});
+
+await test('getCurrentRevision — no issues returns linear:none', async () => {
+  const { tracker } = makeTracker({ latestUpdatedAt: async () => null });
+  assert.equal(await tracker.getCurrentRevision(), 'linear:none');
+});
+
+await test('wrapLinearClient.latestUpdatedAt — top-1 updatedAt desc, ISO from Date node', async () => {
+  let captured: { first?: number; orderBy?: unknown } | undefined;
+  const fakeClient = {
+    issues: async (vars: { first?: number; orderBy?: unknown }) => {
+      captured = vars;
+      return { nodes: [{ updatedAt: new Date('2026-06-02T00:00:00.000Z') }] };
+    },
+  } as unknown as Parameters<typeof wrapLinearClient>[0];
+  const sdk = wrapLinearClient(fakeClient);
+  const iso = await sdk.latestUpdatedAt('team-x');
+  assert.equal(iso, '2026-06-02T00:00:00.000Z');
+  assert.equal(captured?.first, 1);
+  assert.equal(captured?.orderBy, 'updatedAt');
+});

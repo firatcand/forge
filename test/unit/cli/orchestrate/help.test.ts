@@ -166,12 +166,26 @@ test('doctor --help lists --scope; phases --help lists --ready; gc --help lists 
   }
 });
 
-test('reconcile --help shows exactly its six real flags', async () => {
+test('reconcile --help shows exactly its eight real flags', async () => {
   const root = mkdtempSync(join(tmpdir(), 'forge-help-'));
   try {
     const { out } = await captureStdout(() => dispatchOrchestrate(['reconcile', '--help'], { cwd: root }));
-    for (const f of ['--pull', '--push', '--dry-run', '--json', '--confirm-prune', '--no-prune']) {
+    for (const f of [
+      '--pull',
+      '--push',
+      '--dry-run',
+      '--json',
+      '--confirm-prune',
+      '--no-prune',
+      '--task',
+      '--check',
+    ]) {
       assert.ok(out.includes(f), `reconcile --help should list ${f}`);
+    }
+    // FORGE-119/123 pre-review: each new flag and --json must appear exactly once.
+    for (const f of ['--task', '--check', '--json']) {
+      const occurrences = out.split(f).length - 1;
+      assert.equal(occurrences, 1, `reconcile --help should list ${f} exactly once`);
     }
     assert.ok(!out.includes('--forge-dir'), 'reconcile --help must NOT list --forge-dir');
   } finally {

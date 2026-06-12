@@ -1,4 +1,9 @@
-import { Issue as LinearSdkIssue, IssueRelationType, LinearClient } from '@linear/sdk';
+import {
+  Issue as LinearSdkIssue,
+  IssueRelationType,
+  LinearClient,
+  PaginationOrderBy,
+} from '@linear/sdk';
 
 import type { LinearTrackerConfig } from '../schemas/settings.ts';
 import {
@@ -104,6 +109,10 @@ export interface LinearSdkLike {
     relatedIssueId: string;
     type: 'blocks';
   }): Promise<void>;
+  // FORGE-123: top-1 issue ordered by updatedAt desc for the team — the cheap
+  // "has anything changed upstream?" probe. Returns the ISO updatedAt of the
+  // most-recently-updated issue, or null when the team has no issues.
+  latestUpdatedAt(teamId: string): Promise<string | null>;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -415,6 +424,22 @@ export function wrapLinearClient(client: LinearClient): LinearSdkLike {
       return { id: project.id, url: project.url };
     },
 
+    async latestUpdatedAt(teamId) {
+      // Single GraphQL query: top-1 issue ordered by updatedAt desc. The SDK's
+      // `issues({ orderBy: UpdatedAt, first: 1 })` orders descending by default
+      // for the UpdatedAt enum. `updatedAt` is a Date on the SDK node.
+      const conn = await client.issues({
+        first: 1,
+        filter: { team: { id: { eq: teamId } } },
+        orderBy: PaginationOrderBy.UpdatedAt,
+      });
+      const node = conn.nodes[0];
+      if (!node) return null;
+      const updatedAt = (node as { updatedAt?: Date | string }).updatedAt;
+      if (updatedAt === undefined) return null;
+      return updatedAt instanceof Date ? updatedAt.toISOString() : String(updatedAt);
+    },
+
     async createIssueRelation({ issueId, relatedIssueId }) {
       // Seam already constrains `type` to literal 'blocks'; we don't need
       // to bind it here. If a second relation type is ever added, the seam
@@ -568,6 +593,33 @@ export class LinearTracker extends BaseTracker<LinearTrackerConfig> {
             : 'linear health check failed';
       return { ok: false, detail };
     }
+  }
+
+  // ─── getCurrentRevision — cheap upstream-equality probe (FORGE-123) ─────────
+  //
+  // Opaque token = `linear:<iso>` where <iso> is max(updatedAt) over the team's
+  // issues (top-1, updatedAt desc — one query). `linear:none` when the team has
+  // no issues yet (still a stable equality token). The provider-tag prefix keeps
+  // cross-provider equality from ever being accidentally true.
+  async getCurrentRevision(): Promise<string> {
+    const client = await this.getClient();
+    return this.withRetry(
+      'getCurrentRevision',
+      async () => {
+        let iso: string | null;
+        try {
+          iso = await client.latestUpdatedAt(this.teamId);
+        } catch (err) {
+          throw this.normalizeError(
+            'getCurrentRevision',
+            err,
+            classifyLinearError(err),
+          );
+        }
+        return `linear:${iso ?? 'none'}`;
+      },
+      this.retryOpts,
+    );
   }
 
   // ─── Stubs (implemented in subsequent commits) ─────────────────────────────

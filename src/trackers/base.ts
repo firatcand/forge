@@ -74,6 +74,19 @@ export interface Tracker {
   createIssue(payload: CreateIssuePayload): Promise<Issue>;
   setBlockedBy(issueId: string, blockerId: string): Promise<void>;
 
+  // FORGE-123: cheap provider-native "current upstream revision" probe used by
+  // `/reconcile --pull --check` to decide whether anything changed since the
+  // last pull WITHOUT fetching the full issue list. The returned token is
+  // OPAQUE — callers may ONLY test it for string equality against a previously
+  // stored token; never parse, order, or otherwise interpret it. Tokens carry a
+  // provider-tag prefix (e.g. `linear:<iso>`) so cross-provider equality is
+  // never accidentally true. Each adapter mints it from the cheapest native
+  // signal: Linear max(updatedAt), GitHub latest-updated issue, Notion combined
+  // database + newest-page last_edited_time (db timestamp alone misses page
+  // edits). Throws like any other tracker call on a probe failure —
+  // callers treat a throw as "can't tell" and fall back to a full pull.
+  getCurrentRevision(): Promise<string>;
+
   healthCheck(): Promise<{ ok: boolean; detail?: string }>;
 }
 
@@ -134,6 +147,7 @@ export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
   ): Promise<{ id: string; url: string }>;
   abstract createIssue(payload: CreateIssuePayload): Promise<Issue>;
   abstract setBlockedBy(issueId: string, blockerId: string): Promise<void>;
+  abstract getCurrentRevision(): Promise<string>;
   abstract healthCheck(): Promise<{ ok: boolean; detail?: string }>;
 
   // BaseTracker composes; it does not sniff provider-specific errors.

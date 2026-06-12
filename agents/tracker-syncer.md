@@ -30,17 +30,17 @@ Bridge between local `plans/phases.yaml` and the configured tracker. You are tra
 | `github` | `GitHubTracker` (`src/trackers/github.ts`) | Implemented via the `gh` CLI. Maps Project → Milestone, Phase → label `phase:N`, Issue → GitHub issue with `<!-- forge:task=... -->` body footer, depends_on → `<!-- forge:blockedBy=... -->` footer rewrite. |
 | `notion` | NotionTracker via `ntn` CLI (src/trackers/notion.ts, FORGE-117) | Drive the adapter through forge CLI verbs / the NotionTracker class; mapping unchanged (Project → database, Issue → page row, depends_on → forge_blocked_by property). |
 
-Adapters share the `Tracker` interface (`src/trackers/base.ts`): `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`. Calls are uniform across providers.
+Adapters share the `Tracker` interface (`src/trackers/base.ts`): `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `getCurrentRevision`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`. Calls are uniform across providers.
 
 ## /push-to-tracker flow
 
 1. Read `plans/phases.yaml`.
-2. `createProject(project.name, project.description)` → returns `{ id, url }`. Store as `tracker_project_id` + `tracker_url`.
+2. `createProject(project.name, project.description)` → returns `{ id, url }`. Store as `source.project_id` + `source.tracker_url` (FORGE-127: both live in the `source` block — the top-level `tracker_url` and the long-removed top-level `tracker_project_id` are gone; `/reconcile --pull` migrates any legacy top-level keys into `source` automatically).
 3. For each phase, for each task:
    - Build `CreateIssuePayload` with title, body (description + acceptance), `forgeTaskId` (the `P{phase}-T{nn}` id), `ownerType`, `acceptance` list, `dependsOn: []` (deferred to second pass).
    - `createIssue(payload)` → returns `Issue`. Stage `issue.id` in memory against the task.
 4. Second pass — for every task with `depends_on`, call `setBlockedBy(task._issueId, blocker._issueId)` once per blocker. Both issues must already exist.
-5. Write back into `phases.yaml`: `tracker_project_id`, `tracker_url`, per-phase `tracker_milestone_id`, per-task `tracker_issue_id`. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml::tracker.config` and is not duplicated into `phases.yaml`.
+5. Write back into `phases.yaml`: `source.project_id`, `source.tracker_url` (FORGE-127), per-phase `tracker_milestone_id`, per-task `tracker_issue_id`. Tracker-specific config (Linear `team_id`, GitHub `repo`, Notion `database_id`) lives in `.forge/settings.yaml::tracker.config` and is not duplicated into `phases.yaml`.
 6. Per-tracker post-step:
    - `linear` → print the manual Linear-GitHub integration setup (UI walk-through; the API doesn't expose this).
    - `github` → no-op.

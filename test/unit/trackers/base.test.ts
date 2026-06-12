@@ -78,6 +78,9 @@ class TestTracker extends BaseTracker {
     };
   }
   async setBlockedBy(_issueId: string, _blockerId: string): Promise<void> {}
+  async getCurrentRevision(): Promise<string> {
+    return 'test:rev';
+  }
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
     return { ok: true };
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Writable } from 'node:stream';
@@ -97,14 +97,26 @@ function captureStream(): { stream: Writable; chunks: string[] } {
 function fakeTracker(opts: {
   list: () => Promise<Issue[]>;
   update?: (id: string, body: string) => Promise<void>;
+  // FORGE-123: revision probe. Default returns a stable token. A test can
+  // override to a custom token, count calls, or throw (probe-failure path).
+  revision?: () => Promise<string>;
 }): Tracker {
   const updates: { id: string; body: string }[] = [];
+  const revisionCalls = { count: 0 };
+  const listAllCalls = { count: 0 };
   const t: Tracker = {
     type: 'linear',
     listActiveIssues: opts.list,
     // Pull uses listAllIssues; push uses listActiveIssues. Wire both to the
     // same fixture so a single `list` drives whichever path the test exercises.
-    listAllIssues: async () => ({ issues: await opts.list(), truncated: false }),
+    listAllIssues: async () => {
+      listAllCalls.count++;
+      return { issues: await opts.list(), truncated: false };
+    },
+    async getCurrentRevision() {
+      revisionCalls.count++;
+      return opts.revision ? opts.revision() : 'linear:rev-default';
+    },
     async claim() {
       throw new Error('not used');
     },
@@ -128,6 +140,8 @@ function fakeTracker(opts: {
     },
   };
   (t as unknown as { _updates: { id: string; body: string }[] })._updates = updates;
+  (t as unknown as { _revisionCalls: { count: number } })._revisionCalls = revisionCalls;
+  (t as unknown as { _listAllCalls: { count: number } })._listAllCalls = listAllCalls;
   return t;
 }
 
@@ -614,6 +628,799 @@ test('runOrchestrateReconcile — exits 4 when the tracker issue-list call throw
     const payload = JSON.parse(stripFreshness(err.chunks.join('')));
     assert.equal(payload.ok, false);
     assert.equal(payload.error.code, 'AUTH');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+// ─── FORGE-119: --task scoping ───────────────────────────────────────────────
+
+test('parseReconcileArgv — --task consumes its value', () => {
+  const r = parseReconcileArgv(['--pull', '--task', 'P1-T01']);
+  assert.equal('error' in r, false);
+  if (!('error' in r)) assert.equal(r.task, 'P1-T01');
+});
+
+test('parseReconcileArgv — --task without a value is rejected', () => {
+  const r = parseReconcileArgv(['--pull', '--task']);
+  assert.equal('error' in r, true);
+  if ('error' in r) assert.match(r.error, /missing value for --task/);
+});
+
+test('parseReconcileArgv — --task followed by a flag is rejected', () => {
+  const r = parseReconcileArgv(['--pull', '--task', '--json']);
+  assert.equal('error' in r, true);
+  if ('error' in r) assert.match(r.error, /missing value for --task/);
+});
+
+test('parseReconcileArgv — --check parses and requires --pull', () => {
+  const ok = parseReconcileArgv(['--pull', '--check']);
+  assert.equal('error' in ok, false);
+  if (!('error' in ok)) assert.equal(ok.check, true);
+  const bad = parseReconcileArgv(['--push', '--check']);
+  assert.equal('error' in bad, true);
+  if ('error' in bad) assert.match(bad.error, /--check is only valid with --pull/);
+});
+
+// Two-task fixture for scoping tests.
+const TWO_TASK_PHASES = `project: forge
+source:
+  tracker: linear
+  project_id: test-project-uuid
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000abcd
+phases:
+  - id: phase-1
+    name: Phase 1
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: Title one
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+      - id: P1-T02
+        tracker_issue_id: tracker-2
+        title: Title two
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+
+test('FORGE-119 — --task --pull --dry-run scopes the plan to one task (out-of-scope diffs dropped)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'P1-T01'],
+      stdout: out.stream,
+      stderr: err.stream,
+      // BOTH tasks have a title diff upstream; only P1-T01 must survive scoping.
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'New one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'New two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'P1-T01');
+    assert.equal(payload.data.pull.updated.length, 1);
+    assert.equal(payload.data.pull.updated[0].task_id, 'P1-T01');
+    assert.match(stripFreshness(err.chunks.join('')), /scoped to P1-T01 only/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-119 — scoped --pull writes only the in-scope change (out-of-scope title untouched)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--task', 'P1-T01'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'New one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'New two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.match(after, /New one/);
+    assert.match(after, /Title two/); // out-of-scope title NOT pulled
+    assert.doesNotMatch(after, /New two/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-119 — scoped --pull never prunes an out-of-scope orphan', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    // tracker-2 is absent upstream → P1-T02 would be an orphan in an unscoped
+    // run. Scoping to P1-T01 must not surface or prune it.
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--task', 'P1-T01', '--confirm-prune'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.pull.removed.length, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.match(after, /P1-T02/); // out-of-scope orphan retained
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-119 — unknown --task id → INVALID_ARGS exit 3 (NOT 1)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--task', 'P9-T99'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    assert.equal(result.exitCode, 3);
+    const payload = JSON.parse(stripFreshness(err.chunks.join('')));
+    assert.equal(payload.ok, false);
+    assert.equal(payload.error.code, 'INVALID_ARGS');
+    assert.match(payload.error.message, /unknown task id: P9-T99/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-119 — --task --push --dry-run scopes the push plan', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--push', '--dry-run', '--task', 'P1-T02'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'P1-T02');
+    assert.equal(payload.data.push.plan.bodies.length, 1);
+    assert.equal(payload.data.push.plan.bodies[0].task_id, 'P1-T02');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-119 — unknown --task id on --push → INVALID_ARGS exit 3', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--push', '--task', 'NOPE-T1'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({ list: async () => [] }),
+    });
+    assert.equal(result.exitCode, 3);
+    const payload = JSON.parse(stripFreshness(err.chunks.join('')));
+    assert.equal(payload.error.code, 'INVALID_ARGS');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+// ─── FORGE-127 MAJOR: --task id resolution (local id, bound tracker id, ───────
+//                     tracker-page-only id) in both directions ────────────────
+
+test('FORGE-127 MAJOR — --pull --task <bound-tracker-id> scopes the BOUND local task (updated kept)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    // Both tasks have an upstream title diff; targeting tracker-1 (bound to
+    // P1-T01) must keep P1-T01's updated entry and drop P1-T02's.
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'tracker-1'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'New one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'New two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.pull.updated.length, 1);
+    assert.equal(payload.data.pull.updated[0].task_id, 'P1-T01');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --pull --task <bound-tracker-id> with ZERO diff is accepted (empty plan, NOT INVALID_ARGS)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    // No upstream changes at all → empty diff. A VALID id must still be accepted.
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'tracker-1'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.ok, true);
+    assert.equal(payload.data.scoped_to, 'tracker-1');
+    assert.equal(payload.data.pull.updated.length, 0);
+    assert.equal(payload.data.pull.removed.length, 0);
+    assert.equal(payload.data.pull.added.length, 0);
+    assert.equal(payload.data.pull.unmanaged.length, 0);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --pull --task <local-id> with ZERO diff is accepted (empty plan, NOT INVALID_ARGS)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'P1-T01'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'P1-T01');
+    assert.equal(payload.data.pull.updated.length, 0);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --pull --task <tracker-page-only id> scopes a brand-new unmanaged issue', async () => {
+  // tracker-99 is NOT in phases.yaml (not a local id, not a bound tracker id).
+  // It surfaces only on the tracker page as a new issue → must be accepted and
+  // scoped via the tracker-page fallback (added/unmanaged).
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'tracker-99'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+          // New unmanaged issue with no forge:task footer.
+          { id: 'tracker-99', identifier: 'FORGE-99', title: 'Brand new', state: 'todo', blockerIds: [] },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'tracker-99');
+    // Only the tracker-99 entry survives scoping; updated/removed (phases-origin)
+    // are empty because the scope has no local task id.
+    assert.equal(payload.data.pull.updated.length, 0);
+    assert.equal(payload.data.pull.removed.length, 0);
+    const carried =
+      payload.data.pull.added.some((a: { tracker_issue_id: string }) => a.tracker_issue_id === 'tracker-99') ||
+      payload.data.pull.unmanaged.some((u: { tracker_issue_id: string }) => u.tracker_issue_id === 'tracker-99');
+    assert.ok(carried, 'the tracker-page-only id must be scoped via added/unmanaged');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --push --task <bound-tracker-id> scopes the BOUND local task body', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--push', '--dry-run', '--task', 'tracker-2'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'tracker-2');
+    assert.equal(payload.data.push.plan.bodies.length, 1);
+    assert.equal(payload.data.push.plan.bodies[0].task_id, 'P1-T02');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --push --task <local-id> with ZERO push diff is accepted (empty plan)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    // Both local tasks bind tracker issues that exist upstream → both have a
+    // body to push; scoping to P1-T01 leaves exactly one body. (A genuinely
+    // empty push plan is exercised by the bound-tracker-id test family; here we
+    // assert a valid local id is never rejected.)
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--push', '--dry-run', '--task', 'P1-T01'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'Title two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.scoped_to, 'P1-T01');
+    assert.equal(payload.data.push.plan.bodies.length, 1);
+    assert.equal(payload.data.push.plan.bodies[0].task_id, 'P1-T01');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 MAJOR — --push --task <tracker-page-only id> is INVALID_ARGS (no local body to push)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: TWO_TASK_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    // tracker-99 is not a local task nor a bound tracker id → push has no body
+    // to send for it → INVALID_ARGS exit 3 (push has no tracker-page fallback).
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--push', '--task', 'tracker-99'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-99', identifier: 'FORGE-99', title: 'Brand new', state: 'todo', blockerIds: [] },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 3);
+    const payload = JSON.parse(stripFreshness(err.chunks.join('')));
+    assert.equal(payload.error.code, 'INVALID_ARGS');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+// ─── FORGE-127: legacy top-level tracker_url migration ───────────────────────
+
+const LEGACY_TRACKER_URL_PHASES = `project: forge
+tracker_url: "https://linear.app/team/proj"
+source:
+  tracker: linear
+  project_id: test-project-uuid
+  synced_at: "2026-05-17T22:00:00Z"
+  spec_revision: deadbeefcafe000000000000000000000000abcd
+phases:
+  - id: phase-1
+    name: Phase 1
+    status: active
+    goal: g
+    gate_criteria: ['g']
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: tracker-1
+        title: Title one
+        description: d
+        type: foundation
+        priority: P0
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance: ['a']
+`;
+
+test('FORGE-127 — --pull migrates legacy top-level tracker_url into source and deletes the top-level key', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: LEGACY_TRACKER_URL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Title one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    // The top-level key is gone; the value now lives under source.
+    assert.doesNotMatch(after, /^tracker_url:/m);
+    assert.match(after, /tracker_url: https:\/\/linear\.app\/team\/proj/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 — --pull preserves an existing source.tracker_url', async () => {
+  const phases = MINIMAL_PHASES.replace(
+    'spec_revision: deadbeefcafe000000000000000000000000abcd',
+    'spec_revision: deadbeefcafe000000000000000000000000abcd\n  tracker_url: https://existing.example/x',
+  );
+  const wt = mkScratchWorktree({ phasesYaml: phases });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Local title', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.match(after, /tracker_url: https:\/\/existing\.example\/x/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+// ─── FORGE-123: --pull stamps tracker_revision; --check short-circuits ────────
+
+test('FORGE-123 — --pull stamps source.tracker_revision', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Local title', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+        ],
+        revision: async () => 'linear:2026-06-01T00:00:00.000Z',
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.match(after, /tracker_revision: linear:2026-06-01T00:00:00\.000Z/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-123 — --pull revision probe failure warns and still pulls (no stamp wipe)', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'Local title', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+        ],
+        revision: async () => {
+          throw new TrackerError('TRANSPORT', 'flaky probe');
+        },
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    assert.match(stripFreshness(err.chunks.join('')), /could not stamp source\.tracker_revision/);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+const FRESH_REVISION_PHASES = MINIMAL_PHASES.replace(
+  'spec_revision: deadbeefcafe000000000000000000000000abcd',
+  'spec_revision: deadbeefcafe000000000000000000000000abcd\n  tracker_revision: linear:STORED',
+);
+
+test('FORGE-123 — --pull --check MATCH refreshes the stamp and fetches ZERO issue lists', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: FRESH_REVISION_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [],
+      revision: async () => 'linear:STORED',
+    });
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'match');
+    const listAll = (tracker as unknown as { _listAllCalls: { count: number } })._listAllCalls;
+    assert.equal(listAll.count, 0, 'listAllIssues must NOT be called on a check match');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-123 — --pull --check MISMATCH falls through to a full pull', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: FRESH_REVISION_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [
+        { id: 'tracker-1', identifier: 'FORGE-1', title: 'Changed', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+      ],
+      revision: async () => 'linear:DIFFERENT',
+    });
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'mismatch');
+    const listAll = (tracker as unknown as { _listAllCalls: { count: number } })._listAllCalls;
+    assert.equal(listAll.count, 1, 'a mismatch must perform the full pull');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-123 — --pull --check with NO stored revision falls through to a full pull', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: MINIMAL_PHASES }); // no tracker_revision
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [
+        { id: 'tracker-1', identifier: 'FORGE-1', title: 'Local title', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+      ],
+      revision: async () => 'linear:ANY',
+    });
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'missing');
+    const listAll = (tracker as unknown as { _listAllCalls: { count: number } })._listAllCalls;
+    assert.equal(listAll.count, 1);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 BLOCKER — --pull --check --dry-run MATCH leaves phases.yaml byte-identical and takes NO lock', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: FRESH_REVISION_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [],
+      revision: async () => 'linear:STORED',
+    });
+    const before = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check', '--dry-run'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'match');
+    assert.equal(payload.data.dry_run, true);
+    assert.equal(payload.data.applied, false);
+    // The document is byte-identical: no stamp refresh on a dry-run check.
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    assert.equal(after, before, 'dry-run check must not write phases.yaml');
+    // No phases-write lock was ever taken (and thus none left behind): a
+    // dry-run pull acquires no lock, so an unlocked write was impossible.
+    assert.equal(
+      existsSync(join(wt.dir, '.forge', 'orchestrator', 'global', 'phases-write.lock')),
+      false,
+      'dry-run check must not acquire the phases-write lock',
+    );
+    // No issue list fetched either — the short-circuit fired.
+    const listAll = (tracker as unknown as { _listAllCalls: { count: number } })._listAllCalls;
+    assert.equal(listAll.count, 0);
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 BLOCKER — non-dry-run --pull --check MATCH refreshes the freshness stamp under the lock', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: FRESH_REVISION_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [],
+      revision: async () => 'linear:STORED',
+    });
+    const before = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'match');
+    assert.equal(payload.data.dry_run, false);
+    const after = readFileSync(join(wt.dir, 'plans', 'phases.yaml'), 'utf8');
+    // synced_at refreshed (different from the fixture's frozen value) — proof
+    // the stamp write ran. It ran under the lock acquired by
+    // runOrchestrateReconcile for a non-dry-run pull (assertFresh guards it),
+    // and the lock is released on exit so no stale lock remains.
+    assert.notEqual(after, before, 'non-dry-run check match must refresh the stamp');
+    const stampedSynced = after.match(/synced_at:\s*"?([^"\n]+)"?/)?.[1];
+    assert.ok(stampedSynced && stampedSynced !== '2026-05-17T22:00:00Z');
+    // tracker_revision preserved (unchanged token).
+    assert.match(after, /tracker_revision: linear:STORED/);
+    assert.equal(
+      existsSync(join(wt.dir, '.forge', 'orchestrator', 'global', 'phases-write.lock')),
+      false,
+      'lock must be released after the stamp write',
+    );
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-123 — --pull --check probe FAILURE warns and falls back to a full pull', async () => {
+  const wt = mkScratchWorktree({ phasesYaml: FRESH_REVISION_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const tracker = fakeTracker({
+      list: async () => [
+        { id: 'tracker-1', identifier: 'FORGE-1', title: 'Local title', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+      ],
+      revision: async () => {
+        throw new TrackerError('TRANSPORT', 'probe down');
+      },
+    });
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--check'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: tracker,
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    assert.equal(payload.data.check, 'probe_failure');
+    assert.match(stripFreshness(err.chunks.join('')), /revision probe failed/);
+    const listAll = (tracker as unknown as { _listAllCalls: { count: number } })._listAllCalls;
+    assert.equal(listAll.count, 1, 'probe failure must still complete the pull');
+  } finally {
+    wt.cleanup();
+  }
+});
+
+test('FORGE-127 r2 — --pull --task <tracker-id> keeps an UNBOUND local task matched via forgeTaskId', async () => {
+  // P1-T01 has NO tracker_issue_id in phases.yaml; diffPull binds it through
+  // issue.forgeTaskId. Scoping by the tracker id must keep that task's updated
+  // entry instead of silently dropping it to a tracker-only scope (Codex r2).
+  const UNBOUND_PHASES = TWO_TASK_PHASES.replace('        tracker_issue_id: tracker-1\n', '');
+  const wt = mkScratchWorktree({ phasesYaml: UNBOUND_PHASES });
+  try {
+    const out = captureStream();
+    const err = captureStream();
+    const result = await runOrchestrateReconcile({
+      cwd: wt.dir,
+      argv: ['--pull', '--dry-run', '--task', 'tracker-1'],
+      stdout: out.stream,
+      stderr: err.stream,
+      trackerOverride: fakeTracker({
+        list: async () => [
+          { id: 'tracker-1', identifier: 'FORGE-1', title: 'New one', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T01' },
+          { id: 'tracker-2', identifier: 'FORGE-2', title: 'New two', state: 'todo', blockerIds: [], forgeTaskId: 'P1-T02' },
+        ],
+      }),
+    });
+    assert.equal(result.exitCode, 0);
+    const payload = JSON.parse(out.chunks.join(''));
+    const updatedIds = payload.data.pull.updated.map((u: { task_id: string }) => u.task_id);
+    assert.ok(updatedIds.includes('P1-T01'), `expected P1-T01 kept, got ${JSON.stringify(updatedIds)}`);
+    assert.ok(!updatedIds.includes('P1-T02'), 'out-of-scope task must be dropped');
   } finally {
     wt.cleanup();
   }

@@ -128,8 +128,7 @@ Backlog ──→ Todo ──→ In Progress ──→ In Review ──→ Done
 
 After `/push-to-tracker` succeeds, `phases.yaml` gains:
 
-- top-level `tracker_url`
-- `source` block (`tracker`, `project_id`, `synced_at`, `spec_revision`) — kept fresh by `/reconcile --pull`
+- `source` block (`tracker`, `project_id`, `synced_at`, `spec_revision`, `tracker_url`, `tracker_revision`) — kept fresh by `/reconcile --pull`. FORGE-127 moved `tracker_url` into this block (it was a top-level key); FORGE-123 added `tracker_revision` (an opaque upstream-equality token consumed by `/reconcile --pull --check`).
 - per-phase `tracker_milestone_id`
 - per-task `tracker_issue_id`
 

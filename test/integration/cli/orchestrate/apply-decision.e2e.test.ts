@@ -32,6 +32,7 @@ function fakeTracker(opts: { failOnCall?: number } = {}): Tracker & { bodyCalls:
     createIssue: no('h') as Tracker['createIssue'],
     setBlockedBy: no('i') as Tracker['setBlockedBy'],
     setClaimFence: no('k') as Tracker['setClaimFence'],
+    getCurrentRevision: no('l') as Tracker['getCurrentRevision'],
     healthCheck: no('j') as Tracker['healthCheck'],
   };
 }

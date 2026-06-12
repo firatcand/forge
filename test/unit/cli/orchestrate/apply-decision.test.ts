@@ -61,6 +61,7 @@ function fakeTracker(opts: { type?: TrackerType; failOnCall?: number } = {}): Fa
     createIssue: notUsed('createIssue') as Tracker['createIssue'],
     setBlockedBy: notUsed('setBlockedBy') as Tracker['setBlockedBy'],
     setClaimFence: notUsed('setClaimFence') as Tracker['setClaimFence'],
+    getCurrentRevision: notUsed('getCurrentRevision') as Tracker['getCurrentRevision'],
     healthCheck: notUsed('healthCheck') as Tracker['healthCheck'],
   };
 }

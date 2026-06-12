@@ -607,6 +607,78 @@ export class NotionTracker extends BaseTracker<NotionTrackerConfig> {
     return parsed;
   }
 
+  // ─── getCurrentRevision — cheap upstream-equality probe (FORGE-123) ─────────
+  //
+  // Opaque token = `notion:<db last_edited_time>|<newest page last_edited_time>`.
+  // The database object's timestamp does NOT reliably advance when individual
+  // pages inside it are edited (Codex impl-review r3), so the token combines
+  // two cheap signals: the database object (schema/property changes) and a
+  // top-1 data-source query sorted by last_edited_time descending (page
+  // edits/additions). Either component moving breaks equality → full pull.
+  // Residual accepted edge: archiving a page may advance neither timestamp;
+  // a periodic unconditioned --pull still reconciles those. `none` per
+  // component when absent. The provider-tag prefix keeps cross-provider
+  // equality from ever being accidentally true.
+  async getCurrentRevision(): Promise<string> {
+    return this.withRetry(
+      'getCurrentRevision',
+      async () => {
+        const op = 'getCurrentRevision';
+        const raw = await this.runNtn(op, ['api', `v1/databases/${this.databaseId}`]);
+        if (raw === null || typeof raw !== 'object') {
+          throw new TrackerError(
+            'VALIDATION',
+            `getCurrentRevision: GET v1/databases/${this.databaseId} returned unexpected shape`,
+            { databaseId: this.databaseId },
+          );
+        }
+        const lastEdited = (raw as { last_edited_time?: unknown }).last_edited_time;
+        const dbIso =
+          typeof lastEdited === 'string' && lastEdited.length > 0
+            ? lastEdited
+            : 'none';
+
+        const dataSourceId = await this.resolveDataSourceId(op);
+        const queryRaw = await this.runNtn(
+          op,
+          ['api', `v1/data_sources/${dataSourceId}/query`, '-X', 'POST'],
+          JSON.stringify({
+            page_size: 1,
+            sorts: [{ timestamp: 'last_edited_time', direction: 'descending' }],
+          }),
+        );
+        // Validate the query shape like the database fetch above: a malformed
+        // response must THROW (routing --check to its probe-failure → full-pull
+        // fallback), not silently degrade to 'none' — a stored `notion:<db>|none`
+        // token would then false-match and miss upstream changes (Codex r4).
+        if (queryRaw === null || typeof queryRaw !== 'object') {
+          throw new TrackerError(
+            'VALIDATION',
+            `getCurrentRevision: data-source query returned unexpected shape`,
+            { databaseId: this.databaseId, dataSourceId },
+          );
+        }
+        const results = (queryRaw as { results?: unknown }).results;
+        if (!Array.isArray(results)) {
+          throw new TrackerError(
+            'VALIDATION',
+            `getCurrentRevision: data-source query response has no results array`,
+            { databaseId: this.databaseId, dataSourceId },
+          );
+        }
+        let pageIso = 'none';
+        if (results.length > 0) {
+          const first = results[0] as { last_edited_time?: unknown };
+          if (typeof first.last_edited_time === 'string' && first.last_edited_time.length > 0) {
+            pageIso = first.last_edited_time;
+          }
+        }
+        return `notion:${dbIso}|${pageIso}`;
+      },
+      this.retryOpts,
+    );
+  }
+
   // ─── healthCheck — never throws ────────────────────────────────────────────
 
   async healthCheck(): Promise<{ ok: boolean; detail?: string }> {
