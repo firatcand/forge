@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
@@ -109,6 +109,83 @@ test('complete with verdict=ready_for_review + phase=implement → state ready_f
   assert.ok(vv.verified_by);
 });
 
+test('FORGE-187 R1: complete --phase review on the SAME attempt → reviewed, writes verdict.review.json', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+
+  // 1. implement → ready_for_review (writes verdict.json on this attempt).
+  const implVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  let result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: implVerdict,
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0, 'implement complete should succeed');
+  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json present');
+
+  // 2. review → reviewed on the SAME attempt. Before R1 this collided on the
+  //    `flag:'wx'` write to verdict.json and the ready_for_review→reviewed path
+  //    never actually worked. The phase-scoped filename fixes it.
+  const reviewVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: reviewVerdict,
+    phase: 'review',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0, 'review complete should succeed on the same attempt');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'reviewed');
+  assert.match(env.data.verdict_path, /verdict\.review\.json$/);
+
+  // Phase-scoped files written; the implement verdict.json is untouched.
+  assert.ok(existsSync(join(dir, 'verdict.review.json')), 'verdict.review.json present');
+  assert.ok(existsSync(join(dir, 'verdict.review.verified.json')), 'verdict.review.verified.json present');
+  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json still present');
+
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'reviewed');
+});
+
+test('FORGE-187 R1: complete --phase ship on the SAME attempt → shipped, writes verdict.ship.json', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+
+  for (const phase of ['implement', 'review', 'ship'] as const) {
+    const vf = writeVerdict(ctx.repoRoot, 'ready_for_review');
+    const result = await runOrchestrateComplete({
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      verdictFile: vf,
+      phase,
+      forgeDir: ctx.forgeDir,
+      json: true,
+    });
+    assert.equal(result.exitCode, 0, `${phase} complete should succeed`);
+  }
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'shipped');
+  assert.match(env.data.verdict_path, /verdict\.ship\.json$/);
+
+  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json present');
+  assert.ok(existsSync(join(dir, 'verdict.review.json')), 'verdict.review.json present');
+  assert.ok(existsSync(join(dir, 'verdict.ship.json')), 'verdict.ship.json present');
+
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'shipped');
+});
+
 test('complete with verdict=changes_needed records last_failed_at and loops to running', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
@@ -169,4 +246,33 @@ test('complete with malformed verdict file fails INVALID_VERDICT', async (t) => 
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'INVALID_VERDICT');
+});
+
+// Review-fix #3: if the verified-file write fails after the verdict file was
+// created (wx), the orphan verdict file must be rolled back so the phase can be
+// retried without an EEXIST collision.
+test('complete: verified-write failure rolls back the verdict file', async (t) => {
+  const { mkdirSync } = await import('node:fs');
+  const { attemptDir } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Pre-create verdict.verified.json so its `wx` write fails (EEXIST) while
+  // verdict.json (fresh) succeeds first.
+  const dir = attemptDir(ctx.forgeDir, 'FORGE-1', ctx.attemptId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'verdict.verified.json'), '{"pre":"existing"}', 'utf8');
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile,
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'IO_ERROR');
+  // The just-written verdict.json must have been rolled back.
+  assert.equal(existsSync(join(dir, 'verdict.json')), false, 'orphan verdict.json should be cleaned up');
 });

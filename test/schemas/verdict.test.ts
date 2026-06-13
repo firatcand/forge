@@ -158,16 +158,21 @@ test('schemas/verdict: ReviewVerdictSchema rejects unknown host', () => {
 });
 
 test('schemas/verdict: ReviewVerdictSchema accepts all valid host values', () => {
-  // FORGE-88: review-only hosts are codex and gemini.
-  for (const host of ['codex', 'gemini'] as const) {
+  // FORGE-88: second-opinion hosts are codex and gemini.
+  // FORGE-187 (R2): claude is now valid for the in-session primary review.
+  for (const host of ['codex', 'gemini', 'claude'] as const) {
     const result = ReviewVerdictSchema.safeParse(baseReviewVerdict({ host }));
     assert.equal(result.success, true, `host=${host} should be valid`);
   }
 });
 
-test('schemas/verdict: ReviewVerdictSchema rejects claude as a review host (FORGE-88)', () => {
+test('schemas/verdict: ReviewVerdictSchema accepts claude as a primary-review host (FORGE-187 R2)', () => {
+  // FORGE-187 widened the host enum so the in-session primary review (the
+  // code-reviewer subagent under the subscription) can stamp host:'claude' on
+  // the verdict file consumed by review-compose. second-opinion still only
+  // emits codex|gemini.
   const result = ReviewVerdictSchema.safeParse(baseReviewVerdict({ host: 'claude' }));
-  assert.equal(result.success, false);
+  assert.equal(result.success, true);
 });
 
 test('schemas/verdict: ReviewVerdictSchema rejects cursor as a review host (FORGE-88)', () => {

@@ -37,9 +37,13 @@ export const ReviewVerdictSchema = z.object({
       message: byteBoundedString(2_000, { min: 1 }),
     }),
   ),
-  // FORGE-88: review verdicts come from codex or gemini. Claude is excluded
-  // as a reviewer (different-lineage rule); cursor was never wired up.
-  host: z.enum(['codex', 'gemini']),
+  // FORGE-88: second-opinion review verdicts come from codex or gemini.
+  // FORGE-187 (R2): `claude` is now a legal host so the in-session PRIMARY
+  // review (the code-reviewer subagent under the subscription) can stamp its
+  // own provenance on the verdict file fed to `review-compose`. The
+  // `second-opinion` verb still only ever emits codex|gemini — `claude` is for
+  // the primary review only. cursor was never wired up.
+  host: z.enum(['codex', 'gemini', 'claude']),
 });
 
 export type ReviewVerdict = z.infer<typeof ReviewVerdictSchema>;
