@@ -45,6 +45,14 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
       'Cross-run cockpit: active sessions, open questions, ready/blocked, overlap + lease health.',
   },
   {
+    name: 'review-queue',
+    summary: 'List tasks awaiting review (state ready_for_review) with attempt + lease info.',
+  },
+  {
+    name: 'inbox',
+    summary: 'List parked tasks (blocked_on_question) with their correlated open questions.',
+  },
+  {
     name: 'attach',
     summary: 'Tail per-run notifications.jsonl.',
   },
