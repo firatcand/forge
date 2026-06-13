@@ -411,10 +411,13 @@ export async function runOrchestrateQuestionWrite(
     // Best-effort audit trail.
   }
 
-  // State transition: running → blocked_on_question.
+  // State transition: running/ready_for_review → blocked_on_question. A
+  // review-phase worker that hits an architectural question parks from
+  // ready_for_review (FORGE-184); no new state/trigger — both reuse
+  // 'question_written' → blocked_on_question.
   try {
     const state = readTaskState(opts.forgeDir, opts.taskId);
-    if (state.state === 'running') {
+    if (state.state === 'running' || state.state === 'ready_for_review') {
       writeTaskState(
         opts.forgeDir,
         {

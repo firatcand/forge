@@ -56,6 +56,7 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'claimed:dispatch': 'dispatched',
   'dispatched:first_heartbeat': 'running',
   'running:question_written': 'blocked_on_question',
+  'ready_for_review:question_written': 'blocked_on_question',
   'blocked_on_question:answer_recorded': 'awaiting_respawn',
   'awaiting_respawn:dispatch': 'dispatched',
   'running:complete_ready_for_review': 'ready_for_review',

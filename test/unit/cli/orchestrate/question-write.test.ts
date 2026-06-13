@@ -8,7 +8,10 @@ import { v7 as uuidv7 } from 'uuid';
 import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
 import { runOrchestrateHeartbeat } from '../../../../src/cli/orchestrate/heartbeat.ts';
+import { runOrchestrateComplete } from '../../../../src/cli/orchestrate/complete.ts';
 import { runOrchestrateQuestionWrite } from '../../../../src/cli/orchestrate/question-write.ts';
+import { readLease, callerFromLease } from '../../../../src/cli/orchestrate/lease-io.ts';
+import { readTaskState, writeTaskState } from '../../../../src/orchestrator/state-machine.ts';
 import { writeAnswerAtomic } from '../../../../src/orchestrator/questions/index.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
@@ -430,4 +433,129 @@ test('AC7: hard_cap reached → outcome=forced_autonomous + autonomous_decision 
   assert.equal(auto.decision_key, 'arch:over-cap');
   assert.equal(auto.chosen_option_id, 'yes');
   assert.match(auto.reason, /hard_cap/);
+});
+
+// --- FORGE-184: park architectural escalations from ready_for_review ----------
+
+function readyForReviewVerdict(branch: string): unknown {
+  return {
+    version: 1,
+    verdict: 'ready_for_review',
+    summary: 'implement phase complete',
+    tests: { ran: true, passed: 1, failed: 0, skipped: 0, duration_ms: 1, output_excerpt: '' },
+    lint: { ran: true, clean: true, violations: 0, output_excerpt: '' },
+    branch,
+    save_point: '',
+  };
+}
+
+// Drive a freshly-running task to ready_for_review via `complete --phase implement`.
+async function completeToReadyForReview(
+  ctx: { forgeDir: string; repoRoot: string; attemptId: string },
+): Promise<void> {
+  const verdictFile = join(ctx.repoRoot, 'verdict.json');
+  writeFileSync(verdictFile, JSON.stringify(readyForReviewVerdict('feat/FORGE-1')), 'utf8');
+  await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile,
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+}
+
+test('FORGE-184: a ready_for_review task parks on question_written', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  await completeToReadyForReview(ctx);
+  // Sanity: we are in ready_for_review before the question.
+  {
+    const pre = JSON.parse(
+      readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+    );
+    assert.equal(pre.state, 'ready_for_review');
+  }
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:review-escalation:abc',
+    question: 'This change needs an architectural decision — escalate?',
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'Block review until the supervisor decides.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'blocked_on_question');
+});
+
+test('FORGE-184 regression: a running task still parks on question_written', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:running-park:def',
+    question: 'Should we do X or Y?',
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'Block the task until resolved.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'blocked_on_question');
+});
+
+test('FORGE-184: a reviewed task does NOT transition on question_written', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  await completeToReadyForReview(ctx);
+  // Advance ready_for_review → reviewed. We hold the lease (claim never
+  // released through ready_for_review), so write the state transition directly
+  // via the state machine rather than minting a second attempt's verdict.json.
+  {
+    const lease = readLease(ctx.forgeDir, 'FORGE-1');
+    const cur = readTaskState(ctx.forgeDir, 'FORGE-1');
+    writeTaskState(
+      ctx.forgeDir,
+      {
+        ...cur,
+        state: 'reviewed',
+        state_version: cur.state_version + 1,
+        updated_at: new Date().toISOString(),
+        updated_by: callerFromLease(lease),
+      },
+      callerFromLease(lease),
+    );
+  }
+  {
+    const pre = JSON.parse(
+      readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+    );
+    assert.equal(pre.state, 'reviewed');
+  }
+  // The question still writes, but the best-effort transition is a no-op from
+  // 'reviewed' (only running/ready_for_review park).
+  const result = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:reviewed-noop:ghi',
+    question: 'Late question — should not move a reviewed task.',
+    recommendedOptionId: 'yes',
+    whatHappensIfUnanswered: 'No transition expected.',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'reviewed');
 });

@@ -34,6 +34,8 @@ import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
 import { dashboardHandler } from './dashboard.ts';
+import { reviewQueueHandler } from './review-queue.ts';
+import { inboxHandler } from './inbox.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -306,6 +308,8 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   dashboard: [JSON_FLAG, FD],
+  'review-queue': [JSON_FLAG, FD],
+  inbox: [JSON_FLAG, FD],
   questions: [
     { flag: 'open', takesValue: false, description: 'Only open (unanswered) questions.' },
     { flag: 'run', takesValue: true, description: 'Scope to a run id.', aliases: ['run-id'], valueLabel: '<id>' },
@@ -487,6 +491,8 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['questions', withFlags(questionsHandler, FLAG_DECLS['questions']!)],
   ['status', withFlags(statusHandler, FLAG_DECLS['status']!)],
   ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
+  ['review-queue', withFlags(reviewQueueHandler, FLAG_DECLS['review-queue']!)],
+  ['inbox', withFlags(inboxHandler, FLAG_DECLS['inbox']!)],
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
   ['spec-diff', withFlags(specDiffHandler, FLAG_DECLS['spec-diff']!)],
   ['guardrail-check', withFlags(guardrailCheckHandler, FLAG_DECLS['guardrail-check']!)],
@@ -517,6 +523,8 @@ export const HELP_ORDER: readonly string[] = [
   'phases',
   'status',
   'dashboard',
+  'review-queue',
+  'inbox',
   'questions',
   'doctor',
   'attach',
