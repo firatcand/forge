@@ -30,6 +30,7 @@ import { applyDecisionHandler } from './apply-decision.ts';
 import { amendRoadmapHandler } from './amend-roadmap.ts';
 import { runOrchestrateReconcile } from './reconcile.ts';
 import { guardrailCheckHandler } from './guardrail-check.ts';
+import { reviewComposeHandler } from './review-compose.ts';
 import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
@@ -339,6 +340,16 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     JSON_FLAG,
     FD,
   ],
+  'review-compose': [
+    { flag: 'primary', takesValue: true, description: 'JSON file with the primary (Claude) ReviewVerdict, or a second-opinion envelope.', valueLabel: '<file>' },
+    { flag: 'second-opinion', takesValue: true, description: 'JSON file with a second-opinion ReviewVerdict (or envelope); absent → null.', valueLabel: '<file>' },
+    { flag: 'branch', takesValue: true, description: 'Branch name (passed into ComposeCtx).', valueLabel: '<str>' },
+    { flag: 'summary', takesValue: true, description: 'Verdict summary (passed into ComposeCtx).', valueLabel: '<str>' },
+    { flag: 'critical-path', takesValue: false, description: 'The diff touches a CRITICAL.md / architectural path.' },
+    { flag: 'second-opinion-available', takesValue: false, description: 'A second-opinion review host was configured & reachable.' },
+    JSON_FLAG,
+    FD,
+  ],
   'render-worker-prompt': [
     { flag: 'task', takesValue: true, description: 'Task id.', valueLabel: '<task-id>' },
     { flag: 'attempt', takesValue: true, description: 'Attempt id.', valueLabel: '<attempt-id>' },
@@ -496,6 +507,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
   ['spec-diff', withFlags(specDiffHandler, FLAG_DECLS['spec-diff']!)],
   ['guardrail-check', withFlags(guardrailCheckHandler, FLAG_DECLS['guardrail-check']!)],
+  ['review-compose', withFlags(reviewComposeHandler, FLAG_DECLS['review-compose']!)],
   ['render-worker-prompt', withFlags(renderWorkerPromptHandler, FLAG_DECLS['render-worker-prompt']!)],
   ['run', new Map<string, VerbHandler>([
     ['start', withFlags(runStartHandler, RUN_SUB_FLAG_DECLS['start']!)],
@@ -530,6 +542,7 @@ export const HELP_ORDER: readonly string[] = [
   'attach',
   'spec-diff',
   'guardrail-check',
+  'review-compose',
   'render-worker-prompt',
   'run',
   'ensure-worktree',

@@ -11,7 +11,7 @@
 //   _         + changes_needed   → running (loop back)
 //   _         + blocked          → running (then worker writes a question)
 
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
 import { CompleteArgsSchema, type CompleteArgs } from '../../schemas/cli-args.ts';
@@ -136,7 +136,13 @@ export async function runOrchestrateComplete(
     };
   }
 
-  // 3. Write verdict.json + verdict.verified.json atomically.
+  // 3. Write the verdict + verified files atomically. FORGE-187 (R1): the
+  //    filenames are phase-scoped so implement, review, and ship can each write
+  //    a verdict on the SAME attempt without colliding (the `flag:'wx'` write
+  //    refuses to overwrite). The implement phase keeps the historical
+  //    `verdict.json` / `verdict.verified.json` names for back-compat — every
+  //    reader (gc reverify_verdict / row 8, dashboard, etc.) reads the
+  //    implement-phase file, which is unchanged.
   const dir = attemptDir(opts.forgeDir, opts.taskId, opts.attemptId);
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -148,14 +154,15 @@ export async function runOrchestrateComplete(
       ),
     };
   }
-  const verdictPath = path.join(dir, 'verdict.json');
-  const verifiedPath = path.join(dir, 'verdict.verified.json');
+  const { verdictFile, verifiedFile } = verdictFileNames(opts.phase);
+  const verdictPath = path.join(dir, verdictFile);
+  const verifiedPath = path.join(dir, verifiedFile);
   try {
     writeFileSync(verdictPath, `${JSON.stringify(verdict.data, null, 2)}\n`, { flag: 'wx' });
   } catch (err) {
     return {
       exitCode: emit(
-        fail('IO_ERROR', `verdict.json write failed: ${err instanceof Error ? err.message : String(err)}`, false),
+        fail('IO_ERROR', `${verdictFile} write failed: ${err instanceof Error ? err.message : String(err)}`, false),
         { json: opts.json },
       ),
     };
@@ -171,9 +178,17 @@ export async function runOrchestrateComplete(
   try {
     writeFileSync(verifiedPath, `${JSON.stringify(verified, null, 2)}\n`, { flag: 'wx' });
   } catch (err) {
+    // The verdict file was just created with `wx`; if the verified-file write
+    // fails we'd leave an orphan verdict that collides (wx) on every retry of
+    // this phase. Roll it back so the phase can be re-attempted cleanly.
+    try {
+      rmSync(verdictPath, { force: true });
+    } catch {
+      // best-effort cleanup; the original IO_ERROR is the authoritative failure.
+    }
     return {
       exitCode: emit(
-        fail('IO_ERROR', `verdict.verified.json write failed: ${err instanceof Error ? err.message : String(err)}`, false),
+        fail('IO_ERROR', `${verifiedFile} write failed: ${err instanceof Error ? err.message : String(err)}`, false),
         { json: opts.json },
       ),
     };
@@ -283,6 +298,27 @@ export async function runOrchestrateComplete(
       { json: opts.json },
     ),
   };
+}
+
+// FORGE-187 (R1): map the completion phase to its verdict filenames. The
+// implement phase keeps the historical names (`verdict.json` /
+// `verdict.verified.json`) — these are what every existing reader consumes,
+// so back-compat is preserved. review and ship get distinct, phase-scoped
+// names so a review/ship completion on the same attempt as implement does not
+// collide with the `flag:'wx'` (exclusive-create) write.
+function verdictFileNames(phase: CompleteArgs['phase']): {
+  verdictFile: string;
+  verifiedFile: string;
+} {
+  switch (phase) {
+    case 'review':
+      return { verdictFile: 'verdict.review.json', verifiedFile: 'verdict.review.verified.json' };
+    case 'ship':
+      return { verdictFile: 'verdict.ship.json', verifiedFile: 'verdict.ship.verified.json' };
+    case 'implement':
+    default:
+      return { verdictFile: 'verdict.json', verifiedFile: 'verdict.verified.json' };
+  }
 }
 
 function loadRetryPolicy(forgeDir: string): RetryPolicy {

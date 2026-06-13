@@ -65,6 +65,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'Check whether a path falls under agents.preflight_globs (worker preflight).',
   },
   {
+    name: 'review-compose',
+    summary: 'Compose a machine Verdict from a primary review (+ optional second opinion); escalate or park when a human is required.',
+  },
+  {
     name: 'render-worker-prompt',
     summary: 'Render the worker prompt for a dispatched attempt (read-only).',
   },
@@ -188,6 +192,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'review',
     summary: 'Run code-reviewer, security-auditor (on CRITICAL.md paths), and design-reviewer on the current diff.',
+  },
+  {
+    name: 'auto-review',
+    summary: 'Drain the review-queue: review each task awaiting review and advance or escalate it.',
   },
   {
     name: 'second-opinion',
