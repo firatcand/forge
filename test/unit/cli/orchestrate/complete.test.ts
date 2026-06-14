@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
@@ -9,6 +9,7 @@ import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
 import { runOrchestrateHeartbeat } from '../../../../src/cli/orchestrate/heartbeat.ts';
 import { runOrchestrateComplete } from '../../../../src/cli/orchestrate/complete.ts';
+import type { RunCommand } from '../../../../src/orchestrator/verify-runner.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
 
@@ -34,13 +35,18 @@ class StubTracker implements ClaimableTracker {
   async setClaimFence(): Promise<void> {}
 }
 
-async function setupRunning(stdout: string[]): Promise<{
+async function setupRunning(
+  stdout: string[],
+  opts: { worktreePath?: string } = {},
+): Promise<{
   forgeDir: string;
   repoRoot: string;
   attemptId: string;
+  worktreePath: string;
 }> {
   const repoRoot = mkdtempSync(join(tmpdir(), 'forge-complete-'));
   const forgeDir = join(repoRoot, '.forge');
+  const worktreePath = opts.worktreePath ?? '/tmp/wt';
   const runId = uuidv7();
   await runOrchestrateClaim(
     { taskId: 'FORGE-1', runId, forgeDir, json: true },
@@ -51,7 +57,7 @@ async function setupRunning(stdout: string[]): Promise<{
     taskId: 'FORGE-1',
     claimId: claimEnv.data.claim_id,
     runId,
-    worktreePath: '/tmp/wt',
+    worktreePath,
     phase: 'implement',
     forgeDir,
     json: true,
@@ -64,7 +70,45 @@ async function setupRunning(stdout: string[]): Promise<{
     json: true,
   });
   stdout.length = 0;
-  return { forgeDir, repoRoot, attemptId: dispatchEnv.data.attempt_id };
+  return { forgeDir, repoRoot, attemptId: dispatchEnv.data.attempt_id, worktreePath };
+}
+
+// FORGE-188: write a settings.yaml with a `verify` block into the forge dir so
+// the implement-phase completion re-runs it. The block must satisfy
+// SettingsSchema (version 1 + project + tracker + agents + ...). We write only
+// the fields the schema requires plus `verify`; loadSettings validates the rest
+// via defaults.
+function writeSettingsWithVerify(forgeDir: string, commands: string[]): void {
+  mkdirSync(forgeDir, { recursive: true });
+  const yaml = [
+    'version: 1',
+    'project:',
+    '  name: forge-test',
+    'tracker:',
+    '  type: github',
+    '  config:',
+    '    repo: owner/repo',
+    'secrets:',
+    '  manager: env_file',
+    'verify:',
+    '  commands:',
+    ...commands.map((c) => `    - ${JSON.stringify(c)}`),
+    '',
+  ].join('\n');
+  writeFileSync(join(forgeDir, 'settings.yaml'), yaml, 'utf8');
+}
+
+// FORGE-188 (F2): the worktree must carry the `.forge/worktree-task.json` binding
+// marker (taskId === the task) before `complete` will trust it as a verify cwd.
+// create() writes this in production; tests that drive verification with a
+// hand-rolled mkdtemp worktree must stamp it themselves.
+function writeWorktreeMarker(worktreePath: string, taskId: string): void {
+  mkdirSync(join(worktreePath, '.forge'), { recursive: true });
+  writeFileSync(
+    join(worktreePath, '.forge', 'worktree-task.json'),
+    JSON.stringify({ version: 1, taskId, branch: `feat/${taskId}` }, null, 2) + '\n',
+    'utf8',
+  );
 }
 
 function writeVerdict(repoRoot: string, verdict: string): string {
@@ -275,4 +319,409 @@ test('complete: verified-write failure rolls back the verdict file', async (t) =
   assert.equal(env.error.code, 'IO_ERROR');
   // The just-written verdict.json must have been rolled back.
   assert.equal(existsSync(join(dir, 'verdict.json')), false, 'orphan verdict.json should be cleaned up');
+});
+
+// ── FORGE-188: independent CLI re-verification in `complete` ─────────────────
+
+test('FORGE-188: ready_for_review + implement + settings.verify PASS → cli@live, verification.ran', async (t) => {
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test', 'npm run lint']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+
+  const calls: string[] = [];
+  const run: RunCommand = async (command, opts) => {
+    calls.push(`${command}@${opts.cwd}`);
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'ready_for_review');
+
+  // Verify ran in the dispatch-manifest worktree, both commands.
+  assert.deepEqual(calls, [`npm test@${worktreePath}`, `npm run lint@${worktreePath}`]);
+
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  const vv = JSON.parse(readFileSync(join(dir, 'verdict.verified.json'), 'utf8'));
+  assert.equal(vv.verified_by, 'cli@live');
+  assert.equal(vv.verification.ran, true);
+  assert.equal(vv.verification.passed, true);
+  assert.equal(vv.verification.results.length, 2);
+});
+
+test('FORGE-188: ready_for_review + implement + settings.verify FAIL → VERIFICATION_FAILED, no writes, stays running', async (t) => {
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test', 'npm run lint']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+
+  const run: RunCommand = async (command) => ({ exitCode: command === 'npm run lint' ? 1 : 0 });
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'commands_failed');
+  assert.deepEqual(env.error.details.failed_commands, ['npm run lint']);
+
+  // No orphan verdict files; state untouched.
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false, 'no verdict.json on verification failure');
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false, 'no verdict.verified.json on verification failure');
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188: ready_for_review + implement + NO settings.verify → self-attest, verification.ran=false', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // No settings.yaml written → FILE_NOT_FOUND → unconfigured → skip.
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(invoked, false, 'verify must not run when unconfigured');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'ready_for_review');
+
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  const vv = JSON.parse(readFileSync(join(dir, 'verdict.verified.json'), 'utf8'));
+  assert.equal(vv.verified_by, 'cli@self-attest');
+  assert.equal(vv.verification.ran, false);
+  assert.equal(typeof vv.verification.skipped_reason, 'string');
+});
+
+test('FORGE-188 (R1): settings.verify present but worktree MISSING → VERIFICATION_FAILED (worktree_missing), fail closed', async (t) => {
+  const stdout = captureStdout(t);
+  // Dispatch into a path that does NOT exist on disk → resolved worktree missing.
+  const missing = join(tmpdir(), `forge-missing-wt-${uuidv7()}`);
+  const ctx = await setupRunning(stdout, { worktreePath: missing });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run when the worktree is missing');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'worktree_missing');
+  assert.equal(env.error.details.path, missing);
+
+  // Fail closed: NEITHER verdict file written, state untouched.
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188: changes_needed + settings.verify present → verify NOT run (only implement/ready_for_review verifies)', async (t) => {
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'changes_needed');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(invoked, false, 'verify must not run on the failure path');
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+// ── FORGE-188 hardening: adversarial bypass-surface tests (F1–F4) ────────────
+
+test('FORGE-188 (F1): stale attemptId (≠ current_attempt_id) → STALE_ATTEMPT, no writes, stays running', async (t) => {
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  // A worktree that WOULD pass binding+verify, to prove F1 fires first regardless.
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+
+  const staleAttemptId = uuidv7(); // valid shape, but never the current attempt
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: staleAttemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run for a non-current attempt');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+  assert.equal(env.error.retriable, false);
+  assert.equal(env.error.details.current_attempt_id, ctx.attemptId);
+  assert.equal(env.error.details.supplied_attempt_id, staleAttemptId);
+
+  // NEITHER verdict file for EITHER attempt; state unchanged (still running).
+  const curDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  const staleDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', staleAttemptId);
+  assert.equal(existsSync(join(curDir, 'verdict.json')), false);
+  assert.equal(existsSync(join(curDir, 'verdict.verified.json')), false);
+  assert.equal(existsSync(join(staleDir, 'verdict.json')), false);
+  assert.equal(existsSync(join(staleDir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+  assert.equal(state.current_attempt_id, ctx.attemptId);
+});
+
+test("FORGE-188 (F2): manifest worktree_path points at ANOTHER task's marked worktree → VERIFICATION_FAILED marker_mismatch", async (t) => {
+  const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  // Real worktree, but its marker binds it to a DIFFERENT task.
+  const otherWorktree = mkdtempSync(join(tmpdir(), 'forge-wt-other-'));
+  writeWorktreeMarker(otherWorktree, 'FORGE-999');
+  const ctx = await setupRunning(stdout, { worktreePath: otherWorktree });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  // Confirm the dispatch manifest points at the foreign worktree.
+  const manifest = JSON.parse(
+    readFileSync(manifestFilePath(ctx.forgeDir, 'FORGE-1', ctx.attemptId), 'utf8'),
+  );
+  assert.equal(manifest.worktree_path, otherWorktree);
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run in a foreign-bound worktree');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'marker_mismatch');
+
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188 (F3): malformed manifest.json (present, unparseable) + verify required → VERIFICATION_FAILED manifest_invalid', async (t) => {
+  const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+  // Corrupt the dispatch manifest: present but NOT valid JSON. This must NOT be
+  // masked as a legacy-absent record and silently fall back to the canonical path.
+  writeFileSync(manifestFilePath(ctx.forgeDir, 'FORGE-1', ctx.attemptId), '{ not json', 'utf8');
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run with a corrupt dispatch manifest');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'manifest_invalid');
+
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188 (R2 re-review): manifest PRESENT-but-unreadable (EISDIR) ≠ legacy-absent → manifest_invalid, no fallback', async (t) => {
+  const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+  // Manifest path is a DIRECTORY → readFileSync throws EISDIR (NOT ENOENT). A
+  // present-but-unreadable dispatch record must NOT be masked as legacy-absent and
+  // fall back to the canonical worktree — it must fail closed.
+  const mp = manifestFilePath(ctx.forgeDir, 'FORGE-1', ctx.attemptId);
+  rmSync(mp, { force: true }); // remove the dispatch-written manifest file…
+  mkdirSync(mp, { recursive: true }); // …and replace it with a directory → EISDIR on read
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run when the dispatch manifest is unreadable');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'manifest_invalid');
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188 (3rd-pass): manifest ABSENT (ENOENT) for a dispatched attempt → manifest_invalid, NO canonical fallback', async (t) => {
+  const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+  // Also seed the CANONICAL worktree with a valid matching marker — if a fallback
+  // existed, verification would wrongly run+pass there. Deleting the manifest must
+  // NOT redirect to it.
+  const canonical = join(ctx.forgeDir, 'worktrees', 'FORGE-1');
+  writeWorktreeMarker(canonical, 'FORGE-1');
+  rmSync(manifestFilePath(ctx.forgeDir, 'FORGE-1', ctx.attemptId), { force: true });
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must NOT run against a canonical fallback when the manifest is absent');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'manifest_invalid');
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188 (3rd-pass): manifest present but {} (no worktree_path) → manifest_invalid, NO canonical fallback', async (t) => {
+  const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeSettingsWithVerify(ctx.forgeDir, ['npm test']);
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+  const canonical = join(ctx.forgeDir, 'worktrees', 'FORGE-1');
+  writeWorktreeMarker(canonical, 'FORGE-1');
+  writeFileSync(manifestFilePath(ctx.forgeDir, 'FORGE-1', ctx.attemptId), '{}', 'utf8');
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must NOT run against a canonical fallback when worktree_path is missing');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.equal(env.error.details.reason, 'manifest_invalid');
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-188 (F4): invalid settings.yaml (schema fail, non-FILE_NOT_FOUND SettingsError) → clean fail before writes', async (t) => {
+  const stdout = captureStdout(t);
+  const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
+  const ctx = await setupRunning(stdout, { worktreePath });
+  writeWorktreeMarker(worktreePath, 'FORGE-1');
+  // settings.yaml exists but fails schema validation (missing required fields /
+  // bad shape) → a SettingsError that is NOT FILE_NOT_FOUND. Must fail cleanly,
+  // never silently self-attest, and never write.
+  mkdirSync(ctx.forgeDir, { recursive: true });
+  writeFileSync(join(ctx.forgeDir, 'settings.yaml'), 'version: 1\nproject: not-an-object\n', 'utf8');
+
+  let invoked = false;
+  const run: RunCommand = async () => {
+    invoked = true;
+    return { exitCode: 0 };
+  };
+
+  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const result = await runOrchestrateComplete(
+    { taskId: 'FORGE-1', attemptId: ctx.attemptId, verdictFile, phase: 'implement', forgeDir: ctx.forgeDir, json: true },
+    { run },
+  );
+  assert.equal(result.exitCode, 1);
+  assert.equal(invoked, false, 'verify must not run when settings are unreadable');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  assert.notEqual(env.error.code, 'FILE_NOT_FOUND');
+
+  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(existsSync(join(dir, 'verdict.json')), false);
+  assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
 });
