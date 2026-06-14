@@ -69,4 +69,19 @@ A decision can be **silently auto-decided** by the agent only when **all** of th
 
 When in doubt, ask. The cost of an extra question is small; the cost of an unsurfaced fork is rework.
 
+**Per-category discipline (FORGE-216).** Every qualifying fork carries
+options-with-tradeoffs + a recommendation + a what-happens-if-unanswered (the
+`AskUserQuestion` structure), AND picks the BEST-FIT `category` so downstream
+surfaces (`/inbox`, statusline, `/learn` mining) can group by it. Choose:
+`schema_shape` (schema forks consumed downstream), `compat_policy` (back-compat /
+deprecation / migration strategy), `enforcement_mode` (advisory vs enforced),
+`scope_cut` (defer vs build now), `provider_choice` (adapter / host / provider
+picks), `release` (versioning / release sequencing), `security_tradeoff`
+(security calls); fall back to the code-shaped categories (`public_api`, `scope`,
+`naming`, `deprecation`, `error_semantics`, `file_lifecycle`) for code decisions,
+or `other` when nothing fits. When a fork is escalated to the orchestrator via
+`forge orchestrate question`, stamp it with `--classification-file <path>` (a
+`DecisionClassification` JSON carrying that `category`); without it the verb
+defaults to `category: "other"`.
+
 See `skills/_shared/question-format.md` for the canonical question structure.

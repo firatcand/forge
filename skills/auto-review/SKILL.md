@@ -143,14 +143,26 @@ Act on `data.kind`:
   forge orchestrate question <task_id> --attempt <current_attempt_id> \
     --decision-key arch:auto-review:<task_id_lowercased> \
     --question "<the architectural finding + the decision needed>" \
+    --options-file <path> \
     --recommended-option-id <id> \
-    --what-happens-if-unanswered "Task stays parked until you decide."
+    --what-happens-if-unanswered "Task stays parked until you decide." \
+    --classification-file <path>
   ```
 
   (The `--decision-key` must be lowercase `a-z0-9._:-`, so lowercase the task id
   when building it. `--recommended-option-id` must match one of the question's
   options — the verb defaults to a `yes`/`no` set unless you pass an
   `--options-file`.)
+
+  **Classification discipline (FORGE-216).** Pass `--classification-file <path>`
+  (a `DecisionClassification` JSON) so `/inbox` + statusline can group the
+  escalation by `category`. Pick the BEST-FIT value: `schema_shape`,
+  `compat_policy`, `enforcement_mode`, `scope_cut`, `provider_choice`, `release`,
+  `security_tradeoff` for delivery decisions; `public_api`, `scope`, `naming`,
+  `deprecation`, `error_semantics`, `file_lifecycle` for code decisions; `other`
+  when nothing fits. Without the flag the verb defaults to `category: "other"`.
+  Every escalation should carry options-with-tradeoffs, a recommendation, and a
+  what-happens-if-unanswered alongside the classification.
 
 - **`park`** — a second opinion was required (critical path) but unavailable.
   Leave the task in the queue, report `data.reason`, and make **no** state

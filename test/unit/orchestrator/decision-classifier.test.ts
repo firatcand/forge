@@ -87,6 +87,14 @@ test('validateClassification: accepts a well-formed classification', () => {
   assert.deepEqual(out, VALID_CLASSIFICATION);
 });
 
+test('FORGE-216: validateClassification accepts a new-taxonomy category', () => {
+  const out = validateClassification({
+    ...VALID_CLASSIFICATION,
+    category: 'schema_shape',
+  });
+  assert.equal(out.category, 'schema_shape');
+});
+
 test('validateClassification: rejects a missing field with ClassificationError', () => {
   const { decision_type, ...missing } = VALID_CLASSIFICATION;
   void decision_type;

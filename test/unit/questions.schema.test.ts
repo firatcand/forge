@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AnswerSchema,
+  DECISION_CATEGORIES,
   DecisionClassificationSchema,
   QUESTION_FILE_MAX_BYTES,
   QuestionSchema,
@@ -150,6 +151,58 @@ test('DecisionClassificationSchema accepts a routine classification', () => {
   );
   assert.equal(result.success, true);
 });
+
+// FORGE-216: typed taxonomy — back-compat + additive coverage.
+const OLD_CATEGORIES = [
+  'public_api',
+  'scope',
+  'naming',
+  'deprecation',
+  'error_semantics',
+  'file_lifecycle',
+  'other',
+] as const;
+const NEW_CATEGORIES = [
+  'schema_shape',
+  'compat_policy',
+  'enforcement_mode',
+  'scope_cut',
+  'provider_choice',
+  'release',
+  'security_tradeoff',
+] as const;
+
+test('FORGE-216: DECISION_CATEGORIES is a superset of the original FORGE-65 values', () => {
+  for (const old of OLD_CATEGORIES) {
+    assert.ok(
+      (DECISION_CATEGORIES as readonly string[]).includes(old),
+      `expected DECISION_CATEGORIES to still include legacy value '${old}'`,
+    );
+  }
+  // other stays the last value (fallback).
+  assert.equal(DECISION_CATEGORIES[DECISION_CATEGORIES.length - 1], 'other');
+});
+
+for (const old of OLD_CATEGORIES) {
+  test(`FORGE-216: DecisionClassificationSchema still parses legacy category '${old}'`, () => {
+    const result = DecisionClassificationSchema.safeParse(
+      baseClassification({ category: old }),
+    );
+    assert.equal(result.success, true);
+  });
+}
+
+for (const next of NEW_CATEGORIES) {
+  test(`FORGE-216: DecisionClassificationSchema parses new category '${next}'`, () => {
+    const result = DecisionClassificationSchema.safeParse(
+      baseClassification({ category: next }),
+    );
+    assert.equal(result.success, true);
+    if (result.success) {
+      assert.equal(result.data.category, next);
+    }
+  });
+}
 
 test('DecisionClassificationSchema rejects unknown category', () => {
   const result = DecisionClassificationSchema.safeParse(

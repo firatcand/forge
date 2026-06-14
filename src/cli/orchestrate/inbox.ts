@@ -14,7 +14,12 @@
 import { collectTasksByState } from '../../orchestrator/readiness.ts';
 import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/index.ts';
 import { QuestionChannelError } from '../../orchestrator/questions/errors.ts';
-import type { Question, DecisionClassification } from '../../schemas/questions.ts';
+import { DECISION_CATEGORIES } from '../../schemas/questions.ts';
+import type {
+  Question,
+  DecisionClassification,
+  DecisionCategory,
+} from '../../schemas/questions.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { ok, fail, type Envelope } from '../envelope.ts';
 import { hasFlag, resolveForgeDir } from './flags.ts';
@@ -114,8 +119,20 @@ export function runOrchestrateInbox(
     open_questions: (questionsByTask.get(scan.taskId) ?? []).map(toInboxQuestion),
   }));
 
+  // FORGE-216: tally OPEN questions per category across all parked tasks. This
+  // is the analytics acceptance surface for the typed-taxonomy work — /statusline
+  // (197) and /learn mining read it. Only categories with ≥1 open question
+  // appear; sparse by design.
+  const by_category: Partial<Record<DecisionCategory, number>> = {};
+  for (const t of parked_tasks) {
+    for (const q of t.open_questions) {
+      const cat = q.classification.category;
+      by_category[cat] = (by_category[cat] ?? 0) + 1;
+    }
+  }
+
   if (json) {
-    return { exitCode: writeEnvelope(ok({ parked_tasks }), out) };
+    return { exitCode: writeEnvelope(ok({ parked_tasks, by_category }), out) };
   }
 
   if (parked_tasks.length === 0) {
@@ -126,9 +143,24 @@ export function runOrchestrateInbox(
   for (const t of parked_tasks) {
     lines.push(`${t.task_id} [${t.state}] — ${t.open_questions.length} open question(s)`);
     for (const q of t.open_questions) {
-      lines.push(`  [${q.question_id}] ${q.decision_key} (${q.classification.decision_type})`);
+      lines.push(
+        `  [${q.question_id}] ${q.decision_key} (${q.classification.decision_type}/${q.classification.category})`,
+      );
       lines.push(`    Q: ${q.question}`);
     }
+  }
+  // FORGE-216: a one-line per-category tally footer so a supervisor scanning the
+  // TEXT view sees the distribution at a glance (JSON by_category is canonical).
+  // Render in canonical DECISION_CATEGORIES order (not question-encounter order)
+  // so the footer is deterministic across runs.
+  const catEntries = DECISION_CATEGORIES.filter((c) => by_category[c]).map(
+    (c) => [c, by_category[c]] as const,
+  );
+  if (catEntries.length > 0) {
+    lines.push('');
+    lines.push(
+      `By category: ${catEntries.map(([cat, n]) => `${cat}=${n}`).join(', ')}`,
+    );
   }
   out.write(lines.join('\n') + '\n');
   return { exitCode: 0 };

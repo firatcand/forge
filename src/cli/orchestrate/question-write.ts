@@ -24,7 +24,24 @@
 //     [--question-budget-soft <n>] [--question-budget-hard <n>]
 //     [--drift-event-id <id>] [--routing-hint apply-decision|amend-roadmap]
 
-import { readFileSync } from 'node:fs';
+import { lstatSync, readFileSync } from 'node:fs';
+
+// Producer sidecar JSON files (--classification-file) are caller-supplied → cap +
+// require a regular file before reading (the schema caps parsed FIELDS, but a raw
+// read/parse of a huge or non-regular file is the gap). Mirrors readJsonCapped.
+const SIDECAR_FILE_MAX_BYTES = 64 * 1024;
+function readSidecarCapped(filePath: string): { raw: string } | { error: string } {
+  try {
+    const st = lstatSync(filePath);
+    if (!st.isFile()) return { error: `${filePath} is not a regular file` };
+    if (st.size > SIDECAR_FILE_MAX_BYTES) {
+      return { error: `${filePath} is ${st.size} bytes; max is ${SIDECAR_FILE_MAX_BYTES}` };
+    }
+    return { raw: readFileSync(filePath, 'utf8') };
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
 import { v7 as uuidv7 } from 'uuid';
 import { z } from 'zod';
 
@@ -179,17 +196,16 @@ export async function runOrchestrateQuestionWrite(
   // 2. Load classification (or use default), via the standalone validator (AC1).
   let classification = DEFAULT_CLASSIFICATION;
   if (extras.classificationFile) {
-    let raw: string;
-    try {
-      raw = readFileSync(extras.classificationFile, 'utf8');
-    } catch (err) {
+    const read = readSidecarCapped(extras.classificationFile);
+    if ('error' in read) {
       return {
         exitCode: emit(
-          fail('CLASSIFICATION_FILE_READ_FAILED', `${err instanceof Error ? err.message : String(err)}`, false),
+          fail('CLASSIFICATION_FILE_READ_FAILED', read.error, false),
           { json: opts.json },
         ),
       };
     }
+    const raw = read.raw;
     let parsedJson: unknown;
     try {
       parsedJson = JSON.parse(raw);
@@ -549,6 +565,7 @@ export const questionWriteHandler: VerbHandler = {
     const decisionKey = parseFlag(rest, 'decision-key') ?? '';
     const question = parseFlag(rest, 'question') ?? '';
     const optionsFile = parseFlag(rest, 'options-file');
+    const classificationFile = parseFlag(rest, 'classification-file');
     const recommendedOptionId = parseFlag(rest, 'recommended-option-id');
     const whatHappensIfUnanswered = parseFlag(rest, 'what-happens-if-unanswered');
     const softRaw = parseFlag(rest, 'question-budget-soft');
@@ -559,20 +576,23 @@ export const questionWriteHandler: VerbHandler = {
       ? routingHintRaw
       : undefined;
     const json = hasFlag(rest, 'json');
-    return runOrchestrateQuestionWrite({
-      taskId,
-      attemptId,
-      decisionKey,
-      question,
-      forgeDir,
-      json,
-      ...(optionsFile ? { optionsFile } : {}),
-      ...(recommendedOptionId ? { recommendedOptionId } : {}),
-      ...(whatHappensIfUnanswered ? { whatHappensIfUnanswered } : {}),
-      ...(softRaw !== undefined ? { questionBudgetSoft: Number(softRaw) } : {}),
-      ...(hardRaw !== undefined ? { questionBudgetHard: Number(hardRaw) } : {}),
-      ...(driftEventId ? { driftEventId } : {}),
-      ...(routingHint ? { routingHint } : {}),
-    });
+    return runOrchestrateQuestionWrite(
+      {
+        taskId,
+        attemptId,
+        decisionKey,
+        question,
+        forgeDir,
+        json,
+        ...(optionsFile ? { optionsFile } : {}),
+        ...(recommendedOptionId ? { recommendedOptionId } : {}),
+        ...(whatHappensIfUnanswered ? { whatHappensIfUnanswered } : {}),
+        ...(softRaw !== undefined ? { questionBudgetSoft: Number(softRaw) } : {}),
+        ...(hardRaw !== undefined ? { questionBudgetHard: Number(hardRaw) } : {}),
+        ...(driftEventId ? { driftEventId } : {}),
+        ...(routingHint ? { routingHint } : {}),
+      },
+      classificationFile ? { classificationFile } : {},
+    );
   },
 };

@@ -118,6 +118,17 @@ already injects the matching `--question-budget-soft` / `--question-budget-hard`
 flags into its `forge orchestrate question` examples, plus a soft-cap warning
 when the task has crossed its soft budget. Do not strip or rewrite those lines.
 
+**Worker escalation discipline (FORGE-216).** Every `forge orchestrate question`
+a worker writes should carry options-with-tradeoffs (`--options-file`), a
+recommendation (`--recommended-option-id`), a what-happens-if-unanswered, AND a
+typed classification (`--classification-file <path>`, a `DecisionClassification`
+JSON) so `/inbox` + statusline can group by `category`. Pick the BEST-FIT
+category: `schema_shape`, `compat_policy`, `enforcement_mode`, `scope_cut`,
+`provider_choice`, `release`, `security_tradeoff` for delivery decisions; the
+code-shaped values (`public_api`, `scope`, `naming`, `deprecation`,
+`error_semantics`, `file_lifecycle`) for code decisions; `other` as the fallback.
+Without `--classification-file` the verb defaults to `category: "other"`.
+
 **3e. Spawn the worker subagent via the host's Task tool.**
 
 The CLI does NOT spawn — it only writes the manifest and renders the prompt.

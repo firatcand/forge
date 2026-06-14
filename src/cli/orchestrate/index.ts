@@ -408,6 +408,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     { flag: 'decision-key', takesValue: true, description: 'Decision key (question-channel budget bucket).', valueLabel: '<key>' },
     { flag: 'question', takesValue: true, description: 'The question text.', valueLabel: '<text>' },
     { flag: 'options-file', takesValue: true, description: 'Path to a JSON options file.', valueLabel: '<path>' },
+    { flag: 'classification-file', takesValue: true, description: 'Path to a DecisionClassification JSON (decision_type/category/reversibility/blast_radius/default_action/reason). Validated via the schema; an explicit but invalid file fails (no fallback to category:other).', valueLabel: '<path>' },
     { flag: 'recommended-option-id', takesValue: true, description: 'Recommended option id.', valueLabel: '<id>' },
     { flag: 'what-happens-if-unanswered', takesValue: true, description: 'Consequence text if unanswered.', valueLabel: '<text>' },
     { flag: 'question-budget-soft', takesValue: true, description: 'Soft question budget.', valueLabel: '<n>' },

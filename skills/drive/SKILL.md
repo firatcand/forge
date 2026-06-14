@@ -214,12 +214,28 @@ without a pass, **escalate** — do NOT merge:
 forge orchestrate question <ticket-id> --attempt <attempt-id> \
   --decision-key arch:drive:<ticket-id-lowercased> \
   --question "<the unresolved blocking findings + the decision needed>" \
+  --options-file <path> \
   --recommended-option-id <id> \
-  --what-happens-if-unanswered "Ticket stays parked until you decide."
+  --what-happens-if-unanswered "Ticket stays parked until you decide." \
+  --classification-file <path>
 ```
 
 This surfaces via AskUserQuestion and parks the ticket to `/inbox`; the next
 `/goal` turn sees `blocked_on_question` and does not resume the loop.
+
+**Escalation discipline (FORGE-216).** Every escalated question carries
+options-with-tradeoffs (`--options-file`), a recommendation
+(`--recommended-option-id`), a what-happens-if-unanswered, AND a typed
+classification (`--classification-file <path>`, a `DecisionClassification` JSON)
+so `/inbox` + statusline can group by `category`. Pick the BEST-FIT category:
+`schema_shape` (schema forks consumed downstream), `compat_policy` (back-compat /
+deprecation / migration strategy), `enforcement_mode` (advisory vs enforced),
+`scope_cut` (defer vs build now), `provider_choice` (adapter / host / provider
+picks), `release` (versioning / release sequencing), `security_tradeoff`
+(security calls); fall back to the code-shaped categories (`public_api`, `scope`,
+`naming`, `deprecation`, `error_semantics`, `file_lifecycle`) for code decisions,
+or `other` when nothing fits. Without `--classification-file` the verb defaults to
+`category: "other"`.
 
 **`review_host_cli: null` policy (R5).** When no review host is configured the
 cross-review is impossible. Then:
