@@ -46,6 +46,7 @@ function questionJson(
   questionId: string,
   decisionKey: string,
   decisionType: 'routine' | 'architectural' = 'architectural',
+  category = 'scope',
 ): void {
   const created = new Date(Date.now() - 60_000).toISOString();
   const expires = new Date(Date.now() + 3_600_000).toISOString();
@@ -73,7 +74,7 @@ function questionJson(
       what_happens_if_unanswered: 'Block until answered.',
       classification: {
         decision_type: decisionType,
-        category: 'scope',
+        category,
         reversibility: 'medium',
         blast_radius: 'module',
         default_action: 'ask',
@@ -130,6 +131,39 @@ test('inbox: corrupt state.json is tolerated (skipped)', () => {
     env.data.parked_tasks.map((t: { task_id: string }) => t.task_id),
     ['P1-T1'],
   );
+});
+
+test('FORGE-216: inbox JSON by_category tallies open questions per category across parked tasks', () => {
+  const forgeDir = forgeRoot();
+  taskStateJson(forgeDir, 'P1-T1', 'blocked_on_question');
+  // Two open questions on T1: one new-taxonomy 'schema_shape', one 'release'.
+  questionJson(forgeDir, 'P1-T1', 'att-1', '00000000-0000-7000-8000-000000000001', 'k:schema', 'architectural', 'schema_shape');
+  questionJson(forgeDir, 'P1-T1', 'att-1', '00000000-0000-7000-8000-000000000002', 'k:release', 'architectural', 'release');
+  taskStateJson(forgeDir, 'P1-T2', 'blocked_on_question');
+  // A second parked task adds another 'schema_shape' → cross-task tally.
+  questionJson(forgeDir, 'P1-T2', 'att-1', '00000000-0000-7000-8000-000000000003', 'k:schema2', 'architectural', 'schema_shape');
+  // A running (non-parked) task's question must NOT be counted.
+  taskStateJson(forgeDir, 'P1-T3', 'running');
+  questionJson(forgeDir, 'P1-T3', 'att-1', '00000000-0000-7000-8000-000000000004', 'k:ignore', 'architectural', 'release');
+
+  const out = capture();
+  const res = runOrchestrateInbox({ forgeDir, json: true, stdout: out.stream });
+  assert.equal(res.exitCode, 0);
+  const env = JSON.parse(out.text());
+  assert.equal(env.ok, true);
+  assert.deepEqual(env.data.by_category, { schema_shape: 2, release: 1 });
+});
+
+test('FORGE-216: inbox TEXT mode surfaces category and a by-category footer', () => {
+  const forgeDir = forgeRoot();
+  taskStateJson(forgeDir, 'P1-T1', 'blocked_on_question');
+  questionJson(forgeDir, 'P1-T1', 'att-1', '00000000-0000-7000-8000-000000000001', 'k:schema', 'architectural', 'schema_shape');
+  const out = capture();
+  const res = runOrchestrateInbox({ forgeDir, json: false, stdout: out.stream });
+  assert.equal(res.exitCode, 0);
+  const text = out.text();
+  assert.match(text, /architectural\/schema_shape/);
+  assert.match(text, /By category: schema_shape=1/);
 });
 
 test('inbox: empty → { parked_tasks: [] }', () => {

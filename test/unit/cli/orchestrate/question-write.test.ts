@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
@@ -9,7 +9,7 @@ import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
 import { runOrchestrateHeartbeat } from '../../../../src/cli/orchestrate/heartbeat.ts';
 import { runOrchestrateComplete } from '../../../../src/cli/orchestrate/complete.ts';
-import { runOrchestrateQuestionWrite } from '../../../../src/cli/orchestrate/question-write.ts';
+import { runOrchestrateQuestionWrite, questionWriteHandler } from '../../../../src/cli/orchestrate/question-write.ts';
 import { readLease, callerFromLease } from '../../../../src/cli/orchestrate/lease-io.ts';
 import { readTaskState, writeTaskState } from '../../../../src/orchestrator/state-machine.ts';
 import { writeAnswerAtomic } from '../../../../src/orchestrator/questions/index.ts';
@@ -127,6 +127,84 @@ test('question write succeeds, transitions to blocked_on_question', async (t) =>
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
   assert.equal(state.state, 'blocked_on_question');
+});
+
+test('FORGE-216: --classification-file persists the supplied category (producer path)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const classificationFile = join(ctx.repoRoot, 'classification.json');
+  writeFileSync(
+    classificationFile,
+    JSON.stringify({
+      decision_type: 'architectural',
+      category: 'schema_shape',
+      reversibility: 'low',
+      blast_radius: 'project',
+      default_action: 'ask',
+      reason: 'Schema fork consumed downstream.',
+    }),
+    'utf8',
+  );
+  // Drive through the PUBLIC handler so the new --classification-file flag
+  // parsing in index.ts/question-write.ts is exercised end-to-end.
+  const result = await questionWriteHandler.run(
+    [
+      '--task', 'FORGE-1',
+      '--attempt', ctx.attemptId,
+      '--decision-key', 'arch:schema-fork:hash',
+      '--question', 'Fork the schema or extend it?',
+      '--recommended-option-id', 'yes',
+      '--what-happens-if-unanswered', 'Block until resolved.',
+      '--classification-file', classificationFile,
+      '--forge-dir', ctx.forgeDir,
+      '--json',
+    ],
+    { cwd: ctx.repoRoot },
+  );
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.outcome, 'written');
+  const qDir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'questions');
+  const files = readdirSync(qDir);
+  assert.equal(files.length, 1);
+  const qData = JSON.parse(readFileSync(join(qDir, files[0]!), 'utf8'));
+  // The supplied category is persisted — NOT the DEFAULT_CLASSIFICATION 'other'.
+  assert.equal(qData.classification.category, 'schema_shape');
+});
+
+test('FORGE-216: an explicitly-supplied but invalid --classification-file fails (no fallback to other)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const bad = join(ctx.repoRoot, 'bad-classification.json');
+  // Valid JSON, but an unknown category → schema rejects it.
+  writeFileSync(
+    bad,
+    JSON.stringify({
+      decision_type: 'architectural',
+      category: 'not_a_real_category',
+      reversibility: 'low',
+      blast_radius: 'project',
+      default_action: 'ask',
+      reason: 'bogus',
+    }),
+    'utf8',
+  );
+  const result = await runOrchestrateQuestionWrite(
+    {
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      decisionKey: 'arch:bad:hash',
+      question: 'Q?',
+      recommendedOptionId: 'yes',
+      whatHappensIfUnanswered: 'Block.',
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { classificationFile: bad },
+  );
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'INVALID_CLASSIFICATION');
 });
 
 test('question write echoes --drift-event-id + --routing-hint into envelope', async (t) => {
@@ -558,4 +636,30 @@ test('FORGE-184: a reviewed task does NOT transition on question_written', async
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
   assert.equal(state.state, 'reviewed');
+});
+
+test('FORGE-216: --classification-file that is not a regular file (a directory) fails the capped read', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // A directory at the classification-file path → readSidecarCapped rejects
+  // (lstat !isFile) before any read, no crash.
+  const dirPath = join(ctx.repoRoot, 'classification-dir');
+  mkdirSync(dirPath, { recursive: true });
+  const result = await runOrchestrateQuestionWrite(
+    {
+      taskId: 'FORGE-1',
+      attemptId: ctx.attemptId,
+      decisionKey: 'arch:dir:hash',
+      question: 'Q?',
+      recommendedOptionId: 'yes',
+      whatHappensIfUnanswered: 'Block.',
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { classificationFile: dirPath },
+  );
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'CLASSIFICATION_FILE_READ_FAILED');
+  assert.match(env.error.message, /not a regular file/);
 });

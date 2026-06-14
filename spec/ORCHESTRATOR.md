@@ -703,7 +703,7 @@ Before any question, the worker classifies:
 ```json
 {
   "decision_type": "routine" | "architectural",
-  "category": "public_api" | "scope" | "naming" | "deprecation" | "error_semantics" | "file_lifecycle" | "other",
+  "category": "public_api" | "scope" | "naming" | "deprecation" | "error_semantics" | "file_lifecycle" | "schema_shape" | "compat_policy" | "enforcement_mode" | "scope_cut" | "provider_choice" | "release" | "security_tradeoff" | "other",
   "reversibility": "low" | "medium" | "high",
   "blast_radius": "local" | "module" | "project" | "external",
   "default_action": "decide" | "ask",
@@ -712,6 +712,28 @@ Before any question, the worker classifies:
 ```
 
 `routine` → log a `files_modified` event and proceed. `architectural` → write a question.
+
+`category` is a single union of two taxonomies that share one field so `/inbox`
+and the statusline can group by one key (FORGE-216, additive — every prior value
+still parses, no migration). Pick the BEST-FIT value:
+
+- **Code-shaped decisions:** `public_api` (exported symbol surface), `scope`
+  (what's in/out of the task), `naming`, `deprecation`, `error_semantics` (error
+  contracts across module boundaries), `file_lifecycle` (file paths intended for
+  import).
+- **Delivery decisions:** `schema_shape` (schema forks / field shape consumed
+  downstream), `compat_policy` (back-compat / migration / deprecation strategy),
+  `enforcement_mode` (advisory vs enforced), `scope_cut` (defer vs build now),
+  `provider_choice` (adapter / host / provider picks), `release` (versioning /
+  release sequencing), `security_tradeoff` (security calls).
+- `other` is the fallback when nothing fits.
+
+Producers carry the classification into the question via
+`forge orchestrate question … --classification-file <path>` (a
+`DecisionClassification` JSON). Without it the verb defaults to
+`category: "other"`. Every escalated question SHOULD also carry
+options-with-tradeoffs, a `--recommended-option-id`, and
+`--what-happens-if-unanswered`.
 
 ### Template placeholders (allowlisted)
 

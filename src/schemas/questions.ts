@@ -8,6 +8,14 @@ import { z } from 'zod';
 // architectural questions and tight enough to defeat large payloads.
 export const QUESTION_FILE_MAX_BYTES = 64 * 1024;
 
+// FORGE-216: the category axis is a UNION of two taxonomies that share one
+// field so /inbox + statusline group by a single key:
+//   - code-shaped decisions (the original FORGE-65 values): public_api, scope,
+//     naming, deprecation, error_semantics, file_lifecycle
+//   - delivery decisions (FORGE-216, additive): schema_shape, compat_policy,
+//     enforcement_mode, scope_cut, provider_choice, release, security_tradeoff
+// Additive + back-compat: every prior value still parses; no migration; no new
+// field. `other` stays last as the fallback.
 export const DECISION_CATEGORIES = [
   'public_api',
   'scope',
@@ -15,6 +23,13 @@ export const DECISION_CATEGORIES = [
   'deprecation',
   'error_semantics',
   'file_lifecycle',
+  'schema_shape',
+  'compat_policy',
+  'enforcement_mode',
+  'scope_cut',
+  'provider_choice',
+  'release',
+  'security_tradeoff',
   'other',
 ] as const;
 
