@@ -283,6 +283,83 @@ test('amendPayloadHash: stable under depends_on order + dupes', () => {
   assert.equal(amendPayloadHash(a), amendPayloadHash(b));
 });
 
+// FORGE-211 (R2): a payload WITHOUT model_tier must hash identically to the
+// pre-field era. The legacy hash is locked BY VALUE so a regression that adds
+// `model_tier: ... ?? null` to the canonical object (which would silently
+// rotate every existing v1 journal hash) trips this test.
+test('amendPayloadHash: payload WITHOUT model_tier hashes identically to pre-field (legacy-stable)', () => {
+  const p = AmendPayloadSchema.parse(BASE_PAYLOAD);
+  assert.equal(p.model_tier, undefined);
+  assert.equal(
+    amendPayloadHash(p),
+    '76b8a1169e3ecb2b082df2c4172fc3b7902aad12845dc5663794d75ccbc65f4e',
+  );
+});
+
+test('amendPayloadHash: a model_tier stamp yields a distinct hash (and is order-independent)', () => {
+  const without = AmendPayloadSchema.parse(BASE_PAYLOAD);
+  const withTier = AmendPayloadSchema.parse({ ...BASE_PAYLOAD, model_tier: 'frontier' });
+  assert.notEqual(amendPayloadHash(without), amendPayloadHash(withTier));
+  // Stable across re-parse.
+  const withTierAgain = AmendPayloadSchema.parse({ ...BASE_PAYLOAD, model_tier: 'frontier' });
+  assert.equal(amendPayloadHash(withTier), amendPayloadHash(withTierAgain));
+});
+
+// FORGE-211: a staged task carrying model_tier persists it through the YAML
+// document insert (so amended tasks keep their capability floor in phases.yaml).
+test('insertTaskIntoDocument: persists model_tier when present, omits it when absent', () => {
+  const doc = parseDocument(`project: demo
+phases:
+  - id: phase-2
+    name: Core
+    status: active
+    goal: g
+    gate_criteria: [x]
+    tasks:
+      - id: P2-T01
+        title: t
+        description: d
+        type: backend
+        priority: P0
+        depends_on: []
+        estimate: M
+        owner_type: backend-dev
+        acceptance: [a]
+`);
+  const stamped = {
+    id: 'P2-T02',
+    title: 'Stamped',
+    description: 'Has a tier.',
+    type: 'backend' as const,
+    priority: 'P1' as const,
+    depends_on: [],
+    estimate: 'M' as const,
+    owner_type: 'backend-dev' as const,
+    acceptance: ['done'],
+    model_tier: 'small' as const,
+  };
+  const unstamped = {
+    ...stamped,
+    id: 'P2-T03',
+    title: 'Unstamped',
+    model_tier: undefined,
+  };
+  assert.equal(insertTaskIntoDocument(doc, 'phase-2', stamped), true);
+  assert.equal(insertTaskIntoDocument(doc, 'phase-2', unstamped), true);
+
+  // Round-trips through PhasesSchema with the floor preserved on the stamped task.
+  const parsed = PhasesSchema.parse(doc.toJS());
+  const tasks = parsed.phases[0]!.tasks;
+  const t2 = tasks.find((t) => t.id === 'P2-T02')!;
+  const t3 = tasks.find((t) => t.id === 'P2-T03')!;
+  assert.equal(t2.model_tier, 'small');
+  // Absent stays absent — no `model_tier: null` leaks into the YAML.
+  assert.equal(t3.model_tier, undefined);
+  const out = doc.toString({ lineWidth: 0 });
+  assert.match(out, /model_tier: small/);
+  assert.equal(/P2-T03[\s\S]*model_tier/.test(out), false);
+});
+
 // ── verb: happy path ─────────────────────────────────────────────────────────
 
 test('amend-roadmap happy path: issue created, relation wired, phases.yaml materialized, journal archived', async (t) => {

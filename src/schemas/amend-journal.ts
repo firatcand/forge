@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
-import { ESTIMATES, OWNER_TYPES, PRIORITIES, TASK_TYPES } from './phases.ts';
+import { ESTIMATES, MODEL_TIERS, OWNER_TYPES, PRIORITIES, TASK_TYPES } from './phases.ts';
 import { EntryStatusSchema } from './apply-journal.ts';
 
 // Journal for `forge orchestrate amend-roadmap` (FORGE-101).
@@ -39,6 +39,8 @@ export const AmendPayloadSchema = z
     // the verb resolves both against phases.yaml and refuses unknowns.
     depends_on: z.array(z.string().min(1).max(64)).max(50).default([]),
     write_globs: z.array(z.string().min(1).max(512)).max(50).optional(),
+    // FORGE-211: optional capability floor stamped onto the amended task.
+    model_tier: z.enum(MODEL_TIERS).optional(),
   })
   .strict();
 export type AmendPayload = z.infer<typeof AmendPayloadSchema>;
@@ -59,6 +61,13 @@ export function amendPayloadHash(payload: AmendPayload): string {
     acceptance: payload.acceptance,
     depends_on: [...new Set(payload.depends_on)].sort(),
     write_globs: payload.write_globs ?? null,
+    // FORGE-211 (R2): include model_tier in the canonical hash ONLY when
+    // present. A payload WITHOUT model_tier must hash identically to a
+    // pre-v0.5 payload (the field did not exist) so existing v1 journals keep
+    // their hash and --resume after an upgrade does not false-trip
+    // PAYLOAD_MISMATCH. `?? null` would change the legacy hash; conditional
+    // spread does not.
+    ...(payload.model_tier ? { model_tier: payload.model_tier } : {}),
   };
   return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
 }

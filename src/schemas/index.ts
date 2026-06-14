@@ -84,6 +84,7 @@ export {
   PRIORITIES,
   TASK_TYPES,
   ESTIMATES,
+  MODEL_TIERS,
   PHASE_STATUSES,
   TASK_STATUSES,
 } from './phases.ts';
@@ -95,6 +96,7 @@ export type {
   Priority,
   TaskType,
   Estimate,
+  ModelTier,
   PhaseStatus,
   TaskStatus,
 } from './phases.ts';

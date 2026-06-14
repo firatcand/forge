@@ -35,6 +35,7 @@ phases:
         depends_on: []
         estimate: M
         owner_type: backend-dev
+        # model_tier: small|standard|frontier  # optional (capability floor; orchestrator escalates up only)
         acceptance:
           - ""
 

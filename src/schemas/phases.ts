@@ -29,6 +29,13 @@ export const TASK_TYPES = [
 
 export const ESTIMATES = ['S', 'M', 'L', 'XL'] as const;
 
+// FORGE-211: fixed 3-tier capability floor. Concrete models map onto these
+// stable tiers in the catalog (FORGE-212); the route verb (FORGE-210) resolves
+// tier → model. On a task, `model_tier` is an OPTIONAL capability FLOOR — when
+// absent the orchestrator falls back to settings.agents.default_model_tier
+// ('standard'); it is never an error (pre-v0.5 phases.yaml keep working).
+export const MODEL_TIERS = ['small', 'standard', 'frontier'] as const;
+
 export const PHASE_STATUSES = ['active', 'blocked', 'done', 'paused'] as const;
 
 export const TRACKER_TYPES = ['linear', 'github', 'notion'] as const;
@@ -79,6 +86,11 @@ export const TaskSchema = z.object({
   // Optional file-glob declaration consumed by src/orchestrator/overlap.ts to
   // classify candidate-vs-active overlap when phases --ready surfaces tasks.
   write_globs: z.array(z.string().min(1)).optional(),
+  // FORGE-211: optional capability FLOOR for model routing. Absent → the
+  // orchestrator uses settings.agents.default_model_tier ('standard'); never an
+  // error so pre-v0.5 phases.yaml parse unchanged. The route verb (FORGE-210)
+  // may escalate ABOVE this floor at runtime but never below it.
+  model_tier: z.enum(MODEL_TIERS).optional(),
   // FORGE-65: optional per-task override of agents.question_budget (the global
   // default). Either member may be set independently; an unset member falls
   // back to the global default at resolution time (decision-classifier.ts).
@@ -246,5 +258,6 @@ export type Priority = (typeof PRIORITIES)[number];
 // trackers module's type alias remains the single canonical export.
 export type TaskType = (typeof TASK_TYPES)[number];
 export type Estimate = (typeof ESTIMATES)[number];
+export type ModelTier = (typeof MODEL_TIERS)[number];
 export type PhaseStatus = (typeof PHASE_STATUSES)[number];
 export type TaskStatus = (typeof TASK_STATUSES)[number];
