@@ -42,6 +42,13 @@ export interface ReadyTaskOut {
   readonly owner_type: string;
   readonly type: string;
   readonly depends_on: readonly string[];
+  // FORGE-215: the task's raw DECLARED write_globs. `overlap` above classifies a
+  // candidate against the ACTIVE-attempts set (parallel-dispatch safety), so a
+  // set of all-ready related tickets shows `no-overlap` and cannot be grouped
+  // from it. /deliver's themed batching needs candidate-vs-CANDIDATE subsystem
+  // grouping, which requires the raw globs — exposed here (the grouping policy
+  // itself stays in the /deliver skill). `[]` when the task declares none.
+  readonly write_globs: readonly string[];
   readonly overlap: {
     readonly classification: OverlapClassification;
     readonly offendingGlobs: readonly string[];
@@ -260,6 +267,7 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
       owner_type: task.owner_type,
       type: task.type,
       depends_on: task.depends_on,
+      write_globs: task.write_globs ?? [],
       ...(task.tracker_issue_id ? { tracker_issue_id: task.tracker_issue_id } : {}),
       overlap: {
         classification: overlap.classification,

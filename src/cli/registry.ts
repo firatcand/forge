@@ -221,6 +221,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
     summary: 'Drive one ticket end-to-end: claim, plan, implement, verify, cross-review loop, ship, mark Done. Pair with native /goal for hands-off completion.',
   },
   {
+    name: 'deliver',
+    summary: 'Drive a whole phase or feature-set: themed batching over /drive, front-loaded architectural questions, phase-gate ceremonies, lossless resume. Pair with native /goal.',
+  },
+  {
     name: 'ship',
     summary: 'Push the branch, run final gates (tests, secrets scan, conventional commit), open the PR.',
   },

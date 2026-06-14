@@ -107,6 +107,57 @@ phases:
         acceptance: [done]
 `;
 
+// FORGE-215: a task that declares write_globs — /deliver's themed batching
+// reads these (candidate-vs-candidate) from the --ready output.
+const ONE_TASK_WITH_GLOBS = `project: x
+phases:
+  - id: phase-1
+    name: foundation
+    status: active
+    goal: build foundation
+    gate_criteria: [ships]
+    tasks:
+      - id: P1-T01
+        tracker_issue_id: FOO-1
+        title: First task
+        description: Implement the first task
+        type: backend
+        priority: P0
+        estimate: S
+        owner_type: backend-dev
+        depends_on: []
+        write_globs: ["src/cli/orchestrate/**", "skills/deliver/**"]
+        acceptance: [done]
+`;
+
+test('FORGE-215 — phases --ready exposes per-task write_globs for batching', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo } = makeRepoWithPhases(ONE_TASK_WITH_GLOBS);
+  const result = await runOrchestratePhases({
+    ready: true,
+    forgeDir: join(repo, '.forge'),
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, true);
+  assert.equal(env.data.tasks.length, 1);
+  assert.deepEqual(env.data.tasks[0].write_globs, ['src/cli/orchestrate/**', 'skills/deliver/**']);
+});
+
+test('FORGE-215 — phases --ready emits write_globs: [] when a task declares none', async (t) => {
+  const stdout = captureStdout(t);
+  const { repo } = makeRepoWithPhases(ONE_TASK);
+  const result = await runOrchestratePhases({
+    ready: true,
+    forgeDir: join(repo, '.forge'),
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.deepEqual(env.data.tasks[0].write_globs, []);
+});
+
 test('phases (no --ready) lists all tasks projected', async (t) => {
   const stdout = captureStdout(t);
   const { repo, forgeDir } = makeRepoWithPhases(ONE_TASK);

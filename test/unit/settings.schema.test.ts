@@ -572,6 +572,13 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
       review_loop_cap: number;
       merge_policy: 'auto' | 'approval';
     };
+    // FORGE-215: deliver block always materializes (schema default).
+    deliver: {
+      max_batch_size: number;
+      max_batch_estimate: 'S' | 'M' | 'L' | 'XL';
+      review_loop_cap: number;
+      merge_policy: 'auto' | 'approval';
+    };
     // FORGE-150: legacy block — optional, no default.
     codex?: {
       auto_codex_enabled: boolean;
@@ -708,6 +715,75 @@ test('FORGE-214 — drive: review_threshold is NOT a knob (R1 — ignored, not e
   if (!result.success) return;
   assert.equal((result.data.drive as Record<string, unknown>).review_threshold, undefined);
   assert.equal(result.data.drive.review_loop_cap, 4);
+});
+
+// FORGE-215: deliver block (cross-phase /deliver knobs). Shape is
+// { max_batch_size: int>0 default 4, max_batch_estimate: ESTIMATES default 'S',
+// review_loop_cap: int>0 default 4, merge_policy: 'auto'|'approval' default
+// 'auto' }. Like drive, NO review_threshold knob.
+
+test('FORGE-215 — deliver block: defaults expand when block omitted', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.deliver.max_batch_size, 4);
+  assert.equal(result.data.deliver.max_batch_estimate, 'S');
+  assert.equal(result.data.deliver.review_loop_cap, 4);
+  assert.equal(result.data.deliver.merge_policy, 'auto');
+});
+
+test('FORGE-215 — deliver block: explicit values round-trip', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    deliver: { max_batch_size: 6, max_batch_estimate: 'M', review_loop_cap: 3, merge_policy: 'approval' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.deliver.max_batch_size, 6);
+  assert.equal(result.data.deliver.max_batch_estimate, 'M');
+  assert.equal(result.data.deliver.review_loop_cap, 3);
+  assert.equal(result.data.deliver.merge_policy, 'approval');
+});
+
+test('FORGE-215 — deliver block: max_batch_size:0 rejected (must be positive)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    deliver: { max_batch_size: 0 },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-215 — deliver block: max_batch_estimate:"XS" rejected (not in ESTIMATES)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    deliver: { max_batch_estimate: 'XS' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-215 — deliver block: merge_policy:"bogus" rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    deliver: { merge_policy: 'bogus' },
+  });
+  assert.equal(result.success, false);
 });
 
 test('FORGE-150 — legacy codex block: materializes only when present', () => {
