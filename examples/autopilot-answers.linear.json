@@ -1,0 +1,39 @@
+{
+  "$comment": "FORGE-217 recorded-answers reference fixture for the /autopilot walkthrough. These are the discovery + spec answers that reproduce examples/greenfield-linear/spec/* and plans/phases.yaml. This is DOCUMENTATION (a replay reference), NOT wired into answer-injection yet — the front-half skills are LLM-interactive markdown; deterministic CI replay is a deferred follow-up (a FORGE_DISCOVERY_ANSWERS_JSON-style seam mirroring forge init). See autopilot-walkthrough.md.",
+  "tracker": "linear",
+  "expected_output": "examples/greenfield-linear/",
+  "forge_interview": {
+    "product_idea": "A minimal example product to exercise the Forge orchestration lifecycle end to end.",
+    "primary_user": "A developer (and an operator) running the core workflow.",
+    "core_outcome": "Bootstrap a project and run the core workflow end to end; view system health.",
+    "constraints": "Keep it compact — a single CLI entrypoint over a single relational store."
+  },
+  "draft_prd": {
+    "features": [
+      {
+        "name": "Feature 1 — core workflow",
+        "answer": "Users can bootstrap a project and run the core workflow end to end."
+      },
+      {
+        "name": "Feature 2 — health dashboard",
+        "answer": "Operators can view a dashboard of system health."
+      }
+    ]
+  },
+  "draft_spec": {
+    "stack_choice": "Single CLI entrypoint; subcommands added per phase. Persistence is a single relational store, versioned via migrations.",
+    "design_branch": "included — Feature 2 (the health dashboard) is a UI surface, so /draft-design runs and produces greenfield-linear/spec/DESIGN.md"
+  },
+  "decompose": {
+    "shape": "2 phases x 3 tasks, deterministic ids P1-T01..P2-T03 (matches greenfield-linear/plans/phases.yaml).",
+    "review": "accepted in one round (no edits)"
+  },
+  "gates_recorded": {
+    "brief_signoff": "approved",
+    "prd_review": "approved",
+    "spec_approval": "approved",
+    "design_review": "approved (DESIGN.md produced for the dashboard surface)",
+    "ingest_validation": "passed",
+    "decompose_review": "approved"
+  }
+}
