@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { MODEL_TIERS } from './phases.ts';
+import { MODEL_TIERS, ESTIMATES } from './phases.ts';
 import { CATALOG_HOSTS } from './models-catalog.ts';
 
 const LinearTrackerConfigSchema = z.object({
@@ -269,6 +269,26 @@ const DriveSchema = z
   })
   .default({});
 
+// FORGE-215: cross-phase /deliver knobs. The themed-batching POLICY is a
+// pure-skill heuristic (it lives in skills/deliver/SKILL.md, NOT a verb) — this
+// block exposes only the configurable CAPS so the heuristic references real
+// knobs. Mirrors DriveSchema's nested `.default({})` so a settings.yaml with no
+// `deliver:` block still yields full defaults. review_loop_cap + merge_policy
+// mirror drive (a batch runs ONE shared review↔fix loop + ONE merge decision).
+const DeliverSchema = z
+  .object({
+    // Max tickets grouped into one shared-worktree/one-PR batch.
+    max_batch_size: z.number().int().positive().default(4),
+    // Only tickets whose estimate index ≤ this cap (in ESTIMATES order
+    // S<M<L<XL) batch; larger tickets are delivered SOLO (one PR each).
+    max_batch_estimate: z.enum(ESTIMATES).default('S'),
+    // Max review↔fix rounds for the batch before escalating (park to /inbox).
+    review_loop_cap: z.number().int().positive().default(4),
+    // auto = merge on green CI; approval = open PR and park for a human merge.
+    merge_policy: z.enum(['auto', 'approval']).default('auto'),
+  })
+  .default({});
+
 // Added 2026-05-18 (FORGE-105 P2.5-T13) — closed-loop workflow control.
 // auto_codex_enabled WAS the disable lever consumed by `forge codex-suggest`.
 // FORGE-150 superseded it with second_opinion.auto_enabled (above). The block
@@ -377,6 +397,8 @@ export const SettingsSchema = z.object({
   second_opinion: SecondOpinionSchema,
   // FORGE-214: per-ticket /drive HITL knobs (review loop cap + merge policy).
   drive: DriveSchema,
+  // FORGE-215: cross-phase /deliver knobs (batch caps + review loop + merge).
+  deliver: DeliverSchema,
   // FORGE-150: legacy block — optional, no default. Honored by the resolver for
   // back-compat; removed in v0.6.
   codex: CodexSchema,
@@ -396,6 +418,7 @@ export const SettingsSchema = z.object({
 export type Settings = z.infer<typeof SettingsSchema>;
 export type Verify = z.infer<typeof VerifySchema>;
 export type Drive = z.infer<typeof DriveSchema>;
+export type Deliver = z.infer<typeof DeliverSchema>;
 export type Models = z.infer<typeof ModelsSchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
