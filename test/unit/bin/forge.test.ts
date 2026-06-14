@@ -99,3 +99,60 @@ test('forge orchestrate questions --open returns 0 against an empty forge dir', 
   assert.equal(result.exitCode, 0);
   assert.match(result.stdout, /No open questions\./);
 });
+
+// FORGE-197 (Codex cross-review non-blocking #2): a status line runs on every
+// host prompt repaint, so the `statusline` branch is dispatched in bin/forge.ts
+// BEFORE loadForgeEnv and the drift/pin pre-hooks — any incidental stderr would
+// corrupt the host's prompt. These bin-level cases pin that contract end-to-end
+// (the unit test exercises runStatusline directly; only a spawned process proves
+// the early dispatch keeps stderr clean).
+test('forge statusline: outside a forge repo → exit 0, no stdout, no stderr', async () => {
+  const { mkdtempSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'forge-bin-statusline-'));
+  // Use the resolved tsxBin (absolute) — `node --import tsx` would resolve tsx
+  // relative to the temp cwd, which has no node_modules.
+  const result = await execa(tsxBin, [entry, 'statusline'], {
+    cwd: tmp,
+    reject: false,
+    env: { ...process.env, NODE_OPTIONS: '' },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, '');
+  assert.equal(result.stderr, '');
+});
+
+test('forge statusline: forge repo with a parked task → `◆ N to answer`, exit 0, NO stderr noise (early dispatch beats drift/env hooks)', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { dirname, join } = await import('node:path');
+  const tmp = mkdtempSync(join(tmpdir(), 'forge-bin-statusline-'));
+  // A .forge/.env that loadForgeEnv would read on any OTHER command — proving
+  // statusline returns before loadForgeEnv ever runs.
+  mkdirSync(join(tmp, '.forge'), { recursive: true });
+  writeFileSync(join(tmp, '.forge', '.env'), 'FORGE_FAKE=1\n');
+  const statePath = join(tmp, '.forge', 'orchestrator', 'tasks', 'T-1', 'state.json');
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(
+    statePath,
+    JSON.stringify({
+      version: 1,
+      task_id: 'T-1',
+      state: 'blocked_on_question',
+      state_version: 0,
+      attempt_count: 1,
+      current_attempt_id: null,
+      updated_at: '2026-01-01T00:00:00.000Z',
+      updated_by: { run_id: 'r', claim_id: 'c', generation: 0 },
+    }),
+  );
+  const result = await execa(tsxBin, [entry, 'statusline'], {
+    cwd: tmp,
+    reject: false,
+    env: { ...process.env, NODE_OPTIONS: '' },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout.trim(), 'forge ◆ 1 to answer');
+  assert.equal(result.stderr, '');
+});

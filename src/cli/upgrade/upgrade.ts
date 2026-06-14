@@ -47,6 +47,7 @@ import {
   type AgentKind,
 } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
+import { writeStatusLineConfig } from './host-config.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
 import { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
@@ -68,12 +69,28 @@ export interface UpgradeOptions {
   readonly confirm?: boolean;
   /** One-shot migration from v0.4 combined CLAUDE.md → v0.5 split layout (FORGE-154). */
   readonly migrateClaudemd?: boolean;
+  /**
+   * FORGE-197 (R3): INTERNAL test seam — overrides the home dir the statusLine
+   * writer resolves (`~/.claude/settings.json`). NOT a public CLI flag.
+   * Production leaves it undefined → the writer uses os.homedir(). Upgrade tests
+   * inject a temp fake home so they never touch the real ~/.claude.
+   */
+  readonly hostConfigHomeDir?: string;
 }
 
 export interface UpgradeResult {
   readonly exitCode: number;
   readonly filesChanged: readonly string[];
   readonly stderr: string;
+  /**
+   * FORGE-197: a non-blocking, idempotent DISCOVERY notice (the statusLine
+   * opt-in offer) surfaced when `hosts.claude.status_line` is off. Kept OUT of
+   * `stderr` deliberately — `stderr` is a deterministic structured contract that
+   * existing idempotency tests pin (twice == once), so a per-run offer must not
+   * pollute it. bin/forge.ts prints this to process.stderr. FORGE_QUIET-
+   * suppressed (then undefined). Undefined when the opt-in is on.
+   */
+  readonly discoveryNotice?: string;
 }
 
 const FORGE_REPO_URL = 'https://github.com/firatcand/forge';
@@ -214,9 +231,9 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       stderr: `forge upgrade: failed to parse .forge/settings.yaml — ${msg}`,
     };
   }
-  // Defensive: unused var silences typescript's "declared but never read" when
-  // the validated object is only consumed to mirror enabled_root_files.
-  void validated;
+  // `validated` is the schema-defaulted Settings — consumed both to mirror
+  // enabled_root_files above and to read the FORGE-197 hosts.claude.status_line
+  // opt-in in step 12 below.
 
   // 1. Resolve the CLI's bundled methodology version.
   const bundledVersion = readBundledMethodologyVersion();
@@ -453,7 +470,39 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     }
   }
 
-  return { exitCode: 0, filesChanged: changed, stderr: notices.join('\n') };
+  // 12. FORGE-197: display-only `statusLine` host integration. OPT-IN ONLY —
+  //     gated on `settings.hosts.claude.status_line === true` (the consent). This
+  //     is the ONLY thing Forge writes into the user's GLOBAL ~/.claude config,
+  //     so the gate is absolute: when the flag is FALSE we NEVER write — instead
+  //     a one-line DISCOVERY notice offers the integration (FORGE_QUIET-
+  //     suppressible). The writer itself is non-clobbering + symlink-guarded +
+  //     plain-object-guarded (see host-config.ts) and respects dryRun.
+  let discoveryNotice: string | undefined;
+  if (validated.hosts.claude.status_line) {
+    const res = writeStatusLineConfig({
+      ...(opts.hostConfigHomeDir !== undefined ? { homeDir: opts.hostConfigHomeDir } : {}),
+      ...(opts.dryRun ? { dryRun: true } : {}),
+    });
+    // The global ~/.claude/settings.json is OUTSIDE the working tree, so it is
+    // not a repo-relative `changed` path; surface every outcome as a notice.
+    // (Skip outcomes — symlink/clobber/corrupt — are reported too so the user
+    // knows the opt-in did not take effect.)
+    notices.push(res.notice);
+  } else if (process.env.FORGE_QUIET !== '1') {
+    // Off → a one-line DISCOVERY notice offering the integration. Deterministic
+    // (NOT gated on changed) so it is idempotent, and kept OUT of `stderr`
+    // (see UpgradeResult.discoveryNotice) so it never pollutes the structured,
+    // pinned stderr contract. FORGE_QUIET-suppressible.
+    discoveryNotice =
+      'forge: set hosts.claude.status_line: true in .forge/settings.yaml to show a parked-decision badge in Claude Code.';
+  }
+
+  return {
+    exitCode: 0,
+    filesChanged: changed,
+    stderr: notices.join('\n'),
+    ...(discoveryNotice !== undefined ? { discoveryNotice } : {}),
+  };
 }
 
 /** Render a path relative to cwd for the filesChanged report — keeps the

@@ -1087,3 +1087,87 @@ test('upgrade --remove-agent cursor (FORGE-160 parent #3): dry-run parity — no
     cleanup(cwd);
   }
 });
+
+// ============================================================================
+// FORGE-197 — statusLine host-config (opt-in gated; injected fake home)
+// ============================================================================
+
+/** Append a `hosts.claude.status_line` block to a bootstrapped repo's settings. */
+function setStatusLineOptIn(cwd: string, value: boolean): void {
+  const settingsPath = join(cwd, '.forge/settings.yaml');
+  const current = readFileSync(settingsPath, 'utf8');
+  writeFileSync(
+    settingsPath,
+    `${current}hosts:\n  claude:\n    status_line: ${value}\n`,
+    'utf8',
+  );
+}
+
+test('FORGE-197: opt-in true → upgrade writes statusLine into the injected fake home', async () => {
+  const cwd = bootstrap();
+  const fakeHome = mkdtempSync(join(tmpdir(), 'forge-upgrade-home-'));
+  try {
+    setStatusLineOptIn(cwd, true);
+    const result = await upgrade({ cwd, hostConfigHomeDir: fakeHome });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    const settingsJson = join(fakeHome, '.claude', 'settings.json');
+    assert.equal(existsSync(settingsJson), true, 'statusLine must be written into the fake home');
+    const parsed = JSON.parse(readFileSync(settingsJson, 'utf8'));
+    assert.deepEqual(parsed.statusLine, { type: 'command', command: 'forge statusline' });
+    assert.match(result.stderr, /statusLine/);
+  } finally {
+    cleanup(cwd);
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-197: opt-in false (default) → NO write, discovery notice surfaced', async () => {
+  const cwd = bootstrap();
+  const fakeHome = mkdtempSync(join(tmpdir(), 'forge-upgrade-home-'));
+  try {
+    // No hosts block at all → status_line defaults false.
+    const result = await upgrade({ cwd, hostConfigHomeDir: fakeHome });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    const settingsJson = join(fakeHome, '.claude', 'settings.json');
+    assert.equal(existsSync(settingsJson), false, 'must NOT write the global config when opt-out');
+    // The discovery offer is on the dedicated field, NOT in the pinned stderr.
+    assert.match(result.discoveryNotice ?? '', /status_line: true/);
+    assert.equal(result.stderr, '', 'discovery notice must not pollute the deterministic stderr');
+  } finally {
+    cleanup(cwd);
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-197: opt-in false + FORGE_QUIET=1 → no discovery notice', async () => {
+  const cwd = bootstrap();
+  const fakeHome = mkdtempSync(join(tmpdir(), 'forge-upgrade-home-'));
+  const prior = process.env.FORGE_QUIET;
+  process.env.FORGE_QUIET = '1';
+  try {
+    const result = await upgrade({ cwd, hostConfigHomeDir: fakeHome });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert.equal(result.discoveryNotice, undefined);
+    assert.equal(existsSync(join(fakeHome, '.claude', 'settings.json')), false);
+  } finally {
+    if (prior === undefined) delete process.env.FORGE_QUIET;
+    else process.env.FORGE_QUIET = prior;
+    cleanup(cwd);
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+test('FORGE-197: opt-in true + dryRun → no write, dry-run notice', async () => {
+  const cwd = bootstrap();
+  const fakeHome = mkdtempSync(join(tmpdir(), 'forge-upgrade-home-'));
+  try {
+    setStatusLineOptIn(cwd, true);
+    const result = await upgrade({ cwd, dryRun: true, hostConfigHomeDir: fakeHome });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert.equal(existsSync(join(fakeHome, '.claude', 'settings.json')), false);
+    assert.match(result.stderr, /would write statusLine/);
+  } finally {
+    cleanup(cwd);
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});

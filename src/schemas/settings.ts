@@ -345,6 +345,24 @@ const ModelsSchema = z
   })
   .default({});
 
+// FORGE-197: host-integration opt-ins. Orthogonal to `agents` (which configures
+// the orchestrator) — `hosts` declares passive integrations Forge writes into a
+// host's OWN config. Today the only key is `claude.status_line`: an opt-in
+// (default FALSE) consent flag gating whether `forge upgrade` writes a
+// display-only `statusLine` entry into the user's GLOBAL `~/.claude/settings.json`
+// (the parked-decision badge). Default off so a global-config write NEVER
+// happens without an explicit opt-in. Mirrors DriveSchema's nested-`.default({})`
+// pattern so a settings.yaml with no `hosts:` block still yields full defaults.
+const HostsSchema = z
+  .object({
+    claude: z
+      .object({
+        status_line: z.boolean().default(false),
+      })
+      .default({}),
+  })
+  .default({});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -366,6 +384,8 @@ export const SettingsSchema = z.object({
   doctor: DoctorSchema,
   // FORGE-212: model-catalog knobs (per-host pin allow-list + staleness TTL).
   models: ModelsSchema,
+  // FORGE-197: host-integration opt-ins (claude.status_line — default false).
+  hosts: HostsSchema,
   // FORGE-150: tracked methodology-version pin (FORGE-161). Absent ⇒ no warning
   // (pre-pin repos stay quiet); stamped by `forge upgrade`.
   methodology_version: z.string().min(1).optional(),
