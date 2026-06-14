@@ -699,10 +699,11 @@ export interface HeartbeatOptions {
   taskId: string;
   caller: CallerIdentity;
   leaseTtlMs?: number;
+  now?: number; // injectable for testing (mirrors steal); defaults to Date.now()
 }
 
 export function heartbeat(opts: HeartbeatOptions): Lease {
-  const { forgeDir, leaseTtlMs = LEASE_TTL_MS_DEFAULT } = opts;
+  const { forgeDir, leaseTtlMs = LEASE_TTL_MS_DEFAULT, now: nowOverride } = opts;
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
   const { caller } = opts;
 
@@ -741,7 +742,7 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
   }
 
   // 3. Build updated lease.
-  const now = Date.now();
+  const now = nowOverride ?? Date.now();
   const updated: Lease = {
     ...stored,
     expires_at: new Date(now + leaseTtlMs).toISOString(),
