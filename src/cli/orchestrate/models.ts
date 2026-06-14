@@ -27,9 +27,19 @@ import path from 'node:path';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+
+import { execa } from 'execa';
+
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { formatRelativeAge } from '../../core/freshness.ts';
 import { loadSettings } from '../../core/settings.ts';
+import {
+  computeAvailability,
+  type AvailabilitySet,
+} from '../../orchestrator/availability.ts';
+import type { ExecaLike } from '../init/validate.ts';
 import {
   ModelsCatalogSchema,
   CATALOG_HOSTS,
@@ -227,6 +237,18 @@ function loadModelsSettings(forgeDir: string): Models {
   }
 }
 
+// FORGE-213: cursor availability is gated on agents.cursor_host_beta_opt_in.
+// Best-effort like loadModelsSettings — default false (cursor stays gated) when
+// settings are missing/unreadable.
+function loadCursorBetaOptIn(forgeDir: string): boolean {
+  try {
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return settings.agents.cursor_host_beta_opt_in === true;
+  } catch {
+    return false;
+  }
+}
+
 // ── Diff: added / removed / retiered models, per host ─────────────────────────
 export interface CatalogDiff {
   readonly added: { host: string; id: string; tier: string }[];
@@ -288,11 +310,17 @@ export interface ModelsRefreshData {
   readonly path: string;
   readonly diff: CatalogDiff;
 }
+export interface ModelsAvailabilityData {
+  readonly availability: AvailabilitySet;
+}
 
 export interface OrchestrateModelsOptions {
   readonly forgeDir: string;
   readonly json?: boolean;
   readonly refresh?: boolean;
+  // FORGE-213: compute the per-host availability set over the catalog hosts and
+  // emit it. Read-band (no writes). Mutually exclusive with --refresh.
+  readonly availability?: boolean;
   readonly file?: string;
   readonly now?: Date;
   // Injectable streams so PassThrough fixtures capture output (precedent:
@@ -300,6 +328,14 @@ export interface OrchestrateModelsOptions {
   // process.stdout and is invisible to captured streams).
   readonly stdout?: NodeJS.WritableStream;
   readonly stderr?: NodeJS.WritableStream;
+  // FORGE-213 (R4): availability deps seam. Default to the real
+  // execa/process.env/existsSync/os.homedir so production needs no wiring; tests
+  // inject deterministic fakes (NO real binaries).
+  readonly exec?: ExecaLike;
+  readonly getEnv?: (name: string) => string | undefined;
+  readonly fileExists?: (path: string) => boolean;
+  readonly homeDir?: string;
+  readonly timeoutMs?: number;
 }
 export interface OrchestrateModelsResult {
   readonly exitCode: number;
@@ -320,6 +356,23 @@ export function runOrchestrateModels(
   const json = opts.json === true;
   const now = opts.now ?? new Date();
   const catalogPath = path.join(opts.forgeDir, CATALOG_FILENAME);
+
+  // ── R4: --availability + --refresh is INVALID_ARGS, rejected BEFORE any file
+  // op (read OR write). --availability runs through the async path
+  // (runOrchestrateModelsAvailability) routed by the handler; reaching this sync
+  // entry point with `availability` set alongside `refresh` is the illegal combo.
+  if (opts.availability && opts.refresh) {
+    return {
+      exitCode: writeEnvelope(
+        fail(
+          'INVALID_ARGS',
+          'forge orchestrate models: --availability and --refresh are mutually exclusive.',
+          false,
+        ),
+        out,
+      ),
+    };
+  }
 
   // ── Refresh mode ───────────────────────────────────────────────────────────
   if (opts.refresh) {
@@ -486,6 +539,61 @@ export function runOrchestrateModels(
   return { exitCode: 0 };
 }
 
+// ── R4: --availability mode (async — computeAvailability probes are async) ────
+// Computes the per-host availability set over the pinned catalog hosts using the
+// production deps (real execa / process.env / existsSync / os.homedir) unless a
+// test injects fakes through the options seam. Read-band: no writes, no model
+// invocation / paid call (R5). The --availability + --refresh INVALID_ARGS guard
+// is enforced in runOrchestrateModels before any file op.
+export async function runOrchestrateModelsAvailability(
+  opts: OrchestrateModelsOptions,
+): Promise<OrchestrateModelsResult> {
+  const out = opts.stdout ?? process.stdout;
+  const json = opts.json === true;
+
+  if (opts.refresh) {
+    return {
+      exitCode: writeEnvelope(
+        fail(
+          'INVALID_ARGS',
+          'forge orchestrate models: --availability and --refresh are mutually exclusive.',
+          false,
+        ),
+        out,
+      ),
+    };
+  }
+
+  const betaOptIn = loadCursorBetaOptIn(opts.forgeDir);
+  const availability: AvailabilitySet = await computeAvailability(CATALOG_HOSTS, {
+    exec: opts.exec ?? (execa as unknown as ExecaLike),
+    getEnv: opts.getEnv ?? ((n: string) => process.env[n]),
+    fileExists: opts.fileExists ?? ((p: string) => existsSync(p)),
+    homeDir: opts.homeDir ?? homedir(),
+    betaOptIn,
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  });
+
+  const data: ModelsAvailabilityData = { availability };
+  if (json) return { exitCode: writeEnvelope(ok(data), out) };
+  out.write(formatAvailability(data));
+  return { exitCode: 0 };
+}
+
+function formatAvailability(d: ModelsAvailabilityData): string {
+  const lines: string[] = ['Host availability:'];
+  for (const host of CATALOG_HOSTS) {
+    const a = d.availability[host];
+    if (!a) continue;
+    if (a.available) {
+      lines.push(`  ${host}: available`);
+    } else {
+      lines.push(`  ${host}: unavailable — ${a.reasons.join('; ')}`);
+    }
+  }
+  return lines.join('\n') + '\n';
+}
+
 function formatRead(d: ModelsReadData): string {
   const lines: string[] = [];
   lines.push(
@@ -519,14 +627,23 @@ function formatRefresh(d: ModelsRefreshData): string {
 export const modelsHandler: VerbHandler = {
   band: 'read',
   synopsis:
-    'Read the model catalog + staleness; --refresh --file <json> validates + writes .forge/models-catalog.json.',
+    'Read the model catalog + staleness; --availability probes per-host reachability; --refresh --file <json> validates + writes .forge/models-catalog.json.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const file = parseFlag(rest, 'file');
+    const refresh = hasFlag(rest, 'refresh');
+    const availability = hasFlag(rest, 'availability');
+    const json = hasFlag(rest, 'json');
+    // R4: --availability runs through the async prober path. The
+    // --availability + --refresh INVALID_ARGS combo is rejected there (and in
+    // runOrchestrateModels) before any file op.
+    if (availability) {
+      return runOrchestrateModelsAvailability({ forgeDir, json, refresh });
+    }
     return runOrchestrateModels({
       forgeDir,
-      json: hasFlag(rest, 'json'),
-      refresh: hasFlag(rest, 'refresh'),
+      json,
+      refresh,
       ...(file ? { file } : {}),
     });
   },

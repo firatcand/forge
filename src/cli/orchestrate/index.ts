@@ -313,6 +313,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
   models: [
     { flag: 'refresh', takesValue: false, description: 'Validate --file and write the catalog cache.' },
     { flag: 'file', takesValue: true, description: 'With --refresh, the agent-compiled catalog JSON to validate + write.', valueLabel: '<json>' },
+    { flag: 'availability', takesValue: false, description: 'Probe per-host reachability (bin --version + env + file-exists; no paid call). Mutually exclusive with --refresh.' },
     JSON_FLAG,
     FD,
   ],

@@ -47,7 +47,7 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
   {
     name: 'models',
     summary:
-      'Read the model catalog + staleness; --refresh --file <json> validates + writes .forge/models-catalog.json.',
+      'Read the model catalog + staleness; --availability probes per-host reachability; --refresh --file <json> validates + writes .forge/models-catalog.json.',
   },
   {
     name: 'review-queue',
