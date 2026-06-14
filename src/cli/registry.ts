@@ -230,6 +230,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   },
   // ── Diagnostics & recovery ──
   {
+    name: 'inbox',
+    summary: 'Drain parked decisions: a tagged digest of blocked questions; pick, deep-dive, and answer each.',
+  },
+  {
     name: 'investigate',
     summary: 'Trace data flow, test hypotheses, identify root cause (Iron Law of Investigation gate before /fix).',
   },
