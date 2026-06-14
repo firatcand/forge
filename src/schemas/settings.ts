@@ -240,6 +240,26 @@ const SecondOpinionSchema = z
   })
   .default({});
 
+// FORGE-214: per-ticket /drive HITL knobs. Mounted as `drive` on
+// SettingsSchema next to `second_opinion`, mirroring its `.default({})` pattern
+// so a settings.yaml with no `drive:` block still yields full defaults.
+//
+// R1: there is NO `review_threshold` knob. forge's ReviewVerdict
+// (src/schemas/verdict.ts) emits only `verdict: pass|changes_requested` +
+// `findings[].severity: block|improvement` — there are no numeric axis scores,
+// so a numeric threshold would gate nothing. /drive's review gate is therefore
+// `verdict === 'pass'` AND zero `block` findings (from BOTH the primary /review
+// and the cross-review second-opinion). A future ticket could add numeric
+// scoring to ReviewVerdict + the harness + the parser; do not assume it here.
+const DriveSchema = z
+  .object({
+    // Max review↔fix rounds before escalating to a human (park to /inbox).
+    review_loop_cap: z.number().int().positive().default(4),
+    // auto = merge on green CI; approval = open PR and park for a human merge.
+    merge_policy: z.enum(['auto', 'approval']).default('auto'),
+  })
+  .default({});
+
 // Added 2026-05-18 (FORGE-105 P2.5-T13) — closed-loop workflow control.
 // auto_codex_enabled WAS the disable lever consumed by `forge codex-suggest`.
 // FORGE-150 superseded it with second_opinion.auto_enabled (above). The block
@@ -308,6 +328,8 @@ export const SettingsSchema = z.object({
   design: DesignSchema,
   // FORGE-150: primary disable surface for in-skill second-opinion suggestions.
   second_opinion: SecondOpinionSchema,
+  // FORGE-214: per-ticket /drive HITL knobs (review loop cap + merge policy).
+  drive: DriveSchema,
   // FORGE-150: legacy block — optional, no default. Honored by the resolver for
   // back-compat; removed in v0.6.
   codex: CodexSchema,
@@ -322,6 +344,7 @@ export const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type Verify = z.infer<typeof VerifySchema>;
+export type Drive = z.infer<typeof DriveSchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;

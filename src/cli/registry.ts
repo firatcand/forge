@@ -202,6 +202,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
     summary: 'Dispatch a second-opinion review through the configured review host (Codex or Gemini).',
   },
   {
+    name: 'drive',
+    summary: 'Drive one ticket end-to-end: claim, plan, implement, verify, cross-review loop, ship, mark Done. Pair with native /goal for hands-off completion.',
+  },
+  {
     name: 'ship',
     summary: 'Push the branch, run final gates (tests, secrets scan, conventional commit), open the PR.',
   },
