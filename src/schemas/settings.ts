@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { MODEL_TIERS } from './phases.ts';
+
 const LinearTrackerConfigSchema = z.object({
   type: z.literal('linear'),
   config: z.object({ team_id: z.string() }),
@@ -166,6 +168,12 @@ const AgentsSchema = z
     // generation, overwriting any prior `.1`) and starts fresh; readers merge
     // `.1` + current. Default 10 MiB. See src/orchestrator/jsonl-rotate.ts.
     log_rotate_max_bytes: z.number().int().positive().default(10_485_760),
+    // FORGE-211: default capability floor for tasks that carry no `model_tier`
+    // stamp. The AgentsSchema `.default({})` materializes this for free, so an
+    // unstamped task in a pre-v0.5 phases.yaml resolves to 'standard'. The route
+    // verb (FORGE-210) escalates above this floor (CRITICAL path / retry) but
+    // never below it.
+    default_model_tier: z.enum(MODEL_TIERS).default('standard'),
   })
   // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
   // Runs BEFORE refinements so the refined object sees the promoted value.

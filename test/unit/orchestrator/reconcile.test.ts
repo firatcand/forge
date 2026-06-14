@@ -537,6 +537,35 @@ test('renderTaskBody — omits Depends on line when empty', () => {
   assert.equal(body.includes('Depends on'), false);
 });
 
+// FORGE-211: model_tier is push-only informational text in the issue body.
+test('renderTaskBody — includes the Model tier line when present', () => {
+  const task = mkTask({ model_tier: 'frontier' });
+  const phase: Phase = {
+    id: 'phase-1',
+    name: 'P',
+    status: 'active',
+    goal: 'g',
+    gate_criteria: ['g'],
+    tasks: [task],
+  };
+  const body = renderTaskBody(task, phase);
+  assert.match(body, /\*\*Model tier:\*\* frontier/);
+});
+
+test('renderTaskBody — omits the Model tier line when absent', () => {
+  const task = mkTask({ model_tier: undefined });
+  const phase: Phase = {
+    id: 'phase-1',
+    name: 'P',
+    status: 'active',
+    goal: 'g',
+    gate_criteria: ['g'],
+    tasks: [task],
+  };
+  const body = renderTaskBody(task, phase);
+  assert.equal(body.includes('Model tier'), false);
+});
+
 // ---------------- applyPullToPhases ----------------
 
 test('applyPullToPhases — title update is applied', () => {

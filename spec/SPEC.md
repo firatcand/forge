@@ -248,6 +248,14 @@ export const SettingsSchema = z.object({
       // Subagent dispatch cap per main session (enforced by dispatch skill)
       subagent_cap_per_main: z.number().int().positive().default(3),
 
+      // FORGE-211: default model-capability floor for tasks that carry no
+      // `model_tier` stamp. Tiers are the fixed enum {small, standard, frontier}
+      // (catalog maps concrete models → tiers in FORGE-212; the route verb
+      // FORGE-210 resolves tier → model). The route verb escalates ABOVE this
+      // floor at runtime (CRITICAL.md path → frontier, failed-attempt retry →
+      // bump) but never below it.
+      default_model_tier: z.enum(['small', 'standard', 'frontier']).default('standard'),
+
       // Lease management — see ORCHESTRATOR.md "Lease semantics"
       lease_ttl_ms: z.number().int().positive().default(1_800_000),        // 30 min
       heartbeat_interval_ms: z.number().int().positive().default(300_000), // 5 min
@@ -376,6 +384,11 @@ export const TaskSchema = z.object({
   split_into: z.array(z.string().min(1)).optional(),
   status: z.enum(['active', 'paused', 'done', 'deferred-v0.5', 'dropped']).optional(),
   write_globs: z.array(z.string().min(1)).optional(),
+  // FORGE-211: optional capability FLOOR for model routing. Absent → the
+  // orchestrator uses agents.default_model_tier ('standard'); never an error so
+  // pre-v0.5 phases.yaml parse unchanged. The route verb (FORGE-210) escalates
+  // ABOVE this floor at runtime but never below it.
+  model_tier: z.enum(['small', 'standard', 'frontier']).optional(),
   // Per-task override of agents.question_budget; hard must be >= soft when both set.
   question_budget: z
     .object({

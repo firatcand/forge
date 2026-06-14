@@ -240,6 +240,8 @@ function buildStagedTask(
     owner_type: payload.owner_type,
     acceptance: [...payload.acceptance],
     ...(payload.write_globs ? { write_globs: [...payload.write_globs] } : {}),
+    // FORGE-211: persist the optional capability floor when stamped.
+    ...(payload.model_tier ? { model_tier: payload.model_tier } : {}),
   };
 }
 

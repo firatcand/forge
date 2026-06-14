@@ -86,6 +86,8 @@ test('AC3 — applies defaults when agents+design absent', () => {
   assert.equal(result.data.agents.review_host_cli, 'codex');
   // FORGE-85: soft-rotation threshold default = 10 MiB.
   assert.equal(result.data.agents.log_rotate_max_bytes, 10_485_760);
+  // FORGE-211: default capability floor for unstamped tasks.
+  assert.equal(result.data.agents.default_model_tier, 'standard');
   assert.deepEqual(result.data.agents.preflight_globs, [
     'src/index.ts',
     'src/schemas/**',
@@ -103,6 +105,27 @@ test('AC3 — applies defaults when agents+design absent', () => {
     'phases.yaml',
   ]);
   assert.equal(result.data.design.mode, 'project_owned');
+});
+
+test('FORGE-211 — default_model_tier defaults to standard; accepts explicit; rejects invalid', () => {
+  const data = loadFixture('minimal.yaml');
+  type WithAgents = { agents?: { default_model_tier?: string } };
+
+  // Default when absent.
+  const def = SettingsSchema.safeParse(data);
+  assert.equal(def.success, true);
+  if (def.success) assert.equal(def.data.agents.default_model_tier, 'standard');
+
+  // Explicit value accepted.
+  (data as WithAgents).agents = { default_model_tier: 'small' };
+  const explicit = SettingsSchema.safeParse(data);
+  assert.equal(explicit.success, true);
+  if (explicit.success) assert.equal(explicit.data.agents.default_model_tier, 'small');
+
+  // Invalid value rejected.
+  (data as WithAgents).agents = { default_model_tier: 'ultra' };
+  const bad = SettingsSchema.safeParse(data);
+  assert.equal(bad.success, false);
 });
 
 test('AC3.1 — preflight_globs can be overridden', () => {
