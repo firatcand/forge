@@ -7,6 +7,7 @@ import { loadForgeEnv } from '../core/forge-env.ts';
 import { runInit } from '../cli/init.ts';
 import { runSecondOpinionSuggest } from '../cli/second-opinion-suggest.ts';
 import { runProjectStatus } from '../cli/project-status.ts';
+import { runStatusline } from '../cli/statusline.ts';
 import { dispatchOrchestrate } from '../cli/orchestrate/index.ts';
 import { upgrade } from '../cli/upgrade/upgrade.ts';
 import { runMigrate } from '../cli/migrate/migrate.ts';
@@ -109,6 +110,24 @@ if (args.length === 0) {
 
 const command = args[0] ?? '';
 
+// FORGE-197: dispatch `statusline` EARLY — before loadForgeEnv (which reads
+// .forge/.env and may emit stderr) and before the drift/pin pre-hooks. A status
+// line runs frequently and must be NOISE-FREE: any incidental stderr would
+// corrupt the host's prompt. (It is also in the drift/pin skip lists below as
+// belt-and-suspenders, but those hooks never run for it because we return here.)
+if (command === 'statusline') {
+  // A status line must NEVER be noisy or non-zero. Even resolving the cwd can
+  // throw (ENOENT/uv_cwd when the working directory was deleted out from under
+  // the process), and that would happen BEFORE runStatusline's own guards — so
+  // wrap the whole dispatch and degrade to a silent exit 0 on any throw.
+  try {
+    const result = runStatusline({ cwd: process.cwd(), rest: args.slice(1) });
+    process.exit(result.exitCode);
+  } catch {
+    process.exit(0);
+  }
+}
+
 // FORGE-153 B8: drift-warning pre-hook. Fires once per CLI invocation when the
 // repo's .forge/.version disagrees with the bundled methodology version.
 // - Suppressed by FORGE_QUIET=1 (matches design §9 contract).
@@ -119,7 +138,9 @@ const command = args[0] ?? '';
 function maybeWarnDrift(cmd: string): void {
   // migrate is suppressed for the same reason as upgrade: telling the user to
   // "run forge upgrade" mid-migration is noise — migrate IS the fix path.
-  if (cmd === 'upgrade' || cmd === 'migrate') return;
+  // FORGE-197: statusline is dispatched+exited before this hook ever runs;
+  // listed here as belt-and-suspenders so a status line is never noisy.
+  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline') return;
   if (process.env.FORGE_QUIET === '1') return;
   try {
     const drift = checkVersionDrift({ cwd: process.cwd(), currentVersion: version });
@@ -144,7 +165,8 @@ maybeWarnDrift(command);
 //   Absent file/field → silent. All errors swallowed.
 const PIN_READ_MAX_BYTES = 256 * 1024;
 function maybeWarnMethodologyPin(cmd: string): void {
-  if (cmd === 'upgrade' || cmd === 'migrate') return;
+  // FORGE-197: statusline skip — see maybeWarnDrift note above.
+  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline') return;
   if (process.env.FORGE_QUIET === '1') return;
   try {
     const settingsPath = resolve(process.cwd(), '.forge/settings.yaml');
@@ -289,6 +311,10 @@ if (command === 'init') {
       for (const f of result.filesChanged) {
         process.stdout.write(`changed: ${f}\n`);
       }
+      // FORGE-197: the statusLine opt-in discovery offer. Printed to stderr at
+      // the CLI boundary (kept out of UpgradeResult.stderr so the structured
+      // field stays a deterministic contract). Already FORGE_QUIET-gated upstream.
+      if (result.discoveryNotice) process.stderr.write(`${result.discoveryNotice}\n`);
       process.exit(result.exitCode);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

@@ -1011,3 +1011,46 @@ test('FORGE-212 — models block: rejects ttl_days <= 0', () => {
   });
   assert.equal(result.success, false);
 });
+
+// ============================================================================
+// FORGE-197 — hosts.claude.status_line opt-in (default false)
+// ============================================================================
+
+const MINIMAL = {
+  version: 1 as const,
+  project: { name: 'x' },
+  tracker: { type: 'linear' as const, config: { team_id: 'T' } },
+  secrets: { manager: 'env_file' as const },
+};
+
+test('FORGE-197 — hosts.claude.status_line defaults false', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.hosts.claude.status_line, false);
+});
+
+test('FORGE-197 — hosts.claude.status_line accepts true', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    hosts: { claude: { status_line: true } },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.hosts.claude.status_line, true);
+});
+
+test('FORGE-197 — hosts.claude.status_line rejects non-bool', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    hosts: { claude: { status_line: 'yes' } },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-197 — hosts block absent → full defaults materialize', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.hosts, { claude: { status_line: false } });
+});
