@@ -35,6 +35,7 @@ import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
 import { dashboardHandler } from './dashboard.ts';
+import { modelsHandler } from './models.ts';
 import { reviewQueueHandler } from './review-queue.ts';
 import { inboxHandler } from './inbox.ts';
 
@@ -309,6 +310,12 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   dashboard: [JSON_FLAG, FD],
+  models: [
+    { flag: 'refresh', takesValue: false, description: 'Validate --file and write the catalog cache.' },
+    { flag: 'file', takesValue: true, description: 'With --refresh, the agent-compiled catalog JSON to validate + write.', valueLabel: '<json>' },
+    JSON_FLAG,
+    FD,
+  ],
   'review-queue': [JSON_FLAG, FD],
   inbox: [JSON_FLAG, FD],
   questions: [
@@ -502,6 +509,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['questions', withFlags(questionsHandler, FLAG_DECLS['questions']!)],
   ['status', withFlags(statusHandler, FLAG_DECLS['status']!)],
   ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
+  ['models', withFlags(modelsHandler, FLAG_DECLS['models']!)],
   ['review-queue', withFlags(reviewQueueHandler, FLAG_DECLS['review-queue']!)],
   ['inbox', withFlags(inboxHandler, FLAG_DECLS['inbox']!)],
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
@@ -535,6 +543,7 @@ export const HELP_ORDER: readonly string[] = [
   'phases',
   'status',
   'dashboard',
+  'models',
   'review-queue',
   'inbox',
   'questions',
