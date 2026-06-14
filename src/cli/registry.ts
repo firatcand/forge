@@ -50,6 +50,11 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
       'Read the model catalog + staleness; --availability probes per-host reachability; --refresh --file <json> validates + writes .forge/models-catalog.json.',
   },
   {
+    name: 'route',
+    summary:
+      'Route a task to a concrete host:model (tier floor + escalation → availability → warn-downgrade). Advisory; the enforced leg is codex --model on forge-owned spawns.',
+  },
+  {
     name: 'review-queue',
     summary: 'List tasks awaiting review (state ready_for_review) with attempt + lease info.',
   },

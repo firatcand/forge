@@ -91,7 +91,7 @@ export const QuestionBudgetSchema = z
   })
   .default({});
 
-const AgentsSchema = z
+export const AgentsSchema = z
   .object({
     max_concurrent: z.number().int().positive().default(10),
     retry_attempts: z.number().int().nonnegative().default(10),

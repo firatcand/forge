@@ -36,6 +36,7 @@ import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
 import { dashboardHandler } from './dashboard.ts';
 import { modelsHandler } from './models.ts';
+import { routeHandler } from './route.ts';
 import { reviewQueueHandler } from './review-queue.ts';
 import { inboxHandler } from './inbox.ts';
 
@@ -318,6 +319,12 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   'review-queue': [JSON_FLAG, FD],
+  route: [
+    { flag: 'task', takesValue: true, description: 'Task id (phases id or tracker issue id) to route.', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Attempt id — records a model_routed event when a lease is held.', valueLabel: '<attempt-id>' },
+    JSON_FLAG,
+    FD,
+  ],
   inbox: [JSON_FLAG, FD],
   questions: [
     { flag: 'open', takesValue: false, description: 'Only open (unanswered) questions.' },
@@ -511,6 +518,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['status', withFlags(statusHandler, FLAG_DECLS['status']!)],
   ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
   ['models', withFlags(modelsHandler, FLAG_DECLS['models']!)],
+  ['route', withFlags(routeHandler, FLAG_DECLS['route']!)],
   ['review-queue', withFlags(reviewQueueHandler, FLAG_DECLS['review-queue']!)],
   ['inbox', withFlags(inboxHandler, FLAG_DECLS['inbox']!)],
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
@@ -545,6 +553,7 @@ export const HELP_ORDER: readonly string[] = [
   'status',
   'dashboard',
   'models',
+  'route',
   'review-queue',
   'inbox',
   'questions',
