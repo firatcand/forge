@@ -225,6 +225,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
     summary: 'Drive a whole phase or feature-set: themed batching over /drive, front-loaded architectural questions, phase-gate ceremonies, lossless resume. Pair with native /goal.',
   },
   {
+    name: 'autopilot',
+    summary: 'Take a product idea from discovery interview to a running delivery loop: drive the spec chain pausing only at human approval gates, then roll into /deliver. Pair with native /goal.',
+  },
+  {
     name: 'ship',
     summary: 'Push the branch, run final gates (tests, secrets scan, conventional commit), open the PR.',
   },
