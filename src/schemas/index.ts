@@ -73,6 +73,7 @@ export type {
   AwsSecrets,
   DopplerSecrets,
   InfisicalSecrets,
+  Drive,
 } from './settings.ts';
 
 export {

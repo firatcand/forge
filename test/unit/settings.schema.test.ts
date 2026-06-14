@@ -544,6 +544,11 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
     second_opinion: {
       auto_enabled: boolean;
     };
+    // FORGE-214: drive block always materializes (schema default).
+    drive: {
+      review_loop_cap: number;
+      merge_policy: 'auto' | 'approval';
+    };
     // FORGE-150: legacy block — optional, no default.
     codex?: {
       auto_codex_enabled: boolean;
@@ -610,6 +615,76 @@ test('FORGE-150 — second_opinion block: non-boolean enabled rejected', () => {
     second_opinion: { auto_enabled: 'yes' },
   });
   assert.equal(result.success, false);
+});
+
+// FORGE-214: drive block (per-ticket /drive HITL knobs). R1 net shape is
+// { review_loop_cap: int>0 default 4, merge_policy: 'auto'|'approval' default
+// 'auto' } — there is NO review_threshold knob (ReviewVerdict has no scores).
+
+test('FORGE-214 — drive block: defaults expand when block omitted', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.drive.review_loop_cap, 4);
+  assert.equal(result.data.drive.merge_policy, 'auto');
+});
+
+test('FORGE-214 — drive block: explicit values round-trip', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    drive: { review_loop_cap: 2, merge_policy: 'approval' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.drive.review_loop_cap, 2);
+  assert.equal(result.data.drive.merge_policy, 'approval');
+});
+
+test('FORGE-214 — drive block: merge_policy:"bogus" rejected', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    drive: { merge_policy: 'bogus' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-214 — drive block: review_loop_cap:0 rejected (must be positive)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    drive: { review_loop_cap: 0 },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-214 — drive: review_threshold is NOT a knob (R1 — ignored, not enforced)', () => {
+  // The dropped review_threshold key is not part of DriveSchema. DriveSchema has
+  // no .strict(), so a stale key is silently ignored (not enforced) — defaults
+  // still apply and parse succeeds.
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    drive: { review_threshold: 8 },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal((result.data.drive as Record<string, unknown>).review_threshold, undefined);
+  assert.equal(result.data.drive.review_loop_cap, 4);
 });
 
 test('FORGE-150 — legacy codex block: materializes only when present', () => {
