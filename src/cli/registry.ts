@@ -45,6 +45,11 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
       'Cross-run cockpit: active sessions, open questions, ready/blocked, overlap + lease health.',
   },
   {
+    name: 'models',
+    summary:
+      'Read the model catalog + staleness; --refresh --file <json> validates + writes .forge/models-catalog.json.',
+  },
+  {
     name: 'review-queue',
     summary: 'List tasks awaiting review (state ready_for_review) with attempt + lease info.',
   },
@@ -188,6 +193,11 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'qa',
     summary: 'Run the test suite, browser checks, and verify acceptance criteria.',
+  },
+  {
+    name: 'models',
+    summary:
+      'Refresh the model catalog: web-search provider docs + host CLI listings into a cited chart, then write the cache via forge orchestrate models --refresh.',
   },
   {
     name: 'review',

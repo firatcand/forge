@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { MODEL_TIERS } from './phases.ts';
+import { CATALOG_HOSTS } from './models-catalog.ts';
 
 const LinearTrackerConfigSchema = z.object({
   type: z.literal('linear'),
@@ -324,6 +325,26 @@ const VerifySchema = z.object({
   commands: z.array(z.string().min(1)).min(1),
 });
 
+// FORGE-212: the model-catalog knobs. Mirrors DriveSchema's `.default({})`
+// pattern so a settings.yaml with no `models:` block still yields full defaults.
+//
+// R1: `pinned[host]` is a per-host ALLOW-LIST FILTER over the cached catalog —
+// NOT a replacement. Set for a host, it restricts the router to ONLY those
+// cached model ids for that host; tiers/sources stay authoritative in the cache
+// (no re-specifying the catalog in settings — that maintenance burden is exactly
+// what 212 exists to avoid). The pure `applyPins` helper in
+// src/cli/orchestrate/models.ts implements the filter; the router (210) reuses
+// it. A host with no pin → unchanged; an unknown pinned id → dropped + warned.
+//
+// `ttl_days` is the staleness threshold: the `models` read path nudges (stderr,
+// FORGE_QUIET-suppressible) when the cache's refreshed_at is older than this.
+const ModelsSchema = z
+  .object({
+    pinned: z.record(z.enum(CATALOG_HOSTS), z.array(z.string().min(1))).optional(),
+    ttl_days: z.number().int().positive().default(14),
+  })
+  .default({});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -343,6 +364,8 @@ export const SettingsSchema = z.object({
   codex: CodexSchema,
   decisions: DecisionsSchema,
   doctor: DoctorSchema,
+  // FORGE-212: model-catalog knobs (per-host pin allow-list + staleness TTL).
+  models: ModelsSchema,
   // FORGE-150: tracked methodology-version pin (FORGE-161). Absent ⇒ no warning
   // (pre-pin repos stay quiet); stamped by `forge upgrade`.
   methodology_version: z.string().min(1).optional(),
@@ -353,6 +376,7 @@ export const SettingsSchema = z.object({
 export type Settings = z.infer<typeof SettingsSchema>;
 export type Verify = z.infer<typeof VerifySchema>;
 export type Drive = z.infer<typeof DriveSchema>;
+export type Models = z.infer<typeof ModelsSchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;

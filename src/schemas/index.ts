@@ -102,6 +102,20 @@ export type {
 } from './phases.ts';
 
 export {
+  ModelsCatalogSchema,
+  ModelEntrySchema,
+  HostCatalogSchema,
+  CATALOG_HOSTS,
+  CATALOG_VERSION,
+} from './models-catalog.ts';
+export type {
+  ModelsCatalog,
+  ModelEntry,
+  HostCatalog,
+  CatalogHost,
+} from './models-catalog.ts';
+
+export {
   QuestionSchema,
   QuestionSchemaWithRecommendationCheck,
   AnswerSchema,

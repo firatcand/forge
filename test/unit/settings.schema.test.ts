@@ -959,3 +959,55 @@ test('FORGE-168 — verify command empty string: rejected', () => {
   });
   assert.equal(result.success, false);
 });
+
+// FORGE-212: models block (per-host pin allow-list + staleness TTL). Mirrors
+// DriveSchema's .default({}) pattern — defaults expand when the block is absent.
+
+test('FORGE-212 — models block: defaults expand when omitted (ttl_days 14, no pinned)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.models.ttl_days, 14);
+  assert.equal(result.data.models.pinned, undefined);
+});
+
+test('FORGE-212 — models block: accepts pinned per-host allow-list', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    models: { pinned: { claude: ['claude-opus-4'], codex: ['gpt-5.1'] }, ttl_days: 7 },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.models.pinned?.claude, ['claude-opus-4']);
+  assert.equal(result.data.models.ttl_days, 7);
+});
+
+test('FORGE-212 — models block: rejects unknown host key in pinned', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    models: { pinned: { openai: ['gpt-4'] } },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-212 — models block: rejects ttl_days <= 0', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    models: { ttl_days: 0 },
+  });
+  assert.equal(result.success, false);
+});
