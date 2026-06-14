@@ -89,18 +89,24 @@ test('leases: concurrent acquire × 10 — exactly 1 succeeds, 9 throw LEASE_EXI
 
 // ---- heartbeat: happy path ----
 
-test('leases: heartbeat updates expires_at and last_heartbeat_at', async () => {
+test('leases: heartbeat updates expires_at and last_heartbeat_at', () => {
   const fd = forgeDir('hb-happy');
   const lease = acquire({ forgeDir: fd, taskId: 'TASK-HB1', runId: 'run-001' });
   const originalExpires = lease.expires_at;
-  // Small delay to ensure the timestamps differ
-  await new Promise((r) => setTimeout(r, 5));
+  // Inject an explicitly-later clock so timestamps differ deterministically
+  // (no flaky setTimeout / same-millisecond collision).
   const updated = heartbeat({
     forgeDir: fd,
     taskId: 'TASK-HB1',
     caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+    now: Date.parse(lease.acquired_at) + 1000,
   });
   assert.notEqual(updated.expires_at, originalExpires, 'expires_at should be updated');
+  assert.equal(
+    updated.last_heartbeat_at,
+    new Date(Date.parse(lease.acquired_at) + 1000).toISOString(),
+    'last_heartbeat_at should reflect the heartbeat clock',
+  );
   assert.equal(updated.generation, lease.generation, 'generation should not change');
   assert.equal(updated.claim_id, lease.claim_id, 'claim_id should not change');
 });
@@ -963,6 +969,9 @@ test('adminReleaseLeaseByIdentity: expectedExpiresAt catches heartbeat-renewal b
   // Simulate a heartbeat firing between snapshot and admin-release:
   // heartbeat preserves (claim_id, generation, owner_run_id) but advances
   // expires_at. The new identity check MUST detect this and refuse to unlink.
+  // Inject an explicitly-later clock so expires_at provably advances — without
+  // it, acquire() and heartbeat() can land in the same millisecond on a fast
+  // runner, leaving expires_at unchanged and flaking the precondition below.
   const refreshed = heartbeat({
     forgeDir: fd,
     taskId: 'TASK-HB',
@@ -971,6 +980,7 @@ test('adminReleaseLeaseByIdentity: expectedExpiresAt catches heartbeat-renewal b
       claim_id: lease.claim_id,
       generation: lease.generation,
     },
+    now: Date.parse(lease.acquired_at) + 1000,
   });
   assert.equal(refreshed.claim_id, lease.claim_id);
   assert.equal(refreshed.generation, lease.generation);
