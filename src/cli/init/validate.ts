@@ -1,6 +1,7 @@
 import { execa } from 'execa';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { HOST_CLI_BIN } from '../../orchestrator/host-probe.ts';
 import type { InitAnswers } from './prompts.ts';
 
 export type ProbeStatus = 'pass' | 'fail' | 'skip';
@@ -22,7 +23,10 @@ export interface ValidationReport {
 export type ExecaLike = (
   cmd: string,
   args: readonly string[],
-  opts: { timeout: number; reject: false; cwd?: string },
+  // FORGE-213: `stdin` added so the availability prober can pass `stdin: 'ignore'`
+  // (reject stdin / never block on an interactive binary). Optional, so existing
+  // callers (runProbe) need no change.
+  opts: { timeout: number; reject: false; cwd?: string; stdin?: 'ignore' },
 ) => Promise<{
   // execa@9 under reject:false resolves spawn failures with exitCode
   // undefined and a string `code` (e.g. 'ENOENT') — modeled here so runProbe
@@ -62,14 +66,11 @@ const HOST_CLI_INSTALL: Record<'claude' | 'codex' | 'gemini' | 'cursor', string>
   cursor: 'https://cursor.com/docs/cli',
 };
 
-// FORGE-160: cursor's probe binary differs from its host key (the CLI is `agent`,
-// not `cursor`). All other hosts probe their own name.
-const HOST_CLI_BIN: Record<'claude' | 'codex' | 'gemini' | 'cursor', string> = {
-  claude: 'claude',
-  codex: 'codex',
-  gemini: 'gemini',
-  cursor: 'agent',
-};
+// FORGE-160 / FORGE-213: cursor's probe binary differs from its host key (the
+// CLI is `agent`, not `cursor`). All other hosts probe their own name. The map
+// now lives in src/orchestrator/host-probe.ts so the availability prober shares
+// it; imported above to keep the labels/install-links/runProbe behavior here
+// identical.
 
 function parseGitVersion(stdout: string): { major: number; minor: number } | null {
   const m = stdout.match(/git version (\d+)\.(\d+)/);

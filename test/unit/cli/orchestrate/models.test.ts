@@ -6,12 +6,15 @@ import { join } from 'node:path';
 
 import {
   runOrchestrateModels,
+  runOrchestrateModelsAvailability,
   applyPins,
   diffCatalogs,
   type ModelsReadData,
   type ModelsRefreshData,
+  type ModelsAvailabilityData,
 } from '../../../../src/cli/orchestrate/models.ts';
 import type { ModelsCatalog } from '../../../../src/schemas/models-catalog.ts';
+import type { ExecaLike } from '../../../../src/cli/init/validate.ts';
 import { ok } from '../../../../src/cli/envelope.ts';
 
 function forgeDir(): string {
@@ -438,4 +441,90 @@ test('diffCatalogs — no prior cache → everything added', () => {
 // Default-stream sanity: ok() shape is consumed.
 test('envelope ok shape sanity', () => {
   assert.deepEqual(ok({ a: 1 }), { ok: true, data: { a: 1 } });
+});
+
+// ── FORGE-213: --availability mode (deps injected via the options seam) ────────
+
+function execWithBins(present: readonly string[]): ExecaLike {
+  return (async (cmd: string) => {
+    if (present.includes(cmd)) return { exitCode: 0, stdout: `${cmd} 1.0.0`, stderr: '' };
+    return { exitCode: undefined, stdout: '', stderr: '', code: 'ENOENT' };
+  }) as unknown as ExecaLike;
+}
+
+test('models --availability --json emits the availability set (injected deps)', async () => {
+  const fd = forgeDir();
+  const out = capture();
+  const r = await runOrchestrateModelsAvailability({
+    forgeDir: fd,
+    json: true,
+    stdout: out.stream,
+    exec: execWithBins(['codex', 'gemini', 'agent']),
+    getEnv: (n) =>
+      ({ CLAUDE_CODE: '1', FORGE_GEMINI_EXPERIMENTAL: '1' } as Record<string, string>)[n],
+    fileExists: (p) => p === '/home/test/.codex/auth.json',
+    homeDir: '/home/test',
+    timeoutMs: 100,
+  });
+  assert.equal(r.exitCode, 0);
+  const env = parseEnvelope<ModelsAvailabilityData>(out.text());
+  assert.equal(env.ok, true);
+  const a = env.data!.availability;
+  assert.equal(a.claude.available, true);
+  assert.equal(a.codex.available, true);
+  assert.equal(a.gemini.available, true);
+  // cursor: beta opt-in defaults false (no settings.yaml) → unavailable.
+  assert.equal(a.cursor.available, false);
+});
+
+test('models --availability marks all unavailable when nothing configured', async () => {
+  const fd = forgeDir();
+  const out = capture();
+  const r = await runOrchestrateModelsAvailability({
+    forgeDir: fd,
+    json: true,
+    stdout: out.stream,
+    exec: execWithBins([]),
+    getEnv: () => undefined,
+    fileExists: () => false,
+    homeDir: '/home/test',
+    timeoutMs: 100,
+  });
+  assert.equal(r.exitCode, 0);
+  const env = parseEnvelope<ModelsAvailabilityData>(out.text());
+  assert.equal(env.data!.availability.claude.available, false);
+  assert.deepEqual(env.data!.availability.claude.reasons, [
+    'not in a Claude Code session (CLAUDE_CODE unset)',
+  ]);
+});
+
+test('models --availability --refresh → INVALID_ARGS (no file op)', async () => {
+  const fd = forgeDir();
+  const out = capture();
+  const r = await runOrchestrateModelsAvailability({
+    forgeDir: fd,
+    json: true,
+    refresh: true,
+    stdout: out.stream,
+    exec: execWithBins([]),
+  });
+  assert.equal(r.exitCode, 1);
+  const env = parseEnvelope(out.text());
+  assert.equal(env.ok, false);
+  assert.equal(env.error?.code, 'INVALID_ARGS');
+});
+
+test('runOrchestrateModels rejects --availability + --refresh before any file op', () => {
+  const fd = forgeDir();
+  const out = capture();
+  const r = runOrchestrateModels({
+    forgeDir: fd,
+    json: true,
+    availability: true,
+    refresh: true,
+    stdout: out.stream,
+  });
+  assert.equal(r.exitCode, 1);
+  const env = parseEnvelope(out.text());
+  assert.equal(env.error?.code, 'INVALID_ARGS');
 });
