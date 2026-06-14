@@ -24,8 +24,6 @@
 
 import { readFileSync, statSync, openSync, fstatSync, readSync, closeSync } from 'node:fs';
 import path from 'node:path';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -39,17 +37,29 @@ import {
   computeAvailability,
   type AvailabilitySet,
 } from '../../orchestrator/availability.ts';
+// FORGE-210 (R4): the shared cache→seed→canonicalize→applyPins pipeline. Both
+// this read-mode verb and `route` import it so they cannot diverge.
+import {
+  loadEffectiveCatalog,
+  canonicalizeCatalog,
+  applyPins,
+  type UnknownPin,
+} from '../../orchestrator/catalog-load.ts';
 import type { ExecaLike } from '../init/validate.ts';
 import {
   ModelsCatalogSchema,
   CATALOG_HOSTS,
   type ModelsCatalog,
-  type CatalogHost,
 } from '../../schemas/models-catalog.ts';
 import type { Models } from '../../schemas/settings.ts';
 import { ok, fail, type Envelope } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
+
+// Re-export so existing importers (and the verb's test suite) keep their
+// `from './models.ts'` paths working after the R4 extraction.
+export { applyPins, canonicalizeCatalog };
+export type { UnknownPin };
 
 // Untrusted --file size guard — mirrors dashboard.ts readJsonCapped's cap.
 const FILE_MAX_BYTES = 1 * 1024 * 1024;
@@ -57,110 +67,6 @@ const FILE_MAX_BYTES = 1 * 1024 * 1024;
 const CATALOG_FILENAME = 'models-catalog.json';
 const DEFAULT_TTL_DAYS = 14;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
-
-// ── F3: canonicalization — determinism boundary ──────────────────────────────
-// An agent-authored --file may carry hosts and models in arbitrary key/array
-// order. Before diffing, printing, or writing the cache we canonicalize so a
-// semantically-identical catalog always yields a byte-identical written cache
-// and a stable diff: hosts ordered by CATALOG_HOSTS, models within each host
-// sorted by id. Returns a NEW catalog (no mutation of the input).
-function canonicalizeCatalog(catalog: ModelsCatalog): ModelsCatalog {
-  const nextHosts: ModelsCatalog['hosts'] = {};
-  for (const host of CATALOG_HOSTS) {
-    const hc = catalog.hosts[host];
-    if (!hc) continue;
-    const models = [...hc.models].sort((a, b) =>
-      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-    );
-    nextHosts[host] = { ...hc, models };
-  }
-  return { ...catalog, hosts: nextHosts };
-}
-
-// ── R1: applyPins — pure per-host allow-list FILTER over the cache ────────────
-// `pinned[host]` (when set) restricts a host to ONLY those cached model ids:
-//   - keeps cached models whose id ∈ pins[host];
-//   - a host with NO pin entry → unchanged (full list);
-//   - a pinned id NOT present in the cache → dropped + recorded in unknownPins.
-// Tiers/sources stay authoritative in the cache — the pin never re-specifies a
-// model. Returns a NEW catalog (no mutation of the input). The router (210)
-// reuses this.
-export interface UnknownPin {
-  readonly host: CatalogHost;
-  readonly id: string;
-}
-export interface ApplyPinsResult {
-  readonly catalog: ModelsCatalog;
-  readonly unknownPins: UnknownPin[];
-}
-
-export function applyPins(
-  catalog: ModelsCatalog,
-  pinned: Models['pinned'],
-): ApplyPinsResult {
-  if (!pinned) return { catalog, unknownPins: [] };
-
-  const unknownPins: UnknownPin[] = [];
-  const nextHosts: ModelsCatalog['hosts'] = {};
-
-  for (const [host, hostCatalog] of Object.entries(catalog.hosts) as [
-    CatalogHost,
-    ModelsCatalog['hosts'][CatalogHost],
-  ][]) {
-    if (!hostCatalog) continue;
-    const pins = pinned[host];
-    if (!pins || pins.length === 0) {
-      // No pin for this host → unchanged.
-      nextHosts[host] = hostCatalog;
-      continue;
-    }
-    const cachedIds = new Set(hostCatalog.models.map((m) => m.id));
-    // Record pins that name a model the cache doesn't have.
-    for (const id of pins) {
-      if (!cachedIds.has(id)) unknownPins.push({ host, id });
-    }
-    const pinSet = new Set(pins);
-    const kept = hostCatalog.models.filter((m) => pinSet.has(m.id));
-    // A pin that filters to zero known models would violate HostCatalog.min(1).
-    // Drop the host entirely in that case (the router sees no models for it)
-    // rather than emit an invalid host catalog.
-    if (kept.length === 0) continue;
-    nextHosts[host] = { models: kept };
-  }
-
-  return { catalog: { ...catalog, hosts: nextHosts }, unknownPins };
-}
-
-// ── Seed cold-start loader (5-level import.meta.url walk; mirrors
-// src/cli/upgrade/template-loader.ts locateContextTemplate) ───────────────────
-function loadBundledSeed(): ModelsCatalog {
-  const here = dirname(fileURLToPath(import.meta.url));
-  // Dev: src/cli/orchestrate/ → ../../../templates/. Bundled: dist/ → ../templates/.
-  for (let i = 0; i < 5; i++) {
-    const candidate = resolve(
-      here,
-      ...(Array(i).fill('..') as string[]),
-      'templates',
-      'models-catalog.seed.json',
-    );
-    let raw: string;
-    try {
-      raw = readFileSync(candidate, 'utf8');
-    } catch {
-      continue;
-    }
-    const parsed = ModelsCatalogSchema.safeParse(JSON.parse(raw));
-    if (!parsed.success) {
-      throw new Error(
-        `forge orchestrate models: bundled seed at ${candidate} failed schema validation: ${parsed.error.message}`,
-      );
-    }
-    return parsed.data;
-  }
-  throw new Error(
-    'forge orchestrate models: templates/models-catalog.seed.json not found in bundle',
-  );
-}
 
 // ── F4: fd-bounded read of the untrusted --file ──────────────────────────────
 // Close the stat→read TOCTOU: bind the size cap to the actual open fd, not to a
@@ -485,31 +391,30 @@ export function runOrchestrateModels(
   }
 
   // ── Read mode ────────────────────────────────────────────────────────────────
-  const cached = loadCache(catalogPath);
-  const source: 'cache' | 'seed' = cached ? 'cache' : 'seed';
-  let base: ModelsCatalog;
-  if (cached) {
-    base = cached;
-  } else {
-    try {
-      base = loadBundledSeed();
-    } catch (e) {
-      return {
-        exitCode: writeEnvelope(
-          fail('SEED_NOT_FOUND', e instanceof Error ? e.message : String(e), false),
-          out,
-        ),
-      };
-    }
-  }
-
+  // R4: the cache→seed→canonicalize→applyPins pipeline is the SHARED loader so
+  // this read view and the route verb can never diverge. canonicalizeCatalog
+  // preserves top-level fields, so the returned catalog still carries
+  // `refreshed_at` for the staleness computation below.
   const settings = loadModelsSettings(opts.forgeDir);
   const ttlDays = settings.ttl_days ?? DEFAULT_TTL_DAYS;
-  // F3: canonicalize before pin-filtering so the read/JSON output is in a stable
-  // host + id order regardless of how the on-disk cache/seed was authored.
-  const { catalog, unknownPins } = applyPins(canonicalizeCatalog(base), settings.pinned);
+  let catalog: ModelsCatalog;
+  let source: 'cache' | 'seed';
+  let unknownPins: UnknownPin[];
+  try {
+    const loaded = loadEffectiveCatalog(opts.forgeDir, { models: settings });
+    catalog = loaded.catalog;
+    source = loaded.source;
+    unknownPins = loaded.unknownPins;
+  } catch (e) {
+    return {
+      exitCode: writeEnvelope(
+        fail('SEED_NOT_FOUND', e instanceof Error ? e.message : String(e), false),
+        out,
+      ),
+    };
+  }
 
-  const ageMs = computeAgeMs(base.refreshed_at, now);
+  const ageMs = computeAgeMs(catalog.refreshed_at, now);
   const stale = ageMs > ttlDays * MS_PER_DAY;
 
   // R6: staleness nudge — read path ONLY, stderr ONLY, never on JSON stdout,

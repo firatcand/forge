@@ -275,3 +275,54 @@ test('FORGE-83: tests_run accepts ASCII output_excerpt at exactly 2048 bytes', (
   });
   assert.equal(result.success, true);
 });
+
+// FORGE-210: model_routed event (the route verb's warn-downgrade record).
+
+test('schemas/attempt: model_routed parses with required fields', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'model_routed',
+    ts: TS,
+    host: 'codex',
+    model: 'gpt-5.1',
+    tier_effective: 'standard',
+    downgraded: false,
+  });
+  assert.equal(result.success, true);
+});
+
+test('schemas/attempt: model_routed parses with optional tier_floor + warning', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'model_routed',
+    ts: TS,
+    host: 'claude',
+    model: 'claude-haiku',
+    tier_floor: 'standard',
+    tier_effective: 'standard',
+    downgraded: true,
+    warning: 'no model ≥ standard reachable; downgraded to small on claude',
+  });
+  assert.equal(result.success, true);
+});
+
+test('schemas/attempt: model_routed rejects a missing tier_effective', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'model_routed',
+    ts: TS,
+    host: 'codex',
+    model: 'gpt-5.1',
+    downgraded: false,
+  });
+  assert.equal(result.success, false);
+});
+
+test('schemas/attempt: model_routed rejects an out-of-enum tier', () => {
+  const result = AttemptEventSchema.safeParse({
+    type: 'model_routed',
+    ts: TS,
+    host: 'codex',
+    model: 'gpt-5.1',
+    tier_effective: 'megafrontier',
+    downgraded: false,
+  });
+  assert.equal(result.success, false);
+});

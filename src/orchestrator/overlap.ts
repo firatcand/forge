@@ -168,6 +168,66 @@ function dedupe(values: readonly string[]): string[] {
   return Array.from(new Set(values));
 }
 
+// FORGE-210 (R2): does ANY glob in `a` intersect ANY glob in `b`? "Intersect"
+// = a hypothetical file path could match BOTH globs. The route verb computes
+// `touchesCriticalPath = write_globs ∩ preflight_globs ≠ ∅` with this — both
+// sides are GLOBS (e.g. `src/**/*.ts` vs `src/schemas/**`), so matchPreflight
+// (which treats its first arg as a concrete path) is the WRONG tool.
+//
+// SOUND for the forge glob subset (`/`-segments, `**` = zero+ segments, `*`/`?`
+// intra-segment) via recursive segment matching — NOT the probe-materialization
+// heuristic findIntersections uses (which has real false negatives for cases
+// like `src/**/schema.ts` ∩ `src/schemas/**`). For routing, a false negative is
+// UNSAFE (a critical task under-escalated to a cheap model); this errs toward
+// over-escalation (only the two-intra-wildcard segment case is approximated, and
+// it approximates to TRUE) so it never misses a real overlap.
+function hasWild(seg: string): boolean {
+  return seg.includes('*') || seg.includes('?');
+}
+function segToRegExp(seg: string): RegExp {
+  let re = '';
+  for (const ch of seg) {
+    if (ch === '*') re += '[^/]*';
+    else if (ch === '?') re += '[^/]';
+    else re += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`^${re}$`);
+}
+// Two single-path-segment glob patterns: can some literal segment match both?
+function segOverlap(a: string, b: string): boolean {
+  if (a === b) return true;
+  const aw = hasWild(a);
+  const bw = hasWild(b);
+  if (!aw && !bw) return false; // distinct literals
+  if (aw && !bw) return segToRegExp(a).test(b); // literal b vs glob a (exact)
+  if (!aw && bw) return segToRegExp(b).test(a);
+  return true; // both wildcarded → can't cheaply prove disjoint; over-escalate (safe)
+}
+// Do two segment-lists (split on `/`) describe a common concrete path? `**`
+// matches zero+ segments on either side.
+function segsOverlap(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length === 0 && b.length === 0) return true;
+  if (a.length === 0) return b.every((s) => s === '**');
+  if (b.length === 0) return a.every((s) => s === '**');
+  if (a[0] === '**') return segsOverlap(a.slice(1), b) || segsOverlap(a, b.slice(1));
+  if (b[0] === '**') return segsOverlap(a, b.slice(1)) || segsOverlap(a.slice(1), b);
+  if (!segOverlap(a[0]!, b[0]!)) return false;
+  return segsOverlap(a.slice(1), b.slice(1));
+}
+export function globsIntersect(
+  a: readonly string[],
+  b: readonly string[],
+): boolean {
+  if (a.length === 0 || b.length === 0) return false;
+  for (const ga of a) {
+    const aSegs = ga.split('/').filter((s) => s.length > 0);
+    for (const gb of b) {
+      if (segsOverlap(aSegs, gb.split('/').filter((s) => s.length > 0))) return true;
+    }
+  }
+  return false;
+}
+
 export function classifyOverlap(input: ClassifyInput): OverlapResult {
   const hardLocks = input.hardLockGlobs ?? DEFAULT_HARD_LOCK_GLOBS;
   const candidate = input.candidate;

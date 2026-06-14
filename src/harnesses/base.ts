@@ -12,6 +12,13 @@ export interface DispatchOpts {
   readonly attemptId: string;
   readonly timeoutMs?: number;
   readonly env?: Readonly<Record<string, string>>;
+  // FORGE-210: the routed model id (from `forge orchestrate route`). When set,
+  // a forge-owned spawn enforces it on the host that supports a per-spawn model
+  // flag (codex `--model`). Absent → today's behavior (the host's default
+  // model). This is the ENFORCED leg of routing for forge-owned spawns; the
+  // interactive/skill path remains advisory (the skill reads route + passes the
+  // model to its own Task-tool/exec spawn).
+  readonly model?: string;
 }
 
 export interface SubagentHandle {

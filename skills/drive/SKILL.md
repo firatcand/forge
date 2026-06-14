@@ -160,9 +160,13 @@ skipped if `second_opinion.auto_enabled: false` or `review_host_cli` is null.
 
 ### 5. Implement
 
-Run **`/implement`** with the approved plan, via a cwd-asserted subagent. MVP:
-the agent's own complexity judgment routes the work. FUTURE: `forge orchestrate
-route` / `model_tier` will route by tier when FORGE-210/211 land.
+Run **`/implement`** with the approved plan, via a cwd-asserted subagent. Route
+the implement subagent by model: `forge orchestrate route --task ${TASK}
+--attempt ${ATTEMPT} --json` → read `data.host` / `data.model` and pass `data.model`
+as the subagent's `model` (for a codex spawn it flows through `DispatchOpts.model`
+→ `codex exec --model`). The cwd-asserted prompt still comes FIRST. The route is
+advisory — surface `data.warning` when `data.downgraded` is true. On
+`NO_MODEL_AVAILABLE`, escalate rather than silently falling back.
 
 ### 6. Gate verify (independent)
 
@@ -198,7 +202,11 @@ improvement` — there are NO numeric axis scores. The gate is therefore:
 > primary `/review` and the cross-review second-opinion.
 
 If the gate is not met: spawn a cwd-asserted **fix** subagent to address the
-`block` findings, increment `review_rounds` in the drive note, and re-run review.
+`block` findings — route it the same way as the implement subagent (`forge
+orchestrate route --task ${TASK} --attempt ${ATTEMPT} --json` → pass `data.model`
+to the subagent; retry escalation means the fix subagent will often route a tier
+HIGHER than the original implement). Increment `review_rounds` in the drive note,
+and re-run review.
 Repeat up to `drive.review_loop_cap` (default 4) rounds. If the cap is hit
 without a pass, **escalate** — do NOT merge:
 
@@ -299,8 +307,10 @@ together for hands-off, multi-turn completion of a single ticket. Do not wrap
 
 ## Future integration points
 
-- **FORGE-210 / FORGE-211** — `forge orchestrate route` / `model_tier` will route
-  implement/fix subagents by complexity tier (MVP uses the agent's judgment).
+- **FORGE-192 (Autopilot I6)** — threading the routed model through the manifest /
+  render-worker-prompt for a fully-forge-owned interactive dispatch. Today `route`
+  (FORGE-210, consumed in steps 5 + 8) is advisory: the skill reads it and passes
+  the model to its own subagent spawn; codex spawns enforce it via `--model`.
 - **FORGE-216** — the question taxonomy will type the architectural-fork
   AskUserQuestion prompts.
 - **Numeric review scoring** — a future ticket could extend `ReviewVerdict` +

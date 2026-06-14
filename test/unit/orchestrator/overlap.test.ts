@@ -4,8 +4,27 @@ import assert from 'node:assert/strict';
 import {
   classifyOverlap,
   DEFAULT_HARD_LOCK_GLOBS,
+  globsIntersect,
   __overlapInternals,
 } from '../../../src/orchestrator/overlap.ts';
+
+// ── globsIntersect (FORGE-210 R2) — sound glob∩glob (no false negatives) ──────
+test('globsIntersect: constrained ** overlaps (the cross-review counterexamples)', () => {
+  // These intersect at src/schemas/schema.ts / src/cli/route.ts respectively —
+  // the probe heuristic missed them; the segment matcher must find them.
+  assert.equal(globsIntersect(['src/**/schema.ts'], ['src/schemas/**']), true);
+  assert.equal(globsIntersect(['src/**/route.ts'], ['src/cli/**']), true);
+  assert.equal(globsIntersect(['src/**/*.ts'], ['src/schemas/**']), true);
+});
+test('globsIntersect: disjoint top-level dirs do NOT intersect', () => {
+  assert.equal(globsIntersect(['spec/**'], ['src/cli/**']), false);
+  assert.equal(globsIntersect(['src/app/**'], ['src/schemas/**']), false);
+});
+test('globsIntersect: empty side → false; literal equality → true', () => {
+  assert.equal(globsIntersect([], ['src/**']), false);
+  assert.equal(globsIntersect(['CRITICAL.md'], ['CRITICAL.md']), true);
+  assert.equal(globsIntersect(['package.json'], ['CRITICAL.md']), false);
+});
 
 // ── compileGlob ──────────────────────────────────────────────────────────────
 
