@@ -8,6 +8,7 @@ import {
   readlinkSync,
   rmSync,
   symlinkSync,
+  linkSync,
   writeFileSync,
   chmodSync,
 } from 'node:fs';
@@ -169,6 +170,82 @@ test('writeAtomic — plain file and absent target behavior unchanged by the pre
     const fresh = join(dir, 'fresh', 'created.txt');
     writeAtomic(fresh, 'made');
     assert.equal(readFileSync(fresh, 'utf8'), 'made');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================
+// FORGE-209 — hardlink default-deny preflight (nlink > 1)
+// ============================================================================
+
+/** Create `<dir>/orig` and a hard link `<dir>/<linkName>` to it. Returns the
+ * two paths, or null when the filesystem does not support hard links (the test
+ * then skips). Wrapping linkSync keeps the suite green on exotic runner FSes. */
+function tryHardlink(
+  dir: string,
+  origName: string,
+  linkName: string,
+  contents: string,
+): { orig: string; link: string } | null {
+  const orig = join(dir, origName);
+  const link = join(dir, linkName);
+  writeFileSync(orig, contents);
+  try {
+    linkSync(orig, link);
+  } catch (err) {
+    // Only treat genuine "hard links unsupported" errors as a skip signal; a
+    // fixture bug (e.g. bad path) must surface, not masquerade as an FS skip.
+    if (HARDLINK_UNSUPPORTED.has((err as NodeJS.ErrnoException).code ?? '')) return null;
+    throw err;
+  }
+  return { orig, link };
+}
+
+const HARDLINK_UNSUPPORTED = new Set(['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES']);
+
+test('writeAtomic — refuses a hard-linked target with typed FsWriteError; writes nothing', (t) => {
+  const dir = mkScratch();
+  try {
+    const made = tryHardlink(dir, 'orig.md', 'linked.md', 'shared inode content');
+    if (made === null) return t.skip('hard links unsupported on this filesystem');
+    const { orig, link } = made;
+    // Sanity: both names share one inode → nlink === 2.
+    assert.equal(lstatSync(link).nlink, 2, 'fixture should be a 2-link hardlink');
+
+    let caught: unknown;
+    try {
+      writeAtomic(link, 'overwrite attempt');
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof FsWriteError, `expected FsWriteError, got: ${String(caught)}`);
+    assert.equal(caught.name, 'FsWriteError');
+    assert.equal(caught.code, 'HARDLINK_TARGET_REFUSED');
+    assert.equal(caught.details.path, link, 'details.path carries the refused path');
+    assert.equal(caught.details.nlink, 2, 'details.nlink carries the link count');
+    assert.match(caught.message, /hard link/);
+
+    // Nothing written: both names still hold the original content, still linked.
+    assert.equal(readFileSync(link, 'utf8'), 'shared inode content');
+    assert.equal(readFileSync(orig, 'utf8'), 'shared inode content');
+    assert.equal(lstatSync(link).nlink, 2, 'link relationship intact');
+    // No tmp leftovers.
+    const leftover = readdirSync(dir).filter((e) => e.includes('forge-tmp-'));
+    assert.deepEqual(leftover, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('writeAtomic — a single-link (nlink=1) regular file is NOT refused as a hardlink', () => {
+  const dir = mkScratch();
+  try {
+    const plain = join(dir, 'single.txt');
+    writeFileSync(plain, 'old');
+    assert.equal(lstatSync(plain).nlink, 1);
+    writeAtomic(plain, 'new');
+    assert.equal(readFileSync(plain, 'utf8'), 'new');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

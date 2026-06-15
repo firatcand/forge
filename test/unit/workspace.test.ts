@@ -10,6 +10,9 @@ import {
   symlinkSync,
   writeFileSync,
   readFileSync,
+  unlinkSync,
+  chmodSync,
+  lstatSync,
 } from 'node:fs';
 import { execa } from 'execa';
 
@@ -20,6 +23,8 @@ import {
   cleanup,
   WorkspaceError,
 } from '../../src/core/index.ts';
+// FORGE-143 test seam — the TOCTOU O_NOFOLLOW guard lives in copyFileNoFollow.
+import { copyFileNoFollow } from '../../src/core/workspace.ts';
 
 function tmpdir(label: string): string {
   return mkdtempSync(path.join(os.tmpdir(), `forge-${label}-`));
@@ -949,5 +954,134 @@ test('cleanup — deleteMergedBranch deletes a merged branch, retains an unmerge
     assert.match(listUnmerged.stdout, /feat\/FD-UNMERGED/, 'unmerged branch must survive');
   } finally {
     rmrf(repoDir);
+  }
+});
+
+// ============================================================================
+// FORGE-143 — executeCopyPlan TOCTOU: copyFileNoFollow (O_RDONLY | O_NOFOLLOW)
+// ============================================================================
+
+test('copyFileNoFollow — copies a regular source file faithfully (happy path)', () => {
+  const dir = tmpdir('nofollow-happy');
+  try {
+    const src = path.join(dir, 'src.txt');
+    const dest = path.join(dir, 'out', 'dest.txt');
+    writeFileSync(src, 'hydrated content\n');
+    mkdirSync(path.dirname(dest), { recursive: true });
+    copyFileNoFollow(src, dest);
+    assert.equal(readFileSync(dest, 'utf8'), 'hydrated content\n');
+  } finally {
+    rmrf(dir);
+  }
+});
+
+test('copyFileNoFollow — copies an empty file (zero-length, fstat size 0)', () => {
+  const dir = tmpdir('nofollow-empty');
+  try {
+    const src = path.join(dir, 'empty.txt');
+    const dest = path.join(dir, 'dest.txt');
+    writeFileSync(src, '');
+    copyFileNoFollow(src, dest);
+    assert.equal(readFileSync(dest, 'utf8'), '');
+  } finally {
+    rmrf(dir);
+  }
+});
+
+test('FORGE-143: copyFileNoFollow — a symlink swapped in at the SOURCE is rejected (ELOOP → SYMLINK_REJECTED); dest not materialized', () => {
+  const dir = tmpdir('nofollow-toctou');
+  const outside = tmpdir('nofollow-secret');
+  try {
+    // Simulate the TOCTOU swap: the plan recorded `src` as a regular file, but by
+    // copy time it has been replaced with a symlink pointing at a secret outside
+    // the working tree. copyFileSync would follow it; O_NOFOLLOW must not.
+    const secret = path.join(outside, 'secret.txt');
+    writeFileSync(secret, 'TOP SECRET\n');
+    const src = path.join(dir, 'plans', 'swapped.md');
+    mkdirSync(path.dirname(src), { recursive: true });
+    symlinkSync(secret, src); // src is now a symlink
+
+    const dest = path.join(dir, 'worktree', 'plans', 'swapped.md');
+
+    let caught: unknown;
+    try {
+      copyFileNoFollow(src, dest);
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof WorkspaceError, `expected WorkspaceError, got ${String(caught)}`);
+    assert.equal((caught as WorkspaceError).code, 'SYMLINK_REJECTED');
+    assert.equal((caught as WorkspaceError).details.path, src);
+    // The secret was never read into the destination — dest must not exist.
+    assert.equal(existsSync(dest), false, 'destination must NOT be materialized from the symlink');
+    // The secret target is untouched.
+    assert.equal(readFileSync(secret, 'utf8'), 'TOP SECRET\n');
+  } finally {
+    rmrf(dir);
+    rmrf(outside);
+  }
+});
+
+test('FORGE-143 (GPT-5.5 B2): copyFileNoFollow preserves the source file mode (no exec-bit strip)', () => {
+  const dir = tmpdir('nofollow-mode');
+  try {
+    const src = path.join(dir, 'script.sh');
+    writeFileSync(src, '#!/bin/sh\necho hi\n', { mode: 0o755 });
+    chmodSync(src, 0o755); // ensure exec bits regardless of umask
+    const dest = path.join(dir, 'out', 'script.sh');
+    mkdirSync(path.dirname(dest), { recursive: true });
+    copyFileNoFollow(src, dest);
+    assert.equal(readFileSync(dest, 'utf8'), '#!/bin/sh\necho hi\n');
+    // copyFileSync (the prior impl) preserved perms; copyFileNoFollow must too.
+    assert.equal(lstatSync(dest).mode & 0o777, 0o755, 'destination must keep the source mode');
+  } finally {
+    rmrf(dir);
+  }
+});
+
+test('FORGE-143: end-to-end — an untracked source swapped to a symlink between hydration roots is rejected; worktree dest absent', async () => {
+  const repoDir = tmpdir('toctou-e2e');
+  const outsideDir = tmpdir('toctou-secret-e2e');
+  try {
+    await initRepo(repoDir);
+    // An UNTRACKED file under plans/ flows through executeCopyPlan (tracked files
+    // are filtered out). Replace it with a symlink to an outside secret so the
+    // copy step must refuse via O_NOFOLLOW rather than follow the link.
+    const secret = path.join(outsideDir, 'secret.md');
+    writeFileSync(secret, '# secret outside the tree\n');
+    mkdirSync(path.join(repoDir, 'plans'), { recursive: true });
+    const untracked = path.join(repoDir, 'plans', 'untracked.md');
+    writeFileSync(untracked, 'placeholder');
+    // Swap it for a symlink (regular file at write time → symlink now). The
+    // plan-time guard rejects a symlink present at plan time too, so this asserts
+    // the consistent SYMLINK_REJECTED outcome regardless of which guard fires.
+    unlinkSync(untracked);
+    symlinkSync(secret, untracked);
+
+    const root = path.join(repoDir, '.forge', 'worktrees');
+    mkdirSync(root, { recursive: true });
+
+    let caught: unknown;
+    try {
+      await create('FD-TOCTOU', { root, base: 'main', mainWorktree: repoDir });
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof WorkspaceError, `expected WorkspaceError, got ${String(caught)}`);
+    assert.equal((caught as WorkspaceError).code, 'SYMLINK_REJECTED');
+    // The secret was never copied into the worktree.
+    const destInWorktree = path.join(root, 'FD-TOCTOU', 'plans', 'untracked.md');
+    assert.equal(existsSync(destInWorktree), false, 'symlinked source must not be materialized in the worktree');
+    assert.equal(readFileSync(secret, 'utf8'), '# secret outside the tree\n', 'secret untouched');
+  } finally {
+    try {
+      await execa('git', ['worktree', 'remove', '--force', path.join(repoDir, '.forge', 'worktrees', 'FD-TOCTOU')], {
+        cwd: repoDir,
+      });
+    } catch {
+      // ignore
+    }
+    rmrf(repoDir);
+    rmrf(outsideDir);
   }
 });

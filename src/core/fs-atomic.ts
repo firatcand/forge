@@ -33,6 +33,21 @@ export function writeAtomic(absPath: string, contents: string): void {
       { path: absPath },
     );
   }
+  // FORGE-209: hardlink default-deny (the FORGE-208 accepted gap). When the
+  // target is a regular file with nlink > 1, the renameSync below replaces only
+  // THIS path's directory entry — the OTHER hardlink(s) keep the old inode and
+  // its bytes, while this path points at fresh content. The link relationship is
+  // silently broken. Refuse; callers that maintain a skip-policy (upgrade/eject
+  // precheck, scaffold catch) handle it gracefully, everything else fails closed.
+  // The same TOCTOU caveat as the symlink check applies (preflight, not a
+  // no-follow/no-link guarantee). `st` is reused from the lstat above.
+  if (st?.isFile() && st.nlink > 1) {
+    throw new FsWriteError(
+      'HARDLINK_TARGET_REFUSED',
+      `refusing to write ${absPath}: target is a hard link (nlink=${st.nlink}) — renaming over it would detach this link and leave the other link(s) pointing at the old content`,
+      { path: absPath, nlink: st.nlink },
+    );
+  }
 
   mkdirSync(dirname(absPath), { recursive: true });
   const tmpPath = `${absPath}.forge-tmp-${process.pid}-${Date.now()}`;

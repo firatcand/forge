@@ -7,9 +7,14 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
-  copyFileSync,
   writeFileSync,
   rmSync,
+  openSync,
+  fstatSync,
+  readSync,
+  closeSync,
+  chmodSync,
+  constants as fsConstants,
 } from 'node:fs';
 import * as path from 'node:path';
 
@@ -271,11 +276,74 @@ function planForgeSettings(srcRoot: string, destRoot: string): CopyPlanItem[] {
   return [{ source: src, destination: path.join(destRoot, rel), relative: rel }];
 }
 
+// FORGE-143 — read a source file through an O_NOFOLLOW fd so a symlink swapped
+// in AFTER the plan was built (between planCopyRecursive's lstat/rejectIfSymlink
+// and this copy) cannot be followed. copyFileSync follows symlinks, so the
+// earlier lstat-based guard was TOCTOU-vulnerable: an attacker who swaps an
+// untracked source file for a symlink in that window bypasses rejectIfSymlink.
+// O_NOFOLLOW makes openSync throw ELOOP when the leaf is a symlink; we map that
+// to the same WorkspaceError('SYMLINK_REJECTED') the plan-time guard throws, for
+// a consistent error. An fstat on the fd is a belt-and-suspenders regular-file
+// check (a non-regular file — fifo/device — is rejected). POSIX-only: O_NOFOLLOW
+// is not portable to Windows, consistent with the non-Windows-portable note at
+// getTrackedPaths below (this verb is not yet Windows-portable per SPEC).
+// Exported as a FORGE-143 test seam: the TOCTOU guarantee lives entirely in
+// this function (O_NOFOLLOW open + fstat regular-file check), so it is unit-
+// tested directly rather than racing a swap inside create().
+export function copyFileNoFollow(source: string, destination: string): void {
+  let fd: number;
+  try {
+    fd = openSync(source, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+      let target: string | undefined;
+      try {
+        target = readlinkSync(source);
+      } catch {
+        target = undefined;
+      }
+      throw new WorkspaceError(
+        'SYMLINK_REJECTED',
+        'refusing to follow symlink in main worktree (swapped in after plan; O_NOFOLLOW)',
+        { path: source, target },
+      );
+    }
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) {
+      throw new WorkspaceError('SYMLINK_REJECTED', 'refusing to copy a non-regular source file', {
+        path: source,
+      });
+    }
+    // Read the full contents from the verified fd, then write to the destination.
+    const buf = Buffer.allocUnsafe(st.size);
+    let offset = 0;
+    while (offset < st.size) {
+      const bytesRead = readSync(fd, buf, offset, st.size - offset, offset);
+      if (bytesRead === 0) break; // EOF (file shrank since fstat) — stop short
+      offset += bytesRead;
+    }
+    // GPT-5.5 cross-review B2: preserve the SOURCE file mode — copyFileSync
+    // (which this replaces) copied permissions, so writing with writeFileSync
+    // defaults would strip executable/other mode bits from hydrated untracked
+    // files (e.g. a script under plans/ or docs/). Pass the mode on create and
+    // chmod afterwards so the destination matches the source regardless of
+    // whether it pre-existed.
+    const mode = st.mode & 0o777;
+    writeFileSync(destination, offset === st.size ? buf : buf.subarray(0, offset), { mode });
+    chmodSync(destination, mode);
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function executeCopyPlan(items: CopyPlanItem[]): string[] {
   const copied: string[] = [];
   for (const item of items) {
     mkdirSync(path.dirname(item.destination), { recursive: true });
-    copyFileSync(item.source, item.destination);
+    copyFileNoFollow(item.source, item.destination);
     copied.push(item.relative);
   }
   return copied;

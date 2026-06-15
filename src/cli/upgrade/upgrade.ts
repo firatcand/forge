@@ -25,7 +25,7 @@ import {
 import { dirname, resolve } from 'node:path';
 import { parse as yamlParse, parseDocument, stringify as yamlStringify } from 'yaml';
 import { writeAtomic } from '../../core/fs-atomic.ts';
-import { firstSymlinkedComponent, firstSymlinkedParent, isSymlinkAt } from '../../core/symlink-guard.ts';
+import { firstSymlinkedComponent, firstSymlinkedParent, isHardlinkAt, isSymlinkAt } from '../../core/symlink-guard.ts';
 import { SettingsSchema, type Settings } from '../../schemas/index.ts';
 import {
   MANIFEST_RELPATH,
@@ -33,6 +33,7 @@ import {
   readManifest,
   refreshManifest,
   writeManifest,
+  manifestPath,
 } from '../manifest.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import {
@@ -99,18 +100,76 @@ function sha256(s: string): string {
   return createHash('sha256').update(s).digest('hex');
 }
 
-/** FORGE-208: skip notice for a symlinked forge-managed file. Printed in BOTH
- * dry-run and real mode (dry-run parity AC) and the path never enters the
- * `changed` array. */
-function symlinkSkipNotice(fileName: string, absPath: string): string {
-  return `skipped: ${fileName} (symlink → ${readlinkSync(absPath)}) — forge does not manage symlinked root files; managing the target if enabled`;
+/** FORGE-209: read a symlink's immediate target for a notice, or null if the
+ * read fails (e.g. the link vanished in the window between the isSymlinkAt check
+ * and here → raw ENOENT). Callers fall back to a target-less notice so a
+ * vanished link never crashes `forge upgrade` (exit 0 preserved). */
+function readlinkOrNull(absPath: string): string | null {
+  try {
+    return readlinkSync(absPath);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * FORGE-208/209: skip notice for a symlinked forge-managed root file. Printed in
+ * BOTH dry-run and real mode (dry-run parity AC); the path never enters
+ * `changed`.
+ *
+ * FORGE-209-(4): when the enabled set is provided, resolve the IMMEDIATE link
+ * target against the file's own directory and state whether that target is
+ * actually managed by an ENABLED host. A `CLAUDE.md → AGENTS.md` link whose
+ * target host (codex) is NOT enabled means NO loop iteration maintains a
+ * methodology block anywhere — the notice must say so explicitly rather than
+ * imply "managing the target if enabled". Only the immediate target is
+ * considered (a chained target isn't "managed").
+ *
+ * FORGE-209-(1): the readlink is guarded — a link that vanished in the check→use
+ * window degrades to a target-less `(symlink)` notice instead of throwing ENOENT.
+ */
+function symlinkSkipNotice(
+  fileName: string,
+  absPath: string,
+  enabledRootFiles?: readonly AgentKind[],
+  cwd?: string,
+): string {
+  const target = readlinkOrNull(absPath);
+  if (target === null) {
+    return `skipped: ${fileName} (symlink) — forge does not manage symlinked root files; managing the target if enabled`;
+  }
+  // FORGE-209-(4): enabled-set awareness. Resolve the (possibly relative) target
+  // against the link's directory, normalize to absolute, and compare against
+  // each enabled host's ROOT_FILE_BY_AGENT absolute path.
+  if (enabledRootFiles !== undefined && cwd !== undefined) {
+    const resolvedTarget = resolve(dirname(absPath), target);
+    const managingHost = enabledRootFiles.find(
+      (agent) => resolve(cwd, ROOT_FILE_BY_AGENT[agent]) === resolvedTarget,
+    );
+    if (managingHost !== undefined) {
+      return `skipped: ${fileName} (symlink → ${target}) — forge does not manage symlinked root files (target ${target} is managed by host ${managingHost})`;
+    }
+    return `skipped: ${fileName} (symlink → ${target}) — forge does not manage symlinked root files (target ${target} is NOT managed by any enabled host — no methodology block is maintained anywhere; enable that host or replace the symlink with a regular file)`;
+  }
+  return `skipped: ${fileName} (symlink → ${target}) — forge does not manage symlinked root files; managing the target if enabled`;
 }
 
 /** FORGE-208: skip notice for a forge artifact whose PARENT directory is a
  * symlink. Mirrors {@link symlinkSkipNotice}'s shape (printed in dry-run + real
- * mode; path never enters `changed`). */
+ * mode; path never enters `changed`). FORGE-209-(1): readlink guarded. */
 function symlinkParentSkipNotice(fileName: string, parentRel: string, cwd: string): string {
-  return `skipped: ${fileName} (parent ${parentRel} is a symlink → ${readlinkSync(resolve(cwd, parentRel))}) — forge does not write through symlinked parent directories`;
+  const target = readlinkOrNull(resolve(cwd, parentRel));
+  const suffix = target === null ? '' : ` → ${target}`;
+  return `skipped: ${fileName} (parent ${parentRel} is a symlink${suffix}) — forge does not write through symlinked parent directories`;
+}
+
+/** FORGE-209-(5): skip notice for a forge-managed file that is a HARD LINK
+ * (nlink > 1). Mirrors {@link symlinkSkipNotice}'s shape — printed in dry-run +
+ * real mode; the path never enters `changed`. writeAtomic would refuse this
+ * anyway (HARDLINK_TARGET_REFUSED); the precheck keeps the refusal from
+ * aborting an upgrade mid-flight, after CONTEXT.md/.version are already written. */
+function hardlinkSkipNotice(fileName: string): string {
+  return `skipped: ${fileName} (hard link) — forge does not write through hard-linked files; renaming over it would detach this link and leave the other link(s) pointing at the old content. Replace it with a regular file if you want forge to manage it.`;
 }
 
 /**
@@ -195,6 +254,43 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       stderr:
         'forge upgrade: .forge/settings.yaml is a symbolic link. Refusing — destructive writes through symlinks could mutate files outside the working tree. Resolve the symlink or replace with a regular file first.',
     };
+  }
+  // FORGE-209-(5): refuse a hard-linked settings.yaml UPFRONT too — the later
+  // settings re-serializations (--add-agent / --remove-agent / methodology pin)
+  // route through writeAtomic, whose rename would detach this link and leave the
+  // other link(s) pointing at the old content. Refusing here (vs the skip used
+  // for root files / .gitignore) mirrors the symlink settings refusal directly
+  // above: settings.yaml is integral, not a skippable artifact, and the refusal
+  // stays idempotent (exit 1, nothing written).
+  if (isHardlinkAt(settingsPath)) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr:
+        'forge upgrade: .forge/settings.yaml is a hard link (nlink > 1). Refusing — writing through it would detach this link and leave the other link(s) pointing at the old content. Replace it with a regular file first.',
+    };
+  }
+  // FORGE-209-(5) (GPT-5.5 cross-review B1): refuse UPFRONT when any forge-OWNED
+  // always-write file is a hard link. CONTEXT.md / .version / manifest.json are
+  // written unconditionally later (lines ~387, ~388, and the manifest refresh);
+  // a hardlinked one would make writeAtomic throw HARDLINK_TARGET_REFUSED
+  // MID-upgrade (e.g. .version after CONTEXT.md, or manifest after every other
+  // write) — a partial upgrade. Like the settings.yaml refusal above, these are
+  // integral forge-internal files (not skippable artifacts), so refuse here
+  // before ANY mutation, keeping the refusal idempotent (exit 1, nothing written).
+  const manifestAbs = manifestPath(cwd);
+  for (const [label, p] of [
+    ['.forge/CONTEXT.md', contextPath],
+    ['.forge/.version', versionPath],
+    ['.forge/manifest.json', manifestAbs],
+  ] as const) {
+    if (isHardlinkAt(p)) {
+      return {
+        exitCode: 1,
+        filesChanged: [],
+        stderr: `forge upgrade: ${label} is a hard link (nlink > 1). Refusing — writing through it would detach this link and leave the other link(s) pointing at the old content. Replace it with a regular file first.`,
+      };
+    }
   }
   let settings: SettingsYaml;
   let validated: Settings;
@@ -338,7 +434,20 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     // its own loop iteration. Never enters `changed`; notice is identical
     // in dry-run and real mode.
     if (isSymlinkAt(filePath)) {
-      notices.push(symlinkSkipNotice(fileName, filePath));
+      // FORGE-209-(4): pass the enabled set + cwd so the notice states whether
+      // the link's immediate target is actually managed by an enabled host.
+      notices.push(
+        symlinkSkipNotice(fileName, filePath, settings.agents.enabled_root_files, cwd),
+      );
+      continue;
+    }
+    // FORGE-209-(5): a hard-linked root file (nlink > 1) is skipped with a notice
+    // here — a PRECHECK that mirrors the isSymlinkAt precheck above. Without it,
+    // writeAtomic's HARDLINK_TARGET_REFUSED would hard-throw AFTER CONTEXT.md /
+    // .version were already written this run, leaving a partial upgrade. Never
+    // enters `changed`; notice identical in dry-run and real mode.
+    if (isHardlinkAt(filePath)) {
+      notices.push(hardlinkSkipNotice(fileName));
       continue;
     }
     // FORGE-160: cursor's `.cursor/rules/forge-context.mdc` is forge-owned and
@@ -390,6 +499,10 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   // symlink — exit 0, link intact, never enters `changed`.
   if (isSymlinkAt(gitignorePath)) {
     notices.push(symlinkSkipNotice('.gitignore', gitignorePath));
+  } else if (isHardlinkAt(gitignorePath)) {
+    // FORGE-209-(5): hardlink precheck mirroring the symlink precheck above —
+    // skip with a notice rather than let writeAtomic hard-throw mid-upgrade.
+    notices.push(hardlinkSkipNotice('.gitignore'));
   } else {
     const currentGitignore = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
     const desiredGitignore = applyGitignoreBlock(currentGitignore);
@@ -532,6 +645,16 @@ function applyAddAgent(
       exitCode: 1,
       filesChanged: [],
       stderr: `forge upgrade --add-agent: ${addFileName} is a symbolic link. Refusing — writing through it would destroy the link and materialize a divergent regular file. Resolve the symlink or replace with a regular file first.`,
+    };
+  }
+  // FORGE-209-(5): an explicit --add-agent targeting a hard-linked root file is a
+  // HARD refusal too (mirrors the symlink refusal above) — a silent skip would
+  // lie about what was done, and writeAtomic would detach the link.
+  if (isHardlinkAt(addFilePath)) {
+    return {
+      exitCode: 1,
+      filesChanged: [],
+      stderr: `forge upgrade --add-agent: ${addFileName} is a hard link (nlink > 1). Refusing — writing through it would detach this link and leave the other link(s) pointing at the old content. Replace it with a regular file first.`,
     };
   }
 

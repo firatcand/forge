@@ -356,9 +356,19 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
     try {
       writeAtomic(p, bodyWithoutPrefixBlock(readFileSync(p, 'utf8')));
     } catch (err) {
+      // FORGE-208/209: a symlinked OR hard-linked root file makes writeAtomic
+      // refuse — stripping through it would destroy the symlink / detach the
+      // hardlink (the block lives in the target / other link). Skip + warn,
+      // keep ejecting. Mirrors the precheck shape used for symlinked parents.
       if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
         warnings.push(
           `skipped: ${rf.path} is a symbolic link — stripping the forge block would destroy the link (the block lives in the target). Remove the block from the target manually if needed.`,
+        );
+        continue;
+      }
+      if (err instanceof FsWriteError && err.code === 'HARDLINK_TARGET_REFUSED') {
+        warnings.push(
+          `skipped: ${rf.path} is a hard link — stripping the forge block would detach this hard link and leave the other link(s) pointing at the old content. Remove the block from a regular file manually if needed.`,
         );
         continue;
       }
@@ -393,9 +403,18 @@ function applyPlan(cwd: string, manifest: ForgeManifest, _plan: readonly EjectPl
     try {
       writeAtomic(p, after);
     } catch (err) {
+      // FORGE-208/209: same graceful skip as root files when the ignore file is
+      // a symlink OR a hard link — the forge-written block/line lives in the
+      // target / would be detached from the other link.
       if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
         warnings.push(
           `skipped: ${ig.path} is a symbolic link — reversing forge's edit would destroy the link (the edit lives in the target). Remove it from the target manually if needed.`,
+        );
+        continue;
+      }
+      if (err instanceof FsWriteError && err.code === 'HARDLINK_TARGET_REFUSED') {
+        warnings.push(
+          `skipped: ${ig.path} is a hard link — reversing forge's edit would detach this hard link and leave the other link(s) pointing at the old content. Remove it from a regular file manually if needed.`,
         );
         continue;
       }

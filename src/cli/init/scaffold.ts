@@ -14,7 +14,7 @@ import { SettingsSchema } from '../../schemas/index.ts';
 import type { ForgeManifest, ManifestFarmEntry } from '../../schemas/index.ts';
 import { writeAtomic } from '../../core/fs-atomic.ts';
 import { FsWriteError } from '../../core/errors.ts';
-import { firstSymlinkedComponent, firstSymlinkedParent, isSymlinkAt } from '../../core/symlink-guard.ts';
+import { firstSymlinkedComponent, firstSymlinkedParent, isHardlinkAt, isSymlinkAt } from '../../core/symlink-guard.ts';
 import {
   buildManifest,
   farmEntriesFromResult,
@@ -260,11 +260,22 @@ export function appendToolingExcludes(cwd: string): ToolingExcludeResult {
     try {
       r = appendLineIfMissing(p, TOOLING_EXCLUDE_LINE);
     } catch (err) {
-      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+      // FORGE-208/209: a symlinked OR hard-linked ignore file makes writeAtomic
+      // refuse (rewriting it would destroy the symlink / detach the hardlink).
+      // Skip with a warning into the init-warnings surface instead of aborting.
+      if (
+        err instanceof FsWriteError &&
+        (err.code === 'SYMLINK_TARGET_REFUSED' || err.code === 'HARDLINK_TARGET_REFUSED')
+      ) {
+        const linkKind = err.code === 'SYMLINK_TARGET_REFUSED' ? 'symbolic link' : 'hard link';
+        const why =
+          err.code === 'SYMLINK_TARGET_REFUSED'
+            ? 'writing through the link would destroy it'
+            : 'writing over it would detach this hard link and leave the other link(s) pointing at the old content';
         result.skipped.push(name);
         result.warned.push({
           target: name,
-          snippet: `${name} is a symbolic link, so forge did not append the worktree exclude (writing through the link would destroy it). Add this line to the link's target manually:\n\n\`\`\`\n${TOOLING_EXCLUDE_LINE}\n\`\`\``,
+          snippet: `${name} is a ${linkKind}, so forge did not append the worktree exclude (${why}). Add this line to a regular file manually:\n\n\`\`\`\n${TOOLING_EXCLUDE_LINE}\n\`\`\``,
         });
         continue;
       }
@@ -516,6 +527,18 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
       });
       continue;
     }
+    // FORGE-209-(5): the promotion's rmSync+renameSync bypasses writeAtomic, so
+    // it needs its own hardlink precheck (mirroring the isSymlinkAt skip above):
+    // a hard-linked dest, replaced via rmSync+rename, detaches this link and
+    // leaves the other link(s) pointing at the old content. Skip + warn.
+    if (isHardlinkAt(dest)) {
+      skipped.push(a.relPath);
+      symlinkWarnings.push({
+        target: a.relPath,
+        snippet: `${a.relPath} is a hard link, so forge left it untouched (replacing it would detach this hard link and leave the other link(s) pointing at the old content). Replace it with a regular file, then re-run \`forge init\` / \`forge upgrade\` if you want forge to manage it.`,
+      });
+      continue;
+    }
     // FORGE-208 (one level up): a NESTED artifact (cursor's .mdc) whose PARENT
     // directory (.cursor or .cursor/rules) is a symlink would be promoted
     // THROUGH the link by the mkdirSync + renameSync below, escaping the working
@@ -572,13 +595,18 @@ export function scaffoldProject(opts: ScaffoldOptions): ScaffoldResult {
         priorEndedWithNewline: existingGi.endsWith('\n'),
       });
     } catch (err) {
-      if (err instanceof FsWriteError && err.code === 'SYMLINK_TARGET_REFUSED') {
+      // FORGE-208/209: a symlinked OR hard-linked .gitignore makes writeAtomic
+      // refuse — skip with a warning rather than abort init.
+      if (
+        err instanceof FsWriteError &&
+        (err.code === 'SYMLINK_TARGET_REFUSED' || err.code === 'HARDLINK_TARGET_REFUSED')
+      ) {
+        const detail =
+          err.code === 'SYMLINK_TARGET_REFUSED'
+            ? '.gitignore is a symbolic link, so forge did not write its marker block (writing through the link would destroy it). Add the forge-managed block to the link\'s target manually, or replace the link with a regular file and re-run `forge upgrade`.'
+            : '.gitignore is a hard link, so forge did not write its marker block (writing over it would detach this hard link and leave the other link(s) pointing at the old content). Replace it with a regular file and re-run `forge upgrade`.';
         skipped.push('.gitignore');
-        symlinkWarnings.push({
-          target: '.gitignore',
-          snippet:
-            '.gitignore is a symbolic link, so forge did not write its marker block (writing through the link would destroy it). Add the forge-managed block to the link\'s target manually, or replace the link with a regular file and re-run `forge upgrade`.',
-        });
+        symlinkWarnings.push({ target: '.gitignore', snippet: detail });
       } else {
         throw err;
       }
