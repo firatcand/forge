@@ -1130,3 +1130,54 @@ test('FORGE-197 — hosts block absent → full defaults materialize', () => {
   if (!result.success) return;
   assert.deepEqual(result.data.hosts, { claude: { status_line: false } });
 });
+
+// ── FORGE-179: audit block ───────────────────────────────────────────────────
+
+test('FORGE-179 — audit block absent → full defaults materialize', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.audit.dimensions, [
+    'dead-code',
+    'duplication',
+    'over-export',
+    'complexity',
+    'dependency-bloat',
+    'stale-docs',
+  ]);
+  assert.equal(result.data.audit.max_findings_per_agent, 50);
+  assert.equal(result.data.audit.scope_globs, undefined);
+  assert.equal(result.data.audit.protected_globs, undefined);
+});
+
+test('FORGE-179 — audit scope_globs / protected_globs are optional + accepted', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    audit: { scope_globs: ['lib/**'], protected_globs: ['lib/secret.ts'] },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.audit.scope_globs, ['lib/**']);
+  assert.deepEqual(result.data.audit.protected_globs, ['lib/secret.ts']);
+});
+
+test('FORGE-179 — audit rejects non-positive max_findings_per_agent', () => {
+  assert.equal(
+    SettingsSchema.safeParse({ ...MINIMAL, audit: { max_findings_per_agent: 0 } }).success,
+    false,
+  );
+  assert.equal(
+    SettingsSchema.safeParse({ ...MINIMAL, audit: { max_findings_per_agent: -1 } }).success,
+    false,
+  );
+});
+
+test('FORGE-179 — audit accepts custom dimensions', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    audit: { dimensions: ['dead-code'] },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.audit.dimensions, ['dead-code']);
+});

@@ -39,6 +39,7 @@ import { modelsHandler } from './models.ts';
 import { routeHandler } from './route.ts';
 import { reviewQueueHandler } from './review-queue.ts';
 import { inboxHandler } from './inbox.ts';
+import { auditPlanHandler, auditCollectHandler } from './audit.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -504,6 +505,23 @@ const RUN_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
   ],
 };
 
+// FORGE-179: nested audit sub-verb flag declarations.
+const AUDIT_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
+  plan: [
+    { flag: 'scope', takesValue: true, description: 'Comma-separated scope globs (override auto-discovery / settings).', valueLabel: '<globs>' },
+    { flag: 'dimensions', takesValue: true, description: 'Comma-separated audit dimensions (override settings).', valueLabel: '<dims>' },
+    JSON_FLAG,
+    FD,
+  ],
+  collect: [
+    { flag: 'findings-file', takesValue: true, description: 'JSON file with the array of subagent findings to filter + write.', valueLabel: '<path>' },
+    { flag: 'scope', takesValue: true, description: 'Comma-separated scope globs (override auto-discovery / settings).', valueLabel: '<globs>' },
+    { flag: 'dimensions', takesValue: true, description: 'Comma-separated audit dimensions actually run (recorded in the work-order).', valueLabel: '<dims>' },
+    JSON_FLAG,
+    FD,
+  ],
+};
+
 // Attach declared flags onto an imported handler without mutating the original.
 function withFlags(handler: VerbHandler, flags: ReadonlyArray<FlagDecl>): VerbHandler {
   return { ...handler, flags };
@@ -530,6 +548,10 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['run', new Map<string, VerbHandler>([
     ['start', withFlags(runStartHandler, RUN_SUB_FLAG_DECLS['start']!)],
     ['list', withFlags(runListHandler, RUN_SUB_FLAG_DECLS['list']!)],
+  ])],
+  ['audit', new Map<string, VerbHandler>([
+    ['plan', withFlags(auditPlanHandler, AUDIT_SUB_FLAG_DECLS['plan']!)],
+    ['collect', withFlags(auditCollectHandler, AUDIT_SUB_FLAG_DECLS['collect']!)],
   ])],
   // Mutating band.
   ['ensure-worktree', withFlags(ensureWorktreeHandler, FLAG_DECLS['ensure-worktree']!)],
@@ -565,6 +587,7 @@ export const HELP_ORDER: readonly string[] = [
   'review-compose',
   'render-worker-prompt',
   'run',
+  'audit',
   'ensure-worktree',
   'claim',
   'dispatch',
