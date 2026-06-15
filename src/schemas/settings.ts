@@ -387,7 +387,9 @@ const HostsSchema = z
 // `.default({})` so a settings.yaml with no `audit:` block still yields full
 // defaults. ZERO forge-specific paths: scope is auto-discovered from the repo
 // tree when `scope_globs` is unset, and protected globs come from the adopter's
-// CRITICAL.md + agents.preflight_globs + this optional supplement. The default
+// CRITICAL.md + this optional supplement (FORGE-182: NOT agents.preflight_globs
+// — its JS-scaffold default would leak forge-shaped paths into a non-forge
+// repo's audit; see src/cli/orchestrate/audit.ts resolveProtectedGlobs). The default
 // `dimensions` list is the generic audit taxonomy (dead-code / duplication /
 // over-export / complexity / dependency-bloat / stale-docs) — see
 // docs/audits/refactoring-audit-agent-prompt.md; it names no concrete path.
@@ -395,7 +397,7 @@ const AuditSchema = z
   .object({
     // Unset → auto-discover scope by ranking the repo's tracked top-level dirs.
     scope_globs: z.array(z.string().min(1)).optional(),
-    // Supplements CRITICAL.md + agents.preflight_globs (union, not replacement).
+    // Supplements CRITICAL.md (union, not replacement) for the audit protected set.
     protected_globs: z.array(z.string().min(1)).optional(),
     dimensions: z
       .array(z.string().min(1))
