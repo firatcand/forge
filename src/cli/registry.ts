@@ -90,6 +90,14 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     name: 'run list',
     summary: 'List orchestrator runs (--active filters to runs with traffic).',
   },
+  {
+    name: 'audit plan',
+    summary: 'Plan a read-only audit: render one subagent prompt per (scope × dimension). Writes nothing.',
+  },
+  {
+    name: 'audit collect',
+    summary: 'Collect subagent findings (--findings-file), filter escapes/out-of-scope/protected, write the work-order to .forge/audits/<ts>/.',
+  },
   // ── Mutating band ──
   {
     name: 'ensure-worktree',
@@ -240,6 +248,10 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'inbox',
     summary: 'Drain parked decisions: a tagged digest of blocked questions; pick, deep-dive, and answer each.',
+  },
+  {
+    name: 'audit',
+    summary: 'Fan out N read-only subagents to audit the codebase for safe simplification; assemble a filtered work-order of findings. Writes no source.',
   },
   {
     name: 'investigate',

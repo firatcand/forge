@@ -383,6 +383,34 @@ const HostsSchema = z
   })
   .default({});
 
+// FORGE-179: `/audit` read-only core knobs. Mirrors DriveSchema's nested
+// `.default({})` so a settings.yaml with no `audit:` block still yields full
+// defaults. ZERO forge-specific paths: scope is auto-discovered from the repo
+// tree when `scope_globs` is unset, and protected globs come from the adopter's
+// CRITICAL.md + agents.preflight_globs + this optional supplement. The default
+// `dimensions` list is the generic audit taxonomy (dead-code / duplication /
+// over-export / complexity / dependency-bloat / stale-docs) — see
+// docs/audits/refactoring-audit-agent-prompt.md; it names no concrete path.
+const AuditSchema = z
+  .object({
+    // Unset → auto-discover scope by ranking the repo's tracked top-level dirs.
+    scope_globs: z.array(z.string().min(1)).optional(),
+    // Supplements CRITICAL.md + agents.preflight_globs (union, not replacement).
+    protected_globs: z.array(z.string().min(1)).optional(),
+    dimensions: z
+      .array(z.string().min(1))
+      .default([
+        'dead-code',
+        'duplication',
+        'over-export',
+        'complexity',
+        'dependency-bloat',
+        'stale-docs',
+      ]),
+    max_findings_per_agent: z.number().int().positive().default(50),
+  })
+  .default({});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -413,6 +441,9 @@ export const SettingsSchema = z.object({
   methodology_version: z.string().min(1).optional(),
   // FORGE-168: optional — unset ⇒ skip verification with a warning.
   verify: VerifySchema.optional(),
+  // FORGE-179: `/audit` read-only core knobs (scope/protected globs, dimensions,
+  // per-agent finding cap). Nested `.default({})` → absent block yields defaults.
+  audit: AuditSchema,
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -420,6 +451,7 @@ export type Verify = z.infer<typeof VerifySchema>;
 export type Drive = z.infer<typeof DriveSchema>;
 export type Deliver = z.infer<typeof DeliverSchema>;
 export type Models = z.infer<typeof ModelsSchema>;
+export type Audit = z.infer<typeof AuditSchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;
