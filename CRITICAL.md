@@ -48,3 +48,15 @@ supabase/migrations/**
 # (Same reasoning as tracker adapters: generation-fenced CAS, multi-process race surface)
 src/orchestrator/leases.ts
 src/orchestrator/state-machine.ts
+
+# ─── DO-NOT-SIMPLIFY (FORGE-181 /audit dogfood) ───────────────────────────────
+# Subtle, correctness-critical modules whose apparent duplication / complexity is
+# DELIBERATE. /audit reads THIS file for its protected set, so listing them here
+# makes forge "just another adopter": /audit classifies findings in these as
+# do-not-touch / protected (and /second-opinion reviews them on /ship). The audit
+# feature ships with ZERO hardcoded paths — forge's specifics live HERE, in code.
+src/orchestrator/glob-match.ts
+src/orchestrator/overlap.ts
+src/orchestrator/questions/writer.ts
+src/cli/orchestrate/status.ts
+src/core/logger.ts

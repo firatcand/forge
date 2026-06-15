@@ -192,6 +192,8 @@ src/
     orchestrate/                             # forge orchestrate <verb> — control plane surface
       # Read-only verbs
       {phases,status,questions,attach}.ts
+      # /audit read-only core (FORGE-178/179/180; v0.5) — plan + collect + create-issues
+      audit.ts
       # User-approved mutating verbs
       {claim,dispatch,heartbeat,question-write,answer,event,complete,cancel,gc,run-start,run-list}.ts
       # Doctor — SPEC↔code drift (FORGE-99)
@@ -223,6 +225,7 @@ skills/
   forge/                                     # /forge discovery interview
   forge-orchestrate/                         # dispatch skill (per host; portability deferred to Phase 3)
   reconcile/                                 # /reconcile skill (FORGE-100; v0.4)
+  audit/                                     # /audit read-only repo audit (FORGE-178; v0.5)
   # (other skills under skills/* are user-facing workflows — pickup-task, plan-task, implement,
   # ship, qa, etc. — not part of the forge CLI surface)
 templates/

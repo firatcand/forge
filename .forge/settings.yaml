@@ -23,3 +23,13 @@ agents:
     - codex
 design:
   mode: project_owned
+# FORGE-181 (/audit dogfood): the full gate. Makes forge "just another adopter"
+# — /audit reads settings.verify to know findings are verifiable, and /qa,
+# /drive, /deliver run this gate. The audit feature carries none of these
+# commands in code; they live HERE, in forge's own config.
+verify:
+  commands:
+    - npm run typecheck
+    - npm run lint
+    - npm test
+    - npm run build
