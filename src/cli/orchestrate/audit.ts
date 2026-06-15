@@ -13,8 +13,9 @@
 // `.forge/audits/`; the band label is help/rendering metadata, not a write gate.
 //
 // Zero hardcoded forge paths: scope comes from `settings.audit.scope_globs` or
-// auto-discovery over the real git tree; protected globs come from the adopter's
-// CRITICAL.md + agents.preflight_globs + settings.audit.protected_globs. The
+// auto-discovery over the real git tree; protected globs come ONLY from the
+// adopter-curated CRITICAL.md + settings.audit.protected_globs (NOT the
+// JS-flavored agents.preflight_globs default — see resolveProtectedGlobs). The
 // only fixed paths here are the OUTPUT dir convention (`.forge/audits/`) and the
 // shipped guardrails template (resolved via the package's templates dir) — both
 // generic to any adopter repo, not forge-internal source paths.
@@ -57,7 +58,6 @@ const MAX_FINDINGS = 5000;
 // a repo with no settings.yaml.
 interface AuditConfig {
   readonly audit: Audit;
-  readonly preflightGlobs: readonly string[];
   readonly verifyConfigured: boolean;
   // FORGE-180: the configured tracker type (linear|github|notion) so
   // `audit create-issues` can tell the skill how to file the rendered specs.
@@ -87,7 +87,6 @@ function loadAuditConfig(forgeDir: string): AuditConfig {
     const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
     return {
       audit: settings.audit,
-      preflightGlobs: settings.agents.preflight_globs,
       verifyConfigured: settings.verify !== undefined,
       trackerType: settings.tracker.type,
       warnings: [],
@@ -96,11 +95,10 @@ function loadAuditConfig(forgeDir: string): AuditConfig {
     const reason = err instanceof Error ? err.message : String(err);
     return {
       audit: AUDIT_DEFAULTS,
-      preflightGlobs: [],
       verifyConfigured: false,
       trackerType: null,
       warnings: [
-        `settings.yaml unavailable (${reason}); using audit defaults, no preflight globs, verify unconfigured`,
+        `settings.yaml unavailable (${reason}); using audit defaults, verify unconfigured`,
       ],
     };
   }
@@ -206,11 +204,21 @@ function discoverScope(repoRoot: string): ScopeResult {
 }
 
 // ── Protected-glob union ─────────────────────────────────────────────────────
+// FORGE-182 (P4 repo-agnostic): the protected set comes ONLY from the adopter-
+// curated sources — `CRITICAL.md` + `settings.audit.protected_globs`. We do NOT
+// fold in `agents.preflight_globs`: its schema DEFAULT is forge/JS-scaffold-
+// flavored (src/cli/**, src/trackers/base.ts, src/schemas/**, …), so for a
+// non-forge repo that never overrides it those defaults would leak forge-shaped
+// paths into the audit protected set, breaking repo-agnosticism. preflight_globs
+// is a separate orchestrator worker-write concern; audit-protected paths belong
+// in CRITICAL.md (the documented protected-paths convention) where an adopter
+// curates them per repo. (Protected-surface CLASSES — entrypoints, persisted
+// schemas, packaging — are still enforced by the auditor's judgment via the
+// audit-principles, independent of any glob.)
 function resolveProtectedGlobs(repoRoot: string, cfg: AuditConfig): readonly string[] {
   const union = new Set<string>();
   for (const g of parseCriticalGlobs(repoRoot)) union.add(g);
   for (const g of cfg.audit.protected_globs ?? []) union.add(g);
-  for (const g of cfg.preflightGlobs) union.add(g);
   return [...union];
 }
 

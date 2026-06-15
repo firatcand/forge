@@ -23,8 +23,11 @@ The user-facing audit driver. One invocation = one audit pass:
 - A git repo (scope auto-discovery ranks tracked dirs; a non-git repo falls back
   to scope `["**"]` with a warning).
 - `.forge/settings.yaml` is OPTIONAL — when absent, audit uses defaults and warns
-  (no preflight globs, verify unconfigured). Scope/protected come from config +
-  auto-discovery; you never hardcode paths.
+  (verify unconfigured). The protected set comes from the adopter-curated
+  `CRITICAL.md` + `settings.audit.protected_globs` ONLY; scope comes from
+  `settings.audit.scope_globs` or git-tree auto-discovery. You never hardcode
+  paths, and the JS-flavored `agents.preflight_globs` default is NOT folded in
+  (it would leak forge-shaped paths into a non-forge repo's audit).
 
 ## Step 1 — Plan the audit (read-only, writes nothing)
 
