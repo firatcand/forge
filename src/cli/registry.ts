@@ -98,6 +98,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     name: 'audit collect',
     summary: 'Collect subagent findings (--findings-file), filter escapes/out-of-scope/protected, write the work-order to .forge/audits/<ts>/.',
   },
+  {
+    name: 'audit create-issues',
+    summary: 'Render one tracker-issue spec per audit finding (--work-order); the /audit skill files them out-of-band with classification labels.',
+  },
   // ── Mutating band ──
   {
     name: 'ensure-worktree',
