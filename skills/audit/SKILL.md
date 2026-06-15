@@ -95,12 +95,34 @@ Show the user:
   artifact written.
 - If `verify_configured` is false: the unverifiable-findings warning.
 
-## Step 5 — Offer the next step
+## Step 5 — Offer to file issues (FORGE-180)
 
-The audit produces a work-order, not changes. Offer (do NOT auto-run) the
-follow-up: turning approved findings into tracker issues — a separate phase
-(`audit create-issues`) NOT implemented here. The human reviews the work-order
-and decides.
+The audit produces a work-order, not changes. After the human reviews it, OFFER
+(do NOT auto-run) to file one tracker issue per finding:
+
+```bash
+forge orchestrate audit create-issues --work-order <path-to-work-order.json> --json
+```
+
+This verb is **RENDER-ONLY** — it mutates nothing. It reads the configured
+`tracker.type` and emits one issue SPEC per finding:
+`{ title, body, labels: ['audit', '<classification>'], finding_ref }` (and an
+`umbrella_spec` if `--umbrella <title>` is given). It refuses with
+`NO_TRACKER_CONFIGURED` when no tracker is configured.
+
+**The skill files the specs out-of-band** (this is why classification→label is
+applied here, not in a payload — audit issues are NOT forge roadmap tasks, so
+they must NOT go through `createIssue`/`forgeTaskId`, which `reconcile`/`gc`
+would treat as managed tasks). For each spec, file an issue via the host tool for
+`tracker_type`, applying every label:
+
+- **github** → `gh issue create --title <title> --body <body> --label audit --label <classification>` (create the label first if missing).
+- **linear** → Linear MCP create-issue + attach the labels.
+- **notion** → Notion MCP create-page + set the classification as a property.
+
+If `--umbrella` was used, file the umbrella spec first and (optionally) reference
+it from each child. **Filing is NOT idempotent** — render + file once per
+work-order; re-running files duplicates.
 
 ## What the skill must NOT do
 

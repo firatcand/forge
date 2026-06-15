@@ -59,6 +59,10 @@ interface AuditConfig {
   readonly audit: Audit;
   readonly preflightGlobs: readonly string[];
   readonly verifyConfigured: boolean;
+  // FORGE-180: the configured tracker type (linear|github|notion) so
+  // `audit create-issues` can tell the skill how to file the rendered specs.
+  // null when no settings.yaml / no tracker is configured.
+  readonly trackerType: string | null;
   readonly warnings: readonly string[];
 }
 
@@ -85,6 +89,7 @@ function loadAuditConfig(forgeDir: string): AuditConfig {
       audit: settings.audit,
       preflightGlobs: settings.agents.preflight_globs,
       verifyConfigured: settings.verify !== undefined,
+      trackerType: settings.tracker.type,
       warnings: [],
     };
   } catch (err) {
@@ -93,6 +98,7 @@ function loadAuditConfig(forgeDir: string): AuditConfig {
       audit: AUDIT_DEFAULTS,
       preflightGlobs: [],
       verifyConfigured: false,
+      trackerType: null,
       warnings: [
         `settings.yaml unavailable (${reason}); using audit defaults, no preflight globs, verify unconfigured`,
       ],
@@ -782,6 +788,188 @@ export function runAuditCollect(args: CollectArgs): { exitCode: number } {
   }
 }
 
+// ── `audit create-issues` (RENDER-ONLY) ─────────────────────────────────────
+// FORGE-180 (P2). Reads a work-order and RENDERS one tracker-issue SPEC per
+// finding. It mutates NOTHING: the existing `Tracker.createIssue` is bound to
+// forge ROADMAP tasks (it requires a non-empty forgeTaskId, which reconcile/gc
+// then treat as a managed task), so audit findings — which are OUT-OF-BAND
+// issues, not roadmap tasks — must NOT go through it. Instead the `/audit` skill
+// files these specs out-of-band via the host's tracker tools (gh / Linear MCP /
+// Notion), applying the classification label. This verb only READS settings (for
+// the tracker type) + the work-order file. (User-confirmed design, plan
+// pre-opinion.)
+
+const MAX_SPEC_TITLE_LEN = 256;
+
+export interface IssueSpec {
+  readonly title: string;
+  readonly body: string;
+  readonly labels: readonly string[];
+  readonly finding_ref: string; // file[:line]
+  readonly classification: Classification;
+}
+
+export interface UmbrellaSpec {
+  readonly title: string;
+  readonly body: string;
+  readonly labels: readonly string[];
+}
+
+export interface CreateIssuesArgs {
+  readonly forgeDir: string;
+  readonly json: boolean;
+  readonly workOrderFile?: string;
+  readonly umbrella?: string;
+}
+
+export interface CreateIssuesResult {
+  readonly tracker_type: string;
+  readonly count: number;
+  readonly issue_specs: readonly IssueSpec[];
+  readonly umbrella_spec?: UmbrellaSpec;
+  readonly warnings: readonly string[];
+}
+
+function renderFindingBody(f: Finding, verifyConfigured: boolean, umbrellaTitle?: string): string {
+  const loc = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+  const lines = [
+    `**Location:** \`${loc}\``,
+    `**Classification:** ${f.classification}`,
+    `**Dimension:** ${f.dimension}`,
+    '',
+    `**Evidence:** ${f.evidence}`,
+    `**Why safe:** ${f.why_safe}`,
+    `**Proposed change:** ${f.proposed_change}`,
+    `**Blast radius:** ${f.blast_radius}`,
+  ];
+  if (f.tests_required) lines.push(`**Tests required:** ${f.tests_required}`);
+  if (!verifyConfigured) {
+    lines.push('', '> ⚠️ No `verify:` gate configured — this finding is UNVERIFIABLE until a gate is set.');
+  }
+  if (umbrellaTitle) lines.push('', `_Part of the audit umbrella: ${umbrellaTitle}_`);
+  return lines.join('\n') + '\n';
+}
+
+export function runAuditCreateIssues(args: CreateIssuesArgs): { exitCode: number } {
+  const cfg = loadAuditConfig(args.forgeDir);
+
+  // Refuse when no tracker is configured — rendering issue specs the skill can't
+  // file is pointless, and this honors the acceptance. The verb never connects /
+  // authenticates a tracker; it only reads `tracker.type` from settings.
+  if (cfg.trackerType === null) {
+    return {
+      exitCode: emit(
+        fail(
+          'NO_TRACKER_CONFIGURED',
+          'audit create-issues needs a configured tracker (set tracker.type in .forge/settings.yaml) so /audit can file the rendered issues.',
+          false,
+        ),
+        { json: args.json },
+      ),
+    };
+  }
+
+  if (!args.workOrderFile) {
+    return {
+      exitCode: emit(
+        fail('INVALID_ARGS', 'audit create-issues: --work-order <path> is required.', false),
+        { json: args.json },
+      ),
+    };
+  }
+
+  // Read + validate the work-order. It is our OWN output, but still bound it
+  // (regular file + byte cap) + schema-validate before rendering — same posture
+  // as `collect`'s --findings-file.
+  const woPath = path.resolve(args.workOrderFile);
+  try {
+    const st = lstatSync(woPath);
+    if (!st.isFile()) {
+      return {
+        exitCode: emit(
+          fail('WORK_ORDER_INVALID', `audit create-issues: '${args.workOrderFile}' is not a regular file.`, false),
+          { json: args.json },
+        ),
+      };
+    }
+    if (st.size > MAX_FINDINGS_FILE_BYTES) {
+      return {
+        exitCode: emit(
+          fail('WORK_ORDER_TOO_LARGE', `audit create-issues: work-order is ${st.size} bytes; cap is ${MAX_FINDINGS_FILE_BYTES}.`, false),
+          { json: args.json },
+        ),
+      };
+    }
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail('WORK_ORDER_NOT_FOUND', `audit create-issues: could not stat '${args.workOrderFile}': ${err instanceof Error ? err.message : String(err)}`, false),
+        { json: args.json },
+      ),
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(woPath, 'utf8'));
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail('WORK_ORDER_INVALID', `audit create-issues: work-order is not valid JSON: ${err instanceof Error ? err.message : String(err)}`, false),
+        { json: args.json },
+      ),
+    };
+  }
+  const wo = WorkOrderSchema.safeParse(parsed);
+  if (!wo.success) {
+    return {
+      exitCode: emit(
+        fail('WORK_ORDER_INVALID', `audit create-issues: work-order failed validation: ${wo.error.message}`, false),
+        { json: args.json },
+      ),
+    };
+  }
+
+  const umbrellaSpec: UmbrellaSpec | undefined = args.umbrella
+    ? {
+        title: args.umbrella,
+        body:
+          [
+            `Audit umbrella — ${wo.data.findings.length} finding(s).`,
+            `**Scope:** ${wo.data.scope.join(', ')}`,
+            `**Dimensions:** ${wo.data.dimensions.join(', ')}`,
+            '',
+            '**Summary by classification:**',
+            ...AUDIT_CLASSIFICATIONS.map((c) => `- ${c}: ${wo.data.summary[c]}`),
+            '',
+            '_Child issues are filed separately and reference this umbrella._',
+          ].join('\n') + '\n',
+        labels: ['audit'],
+      }
+    : undefined;
+
+  const issueSpecs: IssueSpec[] = wo.data.findings.map((f) => {
+    const loc = f.line !== undefined ? `${f.file}:${f.line}` : f.file;
+    const rawTitle = `[audit:${f.classification}] ${loc} — ${f.dimension}`;
+    return {
+      title: rawTitle.length > MAX_SPEC_TITLE_LEN ? rawTitle.slice(0, MAX_SPEC_TITLE_LEN - 1) + '…' : rawTitle,
+      body: renderFindingBody(f, wo.data.verify_configured, umbrellaSpec?.title),
+      labels: ['audit', f.classification],
+      finding_ref: loc,
+      classification: f.classification,
+    };
+  });
+
+  const result: CreateIssuesResult = {
+    tracker_type: cfg.trackerType,
+    count: issueSpecs.length,
+    issue_specs: issueSpecs,
+    ...(umbrellaSpec ? { umbrella_spec: umbrellaSpec } : {}),
+    warnings: wo.data.verify_configured ? [] : ['work-order has no verify gate — issues note the findings are unverifiable.'],
+  };
+  return { exitCode: emit(ok(result), { json: args.json }) };
+}
+
 // ── Verb-table handlers ──────────────────────────────────────────────────────
 function parseListFlag(rest: readonly string[], long: string): readonly string[] | undefined {
   const raw = parseFlag(rest, long);
@@ -827,6 +1015,25 @@ export const auditCollectHandler: VerbHandler = {
       ...(findingsFile ? { findingsFile } : {}),
       ...(scopeOverride ? { scopeOverride } : {}),
       ...(dimensionsOverride ? { dimensionsOverride } : {}),
+    });
+  },
+};
+
+export const auditCreateIssuesHandler: VerbHandler = {
+  // Band 'read': this verb RENDERS issue specs and mutates nothing (no tracker
+  // connect/createIssue). The /audit skill files the specs out-of-band.
+  band: 'read',
+  synopsis: 'Render one tracker-issue spec per audit finding (--work-order); the /audit skill files them out-of-band with labels.',
+  async run(rest, opts) {
+    const forgeDir = resolveForgeDir(rest, opts.cwd);
+    const json = hasFlag(rest, 'json');
+    const workOrderFile = parseFlag(rest, 'work-order');
+    const umbrella = parseFlag(rest, 'umbrella');
+    return runAuditCreateIssues({
+      forgeDir,
+      json,
+      ...(workOrderFile ? { workOrderFile } : {}),
+      ...(umbrella ? { umbrella } : {}),
     });
   },
 };

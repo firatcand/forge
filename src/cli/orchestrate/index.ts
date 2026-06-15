@@ -39,7 +39,7 @@ import { modelsHandler } from './models.ts';
 import { routeHandler } from './route.ts';
 import { reviewQueueHandler } from './review-queue.ts';
 import { inboxHandler } from './inbox.ts';
-import { auditPlanHandler, auditCollectHandler } from './audit.ts';
+import { auditPlanHandler, auditCollectHandler, auditCreateIssuesHandler } from './audit.ts';
 
 export type VerbBand = 'read' | 'mutate';
 
@@ -520,6 +520,12 @@ const AUDIT_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     JSON_FLAG,
     FD,
   ],
+  'create-issues': [
+    { flag: 'work-order', takesValue: true, description: 'Path to a work-order.json; render one issue spec per finding.', valueLabel: '<path>' },
+    { flag: 'umbrella', takesValue: true, description: 'Also render a summary umbrella-issue spec with this title.', valueLabel: '<title>' },
+    JSON_FLAG,
+    FD,
+  ],
 };
 
 // Attach declared flags onto an imported handler without mutating the original.
@@ -552,6 +558,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['audit', new Map<string, VerbHandler>([
     ['plan', withFlags(auditPlanHandler, AUDIT_SUB_FLAG_DECLS['plan']!)],
     ['collect', withFlags(auditCollectHandler, AUDIT_SUB_FLAG_DECLS['collect']!)],
+    ['create-issues', withFlags(auditCreateIssuesHandler, AUDIT_SUB_FLAG_DECLS['create-issues']!)],
   ])],
   // Mutating band.
   ['ensure-worktree', withFlags(ensureWorktreeHandler, FLAG_DECLS['ensure-worktree']!)],
