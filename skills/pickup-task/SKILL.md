@@ -2,7 +2,6 @@
 name: pickup-task
 description: Claim the next ready task from the configured tracker (Linear / GitHub Issues / Notion), create a git worktree, and inject relevant learnings.
 tools: Read, Edit, Bash(*), Bash(git*), Bash(gh*)
-subagent: learning-curator
 ---
 
 # /pickup-task
@@ -112,10 +111,40 @@ subagent: learning-curator
    `node_modules` symlink (or the installed tree) from the worktree **before**
    running `/wrap-up`. Handle both shapes: `[ -L node_modules ] && rm node_modules || rm -rf node_modules` (run INSIDE the worktree — never against the main checkout).
    `/wrap-up` surfaces the verbatim `GITIGNORED_LOSS` guidance if you forget.
-7. Delegate to `learning-curator` to retrieve relevant learnings (runs AFTER step 5
-   hydration so the curator sees the just-copied learnings tree, not an empty one):
-   - Tags matching task type
-   - Created in last 90 days
+7. **Recall relevant learnings via Loom** (FORGE-200). Runs AFTER step 5 hydration
+   so the just-copied `docs/learnings/` tree + `plans/phases.yaml` are present.
+   Loom replaces the old tag-guessing curator read with a dependency-aware graph
+   query: it walks the task's `depends_on` ancestors, surfaces learnings linked
+   via `learned_from`, and adds full-text matches — ranking graph-linked hits
+   above FTS-only ones, each with a `why` provenance string.
+
+   ```bash
+   forge loom reindex --scope all --json   # rebuild the graph (idempotent)
+   forge loom recall --task "${LINEAR_ID}" --json
+   ```
+
+   `recall` accepts either the phases id (`P2.5-T01`) or the tracker issue id.
+   Parse the envelope and surface the hits:
+
+   ```json
+   { "ok": true, "data": {
+     "task": "P2.5-T01",
+     "hits": [
+       { "id": "learning:docs/learnings/2026-Q2/race-condition.md",
+         "kind": "learning", "title": "Lease race on concurrent claim",
+         "score": 1000, "why": "linked via depends_on→P2.4-T03 learned_from",
+         "source": "structural" }
+     ],
+     "learning_nodes": 12,
+     "warnings": []
+   }}
+   ```
+
+   On a fresh repo with no `loom.db` yet (or an empty graph), `recall` soft-fails:
+   it returns `ok` with `hits: []` and a warning — surface "No prior learnings
+   recalled" rather than treating it as an error. Show the top hits (id + title +
+   `why`) to the implementer; an empty `docs/learnings/` legitimately yields
+   `learning_nodes: 0`.
 8. Output:
 
 ```
@@ -128,10 +157,11 @@ Acceptance criteria:
   - Migrations run cleanly
   - Vercel preview deploy on PR
 
-Relevant learnings (3):
-  - 2026-Q2/nextjs-supabase-typegen.md
-  - 2026-Q2/vercel-env-vars-runtime.md
-  - 2026-Q1/git-hooks-prettier-conflict.md
+Loom recall (dependency-aware):
+  - learning:docs/learnings/2026-Q2/nextjs-supabase-typegen.md
+      (linked via depends_on→TLOG-088 learned_from)
+  - learning:docs/learnings/2026-Q2/vercel-env-vars-runtime.md
+      (FTS match on task title/description)
 
 Next:
   cd .forge/worktrees/TLOG-101

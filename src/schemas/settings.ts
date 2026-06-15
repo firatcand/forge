@@ -413,6 +413,18 @@ const AuditSchema = z
   })
   .default({});
 
+// FORGE-200 (Loom I1): the memory-backend selector. A discriminated union on
+// `backend` so adding a remote variant (Athena) later is purely additive — the
+// only I1 variant is `local` (SQLite WAL+FTS5 under <main-checkout>/.forge/loom.db,
+// resolved via src/memory/paths.ts). Wrapped with `.default({ backend: 'local' })`
+// so a settings.yaml with no `memory:` block still yields a full default — mirrors
+// how `audit`/`drive` mount via nested defaults.
+const MemorySchema = z
+  .discriminatedUnion('backend', [
+    z.object({ backend: z.literal('local') }).strict(),
+  ])
+  .default({ backend: 'local' });
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -446,6 +458,9 @@ export const SettingsSchema = z.object({
   // FORGE-179: `/audit` read-only core knobs (scope/protected globs, dimensions,
   // per-agent finding cap). Nested `.default({})` → absent block yields defaults.
   audit: AuditSchema,
+  // FORGE-200: Loom memory-backend selector. Nested `.default({backend:'local'})`
+  // → absent block resolves to the local SQLite backend.
+  memory: MemorySchema,
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -454,6 +469,7 @@ export type Drive = z.infer<typeof DriveSchema>;
 export type Deliver = z.infer<typeof DeliverSchema>;
 export type Models = z.infer<typeof ModelsSchema>;
 export type Audit = z.infer<typeof AuditSchema>;
+export type Memory = z.infer<typeof MemorySchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;

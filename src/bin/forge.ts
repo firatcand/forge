@@ -352,6 +352,24 @@ if (command === 'init') {
   });
   process.stdout.write(`${renderEject(result, flags.includes('--confirm'))}\n`);
   process.exit(result.exitCode);
+} else if (command === 'loom') {
+  // FORGE-200: the local memory graph (reindex/recall/status). DYNAMIC import
+  // (Codex B1) so non-loom commands never load loom code — and crucially never
+  // load `node:sqlite` (whose ExperimentalWarning would corrupt the noise-free
+  // statusline/--version contract). The sqlite import is itself lazy inside
+  // src/memory/local/db.ts:openDb, so even this dispatcher loads zero sqlite
+  // until a verb opens the db.
+  void (async () => {
+    try {
+      const { dispatchLoom } = await import('../cli/loom/index.ts');
+      const result = await dispatchLoom(args.slice(1), { cwd: process.cwd() });
+      process.exit(result.exitCode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`forge loom failed: ${msg}`);
+      process.exit(1);
+    }
+  })();
 } else {
   failUnknown(command, version);
 }
