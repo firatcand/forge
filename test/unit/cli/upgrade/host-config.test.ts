@@ -193,3 +193,24 @@ test('host-config: R2 symlinked settings.json LEAF → skipped, target untouched
     rmSync(outside, { recursive: true, force: true });
   }
 });
+
+// FORGE-209 (B1): isSymlinkAt now fails closed (throws on non-ENOENT). The
+// statusLine writer documents a NEVER-THROW skip contract, so a guard throw on
+// its symlink-check path must DEGRADE to a `skipped` result, never propagate and
+// abort the upgrade. Deterministic ENOTDIR fixture: make `.claude` a regular
+// FILE so the leaf isSymlinkAt(.claude/settings.json) lstat fails ENOTDIR.
+test('host-config: a guard error (ENOTDIR) is caught → skipped, never throws (B1 never-throw)', () => {
+  const home = fakeHome();
+  try {
+    // `.claude` is a regular file, not a dir → lstat(.claude/settings.json) ENOTDIR.
+    writeFileSync(join(home, '.claude'), 'not a directory', 'utf8');
+    let res: ReturnType<typeof writeStatusLineConfig> | undefined;
+    assert.doesNotThrow(() => {
+      res = writeStatusLineConfig({ homeDir: home });
+    }, 'writeStatusLineConfig must never throw on its expected-skip paths');
+    assert.equal(res?.outcome, 'skipped');
+    assert.match(res!.notice, /could not verify|symlink/i);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

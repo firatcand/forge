@@ -57,17 +57,32 @@ export interface WriteStatusLineResult {
  * immediately before the write — to shrink the TOCTOU window.
  */
 function symlinkSkip(home: string, settingsPath: string): WriteStatusLineResult | null {
-  const symlinkedParent = firstSymlinkedParent(home, '.claude/settings.json');
-  if (symlinkedParent !== null) {
+  // FORGE-209 (B1): isSymlinkAt / firstSymlinkedParent now FAIL CLOSED — a
+  // non-ENOENT lstat failure (EACCES on `~/.claude`, ELOOP, …) THROWS rather
+  // than swallowing to false. This module documents a NEVER-THROW skip contract
+  // (statusLine is a noise-free, best-effort opt-in path that must never abort
+  // the upgrade), so we catch any guard throw here and DEGRADE to a skip —
+  // failing closed (do not write) while preserving the contract. We do not
+  // swallow blindly: the reason is surfaced in the skip notice.
+  try {
+    const symlinkedParent = firstSymlinkedParent(home, '.claude/settings.json');
+    if (symlinkedParent !== null) {
+      return {
+        outcome: 'skipped',
+        notice: `forge: skipped writing statusLine — ${join(home, symlinkedParent)} is a symlink (refusing to write through a pre-existing symlinked path).`,
+      };
+    }
+    if (isSymlinkAt(settingsPath)) {
+      return {
+        outcome: 'skipped',
+        notice: `forge: skipped writing statusLine — ${settingsPath} is a symlink (refusing to write through a pre-existing symlinked path).`,
+      };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     return {
       outcome: 'skipped',
-      notice: `forge: skipped writing statusLine — ${join(home, symlinkedParent)} is a symlink (refusing to write through a pre-existing symlinked path).`,
-    };
-  }
-  if (isSymlinkAt(settingsPath)) {
-    return {
-      outcome: 'skipped',
-      notice: `forge: skipped writing statusLine — ${settingsPath} is a symlink (refusing to write through a pre-existing symlinked path).`,
+      notice: `forge: skipped writing statusLine — could not verify ${settingsPath} is symlink-free (${msg}); refusing to write.`,
     };
   }
   return null;

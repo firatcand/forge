@@ -33,7 +33,12 @@ export class WorkspaceError extends Error {
 // the target), silently destroying e.g. a CLAUDE.md → AGENTS.md parity link and
 // materializing a divergent regular file. Mirrors WorkspaceError house style
 // (which has the SYMLINK_REJECTED precedent).
-export type FsWriteErrorCode = 'SYMLINK_TARGET_REFUSED';
+//
+// FORGE-209: HARDLINK_TARGET_REFUSED is the same class of silent-breakage one
+// inode over: when the target is a regular file with nlink > 1, writeAtomic's
+// rename detaches THIS path's hardlink — the OTHER link(s) keep the old inode's
+// content while this path points at fresh bytes. Refused by the same preflight.
+export type FsWriteErrorCode = 'SYMLINK_TARGET_REFUSED' | 'HARDLINK_TARGET_REFUSED';
 
 export class FsWriteError extends Error {
   readonly code: FsWriteErrorCode;

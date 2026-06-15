@@ -16,15 +16,49 @@ import { resolve } from 'node:path';
 
 /**
  * True when the path itself is a symbolic link (lstat — the link's own type,
- * never the target's). False when absent or a regular file/dir. Catches a
- * dangling symlink too (lstat succeeds on those).
+ * never the target's). False when ABSENT (ENOENT). Catches a dangling symlink
+ * too (lstat succeeds on those).
+ *
+ * FORGE-209: fail-closed error posture, unified with writeAtomic's preflight.
+ * ONLY a genuinely absent target (ENOENT) is "not a symlink, fine to proceed".
+ * ANY other lstat failure (EACCES, ELOOP, ENOTDIR on a parent component, …) is
+ * a real preflight failure and MUST propagate — a path forge cannot lstat must
+ * never be silently treated as "safe to write/delete through". Callers that
+ * cannot tolerate a throw on their expected-skip paths (host-config.ts's
+ * never-throw statusLine contract) wrap this and degrade to a skip; everywhere
+ * else propagation is the intended safe-by-default behavior.
  */
 export function isSymlinkAt(absPath: string): boolean {
   try {
     return lstatSync(absPath).isSymbolicLink();
-  } catch {
-    return false;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
   }
+}
+
+/**
+ * True when the path is a REGULAR FILE with more than one hard link
+ * (`nlink > 1`). False when absent (ENOENT), or when the path is a symlink /
+ * directory / single-link regular file. Mirrors {@link isSymlinkAt}'s
+ * fail-closed posture: ENOENT → false; any other lstat failure → throw.
+ *
+ * FORGE-209: the hardlink analogue of the symlink guard. writeAtomic's rename
+ * over a multiply-linked target detaches this path's link (the other link(s)
+ * keep the old inode), so the precheck callers (upgrade, eject) use this to skip
+ * a hardlinked managed file BEFORE writing — matching their existing isSymlinkAt
+ * precheck shape. lstat (not stat) so a symlink is never mis-counted as a
+ * hardlinked regular file.
+ */
+export function isHardlinkAt(absPath: string): boolean {
+  let st;
+  try {
+    st = lstatSync(absPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw err;
+  }
+  return st.isFile() && st.nlink > 1;
 }
 
 /**

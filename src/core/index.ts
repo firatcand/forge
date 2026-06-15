@@ -40,4 +40,4 @@ export type { Phases, Phase, Task, Source } from '../schemas/phases.ts';
 export { computeFreshnessLine, formatRelativeAge } from './freshness.ts';
 export { computeSpecRevision, SpecRevisionError } from './spec-revision.ts';
 export { createSecretsManager } from './secrets.ts';
-export { isSymlinkAt, firstSymlinkedParent } from './symlink-guard.ts';
+export { isSymlinkAt, isHardlinkAt, firstSymlinkedParent } from './symlink-guard.ts';

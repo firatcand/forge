@@ -561,7 +561,7 @@ test('upgrade --remove-agent: refuses when removal would empty enabled_root_file
 // FORGE-208 — symlink-safe writes
 // ============================================================================
 
-import { lstatSync, readdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync } from 'node:fs';
+import { lstatSync, readdirSync, readlinkSync, renameSync, symlinkSync, unlinkSync, linkSync } from 'node:fs';
 
 type FsKind = 'file' | 'dir' | 'symlink' | 'other';
 
@@ -1170,4 +1170,188 @@ test('FORGE-197: opt-in true + dryRun → no write, dry-run notice', async () =>
     cleanup(cwd);
     rmSync(fakeHome, { recursive: true, force: true });
   }
+});
+
+// ============================================================================
+// FORGE-209 — readlink-guarded notices, enabled-set awareness, hardlink skips
+// ============================================================================
+
+// --- 209-(4): symlinkSkipNotice enabled-set awareness -------------------------
+
+test('upgrade (FORGE-209-(4)): CLAUDE.md → AGENTS.md but codex NOT enabled → notice says target is NOT managed by any enabled host', async () => {
+  // ONLY claude enabled. CLAUDE.md is a symlink to AGENTS.md, whose host (codex)
+  // is NOT enabled — so no loop iteration maintains a methodology block anywhere.
+  const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude', skipRootFiles: true });
+  try {
+    writeFileSync(join(cwd, 'AGENTS.md'), '# external target, not forge-managed\n');
+    symlinkSync('AGENTS.md', join(cwd, 'CLAUDE.md'));
+
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /skipped: CLAUDE\.md \(symlink → AGENTS\.md\)/);
+    assert.match(result.stderr, /NOT managed by any enabled host/);
+    assert.match(result.stderr, /no methodology block is maintained anywhere/);
+    assert.equal(result.filesChanged.includes('CLAUDE.md'), false);
+    // Link + target untouched.
+    assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(), true);
+    assert.equal(readFileSync(join(cwd, 'AGENTS.md'), 'utf8'), '# external target, not forge-managed\n');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade (FORGE-209-(4)): CLAUDE.md → AGENTS.md with codex ENABLED → notice says target is managed by host codex', async () => {
+  // Both claude + codex enabled, CLAUDE.md → AGENTS.md (codex's real root file).
+  const cwd = bootstrapSymlinkTopology({ agentsNeedsRefresh: true });
+  try {
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /skipped: CLAUDE\.md \(symlink → AGENTS\.md\)/);
+    assert.match(result.stderr, /target AGENTS\.md is managed by host codex/);
+    assert.doesNotMatch(result.stderr, /NOT managed by any enabled host/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- 209-(1): readlink guard — vanished link degrades gracefully --------------
+
+test('upgrade (FORGE-209-(1)): a dangling root-file symlink (readlink ok but target absent) still skips with a notice, exit 0', async () => {
+  // A dangling symlink: lstat sees a symlink, readlink succeeds (returns the
+  // missing target name). The notice is produced without crashing; upgrade
+  // exits 0. (The unguarded crash path is readlink itself failing — covered by
+  // the host-config/guard unit tests; here we assert the upgrade stays green.)
+  const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude', skipRootFiles: true });
+  try {
+    symlinkSync('vanished-target.md', join(cwd, 'CLAUDE.md')); // dangling
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+    assert.match(result.stderr, /skipped: CLAUDE\.md \(symlink/);
+    assert.equal(result.filesChanged.includes('CLAUDE.md'), false);
+    assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).isSymbolicLink(), true, 'dangling link survives');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+// --- 209-(5): hardlinked root file / .gitignore skip-with-notice --------------
+
+test('upgrade (FORGE-209-(5)): a hard-linked root file is skipped with a notice; no partial write; exit 0', (t) => {
+  return (async () => {
+    const cwd = bootstrap({ enabledAgents: ['claude'], primary: 'claude', skipRootFiles: true, versionOverride: '0.0.1' });
+    try {
+      // CLAUDE.md WITHOUT its prefix block, hard-linked to a sibling. The stale
+      // version forces a pending refresh, so without the precheck writeAtomic
+      // would HARDLINK_TARGET_REFUSED mid-run (after CONTEXT.md/.version writes).
+      writeFileSync(join(cwd, 'claude-twin.md'), '# user body, no forge block\n');
+      try {
+        linkSync(join(cwd, 'claude-twin.md'), join(cwd, 'CLAUDE.md'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES'].includes(code)) {
+          return t.skip('hard links unsupported on this filesystem');
+        }
+        throw err;
+      }
+      assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).nlink, 2);
+
+      const result = await upgrade({ cwd });
+      assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+      assert.match(result.stderr, /skipped: CLAUDE\.md \(hard link\)/);
+      assert.equal(result.filesChanged.includes('CLAUDE.md'), false, 'hardlink must not enter changed');
+      // Both names still hold the original content, still linked (no detach).
+      assert.equal(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), '# user body, no forge block\n');
+      assert.equal(lstatSync(join(cwd, 'CLAUDE.md')).nlink, 2, 'link relationship intact');
+      // The version refresh STILL happened (CONTEXT.md/.version got written) —
+      // proving the skip is surgical, not an abort.
+      assert.ok(result.filesChanged.includes('.forge/CONTEXT.md'));
+    } finally {
+      cleanup(cwd);
+    }
+  })();
+});
+
+test('upgrade (FORGE-209-(5)): a hard-linked .gitignore is skipped with a notice; exit 0; link intact', (t) => {
+  return (async () => {
+    const cwd = bootstrap();
+    try {
+      unlinkSync(join(cwd, '.gitignore'));
+      writeFileSync(join(cwd, 'gitignore-twin'), 'node_modules\n'); // no marker block
+      try {
+        linkSync(join(cwd, 'gitignore-twin'), join(cwd, '.gitignore'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES'].includes(code)) {
+          return t.skip('hard links unsupported on this filesystem');
+        }
+        throw err;
+      }
+      const result = await upgrade({ cwd });
+      assert.equal(result.exitCode, 0, `stderr: ${result.stderr}`);
+      assert.match(result.stderr, /skipped: \.gitignore \(hard link\)/);
+      assert.equal(result.filesChanged.includes('.gitignore'), false);
+      assert.equal(lstatSync(join(cwd, '.gitignore')).nlink, 2, 'link relationship intact');
+      assert.equal(readFileSync(join(cwd, 'gitignore-twin'), 'utf8'), 'node_modules\n', 'twin untouched');
+    } finally {
+      cleanup(cwd);
+    }
+  })();
+});
+
+test('upgrade --add-agent (FORGE-209-(5)): refuses (exit 1) when the agent root file is a hard link; nothing written', (t) => {
+  return (async () => {
+    const cwd = bootstrap({ enabledAgents: ['claude'] });
+    try {
+      writeFileSync(join(cwd, 'agents-twin.md'), 'real target\n');
+      try {
+        linkSync(join(cwd, 'agents-twin.md'), join(cwd, 'AGENTS.md'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES'].includes(code)) {
+          return t.skip('hard links unsupported on this filesystem');
+        }
+        throw err;
+      }
+      const settingsBefore = readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8');
+      const result = await upgrade({ cwd, addAgent: 'codex' });
+      assert.equal(result.exitCode, 1);
+      assert.match(result.stderr, /--add-agent: AGENTS\.md is a hard link/);
+      assert.deepEqual([...result.filesChanged], []);
+      assert.equal(readFileSync(join(cwd, '.forge/settings.yaml'), 'utf8'), settingsBefore, 'settings untouched');
+    } finally {
+      cleanup(cwd);
+    }
+  })();
+});
+
+test('upgrade (FORGE-209-(5), GPT-5.5 B1): a hard-linked .forge/CONTEXT.md refuses UPFRONT (exit 1); no partial write', (t) => {
+  return (async () => {
+    const cwd = bootstrap();
+    try {
+      // CONTEXT.md is written unconditionally early; a hardlinked one would make
+      // writeAtomic HARDLINK_TARGET_REFUSED mid-run after other writes. The
+      // upfront forge-owned-file guard must refuse before ANY mutation.
+      // bootstrap() may already have materialized CONTEXT.md — remove it so the
+      // hardlink (which requires a non-existent destination) can be created.
+      if (existsSync(join(cwd, '.forge/CONTEXT.md'))) unlinkSync(join(cwd, '.forge/CONTEXT.md'));
+      writeFileSync(join(cwd, '.forge/context-twin.md'), 'shared\n');
+      try {
+        linkSync(join(cwd, '.forge/context-twin.md'), join(cwd, '.forge/CONTEXT.md'));
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? '';
+        if (['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'ENOSYS', 'EACCES'].includes(code)) {
+          return t.skip('hard links unsupported on this filesystem');
+        }
+        throw err;
+      }
+      const result = await upgrade({ cwd });
+      assert.equal(result.exitCode, 1, `stderr: ${result.stderr}`);
+      assert.match(result.stderr, /\.forge\/CONTEXT\.md is a hard link/);
+      assert.deepEqual([...result.filesChanged], [], 'nothing written on refusal');
+      assert.equal(lstatSync(join(cwd, '.forge/CONTEXT.md')).nlink, 2, 'link relationship intact');
+      assert.equal(readFileSync(join(cwd, '.forge/context-twin.md'), 'utf8'), 'shared\n', 'twin untouched');
+    } finally {
+      cleanup(cwd);
+    }
+  })();
 });
