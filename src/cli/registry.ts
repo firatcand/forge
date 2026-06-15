@@ -161,6 +161,26 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
   },
 ] as const;
 
+// FORGE-200: Loom verbs surfaced under `forge loom <verb>`. Kept SEPARATE from
+// CLI_VERBS (which CONTEXT.md renders as the orchestrate verb surface) — loom is
+// its own top-level namespace, not an orchestrate sub-verb. The conformance test
+// in test/unit/cli/registry-loom.test.ts asserts this list tracks the
+// dispatchLoom verb map both directions.
+export const LOOM_VERBS: readonly RegistryEntry[] = [
+  {
+    name: 'reindex',
+    summary: 'Rebuild the local memory graph from plans/phases.yaml + docs/learnings/** (idempotent; --scope all).',
+  },
+  {
+    name: 'recall',
+    summary: 'Dependency-aware recall for a task (--task <id>): depends_on ancestors + learned_from learnings + FTS, structural ranked over FTS.',
+  },
+  {
+    name: 'status',
+    summary: 'Report loom.db node/edge counts, the by-kind breakdown (task/learning), and the resolved db path.',
+  },
+] as const;
+
 // User-facing slash commands shipped by the forge npm package under skills/.
 // Summaries are intentionally one-sentence — the skill body owns the long
 // form. Keep this list alphabetized within each band for review ergonomics.
