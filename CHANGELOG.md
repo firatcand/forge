@@ -4,6 +4,10 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+### Added
+
+- **`/audit` — read-only repo audit → work-order → issue specs (FORGE-178 P1–P3).** `forge orchestrate audit plan` fans out N read-only subagents (one prompt per scope × dimension, injecting path-free principles + the resolved protected globs); `audit collect` validates findings and writes a filtered `work-order.{md,json}` under `.forge/audits/<ts>/` (drops absolute / traversal / out-of-scope / protected paths in code); `audit create-issues` renders one tracker-issue spec per finding for the `/audit` skill to file out-of-band with classification labels. Scope is auto-discovered from the git tree (never hardcoded), the protected set comes from `CRITICAL.md` + config, and the shipped feature carries **zero forge-specific paths** — forge dogfoods it via its own `CRITICAL.md` DO-NOT-SIMPLIFY entries + `settings.verify`.
+
 ## [0.4.3] - 2026-06-12
 
 ### Added
