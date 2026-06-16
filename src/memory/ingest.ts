@@ -16,6 +16,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 import { loadPhases, resolvePhasesYaml } from '../core/phases.ts';
+import { projectEvents } from './project.ts';
 import {
   MEMORY_ATTR_ARRAY_MAX_LEN,
   MEMORY_ATTR_STRING_MAX_LEN,
@@ -49,6 +50,10 @@ function capGlobs(globs: readonly string[]): string[] {
 
 export interface ReindexArgs {
   readonly repoRoot: string;
+  // FORGE-218: the orchestrator history root for the event projector. Loom has no
+  // `--forge-dir` flag, so callers default this to <repoRoot>/.forge (matches the
+  // loom context resolver). Defaulted here too so existing callers keep working.
+  readonly forgeDir?: string;
   readonly backend: MemoryBackend;
 }
 
@@ -56,6 +61,9 @@ export interface ReindexResult {
   readonly nodes: number;
   readonly edges: number;
   readonly learning_nodes: number;
+  // FORGE-218: counts from the event projector (files_modified → file/touches).
+  readonly file_nodes: number;
+  readonly touches_edges: number;
   readonly warnings: string[];
 }
 
@@ -166,7 +174,33 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
     }
   }
 
-  // ── 3. deterministic write: reset, then upsert sorted lists ──
+  // ── 3. event projection → file nodes + touches edges (FORGE-218) ──
+  // Resolve an on-disk taskId (a phases id OR a tracker id — claim/dispatch write
+  // whichever the caller passed) to its canonical task node id. Mirrors
+  // backend.resolveTaskNodeId: prefixed `task:<id>` if known, else `task:<rawId>`
+  // if known, else a task whose attrs.tracker_issue_id === rawId, else null
+  // (dangling-edge guard — never emit a touches edge to a non-existent node).
+  const resolveTaskNodeId = (rawId: string): string | null => {
+    if (rawId.startsWith('task:')) return taskIds.has(rawId) ? rawId : null;
+    const direct = `task:${rawId}`;
+    if (taskIds.has(direct)) return direct;
+    return trackerToTask.get(rawId) ?? null;
+  };
+  // Default forgeDir to <repoRoot>/.forge (loom has no --forge-dir flag). The
+  // projector is best-effort: it NEVER throws — a missing/corrupt orchestrator
+  // tree degrades to warnings + an empty projection so reindex still succeeds on
+  // a repo with zero orchestrator history (the common adopter case).
+  const forgeDir = args.forgeDir ?? path.join(args.repoRoot, '.forge');
+  const projection = projectEvents({
+    forgeDir,
+    repoRoot: args.repoRoot,
+    resolveTaskNodeId,
+  });
+  for (const fileNode of projection.fileNodes) nodes.push(fileNode);
+  for (const touchEdge of projection.touchesEdges) edges.push(touchEdge);
+  for (const w of projection.warnings) warnings.push(w);
+
+  // ── 4. deterministic write: reset, then upsert sorted lists ──
   // Sort so repeated reindex produces an identical write order (idempotency).
   nodes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   edges.sort((a, b) => {
@@ -183,6 +217,8 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
     nodes: nodes.length,
     edges: edges.length,
     learning_nodes: learningCount,
+    file_nodes: projection.fileNodes.length,
+    touches_edges: projection.touchesEdges.length,
     warnings,
   };
 }
