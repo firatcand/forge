@@ -20,6 +20,7 @@ npm-debug.log*
 .env
 .env.local
 .env.production
+.infisical.json
 
 # Build artifacts
 dist/
