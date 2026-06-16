@@ -18,8 +18,8 @@ export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode
         ok({
           node_count: 0,
           edge_count: 0,
-          // Explicit zero for both kinds (honest zero output, Codex).
-          by_kind: { task: 0, learning: 0 },
+          // Explicit zero for all kinds (honest zero output; file added in I2a).
+          by_kind: { task: 0, learning: 0, file: 0 },
           db_path: args.ctx.dbPath,
           warnings: [
             ...args.ctx.warnings,

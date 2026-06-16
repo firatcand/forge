@@ -174,6 +174,92 @@ test('upsertNodes is a fail-closed bounds gate: an over-long node throws (B2)', 
   }
 });
 
+test('status reports file by_kind explicitly even at 0 (FORGE-218)', async () => {
+  const { dbPath, cleanup } = tmpDb();
+  const backend = await openLocalBackend(dbPath);
+  try {
+    backend.upsertNodes([{ id: 'task:A', kind: 'task', title: 'A', body: 'a' }]);
+    assert.equal(backend.status().by_kind.file, 0);
+  } finally {
+    backend.close();
+    cleanup();
+  }
+});
+
+test('co-touch recall: a co-touching task’s learning surfaces structurally (FORGE-218 B1)', async () => {
+  const { dbPath, cleanup } = tmpDb();
+  const backend = await openLocalBackend(dbPath);
+  try {
+    // Task A touches file F. Task B touches the SAME file F and has a learning L
+    // (learned_from B). A and B are NOT depends_on related — the only link is the
+    // shared file. recall(A) must surface L structurally with a co-touch `why`.
+    backend.upsertNodes([
+      { id: 'task:A', kind: 'task', title: 'Alpha work', body: 'unrelated alpha body' },
+      { id: 'task:B', kind: 'task', title: 'Beta work', body: 'unrelated beta body' },
+      { id: 'file:src/shared.ts', kind: 'file', title: 'src/shared.ts', body: '' },
+      { id: 'learning:l1', kind: 'learning', title: 'Shared gotcha', body: 'a lesson from B' },
+    ]);
+    backend.upsertEdges([
+      { src: 'task:A', dst: 'file:src/shared.ts', kind: 'touches' },
+      { src: 'task:B', dst: 'file:src/shared.ts', kind: 'touches' },
+      { src: 'learning:l1', dst: 'task:B', kind: 'learned_from' },
+    ]);
+    const hits = backend.recallForTask('A');
+    const l1 = hits.find((h) => h.id === 'learning:l1');
+    assert.ok(l1, `expected the co-touching learning, got ${JSON.stringify(hits)}`);
+    assert.equal(l1!.source, 'structural');
+    assert.match(l1!.why, /co-touched file src\/shared\.ts with task B/);
+    // File nodes are NEVER returned as hits.
+    assert.ok(!hits.some((h) => h.id.startsWith('file:')), 'file nodes must not be hits');
+  } finally {
+    backend.close();
+    cleanup();
+  }
+});
+
+test('file nodes are excluded from FTS recall (FORGE-218)', async () => {
+  const { dbPath, cleanup } = tmpDb();
+  const backend = await openLocalBackend(dbPath);
+  try {
+    // The task body shares the word "pipeline" with a file node's path-ish title.
+    // A non-file FTS match would surface; the file node must NOT (excluded at index).
+    backend.upsertNodes([
+      { id: 'task:A', kind: 'task', title: 'Pipeline task', body: 'build the pipeline' },
+      { id: 'file:src/pipeline.ts', kind: 'file', title: 'src/pipeline.ts', body: '' },
+    ]);
+    const hits = backend.recallForTask('A');
+    assert.ok(!hits.some((h) => h.id === 'file:src/pipeline.ts'), 'file node must not be an FTS hit');
+  } finally {
+    backend.close();
+    cleanup();
+  }
+});
+
+test('a task with no touches still returns I1-style depends_on + fts results (FORGE-218)', async () => {
+  const { dbPath, cleanup } = tmpDb();
+  const backend = await openLocalBackend(dbPath);
+  try {
+    // No touches edges at all → behaves exactly like I1.
+    backend.upsertNodes([
+      { id: 'task:A', kind: 'task', title: 'Widget pipeline', body: 'build the widget pipeline' },
+      { id: 'task:B', kind: 'task', title: 'B', body: 'base task' },
+      { id: 'learning:struct', kind: 'learning', title: 'Structural lesson', body: 'unrelated text' },
+    ]);
+    backend.upsertEdges([
+      { src: 'task:A', dst: 'task:B', kind: 'depends_on' },
+      { src: 'learning:struct', dst: 'task:B', kind: 'learned_from' },
+    ]);
+    const hits = backend.recallForTask('A');
+    const struct = hits.find((h) => h.id === 'learning:struct');
+    assert.ok(struct, 'depends_on-ancestor learning must still surface (I1 behavior)');
+    assert.equal(struct!.source, 'structural');
+    assert.match(struct!.why, /depends_on→B learned_from/);
+  } finally {
+    backend.close();
+    cleanup();
+  }
+});
+
 test('BFS depth/visited guard: a cyclic depends_on row does not loop recall', async () => {
   const { dbPath, cleanup } = tmpDb();
   // Open the raw db to inject a CORRUPT cyclic edge that PhasesSchema would reject.

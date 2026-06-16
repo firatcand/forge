@@ -85,6 +85,49 @@ test('reindex is idempotent: two runs produce identical logical nodes+edges', as
   }
 });
 
+test('reindex with a seeded events fixture is idempotent incl. file/touches (FORGE-218)', async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'loom-idem-proj-'));
+  mkdirSync(join(repoRoot, 'plans'), { recursive: true });
+  writeFileSync(join(repoRoot, 'plans', 'phases.yaml'), FIXTURE_PHASES);
+  // Seed orchestrator history: P1-T01 touched two files (one via its tracker-id
+  // dir form), P1-T02 touched one shared file. forgeDir defaults to repoRoot/.forge.
+  const forgeDir = join(repoRoot, '.forge');
+  const seed = (task: string, attempt: string, files: string[]): void => {
+    const dir = join(forgeDir, 'orchestrator', 'tasks', task, 'attempts', attempt);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'events.jsonl'),
+      JSON.stringify({ type: 'files_modified', ts: '2026-06-17T00:00:00.000Z', files }) + '\n',
+    );
+  };
+  seed('P1-T01', 'a1', ['src/a/one.ts', 'src/a/two.ts']);
+  seed('P1-T02', 'a1', ['src/a/two.ts']); // shared file → co-touch
+  const dbPath = join(repoRoot, '.forge', 'loom.db');
+
+  try {
+    const b1 = await openLocalBackend(dbPath);
+    const r1 = await reindex({ repoRoot, backend: b1 });
+    b1.close();
+    const snap1 = await snapshot(dbPath);
+
+    const b2 = await openLocalBackend(dbPath);
+    const r2 = await reindex({ repoRoot, backend: b2 });
+    b2.close();
+    const snap2 = await snapshot(dbPath);
+
+    assert.deepEqual(snap2, snap1, 'graph incl. file/touches must be identical across runs');
+    // 2 task + 2 file nodes; 1 depends_on + 3 touches edges.
+    assert.equal(r1.file_nodes, 2);
+    assert.equal(r1.touches_edges, 3);
+    assert.equal(r2.file_nodes, 2);
+    assert.equal(r2.touches_edges, 3);
+    assert.equal(r1.nodes, 4);
+    assert.equal(r1.edges, 4);
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test('reindex caps over-long source text instead of throwing (B2 ingest side)', async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), 'loom-cap-'));
   mkdirSync(join(repoRoot, 'plans'), { recursive: true });

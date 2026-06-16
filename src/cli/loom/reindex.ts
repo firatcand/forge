@@ -1,6 +1,8 @@
 // FORGE-200 (Loom I1): `forge loom reindex` — rebuild the local memory graph
 // from plans/phases.yaml + docs/learnings/**.
 
+import path from 'node:path';
+
 import { emit, fail, ok } from '../envelope.ts';
 import { reindex } from '../../memory/ingest.ts';
 import { resolveBackend, type LoomContext } from './context.ts';
@@ -36,7 +38,10 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
   }
 
   try {
-    const result = await reindex({ repoRoot: args.ctx.repoRoot, backend });
+    // FORGE-218: the projector reads orchestrator history under <repoRoot>/.forge
+    // (loom has no --forge-dir flag — see context.ts).
+    const forgeDir = path.join(args.ctx.repoRoot, '.forge');
+    const result = await reindex({ repoRoot: args.ctx.repoRoot, forgeDir, backend });
     return {
       exitCode: emit(
         ok({
@@ -44,6 +49,9 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
           nodes: result.nodes,
           edges: result.edges,
           learning_nodes: result.learning_nodes,
+          // FORGE-218: honest output — surface the projector's counts too.
+          file_nodes: result.file_nodes,
+          touches_edges: result.touches_edges,
           db_path: args.ctx.dbPath,
           warnings: [...warnings, ...result.warnings],
         }),

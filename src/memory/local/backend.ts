@@ -18,6 +18,7 @@ import {
 } from '../../schemas/memory.ts';
 import type { MemoryBackend, MemoryStatus, RecallOptions } from '../types.ts';
 import { openDb, type OpenDb, type SqliteDatabase } from './db.ts';
+import { matchAny, InvalidGlobError } from '../../orchestrator/glob-match.ts';
 
 const DEFAULT_RECALL_LIMIT = 20;
 const DEFAULT_MAX_DEPTH = 6;
@@ -105,8 +106,11 @@ export class LocalMemoryBackend implements MemoryBackend {
         const attrs = valid.attrs !== undefined ? JSON.stringify(valid.attrs) : null;
         insNode.run(valid.id, valid.kind, valid.title, valid.body, attrs);
         // Keep the FTS shadow in sync: delete any prior row, then insert fresh.
+        // FORGE-218: `file` nodes are structural-only — their title is a repo path
+        // and would pollute FTS recall, so they are NEVER indexed into nodes_fts
+        // (still always cleared, so a kind change file→non-file re-indexes cleanly).
         delFts.run(valid.id);
-        insFts.run(valid.id, valid.title, valid.body);
+        if (valid.kind !== 'file') insFts.run(valid.id, valid.title, valid.body);
       }
     });
   }
@@ -150,7 +154,9 @@ export class LocalMemoryBackend implements MemoryBackend {
       for (const node of validNodes) {
         const attrs = node.attrs !== undefined ? JSON.stringify(node.attrs) : null;
         insNode.run(node.id, node.kind, node.title, node.body, attrs);
-        insFts.run(node.id, node.title, node.body);
+        // FORGE-218: exclude `file` nodes from FTS (repo-path titles would
+        // pollute full-text recall); they remain in `nodes` as structural-only.
+        if (node.kind !== 'file') insFts.run(node.id, node.title, node.body);
       }
       for (const edge of validEdges) {
         insEdge.run(edge.src, edge.dst, edge.kind);
@@ -164,8 +170,9 @@ export class LocalMemoryBackend implements MemoryBackend {
     const byKindRows = this.db
       .prepare('SELECT kind, COUNT(*) AS c FROM nodes GROUP BY kind')
       .all() as Array<{ kind: string; c: number }>;
-    // Honest zero output (Codex): always state both kinds explicitly, even at 0.
-    const by_kind: Record<string, number> = { task: 0, learning: 0 };
+    // Honest zero output (Codex): always state every kind explicitly, even at 0
+    // (FORGE-218 adds `file`).
+    const by_kind: Record<string, number> = { task: 0, learning: 0, file: 0 };
     for (const row of byKindRows) by_kind[row.kind] = row.c;
     return {
       node_count: total.c,
@@ -197,23 +204,74 @@ export class LocalMemoryBackend implements MemoryBackend {
     const hits: RecallHit[] = [];
     const seen = new Set<string>();
 
-    // ── 2. STRUCTURAL hits: learning nodes linked via learned_from → scope. ──
-    // Edge direction (ingest): learning --learned_from--> task. So a learning is
-    // structural for this task when it has a learned_from edge whose dst ∈ scope.
+    // ── 2. CO-TOUCH expansion (FORGE-218 / B1). ──
+    // The `touches` edges are only useful via co-touch until learning→file lands
+    // (I2b): there is NO learning→file edge yet, so "a learning referencing a file
+    // an ancestor touched" is inert. Instead we find OTHER tasks that touched the
+    // same files as the scope, and pull THEIR learnings structurally.
+    //
+    // candidate files = `touches` dsts of every scope node (concrete file ids) ∪
+    //   (fallback, additive) file nodes whose path matches a scope node's
+    //   write_globs — so a task that has not run yet (no touches) can still find
+    //   co-touchers via its declared globs.
+    const candidateFiles = new Set<string>();
+    const selTouchesDst = this.db.prepare(
+      'SELECT dst FROM edges WHERE kind = ? AND src = ?',
+    );
+    for (const member of scope) {
+      const rows = selTouchesDst.all('touches', member) as Array<{ dst: string }>;
+      for (const r of rows) candidateFiles.add(r.dst);
+    }
+    const scopeGlobs = this.collectScopeWriteGlobs(scope);
+    if (scopeGlobs.length > 0) {
+      // Glob-match file node paths (file:<relpath>) against the scope's globs.
+      const fileRows = this.db
+        .prepare("SELECT id FROM nodes WHERE kind = 'file'")
+        .all() as Array<{ id: string }>;
+      for (const fr of fileRows) {
+        const relpath = fr.id.startsWith('file:') ? fr.id.slice('file:'.length) : fr.id;
+        // Reuse the repo's canonical glob engine (GPT-5.5 B1) — the hand-rolled
+        // matcher had globstar false negatives (`src/**/*.ts` missed `src/foo.ts`).
+        // matchAny throws InvalidGlobError on a malformed write_glob; treat that as
+        // no co-touch match (never throw recall on bad phases.yaml glob data).
+        try {
+          if (matchAny(relpath, scopeGlobs).matched) candidateFiles.add(fr.id);
+        } catch (e) {
+          if (!(e instanceof InvalidGlobError)) throw e;
+        }
+      }
+    }
+
+    // co-touching tasks = src of `touches` edges whose dst ∈ candidate files,
+    // EXCLUDING the scope tasks themselves (they are not "other" tasks).
+    const selTouchesSrc = this.db.prepare(
+      'SELECT src FROM edges WHERE kind = ? AND dst = ?',
+    );
+    // coTouchVia: co-touching task node id → one shared file (for the `why` string).
+    const coTouchVia = new Map<string, string>();
+    for (const file of candidateFiles) {
+      const rows = selTouchesSrc.all('touches', file) as Array<{ src: string }>;
+      for (const r of rows) {
+        if (scope.has(r.src)) continue; // not a co-toucher — it's in scope
+        if (!coTouchVia.has(r.src)) coTouchVia.set(r.src, file);
+      }
+    }
+
+    // ── 3. STRUCTURAL hits: learning nodes via learned_from → an expanded source
+    // set = depends_on scope (I1) ∪ co-touching tasks (new). Edge direction
+    // (ingest): learning --learned_from--> task. `why` distinguishes the two
+    // provenance kinds. File nodes are NEVER returned as hits (they are
+    // structural intermediaries, not recall results).
     const selLearnedFrom = this.db.prepare(
       'SELECT src FROM edges WHERE kind = ? AND dst = ?',
     );
-    for (const target of scope) {
+    const addStructuralLearnings = (target: string, via: string): void => {
       const rows = selLearnedFrom.all('learned_from', target) as Array<{ src: string }>;
       for (const r of rows) {
         if (seen.has(r.src)) continue;
         const node = this.getNode(r.src);
         if (!node || node.kind !== 'learning') continue;
         seen.add(r.src);
-        const via =
-          target === taskNodeId
-            ? `linked via learned_from→${stripTaskPrefix(target)}`
-            : `linked via depends_on→${stripTaskPrefix(target)} learned_from`;
         hits.push({
           id: node.id,
           kind: 'learning',
@@ -224,9 +282,22 @@ export class LocalMemoryBackend implements MemoryBackend {
           source: 'structural',
         });
       }
+    };
+    // Scope (depends_on) learnings first — these are the I1 hits, kept verbatim.
+    for (const target of scope) {
+      const via =
+        target === taskNodeId
+          ? `linked via learned_from→${stripTaskPrefix(target)}`
+          : `linked via depends_on→${stripTaskPrefix(target)} learned_from`;
+      addStructuralLearnings(target, via);
+    }
+    // Then co-touching tasks' learnings (new in I2a).
+    for (const [coTask, sharedFile] of coTouchVia) {
+      const via = `co-touched file ${stripFilePrefix(sharedFile)} with task ${stripTaskPrefix(coTask)}; its learning`;
+      addStructuralLearnings(coTask, via);
     }
 
-    // ── 3. FTS hits over title+body using the task's title+description. ──
+    // ── 4. FTS hits over title+body using the task's title+description. ──
     const queryText = `${taskRow.title} ${taskRow.body}`;
     const ftsQuery = buildFtsQuery(queryText);
     if (ftsQuery.length > 0) {
@@ -248,6 +319,9 @@ export class LocalMemoryBackend implements MemoryBackend {
         if (seen.has(r.id)) continue;
         const node = this.getNode(r.id);
         if (!node) continue;
+        // Belt (FORGE-218): file nodes are excluded from FTS at index time, but
+        // never surface one as a hit even if a stale row slipped through.
+        if (node.kind === 'file') continue;
         seen.add(r.id);
         hits.push({
           id: node.id,
@@ -290,6 +364,27 @@ export class LocalMemoryBackend implements MemoryBackend {
     return row?.id;
   }
 
+  // Collect the union of write_globs across a set of task nodes (FORGE-218 fallback
+  // for co-touch candidate files). attrs is JSON in a TEXT column; a corrupt /
+  // non-array value is tolerated (skipped) rather than throwing recall.
+  private collectScopeWriteGlobs(scope: Set<string>): string[] {
+    const out = new Set<string>();
+    for (const id of scope) {
+      const node = this.getNode(id);
+      if (!node || node.kind !== 'task' || !node.attrs) continue;
+      try {
+        const attrs = JSON.parse(node.attrs) as Record<string, unknown>;
+        const globs = attrs.write_globs;
+        if (Array.isArray(globs)) {
+          for (const g of globs) if (typeof g === 'string' && g.length > 0) out.add(g);
+        }
+      } catch {
+        // Corrupt attrs JSON — skip this node's globs, do not throw recall.
+      }
+    }
+    return Array.from(out);
+  }
+
   private getNode(id: string): NodeRow | undefined {
     const row = this.db
       .prepare('SELECT id, kind, title, body, attrs FROM nodes WHERE id = ?')
@@ -326,6 +421,10 @@ export class LocalMemoryBackend implements MemoryBackend {
 
 function stripTaskPrefix(id: string): string {
   return id.startsWith('task:') ? id.slice('task:'.length) : id;
+}
+
+function stripFilePrefix(id: string): string {
+  return id.startsWith('file:') ? id.slice('file:'.length) : id;
 }
 
 // Async factory: opens the DB (lazy sqlite import) and returns a ready backend.
