@@ -75,11 +75,17 @@ export type PhasesArgs = z.infer<typeof PhasesArgsSchema>;
 // spec/SPEC.md §21 (architectural pivot 2026-05-17 PM); doctor.ts pre-parses
 // for those legacy values and emits a custom INVALID_ARGS pointing adopters
 // at v0.5 before Zod's generic enum error fires.
+//
+// FORGE-205: 'docs' is a NEW opt-in scope — a read-only, NON-BLOCKING
+// docs-coverage report over the working branch's diff. It runs ONLY under
+// `--scope docs` (NOT folded into 'all', to preserve the all≡spec-code
+// data-equality contract). `base` selects the diff base ref (docs scope only).
 export const DoctorArgsSchema = z.object({
-  scope: z.enum(['spec-code', 'all']).default('spec-code'),
+  scope: z.enum(['spec-code', 'all', 'docs']).default('spec-code'),
   forgeDir: ForgeDirField,
   json: JsonFlag,
   repoRoot: z.string().min(1).optional(),
+  base: z.string().optional(),
 });
 export type DoctorArgs = z.infer<typeof DoctorArgsSchema>;
 

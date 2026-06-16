@@ -25,6 +25,9 @@ import { parse as yamlParse } from 'yaml';
 import { DoctorArgsSchema, type DoctorArgs } from '../../schemas/cli-args.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { detectSpecCodeDrift, type SpecCodeDriftReport } from '../../orchestrator/drift.ts';
+import { resolveDiffPaths } from '../../docs-coverage/git-diff.ts';
+import { coverageReport, type CoverageReport } from '../../docs-coverage/report.ts';
+import type { DocsCoverage } from '../../schemas/settings.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -45,10 +48,59 @@ export interface DoctorReport extends SpecCodeDriftReport {
   readonly settingsWarnings: readonly DoctorSettingsWarning[];
 }
 
+// FORGE-205: the `--scope docs` envelope payload. NON-BLOCKING — it lives in
+// `data.docsCoverage` and contributes 0 to severity (docs gaps NEVER change the
+// exit code). It is emitted ONLY under `--scope docs`; the spec-code and `all`
+// paths never carry it (preserving the all≡spec-code data-equality contract).
+export interface DocsCoverageReport {
+  readonly scope: 'docs';
+  readonly docsCoverage: CoverageReport;
+  readonly warnings: readonly string[];
+  // null when docs-coverage is disabled via settings.docs_coverage.enabled.
+  readonly note: string | null;
+}
+
 // Legacy scope strings that adopters may still type from v0.3.x scripts or
 // shell history. Pre-parse rejects them with a v0.5-pointing message before
 // Zod's enum check produces a generic "Invalid enum value" error.
 const DEPRECATED_SCOPES = new Set(['adr-drafts', 'apply-journal']);
+
+// FORGE-205 (B2): hand-mirrored defaults for `settings.docs_coverage`. Mirrors
+// AUDIT_DEFAULTS in audit.ts — `loadSettings` THROWS on a missing/invalid
+// settings.yaml (version/project/tracker/secrets are required), so a docs run
+// in an uninitialized/adopter repo would crash. We degrade to these defaults +
+// a warning instead. Kept byte-aligned with DocsCoverageSchema's defaults in
+// src/schemas/settings.ts.
+const DOCS_COVERAGE_DEFAULTS: DocsCoverage = {
+  enabled: true,
+  categories: {
+    Contract: { trigger: ['src/schemas/**', 'src/cli/**'], satisfy: ['spec/SPEC.md', 'CHANGELOG.md', 'README.md'] },
+    Operator: { trigger: ['src/cli/init/**', 'src/trackers/**', '**/*settings*.ts'], satisfy: ['README.md', 'docs/**'] },
+    Walkthrough: { trigger: ['spec/PRD.md'], satisfy: ['docs/**', 'README.md'] },
+    Rationale: { trigger: ['spec/decisions/**'], satisfy: ['spec/decisions/**', 'spec/SPEC.md'] },
+    FieldNote: { trigger: [], satisfy: ['docs/learnings/**'] },
+  },
+};
+
+interface DocsCoverageConfig {
+  readonly config: DocsCoverage;
+  readonly warnings: readonly string[];
+}
+
+// FORGE-205 (B2): best-effort docs-coverage config load. On ANY error fall back
+// to DOCS_COVERAGE_DEFAULTS + a warning, mirroring audit.ts loadAuditConfig.
+function loadDocsCoverageConfig(forgeDir: string): DocsCoverageConfig {
+  try {
+    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
+    return { config: settings.docs_coverage, warnings: [] };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    return {
+      config: DOCS_COVERAGE_DEFAULTS,
+      warnings: [`settings.yaml unavailable (${reason}); using docs-coverage defaults.`],
+    };
+  }
+}
 
 export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode: number }> {
   // (1) Pre-parse deprecated scopes — emit a tailored error before Zod sees
@@ -74,6 +126,16 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
     return { exitCode: emit(fail('INVALID_ARGS', parsed.error.message, false), { json: args.json }) };
   }
   const opts = parsed.data;
+
+  // FORGE-205 (B1): handle `--scope docs` at the TOP — BEFORE the
+  // spec_code_check_enabled short-circuit. docs-coverage has its own enable
+  // toggle (settings.docs_coverage.enabled, default true); disabling spec-code
+  // drift must NOT silently kill docs-coverage. This path is NON-BLOCKING and
+  // ALWAYS exits 0 (gaps never raise the exit code), and it does NOT touch the
+  // spec-code/all envelope shape (preserving the all≡spec-code contract).
+  if (opts.scope === 'docs') {
+    return { exitCode: runDocsCoverage(opts) };
+  }
 
   // (2) Best-effort settings load. Missing/unreadable → defaults apply
   // (check runs). Adopter projects that haven't run `forge init` may not
@@ -119,6 +181,42 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
 
   const envelopeExit = emit(ok(result), { json: opts.json });
   return { exitCode: envelopeExit === 0 ? severityExit : envelopeExit };
+}
+
+// FORGE-205: `--scope docs` handler. Read-only, NON-BLOCKING — ALWAYS returns
+// exit 0. Resolves the diff (best-effort git; every failure → warning + empty),
+// runs the pure coverageReport, and emits an `ok` envelope with the report in
+// `data.docsCoverage`. Disabled (settings.docs_coverage.enabled === false) →
+// an empty report + a note, still exit 0.
+function runDocsCoverage(opts: DoctorArgs): number {
+  const { config, warnings: cfgWarnings } = loadDocsCoverageConfig(opts.forgeDir);
+  // RepoRoot convention mirrors the spec-code path (path.dirname(forgeDir)).
+  const repoRoot = opts.repoRoot ?? path.dirname(opts.forgeDir);
+
+  if (config.enabled === false) {
+    const report: DocsCoverageReport = {
+      scope: 'docs',
+      docsCoverage: { required: [], satisfied: [], gaps: [], warnings: [] },
+      warnings: [...cfgWarnings],
+      note: 'docs-coverage is disabled (settings.docs_coverage.enabled = false).',
+    };
+    return emit(ok(report), { json: opts.json });
+  }
+
+  const { paths, warnings: diffWarnings } = resolveDiffPaths({
+    repoRoot,
+    ...(opts.base !== undefined ? { base: opts.base } : {}),
+  });
+  const coverage = coverageReport({ diffPaths: paths, repoRoot, config });
+
+  const report: DocsCoverageReport = {
+    scope: 'docs',
+    docsCoverage: coverage,
+    warnings: [...cfgWarnings, ...diffWarnings],
+    note: null,
+  };
+  // NON-BLOCKING: emit() returns 0 for ok envelopes; docs gaps never override it.
+  return emit(ok(report), { json: opts.json });
 }
 
 // FORGE-150: warn when settings.yaml carries a legacy `codex` block WITHOUT a
@@ -185,6 +283,8 @@ export const doctorHandler: VerbHandler = {
     const rawScope = parseFlag(rest, 'scope');
     const json = hasFlag(rest, 'json');
     const repoRoot = parseFlag(rest, 'repo-root');
+    // FORGE-205: --base selects the docs-coverage diff base (docs scope only).
+    const base = parseFlag(rest, 'base');
     // Pass scope through verbatim (not narrowed) so the pre-parse layer can
     // recognize deprecated values; runOrchestrateDoctor handles both the
     // legacy-string case and the Zod-narrowed case below.
@@ -193,6 +293,7 @@ export const doctorHandler: VerbHandler = {
       forgeDir,
       json,
       ...(repoRoot ? { repoRoot } : {}),
+      ...(base ? { base } : {}),
     } as DoctorArgs;
     return runOrchestrateDoctor(args);
   },
