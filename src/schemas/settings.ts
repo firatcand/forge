@@ -413,6 +413,55 @@ const AuditSchema = z
   })
   .default({});
 
+// FORGE-205: docs-coverage knobs for `forge orchestrate doctor --scope docs`.
+// Mirrors AuditSchema's nested `.default({})` so a settings.yaml with no
+// `docs_coverage:` block still yields full defaults. Each category carries a
+// `trigger` glob list (a code change that REQUIRES the doc) + a `satisfy` glob
+// list (a doc path that, if ALSO in the same diff, covers the requirement).
+// FieldNote ships trigger-empty (satisfy-only — already owned by `/learn`);
+// Rationale's CRITICAL.md paths are unioned into its triggers at RUNTIME by
+// map.ts (they're per-repo, not a static schema default). Adopter-configurable
+// so non-forge repos tune the globs to their own layout (FORGE-182 leak class
+// is harmless here: a glob that doesn't match → zero triggers → empty report).
+const DocsCoverageCategorySchema = z
+  .object({
+    trigger: z.array(z.string().min(1)).default([]),
+    satisfy: z.array(z.string().min(1)).default([]),
+  })
+  .strict();
+
+const DocsCoverageSchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    categories: z
+      .object({
+        Contract: DocsCoverageCategorySchema.default({
+          trigger: ['src/schemas/**', 'src/cli/**'],
+          satisfy: ['spec/SPEC.md', 'CHANGELOG.md', 'README.md'],
+        }),
+        Operator: DocsCoverageCategorySchema.default({
+          trigger: ['src/cli/init/**', 'src/trackers/**', '**/*settings*.ts'],
+          satisfy: ['README.md', 'docs/**'],
+        }),
+        Walkthrough: DocsCoverageCategorySchema.default({
+          trigger: ['spec/PRD.md'],
+          satisfy: ['docs/**', 'README.md'],
+        }),
+        Rationale: DocsCoverageCategorySchema.default({
+          trigger: ['spec/decisions/**'],
+          satisfy: ['spec/decisions/**', 'spec/SPEC.md'],
+        }),
+        FieldNote: DocsCoverageCategorySchema.default({
+          trigger: [],
+          satisfy: ['docs/learnings/**'],
+        }),
+      })
+      .strict()
+      .default({}),
+  })
+  .strict()
+  .default({});
+
 // FORGE-200 (Loom I1): the memory-backend selector. A discriminated union on
 // `backend` so adding a remote variant (Athena) later is purely additive — the
 // only I1 variant is `local` (SQLite WAL+FTS5 under <main-checkout>/.forge/loom.db,
@@ -458,6 +507,10 @@ export const SettingsSchema = z.object({
   // FORGE-179: `/audit` read-only core knobs (scope/protected globs, dimensions,
   // per-agent finding cap). Nested `.default({})` → absent block yields defaults.
   audit: AuditSchema,
+  // FORGE-205: docs-coverage knobs for `doctor --scope docs`. Nested
+  // `.default({})` → absent block yields full per-category trigger/satisfy
+  // defaults + enabled:true.
+  docs_coverage: DocsCoverageSchema,
   // FORGE-200: Loom memory-backend selector. Nested `.default({backend:'local'})`
   // → absent block resolves to the local SQLite backend.
   memory: MemorySchema,
@@ -469,6 +522,7 @@ export type Drive = z.infer<typeof DriveSchema>;
 export type Deliver = z.infer<typeof DeliverSchema>;
 export type Models = z.infer<typeof ModelsSchema>;
 export type Audit = z.infer<typeof AuditSchema>;
+export type DocsCoverage = z.infer<typeof DocsCoverageSchema>;
 export type Memory = z.infer<typeof MemorySchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;

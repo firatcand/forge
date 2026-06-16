@@ -334,8 +334,9 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   doctor: [
-    { flag: 'scope', takesValue: true, description: 'Drift scope: spec-code (default) | all.', valueLabel: '<scope>' },
+    { flag: 'scope', takesValue: true, description: 'Drift scope: spec-code (default) | all | docs (non-blocking docs-coverage over the branch diff).', valueLabel: '<scope>' },
     { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
+    { flag: 'base', takesValue: true, description: 'With --scope docs: base ref for the diff (default origin/main→main→merge-base). Compares committed-vs-base only.', valueLabel: '<ref>' },
     JSON_FLAG,
     FD,
   ],
