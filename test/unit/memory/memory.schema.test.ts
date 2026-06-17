@@ -123,8 +123,24 @@ test('RecallHitSchema accepts both sources and rejects an unknown source', () =>
   );
 });
 
-test('node/edge kind constants include the I2a additions (FORGE-218)', () => {
-  // I1 shipped task/learning + depends_on/learned_from; I2a adds file + touches.
-  assert.deepEqual([...NODE_KINDS], ['task', 'learning', 'file']);
-  assert.deepEqual([...EDGE_KINDS], ['depends_on', 'learned_from', 'touches']);
+test('node/edge kind constants include the I2a + I2b-1 additions (FORGE-218/219)', () => {
+  // I1 shipped task/learning + depends_on/learned_from; I2a adds file + touches;
+  // I2b-1 (FORGE-219) adds symbol + defines.
+  assert.deepEqual([...NODE_KINDS], ['task', 'learning', 'file', 'symbol']);
+  assert.deepEqual([...EDGE_KINDS], ['depends_on', 'learned_from', 'touches', 'defines']);
+});
+
+test('MemoryNodeSchema accepts a symbol node + defines edge (FORGE-219)', () => {
+  assert.ok(
+    MemoryNodeSchema.safeParse({
+      id: 'symbol:' + 'a'.repeat(64),
+      kind: 'symbol',
+      title: 'hello',
+      body: '',
+      attrs: { file: 'src/a.py', name: 'hello', kind: 'function', start_line: '1', end_line: '2' },
+    }).success,
+  );
+  assert.ok(
+    MemoryEdgeSchema.safeParse({ src: 'file:src/a.py', dst: 'symbol:x', kind: 'defines' }).success,
+  );
 });

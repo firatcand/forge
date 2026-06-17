@@ -13,10 +13,13 @@ import { z } from 'zod';
 // I1 shipped two node kinds and two edge kinds. FORGE-218 (Loom I2a) adds the
 // `file` node kind + `touches` edge kind — projected from `files_modified`
 // attempt events (file:<repo-relative-posix-path> nodes; task→file touches
-// edges). The enums are additive so the I1 graph stays valid; `decision` edges
-// arrive in a later increment.
-export const NODE_KINDS = ['task', 'learning', 'file'] as const;
-export const EDGE_KINDS = ['depends_on', 'learned_from', 'touches'] as const;
+// edges). FORGE-219 (Loom I2b-1) adds the `symbol` node kind + `defines` edge
+// kind — code symbols (functions/classes/methods/types) extracted from source
+// files via bundled tree-sitter (symbol:<sha256(relpath#name@line)> nodes;
+// file→symbol `defines` edges). The enums are additive so the I1/I2a graph stays
+// valid; `references` edges (symbol mentions) arrive in I2b-2.
+export const NODE_KINDS = ['task', 'learning', 'file', 'symbol'] as const;
+export const EDGE_KINDS = ['depends_on', 'learned_from', 'touches', 'defines'] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
 export type EdgeKind = (typeof EDGE_KINDS)[number];

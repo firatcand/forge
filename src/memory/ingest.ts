@@ -17,6 +17,7 @@ import { parse as parseYaml } from 'yaml';
 
 import { loadPhases, resolvePhasesYaml } from '../core/phases.ts';
 import { projectEvents } from './project.ts';
+import { extractSymbols } from './symbols.ts';
 import {
   MEMORY_ATTR_ARRAY_MAX_LEN,
   MEMORY_ATTR_STRING_MAX_LEN,
@@ -64,6 +65,9 @@ export interface ReindexResult {
   // FORGE-218: counts from the event projector (files_modified → file/touches).
   readonly file_nodes: number;
   readonly touches_edges: number;
+  // FORGE-219 (Loom I2b-1): code-symbol counts from the tree-sitter extractor.
+  readonly symbol_nodes: number;
+  readonly defines_edges: number;
   readonly warnings: string[];
 }
 
@@ -200,6 +204,24 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
   for (const touchEdge of projection.touchesEdges) edges.push(touchEdge);
   for (const w of projection.warnings) warnings.push(w);
 
+  // ── 3b. code symbols (FORGE-219 / Loom I2b-1) ──
+  // Extract symbols from the SOURCE of every file node the projector minted
+  // (`file:<relpath>` → its repo-relative path). Symbols attach to file nodes via
+  // `defines` edges, so this MUST run AFTER file nodes exist (I2a). Best-effort:
+  // extractSymbols never throws — a malformed source / missing wasm degrades to
+  // warnings, so reindex still succeeds on a repo with no code. Lazy-loads
+  // tree-sitter (wasm) only here, only when there is indexable source.
+  const symbolRelFiles = projection.fileNodes.map((n) =>
+    n.id.startsWith('file:') ? n.id.slice('file:'.length) : n.title,
+  );
+  const { symbolNodes, definesEdges, warnings: symbolWarnings } = await extractSymbols({
+    repoRoot: args.repoRoot,
+    relFiles: symbolRelFiles,
+  });
+  for (const symbolNode of symbolNodes) nodes.push(symbolNode);
+  for (const defEdge of definesEdges) edges.push(defEdge);
+  for (const w of symbolWarnings) warnings.push(w);
+
   // ── 4. deterministic write: reset, then upsert sorted lists ──
   // Sort so repeated reindex produces an identical write order (idempotency).
   nodes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -219,6 +241,8 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
     learning_nodes: learningCount,
     file_nodes: projection.fileNodes.length,
     touches_edges: projection.touchesEdges.length,
+    symbol_nodes: symbolNodes.length,
+    defines_edges: definesEdges.length,
     warnings,
   };
 }

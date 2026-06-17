@@ -52,6 +52,9 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
           // FORGE-218: honest output — surface the projector's counts too.
           file_nodes: result.file_nodes,
           touches_edges: result.touches_edges,
+          // FORGE-219: code-symbol counts from the tree-sitter extractor.
+          symbol_nodes: result.symbol_nodes,
+          defines_edges: result.defines_edges,
           db_path: args.ctx.dbPath,
           warnings: [...warnings, ...result.warnings],
         }),
