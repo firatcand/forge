@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
-import { MODEL_TIERS, ESTIMATES } from './phases.ts';
-import { CATALOG_HOSTS } from './models-catalog.ts';
+import { ESTIMATES } from './phases.ts';
+import { HOSTS, REVIEW_HOSTS } from './hosts.ts';
 
 const LinearTrackerConfigSchema = z.object({
   type: z.literal('linear'),
@@ -107,7 +107,7 @@ export const AgentsSchema = z
     // honesty mechanism). cursor may appear in `enabled_root_files` WITHOUT the
     // opt-in (passive breadcrumb + farms); only primary dispatch is gated.
     primary_host_cli: z
-      .enum(['claude', 'codex', 'gemini', 'cursor'])
+      .enum(HOSTS)
       .default('claude'),
     // FORGE-160: opt-in for the beta Cursor CLI as the primary dispatch host.
     // Required to set primary_host_cli: cursor (see refine below).
@@ -116,7 +116,7 @@ export const AgentsSchema = z
     // reviewer — second-opinion review requires a different model lineage
     // than the primary worker. `null` disables second-opinion review entirely.
     review_host_cli: z
-      .enum(['codex', 'gemini'])
+      .enum(REVIEW_HOSTS)
       .nullable()
       .default('codex'),
     // Paths a worker must call `forge orchestrate guardrail-check` against
@@ -153,7 +153,7 @@ export const AgentsSchema = z
     // [primary_host_cli] by the .transform() below — see
     // test/unit/settings.schema.test.ts for the contract.
     enabled_root_files: z
-      .array(z.enum(['claude', 'codex', 'gemini', 'cursor']))
+      .array(z.enum(HOSTS))
       .default([]),
     // FORGE-65: per-task ceiling on the TOTAL number of architectural questions
     // a single task may write across all its attempts (spec/ORCHESTRATOR.md:936).
@@ -169,12 +169,6 @@ export const AgentsSchema = z
     // generation, overwriting any prior `.1`) and starts fresh; readers merge
     // `.1` + current. Default 10 MiB. See src/orchestrator/jsonl-rotate.ts.
     log_rotate_max_bytes: z.number().int().positive().default(10_485_760),
-    // FORGE-211: default capability floor for tasks that carry no `model_tier`
-    // stamp. The AgentsSchema `.default({})` materializes this for free, so an
-    // unstamped task in a pre-v0.5 phases.yaml resolves to 'standard'. The route
-    // verb (FORGE-210) escalates above this floor (CRITICAL path / retry) but
-    // never below it.
-    default_model_tier: z.enum(MODEL_TIERS).default('standard'),
   })
   // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
   // Runs BEFORE refinements so the refined object sees the promoted value.
@@ -345,26 +339,6 @@ const VerifySchema = z.object({
   commands: z.array(z.string().min(1)).min(1),
 });
 
-// FORGE-212: the model-catalog knobs. Mirrors DriveSchema's `.default({})`
-// pattern so a settings.yaml with no `models:` block still yields full defaults.
-//
-// R1: `pinned[host]` is a per-host ALLOW-LIST FILTER over the cached catalog —
-// NOT a replacement. Set for a host, it restricts the router to ONLY those
-// cached model ids for that host; tiers/sources stay authoritative in the cache
-// (no re-specifying the catalog in settings — that maintenance burden is exactly
-// what 212 exists to avoid). The pure `applyPins` helper in
-// src/cli/orchestrate/models.ts implements the filter; the router (210) reuses
-// it. A host with no pin → unchanged; an unknown pinned id → dropped + warned.
-//
-// `ttl_days` is the staleness threshold: the `models` read path nudges (stderr,
-// FORGE_QUIET-suppressible) when the cache's refreshed_at is older than this.
-const ModelsSchema = z
-  .object({
-    pinned: z.record(z.enum(CATALOG_HOSTS), z.array(z.string().min(1))).optional(),
-    ttl_days: z.number().int().positive().default(14),
-  })
-  .default({});
-
 // FORGE-197: host-integration opt-ins. Orthogonal to `agents` (which configures
 // the orchestrator) — `hosts` declares passive integrations Forge writes into a
 // host's OWN config. Today the only key is `claude.status_line`: an opt-in
@@ -495,8 +469,6 @@ export const SettingsSchema = z.object({
   codex: CodexSchema,
   decisions: DecisionsSchema,
   doctor: DoctorSchema,
-  // FORGE-212: model-catalog knobs (per-host pin allow-list + staleness TTL).
-  models: ModelsSchema,
   // FORGE-197: host-integration opt-ins (claude.status_line — default false).
   hosts: HostsSchema,
   // FORGE-150: tracked methodology-version pin (FORGE-161). Absent ⇒ no warning
@@ -520,7 +492,6 @@ export type Settings = z.infer<typeof SettingsSchema>;
 export type Verify = z.infer<typeof VerifySchema>;
 export type Drive = z.infer<typeof DriveSchema>;
 export type Deliver = z.infer<typeof DeliverSchema>;
-export type Models = z.infer<typeof ModelsSchema>;
 export type Audit = z.infer<typeof AuditSchema>;
 export type DocsCoverage = z.infer<typeof DocsCoverageSchema>;
 export type Memory = z.infer<typeof MemorySchema>;

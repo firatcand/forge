@@ -31,7 +31,6 @@ Prompt the user for (one round, AskUserQuestion where it helps):
 | `acceptance` | ≥ 1 concrete, testable criteria |
 | `depends_on` | task ids (`P2-T03`) or tracker identifiers (`FORGE-93`); every dep must already exist AND be tracker-backed |
 | `write_globs` | optional — file globs for overlap classification |
-| `model_tier` | optional — `small` · `standard` · `frontier`; capability FLOOR for model routing. Omit → `settings.agents.default_model_tier` (`standard`). Orchestrator escalates above the floor (CRITICAL path / retry), never below it. |
 
 ## Step 2 — Preview + confirm
 

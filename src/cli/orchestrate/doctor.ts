@@ -28,6 +28,12 @@ import { detectSpecCodeDrift, type SpecCodeDriftReport } from '../../orchestrato
 import { resolveDiffPaths } from '../../docs-coverage/git-diff.ts';
 import { coverageReport, type CoverageReport } from '../../docs-coverage/report.ts';
 import type { DocsCoverage } from '../../schemas/settings.ts';
+import {
+  computeAvailability,
+  defaultAvailabilityDeps,
+  type HostAvailability,
+} from '../../orchestrator/availability.ts';
+import { HOSTS, type Host } from '../../schemas/hosts.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -58,6 +64,15 @@ export interface DocsCoverageReport {
   readonly warnings: readonly string[];
   // null when docs-coverage is disabled via settings.docs_coverage.enabled.
   readonly note: string | null;
+}
+
+// `--scope hosts`: the host-reachability preflight payload. NON-BLOCKING — a
+// gated/missing host is informational (reasons, not an error) and contributes 0
+// to the exit code. Emitted ONLY under `--scope hosts`.
+export interface HostReachabilityReport {
+  readonly scope: 'hosts';
+  readonly hosts: Record<Host, HostAvailability>;
+  readonly warnings: readonly string[];
 }
 
 // Legacy scope strings that adopters may still type from v0.3.x scripts or
@@ -135,6 +150,14 @@ export async function runOrchestrateDoctor(args: DoctorArgs): Promise<{ exitCode
   // spec-code/all envelope shape (preserving the all≡spec-code contract).
   if (opts.scope === 'docs') {
     return { exitCode: runDocsCoverage(opts) };
+  }
+
+  // Host-reachability preflight. NON-BLOCKING — ALWAYS exits 0 (a gated/missing
+  // host is a reason, not drift). Probes bin --version + env + file-exists only;
+  // never a paid call. Separate envelope shape; preserves the all≡spec-code
+  // contract by living entirely outside the spec-code path.
+  if (opts.scope === 'hosts') {
+    return { exitCode: await runHostReachability(opts) };
   }
 
   // (2) Best-effort settings load. Missing/unreadable → defaults apply
@@ -219,6 +242,27 @@ function runDocsCoverage(opts: DoctorArgs): number {
   return emit(ok(report), { json: opts.json });
 }
 
+// `--scope hosts` handler. Read-only, NON-BLOCKING — ALWAYS returns exit 0.
+// Probes every host's reachability via the shared `computeAvailability` preflight
+// (the same primitive the orchestrator dispatch path relies on) and emits the
+// per-host availability set. Best-effort settings load: a missing/unreadable
+// settings.yaml falls back to cursor beta opt-in = false + a warning.
+async function runHostReachability(opts: DoctorArgs): Promise<number> {
+  let betaOptIn = false;
+  const warnings: string[] = [];
+  try {
+    const settings = loadSettings(path.join(opts.forgeDir, 'settings.yaml'));
+    betaOptIn = settings.agents.cursor_host_beta_opt_in;
+  } catch {
+    warnings.push('settings.yaml missing/unreadable — assuming cursor_host_beta_opt_in=false.');
+  }
+
+  const hosts = await computeAvailability(HOSTS, defaultAvailabilityDeps(betaOptIn));
+  const report: HostReachabilityReport = { scope: 'hosts', hosts, warnings };
+  // NON-BLOCKING: gated/missing hosts never raise the exit code.
+  return emit(ok(report), { json: opts.json });
+}
+
 // FORGE-150: warn when settings.yaml carries a legacy `codex` block WITHOUT a
 // `second_opinion` block. Best-effort + hardened (lstat first, size-bound the
 // read, typeof-checked); absent/unreadable/symlinked → no warning. Reads the
@@ -277,7 +321,7 @@ function readSymbolAllowlist(forgeDir: string): readonly string[] {
 
 export const doctorHandler: VerbHandler = {
   band: 'read',
-  synopsis: 'Drift diagnostics (--scope spec-code|all; v0.4 file-path checks).',
+  synopsis: 'Drift diagnostics (--scope spec-code|all; docs; hosts — non-blocking per-host reachability preflight).',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const rawScope = parseFlag(rest, 'scope');

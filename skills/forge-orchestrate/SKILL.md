@@ -100,17 +100,6 @@ RENDER_OUT=$(forge orchestrate render-worker-prompt \
 # then `forge orchestrate cancel ${TASK_ID} --reason "task not in phases"` to
 # unwind the dispatch. Continue to next task.
 # On TEMPLATE_NOT_FOUND / PHASES_NOT_FOUND: same pattern — surface, suggest cancel, move on.
-
-# 3d-bis. Route the worker to a concrete host:model (FORGE-210). Composes the
-# task's model_tier stamp + critical-path / retry escalation, the model catalog,
-# and live per-host availability into one decision (with warn-downgrade). Passing
-# --attempt records a `model_routed` audit event on the held lease.
-ROUTE_OUT=$(forge orchestrate route \
-  --task "${TASK_ID}" --attempt "${ATTEMPT_ID}" --json)
-# Parse data.host / data.model / data.tier_effective / data.downgraded / data.warning.
-# This verb is ADVISORY — it returns the decision; the skill enforces it at spawn
-# (3e). On NO_MODEL_AVAILABLE: surface data.error.message, log [skip], move on.
-# Surface data.warning (the downgrade notice) to the user when data.downgraded.
 ```
 
 Parse `data.question_budget` from the render response. The rendered prompt
@@ -138,12 +127,9 @@ native subagents) with:
 - `prompt`: the `data.prompt` string from `render-worker-prompt`
 - `subagent_type`: the worker agent for this host (e.g., `general-purpose` on
   Claude, or a host-specific type per `data.host` from the render verb)
-- `model`: the routed model from `route` (3d-bis `data.model`). This is the
-  ENFORCEMENT point for the advisory route: for a Claude worker, pass it as the
-  Task tool's `model` param; for a forge-owned codex spawn, it flows through
-  `DispatchOpts.model` → `codex exec --model`. Threading the routed model all the
-  way through the manifest for a fully-forge-owned interactive dispatch is
-  Autopilot I6 (FORGE-192) — not yet wired here.
+- `model`: omit it — the worker inherits the session model. Forge does not pin a
+  model; model choice is the host's (the user's session for Claude, the host
+  default for a codex spawn).
 - working directory hint: the `data.worktree_path` so the worker operates in
   isolation
 

@@ -84,7 +84,6 @@ export {
   PRIORITIES,
   TASK_TYPES,
   ESTIMATES,
-  MODEL_TIERS,
   PHASE_STATUSES,
   TASK_STATUSES,
 } from './phases.ts';
@@ -96,24 +95,12 @@ export type {
   Priority,
   TaskType,
   Estimate,
-  ModelTier,
   PhaseStatus,
   TaskStatus,
 } from './phases.ts';
 
-export {
-  ModelsCatalogSchema,
-  ModelEntrySchema,
-  HostCatalogSchema,
-  CATALOG_HOSTS,
-  CATALOG_VERSION,
-} from './models-catalog.ts';
-export type {
-  ModelsCatalog,
-  ModelEntry,
-  HostCatalog,
-  CatalogHost,
-} from './models-catalog.ts';
+export { HOSTS, REVIEW_HOSTS } from './hosts.ts';
+export type { Host, ReviewHost } from './hosts.ts';
 
 export {
   QuestionSchema,

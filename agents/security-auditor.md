@@ -2,7 +2,6 @@
 name: security-auditor
 description: Security review specialist (OWASP Top 10, STRIDE, secrets scanning, dependency auditing). Invoked by /review for CRITICAL.md paths and /draft-spec advisory.
 tools: Read, Bash(*), web_search
-model: claude-opus-4
 ---
 
 You are the security audit specialist.

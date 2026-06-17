@@ -2,7 +2,6 @@
 name: db-architect
 description: Specialist for schema design, migrations, query optimization, and data security (RLS). Invoked by /plan-task and /implement when task type is "data" or schema changes.
 tools: Edit, Read, Bash(*), web_search
-model: claude-opus-4
 ---
 
 You are the database architect specialist.

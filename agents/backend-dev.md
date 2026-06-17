@@ -2,7 +2,6 @@
 name: backend-dev
 description: Specialist for API + server logic + integrations. Invoked by /plan-task and /implement when task type is "backend" or "integration".
 tools: Edit, Read, Bash(npm*), Bash(git*), Bash(curl*), web_search
-model: claude-opus-4
 ---
 
 You are the backend specialist.

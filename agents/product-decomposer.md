@@ -2,7 +2,6 @@
 name: product-decomposer
 description: Specialist for breaking specs into phases.yaml. Invoked by /decompose.
 tools: Read, Write, Edit
-model: claude-opus-4
 ---
 
 You are the product decomposition specialist for forge.

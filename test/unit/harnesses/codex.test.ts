@@ -52,31 +52,6 @@ test('CodexHarness.dispatchSubagent spawns codex exec with rendered prompt', asy
   assert.equal(result.exitCode, 0);
 });
 
-test('FORGE-210: dispatchSubagent({model}) injects --model before the prompt (R7)', async () => {
-  const { spawn, calls } = recordingSpawn(ok);
-  const h = new CodexHarness({ spawnSubprocess: spawn });
-  const handle = await h.dispatchSubagent('do work', { ...dispatchOpts, model: 'gpt-5.1-codex' });
-  await handle.wait();
-  assert.equal(calls.length, 1);
-  // model BEFORE the rendered prompt, never after.
-  assert.deepEqual(calls[0].args, [
-    'exec',
-    '--color',
-    'never',
-    '--model',
-    'gpt-5.1-codex',
-    'do work',
-  ]);
-});
-
-test('FORGE-210: dispatchSubagent without model leaves argv unchanged (back-compat)', async () => {
-  const { spawn, calls } = recordingSpawn(ok);
-  const h = new CodexHarness({ spawnSubprocess: spawn });
-  const handle = await h.dispatchSubagent('do work', dispatchOpts);
-  await handle.wait();
-  assert.deepEqual(calls[0].args, ['exec', '--color', 'never', 'do work']);
-});
-
 test('CodexHarness.dispatchSubagent classifies TIMEOUT into timeout verdict', async () => {
   const err = new HarnessError('TIMEOUT', 'codex', 'too slow');
   const h = new CodexHarness({ spawnSubprocess: failingSpawn(err) });

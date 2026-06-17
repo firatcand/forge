@@ -3,12 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   computeAvailability,
-  resolveAvailableModel,
   type AvailabilityDeps,
-  type AvailabilitySet,
 } from '../../../src/orchestrator/availability.ts';
 import type { ExecaLike } from '../../../src/cli/init/validate.ts';
-import type { CatalogHost, ModelsCatalog } from '../../../src/schemas/models-catalog.ts';
+import type { Host } from '../../../src/schemas/hosts.ts';
 
 // ── exec fakes — NEVER a real binary ────────────────────────────────────────
 // An exec that reports given bins as present (exitCode 0) and everything else as
@@ -45,7 +43,7 @@ function baseDeps(over: Partial<AvailabilityDeps> = {}): AvailabilityDeps {
   };
 }
 
-const ALL: readonly CatalogHost[] = ['claude', 'codex', 'gemini', 'cursor'];
+const ALL: readonly Host[] = ['claude', 'codex', 'gemini', 'cursor'];
 
 // ── claude ──────────────────────────────────────────────────────────────────
 
@@ -211,158 +209,4 @@ test('computeAvailability returns an entry for every requested host', async () =
   assert.deepEqual(Object.keys(set).sort(), [...ALL].sort());
   // None configured → all unavailable, none errored.
   for (const h of ALL) assert.equal(set[h].available, false);
-});
-
-// ── resolveAvailableModel (pure) ────────────────────────────────────────────
-
-function catalog(): ModelsCatalog {
-  return {
-    version: 1,
-    refreshed_at: '2026-06-14T12:00:00Z',
-    hosts: {
-      claude: {
-        models: [
-          { id: 'claude-opus-4', tier: 'frontier', sources: ['https://docs.anthropic.com/models'] },
-          { id: 'claude-sonnet-4', tier: 'standard', sources: ['https://docs.anthropic.com/models'] },
-          { id: 'claude-haiku-4', tier: 'small', sources: ['https://docs.anthropic.com/models'] },
-        ],
-      },
-      codex: {
-        models: [
-          { id: 'gpt-5.1', tier: 'standard', sources: ['https://platform.openai.com/docs/models'] },
-        ],
-      },
-    },
-  };
-}
-
-function availSet(over: Partial<Record<CatalogHost, boolean>>): AvailabilitySet {
-  const mk = (available: boolean) => ({ available, reasons: [] as string[] });
-  return {
-    claude: mk(over.claude ?? false),
-    codex: mk(over.codex ?? false),
-    gemini: mk(over.gemini ?? false),
-    cursor: mk(over.cursor ?? false),
-  };
-}
-
-test('resolve: exact-tier match (no downgrade, no warning)', () => {
-  const r = resolveAvailableModel(catalog(), availSet({ claude: true }), 'standard');
-  assert.equal('unavailable' in r, false);
-  if ('unavailable' in r) return;
-  assert.equal(r.tier, 'standard');
-  assert.equal(r.model, 'claude-sonnet-4');
-  assert.equal(r.downgraded, false);
-  assert.equal(r.warning, undefined);
-});
-
-test('resolve: auto-upgrade to higher reachable tier when no exact match', () => {
-  // claude available but codex (standard) not; ask for standard — claude has
-  // standard too, so to test auto-upgrade ask for a tier where only higher
-  // exists: make only the frontier model reachable.
-  const cat: ModelsCatalog = {
-    version: 1,
-    refreshed_at: '2026-06-14T12:00:00Z',
-    hosts: {
-      claude: { models: [{ id: 'claude-opus-4', tier: 'frontier', sources: ['https://x.dev/a'] }] },
-    },
-  };
-  const r = resolveAvailableModel(cat, availSet({ claude: true }), 'standard');
-  if ('unavailable' in r) return assert.fail('expected a model');
-  assert.equal(r.tier, 'frontier');
-  assert.equal(r.downgraded, false);
-  assert.equal(r.warning, undefined);
-});
-
-test('resolve: picks the LOWEST tier at-or-above the floor (cheapest upgrade)', () => {
-  // floor small; claude has small/standard/frontier reachable → pick small.
-  const r = resolveAvailableModel(catalog(), availSet({ claude: true }), 'small');
-  if ('unavailable' in r) return assert.fail('expected a model');
-  assert.equal(r.tier, 'small');
-  assert.equal(r.model, 'claude-haiku-4');
-  assert.equal(r.downgraded, false);
-});
-
-test('resolve: downgrade one tier WITH a warning when nothing >= floor', () => {
-  // Only codex reachable (its best is standard); ask for frontier → downgrade.
-  const r = resolveAvailableModel(catalog(), availSet({ codex: true }), 'frontier');
-  if ('unavailable' in r) return assert.fail('expected a model');
-  assert.equal(r.tier, 'standard');
-  assert.equal(r.model, 'gpt-5.1');
-  assert.equal(r.downgraded, true);
-  assert.ok(r.warning && r.warning.includes('no model ≥ frontier reachable'));
-  assert.ok(r.warning.includes('standard'));
-  assert.ok(r.warning.includes('codex'));
-});
-
-test('resolve: downgrade picks the HIGHEST reachable tier below the floor', () => {
-  // claude reachable with small+standard+frontier, but ask for a floor above
-  // all? frontier is the top tier, so construct: only small+standard reachable.
-  const cat: ModelsCatalog = {
-    version: 1,
-    refreshed_at: '2026-06-14T12:00:00Z',
-    hosts: {
-      claude: {
-        models: [
-          { id: 'a-small', tier: 'small', sources: ['https://x.dev/a'] },
-          { id: 'b-standard', tier: 'standard', sources: ['https://x.dev/b'] },
-        ],
-      },
-    },
-  };
-  const r = resolveAvailableModel(cat, availSet({ claude: true }), 'frontier');
-  if ('unavailable' in r) return assert.fail('expected a model');
-  assert.equal(r.tier, 'standard');
-  assert.equal(r.model, 'b-standard');
-  assert.equal(r.downgraded, true);
-});
-
-test('resolve: nothing reachable → { unavailable: true }', () => {
-  const r = resolveAvailableModel(catalog(), availSet({}), 'standard');
-  assert.equal('unavailable' in r && r.unavailable, true);
-});
-
-test('resolve: deterministic host/model pick (CATALOG_HOSTS order, sorted id)', () => {
-  // Both claude and codex available, both carry a `standard` model. claude comes
-  // first in CATALOG_HOSTS so it wins.
-  const r = resolveAvailableModel(catalog(), availSet({ claude: true, codex: true }), 'standard');
-  if ('unavailable' in r) return assert.fail('expected a model');
-  assert.equal(r.host, 'claude');
-  assert.equal(r.model, 'claude-sonnet-4');
-});
-
-test('resolve: throws on unknown desiredTier (defensive)', () => {
-  assert.throws(
-    () => resolveAvailableModel(catalog(), availSet({ claude: true }), 'mega' as never),
-    /unknown desiredTier/,
-  );
-});
-
-test('resolve: throws on a catalog model with an unknown tier (defensive)', () => {
-  const cat = {
-    version: 1,
-    refreshed_at: '2026-06-14T12:00:00Z',
-    hosts: { claude: { models: [{ id: 'x', tier: 'mega', sources: ['https://x.dev/a'] }] } },
-  } as unknown as ModelsCatalog;
-  assert.throws(
-    () => resolveAvailableModel(cat, availSet({ claude: true }), 'standard'),
-    /unknown tier/,
-  );
-});
-
-test('resolve: corrupt tier on an UNAVAILABLE host still throws (validate all hosts up front)', () => {
-  // codex is UNAVAILABLE here, but its model carries a bogus tier. The resolver
-  // must fail loud regardless of availability — not lurk until codex comes up.
-  const cat = {
-    version: 1,
-    refreshed_at: '2026-06-14T12:00:00Z',
-    hosts: {
-      claude: { models: [{ id: 'claude-sonnet-4', tier: 'standard', sources: ['https://x'] }] },
-      codex: { models: [{ id: 'gpt-x', tier: 'ultra', sources: ['https://y'] }] },
-    },
-  } as unknown as ModelsCatalog;
-  assert.throws(
-    () => resolveAvailableModel(cat, availSet({ claude: true, codex: false }), 'standard'),
-    /unknown tier 'ultra'/,
-  );
 });

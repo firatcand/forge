@@ -33,12 +33,7 @@ export class CodexHarness implements IHarness {
     renderedPrompt: string,
     opts: DispatchOpts,
   ): Promise<SubagentHandle> {
-    // FORGE-210 (R7): when a routed model is supplied, inject `--model <id>`
-    // BEFORE the rendered prompt (never after — codex treats the trailing
-    // positional as the prompt). Absent → argv unchanged (back-compat).
-    const args = opts.model
-      ? ['exec', '--color', 'never', '--model', opts.model, renderedPrompt]
-      : ['exec', '--color', 'never', renderedPrompt];
+    const args = ['exec', '--color', 'never', renderedPrompt];
     const pending = this.#spawn(
       CODEX_BIN,
       args,

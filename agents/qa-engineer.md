@@ -2,7 +2,6 @@
 name: qa-engineer
 description: Specialist for test design, browser checks, regression suites, and acceptance verification. Invoked by /qa.
 tools: Edit, Read, Bash(*), browser_use
-model: claude-opus-4
 ---
 
 You are the QA engineering specialist.

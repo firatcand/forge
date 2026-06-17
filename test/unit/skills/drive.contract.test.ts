@@ -72,8 +72,6 @@ test('AC: body references every required CLI verb', () => {
     'forge orchestrate second-opinion',
     'forge orchestrate question',
     'forge orchestrate doctor',
-    // FORGE-210: implement + fix subagents are routed by model.
-    'forge orchestrate route',
   ]) {
     assert.ok(md.includes(verb), `skill body must reference '${verb}'`);
   }

@@ -2,7 +2,6 @@
 name: phase-gatekeeper
 description: Ceremonial specialist for advancing phases. Invoked by /phase-gate.
 tools: Read, Write, Bash(*)
-model: claude-opus-4
 ---
 
 You are the phase gate specialist.

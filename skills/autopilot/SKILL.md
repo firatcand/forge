@@ -177,13 +177,12 @@ on the headless/attempt path) and the loop continues on whatever is unblocked.
 Ask MAINLY architectural / public-API forks (typed per the FORGE-216 taxonomy);
 drive sequencing and defensible defaults autonomously.
 
-## Model routing
+## Model selection
 
-Model routing applies from the first DELIVERY dispatch: `/deliver` routes
-implement/fix subagents via `forge orchestrate route`. The front-half drafting
-subagents (`product-spec`, `software-architect`, `product-decomposer`) run at the
-project's `default_model_tier` — there is no per-task tier to route on yet, so do
-not fake a route for taskless drafting.
+Forge does not pin or route models. Every dispatched subagent — front-half
+drafting (`product-spec`, `software-architect`, `product-decomposer`) and
+delivery (implement/fix) alike — inherits the session model; the host owns that
+choice.
 
 ## cwd note
 
