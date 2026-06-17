@@ -526,6 +526,8 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   });
   for (const p of farm.created) changed.push(relativeFromCwd(cwd, p));
   for (const p of farm.refreshed) changed.push(relativeFromCwd(cwd, p));
+  // Stale farm symlinks pruned because their skill/agent left the bundle.
+  for (const p of farm.pruned) changed.push(p);
   // FORGE-160: surface symlink-guard skips (a host's farm dir was a symlink).
   for (const n of farm.notices) notices.push(n);
 

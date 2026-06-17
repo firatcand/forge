@@ -732,3 +732,71 @@ test('FORGE-160 symlink guard — pruneHostFarm: symlinked .claude proves the pr
     );
   });
 });
+
+// ── prune-stale: a re-run after a skill/agent leaves the bundle ────────────────
+
+test('applySkillFarm: prunes a forge-owned symlink whose skill left the bundle', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'models'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    // First materialize with `models` present.
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+    assert.ok(existsSync(expectedSkill(cwd, 'claude', 'models')), 'models linked initially');
+
+    // Ship a new release: `models` is removed from the bundle.
+    rmSync(resolve(pkg, 'skills', 'models'), { recursive: true, force: true });
+
+    const result = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    assert.ok(
+      result.pruned.includes('.claude/skills/models'),
+      `expected models pruned; got ${JSON.stringify(result.pruned)}`,
+    );
+    // The dangling symlink is gone; the surviving bundle skill stays.
+    assert.ok(!existsSync(resolve(cwd, '.claude', 'skills', 'models')), 'models symlink removed');
+    assert.ok(lstatSync(expectedSkill(cwd, 'claude', 'forge')).isSymbolicLink(), 'forge survives');
+  });
+});
+
+test('applySkillFarm: prune leaves user content and .bak backups alone', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    const skillsDir = resolve(cwd, '.claude', 'skills');
+    mkdirSync(skillsDir, { recursive: true });
+
+    // A user's own skill (real dir, non-bundle name) and a leftover backup.
+    mkdirSync(resolve(skillsDir, 'my-skill'), { recursive: true });
+    writeFileSync(resolve(skillsDir, 'my-skill', 'SKILL.md'), '# mine\n', 'utf8');
+    writeFileSync(resolve(skillsDir, 'forge.bak'), 'old\n', 'utf8');
+
+    const result = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    assert.deepEqual(result.pruned, [], 'nothing forge-owned to prune');
+    assert.ok(existsSync(resolve(skillsDir, 'my-skill', 'SKILL.md')), 'user skill untouched');
+    assert.ok(existsSync(resolve(skillsDir, 'forge.bak')), '.bak backup untouched');
+  });
+});
+
+test('applySkillFarm: dryRun reports the stale prune without deleting it', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'models'], []);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+    rmSync(resolve(pkg, 'skills', 'models'), { recursive: true, force: true });
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['claude'],
+      mode: 'symlink',
+      dryRun: true,
+    });
+
+    assert.ok(result.pruned.includes('.claude/skills/models'), 'dryRun still reports the prune');
+    assert.ok(lstatSync(resolve(cwd, '.claude', 'skills', 'models')).isSymbolicLink(), 'symlink NOT deleted under dryRun');
+  });
+});
