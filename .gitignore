@@ -20,6 +20,7 @@ npm-debug.log*
 .env
 .env.local
 .env.production
+.infisical.json
 
 # Build artifacts
 dist/
@@ -61,4 +62,7 @@ tmp/
 /.codex/agents/
 /.gemini/skills/
 /.gemini/agents/
+/.agents/skills/
+/.cursor/agents/
+/.cursor/rules/forge-context.mdc
 # <<< forge-managed <<<
