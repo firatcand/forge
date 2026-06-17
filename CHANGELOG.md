@@ -4,6 +4,8 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-18
+
 ### Removed
 
 - **Model routing / catalog subsystem (BREAKING).** Removed the `forge orchestrate route` and `forge orchestrate models` verbs, the `/models` skill, the model catalog (`templates/models-catalog.seed.json` + schema), tier arithmetic/escalation, the per-host model pin allow-list, and all per-subagent `model:` frontmatter from the shipped agents. Model selection is no longer Forge's concern: interactive subagents inherit the session model and Forge-owned codex spawns use the host default — the host owns model choice, so nothing goes stale. Schema fields `task.model_tier`, `agents.default_model_tier`, and the `models:` settings block are gone; stale values in existing `phases.yaml` / `settings.yaml` are silently ignored (no `.strict()`), so no adopter migration is required. The host-reachability preflight routing relied on is **kept** and now surfaced via `forge orchestrate doctor --scope hosts` (non-blocking). Note: Claude Code already ignored subagent `model:` frontmatter (anthropics/claude-code#44385), so removing those pins changes no runtime behavior. Supersedes the unshipped FORGE-192 model-threading work.
