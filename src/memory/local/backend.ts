@@ -110,7 +110,13 @@ export class LocalMemoryBackend implements MemoryBackend {
         // and would pollute FTS recall, so they are NEVER indexed into nodes_fts
         // (still always cleared, so a kind change file→non-file re-indexes cleanly).
         delFts.run(valid.id);
-        if (valid.kind !== 'file') insFts.run(valid.id, valid.title, valid.body);
+        // FORGE-219: `symbol` nodes are excluded from FTS like `file` nodes —
+        // their title is a bare code identifier (e.g. `get`, `id`) that would
+        // pollute full-text recall with name-token noise (symbols are structural-
+        // only in I2b-1; recall does not surface them).
+        if (valid.kind !== 'file' && valid.kind !== 'symbol') {
+          insFts.run(valid.id, valid.title, valid.body);
+        }
       }
     });
   }
@@ -156,7 +162,11 @@ export class LocalMemoryBackend implements MemoryBackend {
         insNode.run(node.id, node.kind, node.title, node.body, attrs);
         // FORGE-218: exclude `file` nodes from FTS (repo-path titles would
         // pollute full-text recall); they remain in `nodes` as structural-only.
-        if (node.kind !== 'file') insFts.run(node.id, node.title, node.body);
+        // FORGE-219: exclude `symbol` nodes too (bare identifier titles would add
+        // name-token noise; symbols are structural-only in I2b-1).
+        if (node.kind !== 'file' && node.kind !== 'symbol') {
+          insFts.run(node.id, node.title, node.body);
+        }
       }
       for (const edge of validEdges) {
         insEdge.run(edge.src, edge.dst, edge.kind);
@@ -171,8 +181,8 @@ export class LocalMemoryBackend implements MemoryBackend {
       .prepare('SELECT kind, COUNT(*) AS c FROM nodes GROUP BY kind')
       .all() as Array<{ kind: string; c: number }>;
     // Honest zero output (Codex): always state every kind explicitly, even at 0
-    // (FORGE-218 adds `file`).
-    const by_kind: Record<string, number> = { task: 0, learning: 0, file: 0 };
+    // (FORGE-218 adds `file`; FORGE-219 adds `symbol`).
+    const by_kind: Record<string, number> = { task: 0, learning: 0, file: 0, symbol: 0 };
     for (const row of byKindRows) by_kind[row.kind] = row.c;
     return {
       node_count: total.c,

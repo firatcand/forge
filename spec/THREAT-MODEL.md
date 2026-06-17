@@ -87,6 +87,31 @@ MUST land together with the Tripwire boundary scan for that path. This file is
 the checklist: adding such a path without updating this table + the scan is a
 gate violation.
 
+## Loom code symbols (FORGE-219 / I2b-1) — stored, not rendered
+
+Loom's I2b-1 increment indexes **code symbols** (function/class/method/type
+names, their kind, and line spans) from repository source via bundled
+tree-sitter. This deliberately stays inside the trust boundary above:
+
+- The extractor stores **names, kinds, start/end line, and the file path ONLY** —
+  it never reads or persists function bodies, docstrings, comments, or any other
+  source text. (Asserted in `test/unit/memory/symbols.test.ts`.)
+- Symbol nodes are **excluded from FTS** and **not surfaced by recall** in
+  I2b-1: there is no `references` edge and `recallForTask` is unchanged, so no
+  symbol name reaches a rendered worker prompt. Symbols are structural
+  intermediaries (file → symbol `defines`), invisible to the prompt today.
+- Therefore I2b-1 introduces **no new external→prompt path** and needs no
+  Tripwire boundary scan. The file paths it consumes are the same untrusted
+  worker self-reports the I2a projector already path-validates; the extractor
+  additionally lstat/realpath/O_NOFOLLOW-guards every read (no symlink escape).
+
+The decision on whether symbol **names** may ever appear in recall `why`
+strings / worker prompts (vs. constrained payloads) is **deferred to I2b-2** and
+is a Tripwire-adjacent fork. Per the binding guardrail above, the I2b-2 change
+that first surfaces symbol names into a prompt MUST land with the corresponding
+Tripwire decision + scan; doing so without updating this table is a gate
+violation.
+
 ## What Tripwire does NOT defend (limitations — read before trusting it)
 
 - **Network exfiltration / Sentinel Marks.** Sentinel Marks (canary tokens

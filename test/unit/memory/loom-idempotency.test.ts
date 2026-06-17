@@ -128,6 +128,62 @@ test('reindex with a seeded events fixture is idempotent incl. file/touches (FOR
   }
 });
 
+test('reindex extracts code symbols + defines edges idempotently (FORGE-219)', async () => {
+  const repoRoot = mkdtempSync(join(tmpdir(), 'loom-idem-sym-'));
+  mkdirSync(join(repoRoot, 'plans'), { recursive: true });
+  writeFileSync(join(repoRoot, 'plans', 'phases.yaml'), FIXTURE_PHASES);
+  // Seed a touched code file via orchestrator history, then write its source so
+  // the extractor parses it. P1-T01 touched src/a/app.py (matches its write_glob).
+  const forgeDir = join(repoRoot, '.forge');
+  const seedDir = join(forgeDir, 'orchestrator', 'tasks', 'P1-T01', 'attempts', 'a1');
+  mkdirSync(seedDir, { recursive: true });
+  writeFileSync(
+    join(seedDir, 'events.jsonl'),
+    JSON.stringify({
+      type: 'files_modified',
+      ts: '2026-06-17T00:00:00.000Z',
+      files: ['src/a/app.py', 'src/a/svc.go'],
+    }) + '\n',
+  );
+  mkdirSync(join(repoRoot, 'src', 'a'), { recursive: true });
+  writeFileSync(join(repoRoot, 'src', 'a', 'app.py'), 'def handler(req):\n    return req\nclass App:\n    pass\n');
+  writeFileSync(join(repoRoot, 'src', 'a', 'svc.go'), 'package a\nfunc Serve() {}\ntype Conn struct{}\n');
+  const dbPath = join(repoRoot, '.forge', 'loom.db');
+
+  try {
+    const b1 = await openLocalBackend(dbPath);
+    const r1 = await reindex({ repoRoot, backend: b1 });
+    b1.close();
+    const snap1 = await snapshot(dbPath);
+
+    const b2 = await openLocalBackend(dbPath);
+    const r2 = await reindex({ repoRoot, backend: b2 });
+    b2.close();
+    const snap2 = await snapshot(dbPath);
+
+    assert.deepEqual(snap2, snap1, 'graph incl. symbols/defines must be identical across runs');
+    // 4 symbols: handler, App (py) + Serve, Conn (go).
+    assert.equal(r1.symbol_nodes, 4);
+    assert.equal(r1.defines_edges, 4);
+    assert.equal(r2.symbol_nodes, 4);
+    assert.equal(r2.defines_edges, 4);
+    // Symbols are excluded from FTS: no nodes_fts row for any symbol id.
+    const { db } = await (await import('../../../src/memory/local/db.ts')).openDb(dbPath);
+    const symIds = (db.prepare("SELECT id FROM nodes WHERE kind = 'symbol'").all() as Array<{ id: string }>).map((r) => r.id);
+    assert.equal(symIds.length, 4);
+    for (const id of symIds) {
+      const ftsRow = db.prepare('SELECT id FROM nodes_fts WHERE id = ?').get(id);
+      assert.equal(ftsRow, undefined, `symbol ${id} must NOT be in nodes_fts`);
+    }
+    // A symbol name does not appear as an FTS hit.
+    const handlerHit = db.prepare("SELECT id FROM nodes_fts WHERE nodes_fts MATCH 'handler'").all();
+    assert.equal(handlerHit.length, 0, 'symbol name must not be an FTS hit');
+    db.close();
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test('reindex caps over-long source text instead of throwing (B2 ingest side)', async () => {
   const repoRoot = mkdtempSync(join(tmpdir(), 'loom-cap-'));
   mkdirSync(join(repoRoot, 'plans'), { recursive: true });

@@ -1246,7 +1246,8 @@ Tracker / secret-manager adapters consume their own conventional vars (e.g. `ANT
 | Target | Threshold | Rationale |
 |---|---|---|
 | `npx @firatcand/forge --version` cold start | p95 < 500 ms | First-impression latency |
-| `npm pack` size | unpacked ≤ 1 MB | Lightweight discipline (PRD constraint) |
+| `npm pack` size (excl. Loom grammar pack) | unpacked ≤ 1 MB | Lightweight discipline (PRD constraint) |
+| `npm pack` size (incl. Loom grammar pack) | unpacked ≤ 20 MiB | FORGE-219 (Loom I2b-1) exception: the bundled tree-sitter core wasm + curated grammar pack (`vendor/tree-sitter/`, ~14.4 MiB) ships in the tarball so multi-language symbol extraction works with ZERO extra install (no postinstall, no network) — "works with nothing installed" is a hard requirement. The grammar pack is the only reason the tarball exceeds the 1 MB discipline line; the 20 MiB ceiling caps growth and is enforced by `scripts/test-pack.mjs` in CI. |
 | `forge init` end-to-end | p95 < 30 s | PRD acceptance criterion |
 | Orchestrator dispatch loop overhead at idle | < 1% CPU on M-class laptop | Foreground process must coexist with editor |
 | Worktree create | p95 < 2 s | User-visible per-task latency |
