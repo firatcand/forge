@@ -1,0 +1,20 @@
+# gitleaks configuration for forge.
+#
+# Keep the full default ruleset everywhere (extend.useDefault), and allowlist
+# ONLY the Tripwire injection-detection test fixtures. Those files
+# (src test corpus for FORGE-202) intentionally contain secret-SHAPED strings —
+# `api_key = "sk-…"`, `ghp_…`, 40-char hashes — as detection fixtures. They are
+# NOT real credentials. Inline `gitleaks:allow` cannot cover them because the
+# action scans commit-by-commit history and the strings were introduced in an
+# earlier commit; a path allowlist is commit-independent. The scope is two test
+# files, so real-secret detection elsewhere in the repo is unaffected.
+title = "forge gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Tripwire (FORGE-202) injection-detection test fixtures hold intentional fake secret-shaped strings"
+paths = [
+  '''test/unit/security/tripwire/.*\.test\.ts''',
+]
