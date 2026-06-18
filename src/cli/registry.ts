@@ -53,6 +53,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'List parked tasks (blocked_on_question) with their correlated open questions.',
   },
   {
+    name: 'scan',
+    summary: 'Scan a task\'s owner fields (--task) or arbitrary text (--text) for injection patterns; report-only deterministic detection (never blocks, never emits events).',
+  },
+  {
     name: 'attach',
     summary: 'Tail per-run notifications.jsonl.',
   },

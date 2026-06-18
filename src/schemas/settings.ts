@@ -91,6 +91,17 @@ export const QuestionBudgetSchema = z
   })
   .default({});
 
+// FORGE-202 (Tripwire I1): report-only injection-scanner mode selector. `mark` =
+// deterministic detection runs and is surfaced (the standalone `scan` verb),
+// never blocking. `off` disables scanning. There is intentionally NO `block`
+// mode yet (Codex C2): an inert block mode would imply enforcement that does not
+// exist — block lands with the first enforcing boundary path (FORGE-203/204).
+export const TripwireSchema = z
+  .object({
+    mode: z.enum(['off', 'mark']).default('mark'),
+  })
+  .default({});
+
 export const AgentsSchema = z
   .object({
     max_concurrent: z.number().int().positive().default(10),
@@ -169,6 +180,10 @@ export const AgentsSchema = z
     // generation, overwriting any prior `.1`) and starts fresh; readers merge
     // `.1` + current. Default 10 MiB. See src/orchestrator/jsonl-rotate.ts.
     log_rotate_max_bytes: z.number().int().positive().default(10_485_760),
+    // FORGE-202: report-only injection-scanner mode (off | mark; default mark).
+    // Consumed today only by the standalone `forge orchestrate scan` verb;
+    // boundary enforcement (and any `block` mode) lands with FORGE-203/204.
+    tripwire: TripwireSchema,
   })
   // FORGE-152 transform: promote empty enabled_root_files to [primary_host_cli].
   // Runs BEFORE refinements so the refined object sees the promoted value.

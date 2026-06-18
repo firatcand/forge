@@ -1134,3 +1134,30 @@ test('FORGE-179 — audit accepts custom dimensions', () => {
   if (!result.success) return;
   assert.deepEqual(result.data.audit.dimensions, ['dead-code']);
 });
+
+// ── FORGE-202: tripwire mode ──────────────────────────────────────────────────
+
+test('FORGE-202 — agents.tripwire defaults to { mode: "mark" }', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.agents.tripwire, { mode: 'mark' });
+});
+
+test('FORGE-202 — agents.tripwire accepts mode: off', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    agents: { tripwire: { mode: 'off' } },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.agents.tripwire.mode, 'off');
+});
+
+test('FORGE-202 — agents.tripwire rejects mode: block (no inert enforcement)', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    agents: { tripwire: { mode: 'block' } },
+  });
+  assert.equal(result.success, false);
+});

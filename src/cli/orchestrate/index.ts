@@ -36,6 +36,7 @@ import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
 import { dashboardHandler } from './dashboard.ts';
 import { reviewQueueHandler } from './review-queue.ts';
+import { scanHandler } from './scan.ts';
 import { inboxHandler } from './inbox.ts';
 import { auditPlanHandler, auditCollectHandler, auditCreateIssuesHandler } from './audit.ts';
 
@@ -312,6 +313,13 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
   dashboard: [JSON_FLAG, FD],
   'review-queue': [JSON_FLAG, FD],
   inbox: [JSON_FLAG, FD],
+  scan: [
+    { flag: 'task', takesValue: true, description: 'Task id to scan (owner description + acceptance). Mutually exclusive with --text.', valueLabel: '<task-id>' },
+    { flag: 'text', takesValue: true, description: 'Arbitrary text to scan; `-` reads stdin (explicit only). Mutually exclusive with --task.', valueLabel: '<str>' },
+    { flag: 'source', takesValue: true, description: 'Tag --text with a source (task_description|acceptance_criteria|answered_questions|prior_attempts|conventions|search_result|browser_page; default search_result).', valueLabel: '<enum>' },
+    JSON_FLAG,
+    FD,
+  ],
   questions: [
     { flag: 'open', takesValue: false, description: 'Only open (unanswered) questions.' },
     { flag: 'run', takesValue: true, description: 'Scope to a run id.', aliases: ['run-id'], valueLabel: '<id>' },
@@ -530,6 +538,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
   ['review-queue', withFlags(reviewQueueHandler, FLAG_DECLS['review-queue']!)],
   ['inbox', withFlags(inboxHandler, FLAG_DECLS['inbox']!)],
+  ['scan', withFlags(scanHandler, FLAG_DECLS['scan']!)],
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
   ['spec-diff', withFlags(specDiffHandler, FLAG_DECLS['spec-diff']!)],
   ['guardrail-check', withFlags(guardrailCheckHandler, FLAG_DECLS['guardrail-check']!)],
@@ -568,6 +577,7 @@ export const HELP_ORDER: readonly string[] = [
   'dashboard',
   'review-queue',
   'inbox',
+  'scan',
   'questions',
   'doctor',
   'attach',
