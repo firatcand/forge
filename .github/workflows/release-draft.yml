@@ -1,11 +1,9 @@
-name: Draft GitHub Release
+name: GitHub Release
 
-# FORGE-157 — fires on the same `v*` tag push as `release.yml` and creates
-# a DRAFT GitHub Release pre-filled with the matching CHANGELOG section.
-# Independent of the npm publish workflow: tag push immediately publishes
-# to npm, and ALSO drafts a GH Release the user can review + publish from
-# the GH UI when ready. Decoupling lets release-notes editing happen
-# without blocking the npm publish.
+# FORGE-157 — fires on the same `v*` tag push as `release.yml` and PUBLISHES a
+# GitHub Release pre-filled with the matching CHANGELOG section, marked Latest.
+# Runs alongside the npm publish workflow so every npm release has a matching,
+# published GH Release (no manual draft-publishing step).
 #
 # Security: GITHUB_REF_NAME is consumed via env var (safe).
 
@@ -18,8 +16,8 @@ permissions:
   contents: write    # required to create the GitHub Release
 
 jobs:
-  draft-release:
-    name: Draft release from CHANGELOG
+  publish-release:
+    name: Publish release from CHANGELOG
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +37,7 @@ jobs:
           # Trim trailing blank lines.
           NOTES="$(printf '%s' "$NOTES" | sed -e ':a' -e '/^$/{$d;N;ba' -e '}')"
           if [ -z "$NOTES" ]; then
-            NOTES="Release notes not found in CHANGELOG.md for version ${TAG}. Edit this draft before publishing."
+            NOTES="Release notes not found in CHANGELOG.md for version ${TAG}."
           fi
           {
             echo 'notes<<__EOF__'
@@ -51,5 +49,6 @@ jobs:
           name: ${{ github.ref_name }}
           tag_name: ${{ github.ref_name }}
           body: ${{ steps.changelog.outputs.notes }}
-          draft: true
+          draft: false
           prerelease: false
+          make_latest: true
