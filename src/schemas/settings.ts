@@ -463,6 +463,21 @@ const MemorySchema = z
   ])
   .default({ backend: 'local' });
 
+// FORGE-204 (Search adapter I1): the search-provider selector. A discriminated
+// union on `provider` — all four literals accepted for forward-compat, but only
+// `native` (keyless URL fetch, Tripwire-scanned at the base) is wired in I1; the
+// factory throws NOT_IMPLEMENTED for the others. Wrapped with
+// `.default({ provider: 'native' })` so a settings.yaml with no `search:` block
+// resolves to the keyless native provider — zero-config adopters get search.
+export const SearchSchema = z
+  .discriminatedUnion('provider', [
+    z.object({ provider: z.literal('native') }).strict(),
+    z.object({ provider: z.literal('exa') }).strict(),
+    z.object({ provider: z.literal('parallel') }).strict(),
+    z.object({ provider: z.literal('perplexity') }).strict(),
+  ])
+  .default({ provider: 'native' });
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -501,6 +516,10 @@ export const SettingsSchema = z.object({
   // FORGE-200: Loom memory-backend selector. Nested `.default({backend:'local'})`
   // → absent block resolves to the local SQLite backend.
   memory: MemorySchema,
+  // FORGE-204: search-provider selector. Nested `.default({provider:'native'})`
+  // → absent block resolves to the keyless native provider (Tripwire-scanned at
+  // the adapter base).
+  search: SearchSchema,
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -510,6 +529,7 @@ export type Deliver = z.infer<typeof DeliverSchema>;
 export type Audit = z.infer<typeof AuditSchema>;
 export type DocsCoverage = z.infer<typeof DocsCoverageSchema>;
 export type Memory = z.infer<typeof MemorySchema>;
+export type Search = z.infer<typeof SearchSchema>;
 
 export type LinearTrackerConfig = z.infer<typeof LinearTrackerConfigSchema>;
 export type GithubTrackerConfig = z.infer<typeof GithubTrackerConfigSchema>;

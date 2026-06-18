@@ -1161,3 +1161,31 @@ test('FORGE-202 — agents.tripwire rejects mode: block (no inert enforcement)',
   });
   assert.equal(result.success, false);
 });
+
+// ── FORGE-204: search provider selector ──────────────────────────────────────
+
+test('FORGE-204 — search defaults to { provider: "native" }', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.search, { provider: 'native' });
+});
+
+test('FORGE-204 — search accepts each forward-compat provider literal', () => {
+  for (const provider of ['native', 'exa', 'parallel', 'perplexity'] as const) {
+    const result = SettingsSchema.safeParse({ ...MINIMAL, search: { provider } });
+    assert.equal(result.success, true, provider);
+    if (!result.success) continue;
+    assert.equal(result.data.search.provider, provider);
+  }
+});
+
+test('FORGE-204 — search rejects an unknown provider', () => {
+  const result = SettingsSchema.safeParse({ ...MINIMAL, search: { provider: 'bing' } });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-204 — search rejects unknown keys (strict variant)', () => {
+  const result = SettingsSchema.safeParse({ ...MINIMAL, search: { provider: 'native', apiKey: 'x' } });
+  assert.equal(result.success, false);
+});

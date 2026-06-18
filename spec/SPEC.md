@@ -646,6 +646,11 @@ src/
     tripwire/
       scan.ts                 // pure scanText(text, source) → TripwireReport (UTF-16 spans, byte-capped, secret-redacted excerpts); model-free
       rules.ts                // 5 high-precision rules: instruction_override / tool_coercion / secret_egress / encoded_payload / role_confusion
+  search/                     // (added FORGE-204) pluggable core search adapter — native default, providers opt-in, Tripwire-scanned at the base
+    types.ts                  // RawSearchBackend (internal, raw) vs SearchProvider (public, scanned); RawSearchResult/ScannedResult/SearchOutcome; typed SearchError codes
+    base.ts                   // ScanningSearchProvider (the structural Tripwire chokepoint) + hardenedFetch (SSRF-safe, custom-lookup, manual redirects, streaming byte cap) + bounded extractText
+    native.ts                 // NativeBackend — keyless URL fetch; searchRaw → UNSUPPORTED_OPERATION (no keyless query backend)
+    index.ts                  // createSearchProvider(config, deps) factory — only public SearchProvider constructor; exa/parallel/perplexity → NOT_IMPLEMENTED
   schemas/
     settings.ts               // SettingsSchema (zod) — extended with codex/decisions/doctor blocks
     phases.ts                 // PhasesSchema (zod)
@@ -674,6 +679,8 @@ test/
 **Shipped under FORGE-95 (2026-05-30):** `apply-decision.ts` + `markdown-section.ts` (`src/cli/orchestrate/` and `src/orchestrator/`), `adr.ts` (`src/orchestrator/` + `src/schemas/`), `apply-journal.ts` (`src/schemas/`), and `factory.ts` (`src/trackers/`, extracted from `reconcile.ts`). **Shipped under FORGE-101 (2026-06-11):** `amend-roadmap.ts` (`src/cli/orchestrate/`) + `amend-journal.ts` (`src/schemas/`) + the `stagedAdditions`/`insertTaskIntoDocument` extension to the reconcile pull path. **Shipped under FORGE-93 (2026-06-11):** the `/update-spec --draft|--apply` skill wrapping the now-shipped verb. **Still v0.5:** `precedence.ts` (`src/orchestrator/`) — the deferred drift/precedence work. `worktree-drift-guard.ts` is dropped (FORGE-103 canceled); its role survives as `amend-roadmap`'s inline drift warning. The `templates/adr.template.md` scaffold shipped under FORGE-92.
 
 **Shipped under FORGE-202 (Tripwire I1):** `src/security/tripwire/{scan,rules}.ts` — a deterministic, model-free injection-detection engine + the standalone read-band `forge orchestrate scan` verb (`--task <id>` | `--text <str>` | `--text -`). **Report-only**: it never blocks and never emits events. Render-guard wiring (boundary-wrapping untrusted spans at the hydration layer) is **deferred** per the I0 gate (FORGE-201): no externally-authorable text reaches the rendered worker prompt today, so the boundary scan lands with the first untrusted→prompt adapter (search/browser, FORGE-203/204). `agents.tripwire.mode` (`off|mark`, default `mark`) is the report-only toggle; there is intentionally no `block` mode yet.
+
+**Shipped under FORGE-204 (Search adapter I1):** `src/search/{types,base,native,index}.ts` + the `forge search <fetch|query>` verb (`src/cli/search/`) + the `search` selector in `SettingsSchema` (default `{ provider: 'native' }`). Search is a **pluggable core adapter**: backends implement the internal `RawSearchBackend` (raw, unscanned) and are wrapped by the only public `SearchProvider`, `ScanningSearchProvider`, which Tripwire-scans every result at the base (`scanText(text,'search_result')`) — the structural chokepoint that makes the THREAT-MODEL guardrail enforceable. The `native` provider is keyless URL fetch (SSRF-hardened `hardenedFetch` + bounded `extractText`, with a defense-in-depth raw-HTML scan); `searchRaw` is `UNSUPPORTED_OPERATION` (no keyless query backend). `exa|parallel|perplexity` backends (and their secrets-manager key resolution) + the native query path + rewiring the agents' `web_search` refs are **deferred** to follow-up increments — the factory throws `NOT_IMPLEMENTED` with guidance today.
 
 ### Worktree location convention
 
