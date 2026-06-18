@@ -33,3 +33,4 @@ verify:
     - npm run lint
     - npm test
     - npm run build
+methodology_version: 0.4.4
