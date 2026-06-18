@@ -30,6 +30,14 @@ src/core/secrets.ts
 # /second-opinion auto-trigger.
 src/security/**
 
+# Search adapters (FORGE-204) — the untrusted-content ingestion boundary.
+# `forge search fetch` is the first path carrying externally-authorable free-form
+# text toward an agent. Security-sensitive: SSRF-hardened HTTP (custom DNS lookup,
+# manual redirect re-guard, streaming byte cap), bounded HTML→text extraction,
+# and the structural Tripwire chokepoint (every result scanned at the base before
+# it can reach a caller). A change here is a /second-opinion auto-trigger.
+src/search/**
+
 # CLI / init flow — touches user files, executes subprocesses.
 src/cli/init/**
 

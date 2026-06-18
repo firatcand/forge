@@ -62,6 +62,7 @@ placeholder** in the template or the `WorkerPromptContext`.
 | supervisor **answer `--note`** (free text) | no (owner only) | stored | — | **NO** | the free-text note exists (`schemas/questions.ts:84-90`, `answer.ts:113-119`) but is never rendered into the prompt |
 | worker **question** text / options / `what_happens_if_unanswered` / routing-hint | no (worker) | stored | — | **NO** | only `decision_key` is read back; question prose/options are not surfaced (`question-write.ts:372-390` store; `render-worker-prompt.ts:250-269` read) |
 | prior-attempt **output** | no (system) | — | — | **NO** | only the `phase` enum is surfaced; worker output is never stored/surfaced |
+| **fetched web page** (`forge search fetch`, FORGE-204) | yes (any site author) | yes (`hardenedFetch`) | `SearchOutcome` → `ScannedResult.text` | **toward agent, WITH scan** | every result is Tripwire-scanned at the adapter base (`scanText(text,'search_result')` in `ScanningSearchProvider`, `src/search/base.ts`) — a backend cannot return text without the boundary scan (factory-only construction + module boundary) |
 
 ## Verdict (the gate decision)
 
@@ -100,6 +101,42 @@ untrusted→prompt adapter (search/browser, FORGE-203/204). The binding guardrai
 above is unchanged. Tripwire **does not** prevent exfiltration — a deterministic
 scanner over input is best-effort detection, not an egress control (see the
 limitations below).
+
+## Search adapter (FORGE-204) — the first external→agent path, landed WITH its scan
+
+`forge search fetch` is the FIRST forge path that carries externally-authorable
+free-form text (an arbitrary web page) toward an agent. Per the binding guardrail
+above, it lands **together with** its Tripwire boundary scan, so the gate is
+satisfied rather than violated:
+
+- **Structural Tripwire chokepoint.** Backends (`NativeBackend`, future
+  exa/parallel/perplexity) implement `RawSearchBackend` and return **raw,
+  unscanned** results. The ONLY public `SearchProvider` is
+  `ScanningSearchProvider`, which runs `scanText(text, 'search_result')` on
+  **every** result and attaches the `TripwireReport` before returning a
+  `SearchOutcome`. The factory (`src/search/index.ts`) is the only construction
+  path. A backend therefore **physically cannot** hand raw text to a caller
+  without the boundary scan (module boundary + factory-only construction).
+- **Defense-in-depth.** The native fetch path scans BOTH the extracted text AND
+  the bounded raw HTML, so an injection that an extraction mistake stripped out
+  is still caught.
+- **SSRF guard (default-deny).** `hardenedFetch` (`src/search/base.ts`) connects
+  only to a validated **public** IP via a custom DNS `lookup` that resolves ALL
+  addresses and rejects unless every one is public (defeats DNS-rebind/TOCTOU).
+  It rejects non-http(s) schemes, blocks loopback/metadata hostnames and the
+  private/link-local/CGNAT/reserved/multicast/IPv4-mapped-IPv6 ranges, rejects
+  octal/hex/integer host encodings, follows redirects manually (re-running the
+  full guard on each hop), and enforces a streaming byte cap (never trusting
+  `Content-Length`). Opt-out only via an explicit `--allow-private` flag.
+- **No raw error/header echo.** Failures surface as typed `SearchError` codes
+  only; raw network errors/headers are never returned to the caller. No caching.
+
+**Limitation (unchanged):** the scan is best-effort **detection, report-only** —
+it is **not** sanitization and **not** an egress control. It attaches a severity
++ findings to each result; it does not block the fetch, rewrite the text, or stop
+a downstream agent from acting on a hostile page. The SSRF guard bounds *where*
+forge will connect; the Tripwire scan bounds *what we know* about the returned
+text. Neither prevents exfiltration once content reaches a tool-capable agent.
 
 ## Loom code symbols (FORGE-219 / I2b-1) — stored, not rendered
 

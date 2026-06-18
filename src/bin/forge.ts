@@ -370,6 +370,22 @@ if (command === 'init') {
       process.exit(1);
     }
   })();
+} else if (command === 'search') {
+  // FORGE-204: the pluggable core search adapter (fetch/query). DYNAMIC import
+  // (mirrors the loom branch) so non-search commands never load search code.
+  // `forge search fetch` is the first untrusted-text → agent path; every result
+  // is Tripwire-scanned at the adapter base.
+  void (async () => {
+    try {
+      const { dispatchSearch } = await import('../cli/search/index.ts');
+      const result = await dispatchSearch(args.slice(1), { cwd: process.cwd() });
+      process.exit(result.exitCode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`forge search failed: ${msg}`);
+      process.exit(1);
+    }
+  })();
 } else {
   failUnknown(command, version);
 }
