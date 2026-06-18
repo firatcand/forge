@@ -4,6 +4,12 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-18
+
+### Removed
+
+- **Model routing / catalog subsystem (BREAKING).** Removed the `forge orchestrate route` and `forge orchestrate models` verbs, the `/models` skill, the model catalog (`templates/models-catalog.seed.json` + schema), tier arithmetic/escalation, the per-host model pin allow-list, and all per-subagent `model:` frontmatter from the shipped agents. Model selection is no longer Forge's concern: interactive subagents inherit the session model and Forge-owned codex spawns use the host default — the host owns model choice, so nothing goes stale. Schema fields `task.model_tier`, `agents.default_model_tier`, and the `models:` settings block are gone; stale values in existing `phases.yaml` / `settings.yaml` are silently ignored (no `.strict()`), so no adopter migration is required. The host-reachability preflight routing relied on is **kept** and now surfaced via `forge orchestrate doctor --scope hosts` (non-blocking). Note: Claude Code already ignored subagent `model:` frontmatter (anthropics/claude-code#44385), so removing those pins changes no runtime behavior. Supersedes the unshipped FORGE-192 model-threading work.
+
 ### Added
 
 - **`/audit` — read-only repo audit → work-order → issue specs (FORGE-178 P1–P3).** `forge orchestrate audit plan` fans out N read-only subagents (one prompt per scope × dimension, injecting path-free principles + the resolved protected globs); `audit collect` validates findings and writes a filtered `work-order.{md,json}` under `.forge/audits/<ts>/` (drops absolute / traversal / out-of-scope / protected paths in code); `audit create-issues` renders one tracker-issue spec per finding for the `/audit` skill to file out-of-band with classification labels. Scope is auto-discovered from the git tree (never hardcoded), the protected set comes from `CRITICAL.md` + config, and the shipped feature carries **zero forge-specific paths** — forge dogfoods it via its own `CRITICAL.md` DO-NOT-SIMPLIFY entries + `settings.verify`.

@@ -81,7 +81,7 @@ export type PhasesArgs = z.infer<typeof PhasesArgsSchema>;
 // `--scope docs` (NOT folded into 'all', to preserve the all≡spec-code
 // data-equality contract). `base` selects the diff base ref (docs scope only).
 export const DoctorArgsSchema = z.object({
-  scope: z.enum(['spec-code', 'all', 'docs']).default('spec-code'),
+  scope: z.enum(['spec-code', 'all', 'docs', 'hosts']).default('spec-code'),
   forgeDir: ForgeDirField,
   json: JsonFlag,
   repoRoot: z.string().min(1).optional(),

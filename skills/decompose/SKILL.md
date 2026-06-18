@@ -32,7 +32,6 @@ Delegate to the `product-decomposer` subagent.
 - depends_on (list of task IDs)
 - estimate (S | M | L | XL)
 - owner_type (which subagent picks this up — use 'human' for manual bootstrap work, never auto-dispatched)
-- model_tier (optional — `small` | `standard` | `frontier`; capability FLOOR for model routing. Stamp it so cheap tasks use cheap models and risky tasks use strong ones. Rules: docs/content/infra (non-critical) → `small`; backend/integration/data/foundation → `standard`; `security-auditor` owner OR a CRITICAL.md path OR correctness-critical work → `frontier`. Omit → falls back to `settings.agents.default_model_tier` (`standard`). The orchestrator only ever escalates ABOVE this floor at runtime, never below it.)
 - acceptance (concrete, testable)
 
 ## Hard rules

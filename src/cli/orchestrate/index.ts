@@ -35,8 +35,6 @@ import { ensureWorktreeHandler } from './ensure-worktree.ts';
 import { renderWorkerPromptHandler } from './render-worker-prompt.ts';
 import { secondOpinionHandler } from './second-opinion.ts';
 import { dashboardHandler } from './dashboard.ts';
-import { modelsHandler } from './models.ts';
-import { routeHandler } from './route.ts';
 import { reviewQueueHandler } from './review-queue.ts';
 import { inboxHandler } from './inbox.ts';
 import { auditPlanHandler, auditCollectHandler, auditCreateIssuesHandler } from './audit.ts';
@@ -312,20 +310,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   dashboard: [JSON_FLAG, FD],
-  models: [
-    { flag: 'refresh', takesValue: false, description: 'Validate --file and write the catalog cache.' },
-    { flag: 'file', takesValue: true, description: 'With --refresh, the agent-compiled catalog JSON to validate + write.', valueLabel: '<json>' },
-    { flag: 'availability', takesValue: false, description: 'Probe per-host reachability (bin --version + env + file-exists; no paid call). Mutually exclusive with --refresh.' },
-    JSON_FLAG,
-    FD,
-  ],
   'review-queue': [JSON_FLAG, FD],
-  route: [
-    { flag: 'task', takesValue: true, description: 'Task id (phases id or tracker issue id) to route.', valueLabel: '<task-id>' },
-    { flag: 'attempt', takesValue: true, description: 'Attempt id — records a model_routed event when a lease is held.', valueLabel: '<attempt-id>' },
-    JSON_FLAG,
-    FD,
-  ],
   inbox: [JSON_FLAG, FD],
   questions: [
     { flag: 'open', takesValue: false, description: 'Only open (unanswered) questions.' },
@@ -334,7 +319,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     FD,
   ],
   doctor: [
-    { flag: 'scope', takesValue: true, description: 'Drift scope: spec-code (default) | all | docs (non-blocking docs-coverage over the branch diff).', valueLabel: '<scope>' },
+    { flag: 'scope', takesValue: true, description: 'Drift scope: spec-code (default) | all | docs (non-blocking docs-coverage over the branch diff) | hosts (non-blocking per-host reachability preflight).', valueLabel: '<scope>' },
     { flag: 'repo-root', takesValue: true, description: 'Repository root (default: cwd).', valueLabel: '<path>' },
     { flag: 'base', takesValue: true, description: 'With --scope docs: base ref for the diff (default origin/main→main→merge-base). Compares committed-vs-base only.', valueLabel: '<ref>' },
     JSON_FLAG,
@@ -543,8 +528,6 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['questions', withFlags(questionsHandler, FLAG_DECLS['questions']!)],
   ['status', withFlags(statusHandler, FLAG_DECLS['status']!)],
   ['dashboard', withFlags(dashboardHandler, FLAG_DECLS['dashboard']!)],
-  ['models', withFlags(modelsHandler, FLAG_DECLS['models']!)],
-  ['route', withFlags(routeHandler, FLAG_DECLS['route']!)],
   ['review-queue', withFlags(reviewQueueHandler, FLAG_DECLS['review-queue']!)],
   ['inbox', withFlags(inboxHandler, FLAG_DECLS['inbox']!)],
   ['attach', withFlags(attachHandler, FLAG_DECLS['attach']!)],
@@ -583,8 +566,6 @@ export const HELP_ORDER: readonly string[] = [
   'phases',
   'status',
   'dashboard',
-  'models',
-  'route',
   'review-queue',
   'inbox',
   'questions',

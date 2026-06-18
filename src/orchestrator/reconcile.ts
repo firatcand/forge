@@ -317,12 +317,6 @@ export function renderTaskBody(task: Task, phase: Phase): string {
     `**Priority:** ${task.priority}`,
     `**Estimate:** ${task.estimate}`,
   ];
-  // FORGE-211: informational, push-only. reconcile --pull only round-trips
-  // title + depends_on, so model_tier never parses back from the tracker body;
-  // it is rendered here purely for human readers of the issue.
-  if (task.model_tier) {
-    meta.push(`**Model tier:** ${task.model_tier}`);
-  }
   lines.push(meta.join(' · '));
   if (task.depends_on.length > 0) {
     lines.push(`**Depends on:** ${task.depends_on.join(', ')}`);
@@ -575,8 +569,6 @@ export function insertTaskIntoDocument(
       owner_type: task.owner_type,
       acceptance: [...task.acceptance],
       ...(task.write_globs ? { write_globs: [...task.write_globs] } : {}),
-      // FORGE-211: persist the optional capability floor for amended tasks.
-      ...(task.model_tier ? { model_tier: task.model_tier } : {}),
     };
     const node = doc.createNode(shape);
     if (isMap(node)) {

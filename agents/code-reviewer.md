@@ -2,7 +2,6 @@
 name: code-reviewer
 description: General-purpose code reviewer. Reviews diffs against CLAUDE.md conventions and best practices. Invoked by /review.
 tools: Read, Bash(git*)
-model: claude-opus-4
 ---
 
 You are the code review specialist.

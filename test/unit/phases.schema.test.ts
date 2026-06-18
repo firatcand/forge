@@ -11,16 +11,13 @@ import {
   OWNER_TYPES,
   PRIORITIES,
   ESTIMATES,
-  MODEL_TIERS,
   TASK_TYPES,
   type Phases,
   type Task,
 } from '../../src/schemas/phases.ts';
 import {
   PhasesSchema as PhasesSchemaViaBarrel,
-  MODEL_TIERS as MODEL_TIERS_VIA_BARREL,
   type Phases as PhasesViaBarrel,
-  type ModelTier as ModelTierViaBarrel,
 } from '../../src/index.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -230,28 +227,17 @@ test('AC3 — rejects invalid estimate "XXL"', () => {
   assert.equal(result.success, false);
 });
 
-// FORGE-211: model_tier optional capability floor.
-for (const tier of MODEL_TIERS) {
-  test(`FORGE-211 — accepts model_tier "${tier}"`, () => {
-    const result = PhasesSchema.safeParse(basePhases({ model_tier: tier }));
-    if (!result.success) {
-      assert.fail(`model_tier ${tier} rejected: ${JSON.stringify(result.error.issues)}`);
-    }
-    assert.equal(result.data.phases[0]!.tasks[0]!.model_tier, tier);
-  });
-}
-
-test('FORGE-211 — accepts a task with no model_tier (optional; back-compat)', () => {
-  const result = PhasesSchema.safeParse(basePhases());
+// Model routing removed: a stale `model_tier` key is silently stripped (no
+// `.strict()` on TaskSchema), so old phases.yaml keeps parsing.
+test('a stale model_tier key is ignored (stripped, not an error)', () => {
+  const result = PhasesSchema.safeParse(basePhases({ model_tier: 'frontier' }));
   if (!result.success) {
-    assert.fail(`absent model_tier rejected: ${JSON.stringify(result.error.issues)}`);
+    assert.fail(`stale model_tier rejected: ${JSON.stringify(result.error.issues)}`);
   }
-  assert.equal(result.data.phases[0]!.tasks[0]!.model_tier, undefined);
-});
-
-test('FORGE-211 — rejects invalid model_tier "ultra"', () => {
-  const result = PhasesSchema.safeParse(basePhases({ model_tier: 'ultra' }));
-  assert.equal(result.success, false);
+  assert.equal(
+    (result.data.phases[0]!.tasks[0]! as Record<string, unknown>).model_tier,
+    undefined,
+  );
 });
 
 for (const taskType of TASK_TYPES) {
@@ -461,14 +447,6 @@ test('FORGE-100 — TASK_TYPES includes "skill" and "docs"', () => {
 test('barrel — PhasesSchema reachable through src/index.ts', () => {
   const result = PhasesSchemaViaBarrel.safeParse(loadFixture('valid-minimal.yaml'));
   assert.equal(result.success, true);
-});
-
-// FORGE-211 (R3): MODEL_TIERS + ModelTier reachable through the public barrel.
-test('barrel — MODEL_TIERS + ModelTier reachable through src/index.ts', () => {
-  assert.deepEqual([...MODEL_TIERS_VIA_BARREL], ['small', 'standard', 'frontier']);
-  assert.deepEqual([...MODEL_TIERS_VIA_BARREL], [...MODEL_TIERS]);
-  const tier: ModelTierViaBarrel = 'frontier';
-  assert.equal(tier, 'frontier');
 });
 
 test('types — z.infer surface compiles via satisfies', () => {

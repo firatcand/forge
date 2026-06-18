@@ -2,7 +2,6 @@
 name: learning-curator
 description: Authors the compound learning store. Invoked by /learn (write). Retrieval (the old /pickup-task read flow) is now Loom — `forge loom recall` (FORGE-200).
 tools: Read, Write, Edit
-model: claude-sonnet-4-6
 ---
 
 You are the learning curator. You AUTHOR learnings; you do not retrieve them.

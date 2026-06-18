@@ -68,14 +68,6 @@ test('AC: skill body mentions all four critical CLI verbs', () => {
   }
 });
 
-test('AC (FORGE-210): skill consumes `forge orchestrate route` before spawning', () => {
-  const md = read('skills/forge-orchestrate/SKILL.md');
-  assert.ok(
-    md.includes('forge orchestrate route'),
-    'skill must route the worker via `forge orchestrate route` before spawn',
-  );
-});
-
 test('AC: skill uses --json + --run for run-scoped question polling', () => {
   const md = read('skills/forge-orchestrate/SKILL.md');
   // Per Codex #9: must scope question polling to the current run, otherwise

@@ -29,7 +29,7 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
   },
   {
     name: 'doctor',
-    summary: 'Drift diagnostics (--scope spec-code|all; v0.4 file-path checks).',
+    summary: 'Drift diagnostics (--scope spec-code|all; docs; hosts — non-blocking per-host reachability preflight).',
   },
   {
     name: 'questions',
@@ -43,16 +43,6 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     name: 'dashboard',
     summary:
       'Cross-run cockpit: active sessions, open questions, ready/blocked, overlap + lease health.',
-  },
-  {
-    name: 'models',
-    summary:
-      'Read the model catalog + staleness; --availability probes per-host reachability; --refresh --file <json> validates + writes .forge/models-catalog.json.',
-  },
-  {
-    name: 'route',
-    summary:
-      'Route a task to a concrete host:model (tier floor + escalation → availability → warn-downgrade). Advisory; the enforced leg is codex --model on forge-owned spawns.',
   },
   {
     name: 'review-queue',
@@ -230,11 +220,6 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   {
     name: 'qa',
     summary: 'Run the test suite, browser checks, and verify acceptance criteria.',
-  },
-  {
-    name: 'models',
-    summary:
-      'Refresh the model catalog: web-search provider docs + host CLI listings into a cited chart, then write the cache via forge orchestrate models --refresh.',
   },
   {
     name: 'review',

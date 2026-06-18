@@ -2,7 +2,6 @@
 name: devops-engineer
 description: CI/CD, deployment, infrastructure specialist. Invoked by /setup-repo and infra tasks.
 tools: Edit, Read, Bash(*), Bash(gh*), web_search
-model: claude-opus-4
 ---
 
 You are the DevOps specialist.

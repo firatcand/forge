@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
 import { byteBoundedString } from './byte-bounded.ts';
-import { MODEL_TIERS } from './phases.ts';
 
 const Ts = z.string().datetime();
 const Id = z.string().min(1).max(64);
@@ -96,23 +95,6 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     ts: Ts,
     from_generation: z.number().int().min(0),
     to_generation: z.number().int().min(1),
-  }),
-  // FORGE-210: the route verb records its routing decision (incl. any
-  // warn-downgrade) when called WITH --attempt AND a held lease. Advisory mode
-  // (no --attempt / no lease) leaves the JSON envelope as the only record. R5:
-  // every string field is length-bounded.
-  z.object({
-    type: z.literal('model_routed'),
-    ts: Ts,
-    host: z.string().min(1).max(64),
-    model: z.string().min(1).max(128),
-    // The task's model_tier stamp (the floor), if any.
-    tier_floor: z.enum(MODEL_TIERS).optional(),
-    // The resolved effective tier after escalation (critical-path / retry).
-    tier_effective: z.enum(MODEL_TIERS),
-    downgraded: z.boolean(),
-    // Present only on a downgrade (nothing ≥ floor reachable).
-    warning: byteBoundedString(512).optional(),
   }),
   z.object({
     type: z.literal('guardrail_checked'),

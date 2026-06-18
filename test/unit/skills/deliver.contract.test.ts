@@ -57,7 +57,6 @@ test('AC: body references every required CLI verb', () => {
     'forge orchestrate phases --ready',
     'forge orchestrate second-opinion',
     'forge orchestrate question',
-    'forge orchestrate route',
   ]) {
     assert.ok(md.includes(verb), `skill body must reference '${verb}'`);
   }

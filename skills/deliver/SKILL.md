@@ -60,13 +60,12 @@ is the HEADLESS-orchestrator path. This matters two ways:
   is closed by marking it Done on the tracker, and the shared worktree is removed
   once by `/wrap-up`.
 
-`forge orchestrate route` is **advisory** here (same as in `/drive`): a routing
-hint read per dispatch, not a state transition. Escalation surfaces via
-`AskUserQuestion` (interactive HITL); on a headless run where a dispatched
-attempt exists, `forge orchestrate question` parks it to `/inbox`. Every
-orchestrator state change still goes through a verb; `deliver-state.md` (below) is
-private scratch, not orchestrator state, so writing it honors the skill ↔ verb
-contract.
+Forge does not pin or route models — dispatched subagents inherit the session
+model (the host owns that choice). Escalation surfaces via `AskUserQuestion`
+(interactive HITL); on a headless run where a dispatched attempt exists, `forge
+orchestrate question` parks it to `/inbox`. Every orchestrator state change still
+goes through a verb; `deliver-state.md` (below) is private scratch, not
+orchestrator state, so writing it honors the skill ↔ verb contract.
 
 ## Re-entrancy — resume from durable truth, never redo
 
@@ -224,16 +223,9 @@ b. **One shared worktree, keyed on the LEAD:**
 c. **One plan** (`/plan-task`) covering all batch tickets → **plan pre-opinion**
    (`/second-opinion review-plan`; skipped if `review_host_cli` is null or
    second-opinion is disabled). Fold findings in.
-d. **Implement** (`/implement`) via a cwd-asserted subagent. Route by model
-   (advisory):
-   ```bash
-   forge orchestrate route --task <lead> --json
-   ```
-   Pass `data.model` to the subagent; surface `data.warning` when
-   `data.downgraded`; on `NO_MODEL_AVAILABLE`, escalate rather than silently
-   falling back. (`route` is a hint, not a state change; its `--attempt` is
-   optional — it only gates a best-effort routing event on the headless path —
-   so it is omitted here.)
+d. **Implement** (`/implement`) via a cwd-asserted subagent. Do not pin the
+   subagent's `model` — it inherits the session model (Forge no longer routes
+   models; the host owns that choice).
 e. **Independent gate** — run the project gate yourself (`settings.verify` or
    typecheck + test + lint + build) and `forge orchestrate doctor --scope
    spec-code`. Trust your OWN measured numbers. Then **`/qa`**.

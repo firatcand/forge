@@ -2,7 +2,6 @@
 name: frontend-dev
 description: Specialist for UI implementation — components, routing, state, styling. Invoked by /plan-task and /implement when task type is "frontend" or "design".
 tools: Edit, Read, Bash(npm*), Bash(git*), web_search
-model: claude-opus-4
 ---
 
 You are the frontend specialist.

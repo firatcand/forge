@@ -81,6 +81,12 @@ export interface SkillFarmResult {
   readonly refreshed: readonly string[];
   /** Targets already pointing at the expected source — left alone. */
   readonly skipped: readonly string[];
+  /**
+   * Stale forge-owned farm symlinks removed because their skill/agent is no
+   * longer in the bundle (e.g. a skill deleted in a forge release). Only
+   * provenance-verified forge symlinks are pruned; user content is left alone.
+   */
+  readonly pruned: readonly string[];
   /** Effective mode (after platform detection if not overridden). */
   readonly mode: FarmMode;
   /**
@@ -282,6 +288,7 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
   const created: string[] = [];
   const refreshed: string[] = [];
   const skipped: string[] = [];
+  const pruned: string[] = [];
   const notices: string[] = [];
 
   // Canonicalize cwd and packageRoot — on macOS, /tmp is a symlink to
@@ -299,6 +306,8 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
 
   const skillNames = listBundledSkills(skillsRoot);
   const agentFiles = listBundledAgents(agentsRoot);
+  const skillNameSet = new Set(skillNames);
+  const agentFileSet = new Set(agentFiles);
 
   for (const agent of opts.enabledAgents) {
     const hostDirs = HOST_DIRS[agent];
@@ -327,6 +336,15 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
         });
         pushOutcome(outcome, resolve(cwd, hostDirs.skills, name), created, refreshed, skipped);
       }
+      pruned.push(
+        ...pruneStaleEntries({
+          cwd,
+          destDirRel: hostDirs.skills,
+          bundleRoot: skillsRoot,
+          bundleNames: skillNameSet,
+          dryRun,
+        }),
+      );
     }
 
     const agentsLink = firstSymlinkedComponent(cwd, hostDirs.agents);
@@ -344,10 +362,54 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
         });
         pushOutcome(outcome, resolve(cwd, hostDirs.agents, fileName), created, refreshed, skipped);
       }
+      pruned.push(
+        ...pruneStaleEntries({
+          cwd,
+          destDirRel: hostDirs.agents,
+          bundleRoot: agentsRoot,
+          bundleNames: agentFileSet,
+          dryRun,
+        }),
+      );
     }
   }
 
-  return { created, refreshed, skipped, mode, notices };
+  return { created, refreshed, skipped, pruned, mode, notices };
+}
+
+/**
+ * Remove forge-owned farm symlinks whose skill/agent is no longer in the bundle
+ * (e.g. a skill deleted in a forge release). Mirrors `pruneHostFarm`'s
+ * provenance contract — only entries that are provenance-verified forge symlinks
+ * are removed; user content, `.bak` backups, and current-bundle entries are left
+ * alone. The caller guarantees no path component of `destDirRel` is a symlink
+ * (the FORGE-160 guard runs first), so `rmSync` can never delete through a link.
+ * Copy-mode farms (Windows) carry no provenance signal, so stale copies are
+ * left in place — same limitation as `pruneHostFarm`.
+ */
+function pruneStaleEntries(args: {
+  readonly cwd: string;
+  readonly destDirRel: string;
+  readonly bundleRoot: string;
+  readonly bundleNames: ReadonlySet<string>;
+  readonly dryRun: boolean;
+}): string[] {
+  const removed: string[] = [];
+  const destDir = resolve(args.cwd, args.destDirRel);
+  if (!existsSync(destDir)) return removed;
+  for (const name of readdirSync(destDir)) {
+    if (name.endsWith('.bak')) continue; // applyOne backup — never auto-delete
+    if (args.bundleNames.has(name)) continue; // still in the bundle — handled by applyOne
+    const dest = resolve(destDir, name);
+    // Only forge-created symlinks (target matches the bundled path forge would
+    // compute) are ours to remove — even when that target no longer exists
+    // (a dangling link from a removed skill). User content / foreign symlinks
+    // fail this check and are left alone.
+    if (!isForgeOwnedSymlink(dest, resolve(args.bundleRoot, name))) continue;
+    if (!args.dryRun) rmSync(dest, { recursive: true, force: true });
+    removed.push(`${args.destDirRel}/${name}`);
+  }
+  return removed;
 }
 
 function pushOutcome(
