@@ -23,6 +23,13 @@ src/trackers/footers.ts
 src/secrets-managers/**
 src/core/secrets.ts
 
+# Tripwire injection scanner (FORGE-202) — the deterministic detection engine.
+# Security-sensitive: it scans UNTRUSTED input, redacts secrets out of findings,
+# and is the trust boundary for the future untrusted→prompt path (FORGE-203/204).
+# Same review reasoning as the tracker/secrets adapters: a change here is a
+# /second-opinion auto-trigger.
+src/security/**
+
 # CLI / init flow — touches user files, executes subprocesses.
 src/cli/init/**
 

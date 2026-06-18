@@ -87,6 +87,20 @@ MUST land together with the Tripwire boundary scan for that path. This file is
 the checklist: adding such a path without updating this table + the scan is a
 gate violation.
 
+## Tripwire I1 (FORGE-202) — detection engine landed, report-only
+
+The deterministic injection-detection engine shipped: `src/security/tripwire/`
+(`scanText` + five high-precision rules) plus the standalone read-band
+`forge orchestrate scan` verb. This is **detection only and report-only** — the
+engine never blocks, never emits events, and is **not wired into the renderer**.
+The renderer remains untouched, so the gate verdict above still stands: no
+externally-authorable text reaches the worker prompt today, and the boundary
+scan that actually wraps/scrubs untrusted spans lands **with** the first
+untrusted→prompt adapter (search/browser, FORGE-203/204). The binding guardrail
+above is unchanged. Tripwire **does not** prevent exfiltration — a deterministic
+scanner over input is best-effort detection, not an egress control (see the
+limitations below).
+
 ## Loom code symbols (FORGE-219 / I2b-1) — stored, not rendered
 
 Loom's I2b-1 increment indexes **code symbols** (function/class/method/type
@@ -130,3 +144,15 @@ violation.
   known injection patterns + boundary-wraps untrusted spans; it is best-effort,
   not a proof. Defense-in-depth (least-privilege secrets, sandboxed egress, the
   human merge gate) remains primary.
+- **Unicode-normalization / homoglyph bypasses (I1 limitation).** The I1 rules
+  match on the raw string without NFKC normalization, so a full-width or
+  homoglyph rendering of an injection phrase (e.g. `Ｉｇｎｏｒｅ all previous
+  instructions`) can evade the phrase rules. Zero-width and bidi control
+  characters ARE caught (separate `encoded_payload` finding). Confusable-fold
+  normalization is deferred to the Tier-2 pass (I2); until then this is a known
+  detection gap, not a guarantee.
+- **Encoding coverage (I1 limitation).** `encoded_payload` strict-decodes
+  standard padded base64 and even-length hex, then recursively scans. base64url,
+  unpadded, or multiply-nested encodings may downgrade to `suspicious` (opaque
+  blob) or be missed. Strict decoding is the intended I1 scope to keep the
+  detector deterministic and false-positive-light.
