@@ -4,7 +4,7 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-06-18
+## [0.4.4] - 2026-06-18
 
 ### Removed
 
