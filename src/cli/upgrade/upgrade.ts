@@ -48,7 +48,7 @@ import {
   type AgentKind,
 } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
-import { writeStatusLineConfig } from './host-config.ts';
+import { writeStatusLineConfig, writeTripwireHookConfig } from './host-config.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
 import { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
@@ -592,7 +592,7 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   //     a one-line DISCOVERY notice offers the integration (FORGE_QUIET-
   //     suppressible). The writer itself is non-clobbering + symlink-guarded +
   //     plain-object-guarded (see host-config.ts) and respects dryRun.
-  let discoveryNotice: string | undefined;
+  const discoveryNotices: string[] = [];
   if (validated.hosts.claude.status_line) {
     const res = writeStatusLineConfig({
       ...(opts.hostConfigHomeDir !== undefined ? { homeDir: opts.hostConfigHomeDir } : {}),
@@ -608,9 +608,29 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
     // (NOT gated on changed) so it is idempotent, and kept OUT of `stderr`
     // (see UpgradeResult.discoveryNotice) so it never pollutes the structured,
     // pinned stderr contract. FORGE_QUIET-suppressible.
-    discoveryNotice =
-      'forge: set hosts.claude.status_line: true in .forge/settings.yaml to show a parked-decision badge in Claude Code.';
+    discoveryNotices.push(
+      'forge: set hosts.claude.status_line: true in .forge/settings.yaml to show a parked-decision badge in Claude Code.',
+    );
   }
+
+  // 13. FORGE-202 follow-on: the Tripwire PostToolUse hook host integration.
+  //     Same OPT-IN-ONLY contract as statusLine — gated on
+  //     `settings.hosts.claude.tripwire_hook === true`. When off, a one-line
+  //     discovery notice offers it (FORGE_QUIET-suppressible). The writer is
+  //     idempotent + non-clobber + symlink-guarded (see host-config.ts).
+  if (validated.hosts.claude.tripwire_hook) {
+    const res = writeTripwireHookConfig({
+      ...(opts.hostConfigHomeDir !== undefined ? { homeDir: opts.hostConfigHomeDir } : {}),
+      ...(opts.dryRun ? { dryRun: true } : {}),
+    });
+    notices.push(res.notice);
+  } else if (process.env.FORGE_QUIET !== '1') {
+    discoveryNotices.push(
+      'forge: set hosts.claude.tripwire_hook: true in .forge/settings.yaml to scan untrusted tool/MCP output for prompt-injection in Claude Code.',
+    );
+  }
+
+  const discoveryNotice = discoveryNotices.length > 0 ? discoveryNotices.join('\n') : undefined;
 
   return {
     exitCode: 0,

@@ -188,3 +188,237 @@ export function writeStatusLineConfig(opts: WriteStatusLineOptions = {}): WriteS
     notice: `forge: wrote display-only statusLine (parked-decision badge) into ${settingsPath}.`,
   };
 }
+
+// ── FORGE-202 follow-on: Tripwire PostToolUse hook ──────────────────────────
+//
+// The SECOND thing Forge can write into the user's GLOBAL ~/.claude/settings.json
+// (also opt-in, also OUTSIDE the working tree), so the full safety contract from
+// writeStatusLineConfig is mirrored here: opt-in gated by the caller, plain-
+// object guard, double symlink guard (pre-read + pre-write via symlinkSkip),
+// atomic write, injectable homeDir, never-throw skip contract.
+//
+// DIFFERENCE: `hooks.PostToolUse` is an ARRAY of entries, so the merge is more
+// careful than a single key — see writeTripwireHookConfig.
+
+/** The hook command(s) Forge installs. A LIST so a future rename stays dedupe/
+ * eject-safe: any nested hook whose `command` is in this set is "ours". */
+export const TRIPWIRE_HOOK_COMMANDS: readonly string[] = ['forge tripwire-hook'];
+
+/** The PostToolUse entry Forge appends. Matcher scopes to external-content tools
+ * (the real untrusted external→agent path); Read/Edit/Write of the owner's repo
+ * are trusted per spec/THREAT-MODEL.md. */
+const TRIPWIRE_HOOK_ENTRY = {
+  matcher: 'WebFetch|WebSearch|mcp__.*',
+  hooks: [{ type: 'command', command: 'forge tripwire-hook', timeout: 10 }],
+} as const;
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** True if a PostToolUse array already contains one of our nested hook commands. */
+function hasTripwireEntry(postToolUse: readonly unknown[]): boolean {
+  for (const entry of postToolUse) {
+    if (!isPlainObject(entry)) continue;
+    const nested = entry.hooks;
+    if (!Array.isArray(nested)) continue;
+    for (const h of nested) {
+      if (
+        isPlainObject(h) &&
+        typeof h.command === 'string' &&
+        TRIPWIRE_HOOK_COMMANDS.includes(h.command)
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Read + parse ~/.claude/settings.json with the same guards as the statusLine
+ * writer. Returns the parsed plain object, or a skip result (never throws on the
+ * expected skip paths). `verb` tunes the notice wording (write vs remove).
+ */
+function loadSettingsObject(
+  settingsPath: string,
+  verb: string,
+): { obj: Record<string, unknown> } | WriteStatusLineResult {
+  let raw: string | null = null;
+  if (existsSync(settingsPath)) {
+    try {
+      raw = readFileSync(settingsPath, 'utf8');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { outcome: 'skipped', notice: `forge: skipped ${verb} — could not read ${settingsPath} (${msg}).` };
+    }
+  }
+  let parsed: unknown = {};
+  if (raw !== null && raw.trim().length > 0) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return { outcome: 'skipped', notice: `forge: skipped ${verb} — ${settingsPath} is not valid JSON (left untouched).` };
+    }
+  }
+  if (!isPlainObject(parsed)) {
+    return { outcome: 'skipped', notice: `forge: skipped ${verb} — ${settingsPath} is not a JSON object (left untouched).` };
+  }
+  return { obj: parsed };
+}
+
+/**
+ * Install the Tripwire PostToolUse hook into `<homeDir>/.claude/settings.json`.
+ * Idempotent (dedup by nested command), non-clobbering (preserves all other
+ * hooks/entries + a user-edited matcher/timeout), skip-not-clobber on a
+ * non-object `hooks` or non-array `hooks.PostToolUse`. Never throws on the
+ * expected skip paths.
+ */
+export function writeTripwireHookConfig(opts: WriteStatusLineOptions = {}): WriteStatusLineResult {
+  const home = opts.homeDir ?? homedir();
+  const settingsPath = join(home, '.claude', 'settings.json');
+
+  const preReadSkip = symlinkSkip(home, settingsPath);
+  if (preReadSkip !== null) {
+    return { outcome: 'skipped', notice: preReadSkip.notice.replace('statusLine', 'tripwire-hook') };
+  }
+
+  const loaded = loadSettingsObject(settingsPath, 'writing tripwire-hook');
+  if ('outcome' in loaded) return loaded;
+  const obj = loaded.obj;
+
+  // SKIP-not-clobber: never repair/overwrite a structure we don't understand.
+  const hooksVal = obj.hooks;
+  if (hooksVal !== undefined && !isPlainObject(hooksVal)) {
+    return { outcome: 'skipped', notice: `forge: skipped writing tripwire-hook — ${settingsPath} hooks is not a JSON object (left untouched).` };
+  }
+  const hooks = isPlainObject(hooksVal) ? hooksVal : {};
+  const postVal = hooks.PostToolUse;
+  if (postVal !== undefined && !Array.isArray(postVal)) {
+    return { outcome: 'skipped', notice: `forge: skipped writing tripwire-hook — ${settingsPath} hooks.PostToolUse is not an array (left untouched).` };
+  }
+  const postToolUse: unknown[] = Array.isArray(postVal) ? postVal : [];
+
+  // IDEMPOTENT: already installed (or user kept our command under a custom
+  // matcher/timeout) → leave untouched.
+  if (hasTripwireEntry(postToolUse)) {
+    return { outcome: 'skipped', notice: `forge: ${settingsPath} already installs the tripwire-hook PostToolUse hook — left untouched.` };
+  }
+
+  if (opts.dryRun) {
+    return { outcome: 'dry-run', notice: `forge: would install the tripwire-hook PostToolUse hook into ${settingsPath}.` };
+  }
+
+  const preWriteSkip = symlinkSkip(home, settingsPath);
+  if (preWriteSkip !== null) {
+    return { outcome: 'skipped', notice: preWriteSkip.notice.replace('statusLine', 'tripwire-hook') };
+  }
+
+  const merged = {
+    ...obj,
+    hooks: {
+      ...hooks,
+      PostToolUse: [...postToolUse, { ...TRIPWIRE_HOOK_ENTRY, hooks: [...TRIPWIRE_HOOK_ENTRY.hooks] }],
+    },
+  };
+  try {
+    writeAtomic(settingsPath, `${JSON.stringify(merged, null, 2)}\n`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { outcome: 'skipped', notice: `forge: skipped writing tripwire-hook — ${msg}` };
+  }
+  return { outcome: 'written', notice: `forge: installed the tripwire-hook PostToolUse hook into ${settingsPath}.` };
+}
+
+/**
+ * Remove the Tripwire PostToolUse hook from `<homeDir>/.claude/settings.json` on
+ * eject. Removes ONLY entries whose nested hook command is in
+ * TRIPWIRE_HOOK_COMMANDS, preserving sibling entries + other nested hooks.
+ * Drops now-empty PostToolUse / hooks structures cleanly. Same never-throw +
+ * symlink-guard contract as the writer; a no-op (nothing ours present) is a skip.
+ */
+export function removeTripwireHookConfig(opts: WriteStatusLineOptions = {}): WriteStatusLineResult {
+  const home = opts.homeDir ?? homedir();
+  const settingsPath = join(home, '.claude', 'settings.json');
+
+  if (!existsSync(settingsPath)) {
+    return { outcome: 'skipped', notice: `forge: ${settingsPath} does not exist — no tripwire-hook to remove.` };
+  }
+
+  const preReadSkip = symlinkSkip(home, settingsPath);
+  if (preReadSkip !== null) {
+    return { outcome: 'skipped', notice: preReadSkip.notice.replace('statusLine', 'tripwire-hook') };
+  }
+
+  const loaded = loadSettingsObject(settingsPath, 'removing tripwire-hook');
+  if ('outcome' in loaded) return loaded;
+  const obj = loaded.obj;
+
+  const hooksVal = obj.hooks;
+  if (!isPlainObject(hooksVal)) {
+    return { outcome: 'skipped', notice: `forge: ${settingsPath} has no hooks object — nothing to remove.` };
+  }
+  const postVal = hooksVal.PostToolUse;
+  if (!Array.isArray(postVal)) {
+    return { outcome: 'skipped', notice: `forge: ${settingsPath} has no hooks.PostToolUse array — nothing to remove.` };
+  }
+
+  // Strip our nested hooks from each entry; drop entries left with no hooks.
+  let removedAny = false;
+  const rebuilt: unknown[] = [];
+  for (const entry of postVal) {
+    if (!isPlainObject(entry) || !Array.isArray(entry.hooks)) {
+      rebuilt.push(entry);
+      continue;
+    }
+    const keptHooks = entry.hooks.filter((h) => {
+      const isOurs =
+        isPlainObject(h) && typeof h.command === 'string' && TRIPWIRE_HOOK_COMMANDS.includes(h.command);
+      if (isOurs) removedAny = true;
+      return !isOurs;
+    });
+    if (keptHooks.length === 0) {
+      // Entire entry was ours → drop it (only if it had nested hooks to begin
+      // with; an originally-empty user entry is preserved above via length check).
+      if (entry.hooks.length > 0) continue;
+      rebuilt.push(entry);
+      continue;
+    }
+    rebuilt.push({ ...entry, hooks: keptHooks });
+  }
+
+  if (!removedAny) {
+    return { outcome: 'skipped', notice: `forge: ${settingsPath} has no tripwire-hook entry — nothing to remove.` };
+  }
+
+  if (opts.dryRun) {
+    return { outcome: 'dry-run', notice: `forge: would remove the tripwire-hook PostToolUse hook from ${settingsPath}.` };
+  }
+
+  // Rebuild hooks, dropping now-empty PostToolUse and then a now-empty hooks.
+  const newHooks: Record<string, unknown> = { ...hooksVal };
+  if (rebuilt.length === 0) {
+    delete newHooks.PostToolUse;
+  } else {
+    newHooks.PostToolUse = rebuilt;
+  }
+  const newObj: Record<string, unknown> = { ...obj };
+  if (Object.keys(newHooks).length === 0) {
+    delete newObj.hooks;
+  } else {
+    newObj.hooks = newHooks;
+  }
+
+  const preWriteSkip = symlinkSkip(home, settingsPath);
+  if (preWriteSkip !== null) {
+    return { outcome: 'skipped', notice: preWriteSkip.notice.replace('statusLine', 'tripwire-hook') };
+  }
+
+  try {
+    writeAtomic(settingsPath, `${JSON.stringify(newObj, null, 2)}\n`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { outcome: 'skipped', notice: `forge: skipped removing tripwire-hook — ${msg}` };
+  }
+  return { outcome: 'written', notice: `forge: removed the tripwire-hook PostToolUse hook from ${settingsPath}.` };
+}

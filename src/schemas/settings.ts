@@ -367,6 +367,12 @@ const HostsSchema = z
     claude: z
       .object({
         status_line: z.boolean().default(false),
+        // FORGE-202 follow-on: opt-in (default FALSE) consent gating whether
+        // `forge upgrade` writes a PostToolUse hook into the user's GLOBAL
+        // `~/.claude/settings.json`. The hook (`forge tripwire-hook`) scans
+        // untrusted tool/MCP output for prompt-injection. Default off so a
+        // global-config write NEVER happens without an explicit opt-in.
+        tripwire_hook: z.boolean().default(false),
       })
       .default({}),
   })

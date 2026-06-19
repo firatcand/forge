@@ -1081,7 +1081,32 @@ test('FORGE-197 — hosts block absent → full defaults materialize', () => {
   const result = SettingsSchema.safeParse(MINIMAL);
   assert.equal(result.success, true);
   if (!result.success) return;
-  assert.deepEqual(result.data.hosts, { claude: { status_line: false } });
+  assert.deepEqual(result.data.hosts, { claude: { status_line: false, tripwire_hook: false } });
+});
+
+test('FORGE-202 — hosts.claude.tripwire_hook defaults false', () => {
+  const result = SettingsSchema.safeParse(MINIMAL);
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.hosts.claude.tripwire_hook, false);
+});
+
+test('FORGE-202 — hosts.claude.tripwire_hook accepts true', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    hosts: { claude: { tripwire_hook: true } },
+  });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.hosts.claude.tripwire_hook, true);
+});
+
+test('FORGE-202 — hosts.claude.tripwire_hook rejects non-bool', () => {
+  const result = SettingsSchema.safeParse({
+    ...MINIMAL,
+    hosts: { claude: { tripwire_hook: 'yes' } },
+  });
+  assert.equal(result.success, false);
 });
 
 // ── FORGE-179: audit block ───────────────────────────────────────────────────

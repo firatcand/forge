@@ -509,3 +509,33 @@ test('eject (FORGE-160 farm): recorded entry under symlinked `.claude` proves th
     `expected a farm parent-symlink skip warning, got: ${JSON.stringify(res.warnings)}`,
   );
 });
+
+test('eject: removes the GLOBAL ~/.claude tripwire-hook entry (injected fake home)', () => {
+  const cwd = project();
+  writeManifest(cwd, baseManifest());
+
+  // A fake home with the tripwire-hook installed alongside a user hook.
+  const home = mkdtempSync(join(tmpdir(), 'forge-eject-home-'));
+  mkdirSync(join(home, '.claude'), { recursive: true });
+  writeFileSync(
+    join(home, '.claude', 'settings.json'),
+    JSON.stringify({
+      hooks: {
+        PostToolUse: [
+          { matcher: 'Bash', hooks: [{ type: 'command', command: 'user-post' }] },
+          { matcher: 'WebFetch|WebSearch|mcp__.*', hooks: [{ type: 'command', command: 'forge tripwire-hook', timeout: 10 }] },
+        ],
+      },
+    }),
+    'utf8',
+  );
+
+  const res = eject({ cwd, confirm: true, noBackup: true, hostConfigHomeDir: home });
+  assert.equal(res.exitCode, 0);
+
+  const settings = JSON.parse(readFileSync(join(home, '.claude', 'settings.json'), 'utf8')) as {
+    hooks: { PostToolUse: Array<{ matcher: string }> };
+  };
+  assert.equal(settings.hooks.PostToolUse.length, 1, 'only the user hook remains');
+  assert.equal(settings.hooks.PostToolUse[0]!.matcher, 'Bash');
+});
