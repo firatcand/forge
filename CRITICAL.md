@@ -30,6 +30,13 @@ src/core/secrets.ts
 # /second-opinion auto-trigger.
 src/security/**
 
+# Tripwire PostToolUse hook — the FIRST live consumer of the Tripwire scanner.
+# Parses UNTRUSTED hook stdin (tool/MCP output) and emits model-visible
+# additionalContext. Security-sensitive on both edges: a byte-capped/fail-open
+# stdin parser AND a constants-only warning that must never re-inject any
+# attacker-controlled substring. A change here is a /second-opinion auto-trigger.
+src/cli/tripwire-hook/**
+
 # Search adapters (FORGE-204) — the untrusted-content ingestion boundary.
 # `forge search fetch` is the first path carrying externally-authorable free-form
 # text toward an agent. Security-sensitive: SSRF-hardened HTTP (custom DNS lookup,

@@ -89,7 +89,13 @@ function failNoCommand(version: string): never {
 }
 
 const args = process.argv.slice(2);
-const version = readVersion();
+// FORGE-202 follow-on: `tripwire-hook` is a PostToolUse hook that must be TOTALLY
+// fail-open — it must never throw or emit at startup. readVersion() can throw
+// (no resolvable package.json), and it runs BEFORE the hook's own dispatch+guard
+// below, so skip it for this command. `version` is never consumed on the
+// tripwire-hook path (help/version/no-command are skipped, and the drift/pin
+// pre-hooks + loadForgeEnv + dispatch all early-return for `tripwire-hook`).
+const version = args[0] === 'tripwire-hook' ? '' : readVersion();
 
 // Global --help / --version only fire when they're the first argument.
 // Subcommands (e.g., `forge orchestrate run --help`) keep --help so the
@@ -128,6 +134,27 @@ if (command === 'statusline') {
   }
 }
 
+// FORGE-202 follow-on: dispatch `tripwire-hook` EARLY — like statusline, BEFORE
+// loadForgeEnv and the drift/pin pre-hooks. This verb is a Claude Code
+// PostToolUse hook: it reads untrusted JSON from stdin, scans for prompt-
+// injection, and must NEVER load repo env/settings or emit incidental noise. It
+// is FAIL-OPEN SILENT — any throw here (including a dynamic-import failure)
+// degrades to exit 0 so a crashing hook never destabilizes the host session.
+// The async dispatch returns immediately, so we gate the synchronous pre-hooks
+// below on `command !== 'tripwire-hook'` (and the dispatcher's own guard) so
+// neither drift/pin warnings nor loadForgeEnv ever run for this command.
+if (command === 'tripwire-hook') {
+  void (async () => {
+    try {
+      const { tripwireHookMain } = await import('../cli/tripwire-hook/index.ts');
+      const code = await tripwireHookMain();
+      process.exit(code);
+    } catch {
+      process.exit(0);
+    }
+  })();
+}
+
 // FORGE-153 B8: drift-warning pre-hook. Fires once per CLI invocation when the
 // repo's .forge/.version disagrees with the bundled methodology version.
 // - Suppressed by FORGE_QUIET=1 (matches design §9 contract).
@@ -140,7 +167,7 @@ function maybeWarnDrift(cmd: string): void {
   // "run forge upgrade" mid-migration is noise — migrate IS the fix path.
   // FORGE-197: statusline is dispatched+exited before this hook ever runs;
   // listed here as belt-and-suspenders so a status line is never noisy.
-  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline') return;
+  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline' || cmd === 'tripwire-hook') return;
   if (process.env.FORGE_QUIET === '1') return;
   try {
     const drift = checkVersionDrift({ cwd: process.cwd(), currentVersion: version });
@@ -166,7 +193,8 @@ maybeWarnDrift(command);
 const PIN_READ_MAX_BYTES = 256 * 1024;
 function maybeWarnMethodologyPin(cmd: string): void {
   // FORGE-197: statusline skip — see maybeWarnDrift note above.
-  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline') return;
+  // FORGE-202 follow-on: tripwire-hook skips too (already dispatched above).
+  if (cmd === 'upgrade' || cmd === 'migrate' || cmd === 'statusline' || cmd === 'tripwire-hook') return;
   if (process.env.FORGE_QUIET === '1') return;
   try {
     const settingsPath = resolve(process.cwd(), '.forge/settings.yaml');
@@ -187,6 +215,12 @@ function maybeWarnMethodologyPin(cmd: string): void {
   }
 }
 maybeWarnMethodologyPin(command);
+
+// FORGE-202 follow-on: tripwire-hook was dispatched EARLY (async) above and must
+// NOT load repo env or fall into the command dispatch chain (the trailing
+// `else` would failUnknown it). Skip everything below for it; its IIFE will
+// process.exit when it resolves.
+if (command !== 'tripwire-hook') {
 
 // FORGE per-repo tracker credentials: seed process.env from .forge/.env (if any)
 // before any command dispatches. Allowlisted + no-override; best-effort.
@@ -389,6 +423,8 @@ if (command === 'init') {
 } else {
   failUnknown(command, version);
 }
+
+} // end: if (command !== 'tripwire-hook')
 
 function renderEject(result: EjectResult, confirm: boolean): string {
   const out: string[] = [];

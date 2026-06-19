@@ -50,6 +50,7 @@ import {
   readEnabledHostsFromSettings,
 } from '../manifest.ts';
 import { ROOT_FILE_BY_AGENT } from '../upgrade/index.ts';
+import { removeTripwireHookConfig } from '../upgrade/host-config.ts';
 
 // Task states that mean "this task is still live" — eject refuses while any
 // exists. Everything NOT in this set (shipped/cancelled/failed/abandoned/
@@ -74,6 +75,9 @@ export interface EjectOptions {
   readonly noBackup?: boolean;
   /** Restore a prior eject from its backup directory instead of ejecting. */
   readonly restore?: string;
+  /** Injectable home dir for the GLOBAL ~/.claude host-config reversal (tests
+   * inject a fake home so the real ~/.claude is never touched). */
+  readonly hostConfigHomeDir?: string;
 }
 
 export interface EjectPlanItem {
@@ -154,6 +158,19 @@ export function eject(opts: EjectOptions): EjectResult {
   }
 
   warnings.push(...applyPlan(cwd, manifest, plan));
+
+  // FORGE-202 follow-on: reverse the GLOBAL ~/.claude/settings.json Tripwire hook
+  // host integration (the only thing forge writes OUTSIDE the working tree, so it
+  // is not in the manifest/plan). Removes ONLY our nested PostToolUse hook,
+  // preserving sibling hooks/entries. Never throws (never-throw skip contract);
+  // a no-op (nothing ours present) is silent. A real removal is surfaced.
+  {
+    const res = removeTripwireHookConfig({
+      ...(opts.hostConfigHomeDir !== undefined ? { homeDir: opts.hostConfigHomeDir } : {}),
+    });
+    if (res.outcome === 'written') warnings.push(res.notice);
+  }
+
   // Remove .forge/ wholesale last (covers CONTEXT.md, .version, settings.yaml,
   // orchestrator/, logs/, manifest.json — everything forge owns under .forge/).
   rmSync(forgeDir, { recursive: true, force: true });
