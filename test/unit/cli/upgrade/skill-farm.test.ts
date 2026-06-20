@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -38,6 +39,17 @@ function makeFakePackage(
     writeFileSync(resolve(root, 'agents', `${name}.md`), `# ${name}\nFake agent body.\n`, 'utf8');
   }
   return root;
+}
+
+// lstat-based presence check — `existsSync` returns false for a BROKEN symlink
+// whether or not it's still on disk, so it can't tell "swept" from "dangling".
+function gone(p: string): boolean {
+  try {
+    lstatSync(p);
+    return false;
+  } catch {
+    return true;
+  }
 }
 
 function withTmpDir<T>(fn: (dir: string) => T): T {
@@ -123,7 +135,7 @@ test('applySkillFarm: idempotent — second call with same inputs returns all sk
   });
 });
 
-test('applySkillFarm: replace-if-mismatched — existing symlink with wrong target is backed up and rewritten', () => {
+test('applySkillFarm: replace-if-mismatched — existing symlink with wrong target is rewritten WITHOUT a .bak (FORGE-221)', () => {
   withTmpDir((tmp) => {
     const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
     const cwd = resolve(tmp, 'proj');
@@ -144,23 +156,25 @@ test('applySkillFarm: replace-if-mismatched — existing symlink with wrong targ
 
     assert.equal(result.refreshed.length, 1, 'mismatched link is refreshed');
     assert.equal(result.created.length, 0);
-    // Backup created.
-    assert.ok(existsSync(resolve(cwd, '.claude/skills/forge.bak')), '.bak created');
+    // FORGE-221: the refresh must NOT leave a `.bak` in the skills-discovery dir.
+    assert.equal(
+      existsSync(resolve(cwd, '.claude/skills/forge.bak')),
+      false,
+      'no .bak left behind after refresh',
+    );
     // New link points to bundled skill.
     const newLink = resolve(cwd, '.claude/skills/forge');
     assert.match(readFileSync(resolve(newLink, 'SKILL.md'), 'utf8'), /Fake skill body/);
   });
 });
 
-test('applySkillFarm: replace-if-mismatched — pre-existing .bak is overwritten without crash', () => {
+test('applySkillFarm: replace-if-mismatched — real-file dest is replaced in place, no .bak (FORGE-221)', () => {
   withTmpDir((tmp) => {
     const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
     const cwd = resolve(tmp, 'proj');
     mkdirSync(resolve(cwd, '.claude/skills'), { recursive: true });
 
-    // Stale .bak from a previous refresh.
-    writeFileSync(resolve(cwd, '.claude/skills/forge.bak'), 'old-bak\n');
-    // And a current real-file entry that needs replacing.
+    // A current real-file entry (not a symlink) that needs replacing.
     writeFileSync(resolve(cwd, '.claude/skills/forge'), 'real-file-not-symlink\n');
 
     const result = applySkillFarm({
@@ -171,10 +185,16 @@ test('applySkillFarm: replace-if-mismatched — pre-existing .bak is overwritten
     });
 
     assert.equal(result.refreshed.length, 1);
-    // New .bak holds the most recent pre-refresh state (the real file), not the stale one.
+    // Replaced in place with the forge-owned symlink; no backup created.
+    assert.ok(lstatSync(resolve(cwd, '.claude/skills/forge')).isSymbolicLink(), 'now a symlink');
+    assert.match(
+      readFileSync(resolve(cwd, '.claude/skills/forge/SKILL.md'), 'utf8'),
+      /Fake skill body/,
+    );
     assert.equal(
-      readFileSync(resolve(cwd, '.claude/skills/forge.bak'), 'utf8'),
-      'real-file-not-symlink\n',
+      existsSync(resolve(cwd, '.claude/skills/forge.bak')),
+      false,
+      'no .bak created on real-file replacement',
     );
   });
 });
@@ -798,5 +818,140 @@ test('applySkillFarm: dryRun reports the stale prune without deleting it', () =>
 
     assert.ok(result.pruned.includes('.claude/skills/models'), 'dryRun still reports the prune');
     assert.ok(lstatSync(resolve(cwd, '.claude', 'skills', 'models')).isSymbolicLink(), 'symlink NOT deleted under dryRun');
+  });
+});
+
+// ── FORGE-221: refresh no longer leaves `.bak`; self-heal sweeps orphaned ones ──
+
+test('FORGE-221 — two upgrades with an intervening target change leave ZERO *.bak in the farm', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge', 'plan-task'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+
+    // First upgrade.
+    applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    // Simulate an intervening target change: re-point each farm symlink at a
+    // decoy so the next upgrade sees a mismatch and refreshes (the exact path
+    // that used to mint a `.bak`).
+    const decoy = resolve(tmp, 'decoy');
+    mkdirSync(decoy, { recursive: true });
+    writeFileSync(resolve(decoy, 'SKILL.md'), '# decoy\n');
+    for (const name of ['forge', 'plan-task']) {
+      const p = resolve(cwd, '.claude/skills', name);
+      rmSync(p, { recursive: true, force: true });
+      symlinkSync(decoy, p, 'dir');
+    }
+
+    // Second upgrade — refreshes the mismatched links.
+    const second = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+    assert.equal(second.refreshed.length, 2, 'both mismatched skills refreshed');
+
+    // AC: zero *.bak anywhere in the skills farm.
+    const baks = readdirSync(resolve(cwd, '.claude/skills')).filter((n) => n.endsWith('.bak'));
+    assert.deepEqual(baks, [], `expected no .bak entries; got ${JSON.stringify(baks)}`);
+  });
+});
+
+test('FORGE-221 — self-heal: pre-existing orphaned .bak SYMLINKS (live + broken) are swept on upgrade', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], ['code-reviewer']);
+    const cwd = resolve(tmp, 'proj');
+    const skillsDir = resolve(cwd, '.claude/skills');
+    const agentsDir = resolve(cwd, '.claude/agents');
+    mkdirSync(skillsDir, { recursive: true });
+    mkdirSync(agentsDir, { recursive: true });
+
+    // Live orphaned .bak symlink (the pre-fix refresh artifact, points at a real dir).
+    const oldTarget = resolve(tmp, 'old-skill');
+    mkdirSync(oldTarget, { recursive: true });
+    writeFileSync(resolve(oldTarget, 'SKILL.md'), '# old\n');
+    symlinkSync(oldTarget, resolve(skillsDir, 'audit.bak'), 'dir');
+    // Broken orphaned .bak symlink (target gone) — must also be swept.
+    symlinkSync(resolve(tmp, 'gone'), resolve(skillsDir, 'drive.bak'), 'dir');
+    // Agent-side orphaned .bak symlink.
+    symlinkSync(resolve(tmp, 'gone-agent.md'), resolve(agentsDir, 'old-agent.md.bak'));
+
+    const result = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    for (const rel of ['.claude/skills/audit.bak', '.claude/skills/drive.bak', '.claude/agents/old-agent.md.bak']) {
+      assert.ok(result.pruned.includes(rel), `expected ${rel} in pruned; got ${JSON.stringify(result.pruned)}`);
+    }
+    assert.ok(gone(resolve(skillsDir, 'audit.bak')), 'live .bak symlink swept');
+    assert.ok(gone(resolve(skillsDir, 'drive.bak')), 'broken .bak symlink swept');
+    assert.ok(gone(resolve(agentsDir, 'old-agent.md.bak')), 'agent .bak symlink swept');
+    // The .bak's out-of-tree target is untouched (we unlinked the link, not the target).
+    assert.ok(existsSync(resolve(oldTarget, 'SKILL.md')), '.bak target tree intact');
+  });
+});
+
+test('FORGE-221 — self-heal sweeps .bak SYMLINKS but leaves real-file .bak alone', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    const skillsDir = resolve(cwd, '.claude/skills');
+    mkdirSync(skillsDir, { recursive: true });
+    // Symlink .bak (regenerable) → swept.
+    symlinkSync(resolve(tmp, 'whatever'), resolve(skillsDir, 'audit.bak'), 'dir');
+    // Real-file .bak (may hold user data) → left alone.
+    writeFileSync(resolve(skillsDir, 'notes.bak'), 'user backup\n');
+
+    const result = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    assert.ok(result.pruned.includes('.claude/skills/audit.bak'));
+    assert.ok(gone(resolve(skillsDir, 'audit.bak')), 'symlink .bak swept');
+    assert.ok(existsSync(resolve(skillsDir, 'notes.bak')), 'real-file .bak preserved');
+  });
+});
+
+test('FORGE-221 — self-heal honors dryRun: reports the sweep without deleting', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    const skillsDir = resolve(cwd, '.claude/skills');
+    mkdirSync(skillsDir, { recursive: true });
+    const oldTarget = resolve(tmp, 'old');
+    mkdirSync(oldTarget);
+    writeFileSync(resolve(oldTarget, 'SKILL.md'), '# old\n');
+    symlinkSync(oldTarget, resolve(skillsDir, 'audit.bak'), 'dir');
+
+    const result = applySkillFarm({
+      cwd,
+      packageRoot: pkg,
+      enabledAgents: ['claude'],
+      mode: 'symlink',
+      dryRun: true,
+    });
+
+    assert.ok(result.pruned.includes('.claude/skills/audit.bak'), 'dryRun reports the sweep');
+    assert.ok(lstatSync(resolve(skillsDir, 'audit.bak')).isSymbolicLink(), 'dryRun did NOT delete the .bak symlink');
+  });
+});
+
+test('FORGE-221 — self-heal containment: a .bak under a symlinked .claude escaping the tree is NOT swept', () => {
+  withTmpDir((tmp) => {
+    const pkg = makeFakePackage(resolve(tmp, 'pkg'), ['forge'], []);
+    const cwd = resolve(tmp, 'proj');
+    mkdirSync(cwd, { recursive: true });
+    // Out-of-tree dir with a .bak symlink sentinel inside skills/.
+    const outside = resolve(tmp, 'outside-claude');
+    mkdirSync(resolve(outside, 'skills'), { recursive: true });
+    symlinkSync(resolve(tmp, 'sometarget'), resolve(outside, 'skills', 'audit.bak'), 'dir');
+    // Symlink .claude → outside (escapes the working tree).
+    symlinkSync(outside, resolve(cwd, '.claude'), 'dir');
+
+    const result = applySkillFarm({ cwd, packageRoot: pkg, enabledAgents: ['claude'], mode: 'symlink' });
+
+    // FORGE-160 containment: the .bak under the escaping link must be untouched.
+    assert.ok(
+      lstatSync(resolve(outside, 'skills', 'audit.bak')).isSymbolicLink(),
+      'out-of-tree .bak NOT deleted through the symlinked .claude',
+    );
+    assert.equal(
+      result.pruned.filter((p) => p.includes('.bak')).length,
+      0,
+      'no .bak swept through the escaping link',
+    );
   });
 });
