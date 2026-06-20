@@ -16,9 +16,12 @@
 //
 // Idempotency: replace-if-mismatched. A target that already points at the
 // expected source is left alone; a target that doesn't (different path, real
-// file/dir, broken link) is backed up with `.bak` and replaced. Per the
-// FORGE-156 design ticket — strict-match-bail (FORGE-153 pattern) was rejected
-// as too strict for farm refresh; the user can always recover from a `.bak`.
+// file/dir, broken link) is removed and rewritten in place. FORGE-221: no
+// `.bak` backup is kept — the pre-fix `.bak` rename dumped a duplicate-loading
+// entry into the skills-discovery dir (every host globs `.X/skills/*` and loads
+// `<name>.bak` as a second skill). A symlink holds no data and is regenerable
+// from the bundle; the copy-mode tree is regenerable too. Older `.bak` orphans
+// left by previous forge versions are swept on the next upgrade.
 //
 // Gitignore: the farm directories are gitignored by the shared block in
 // gitignore-block.ts (`/.claude/skills/`, `/.codex/agents/`, etc.) — each
@@ -32,12 +35,11 @@ import {
   readdirSync,
   readlinkSync,
   realpathSync,
-  renameSync,
   rmSync,
   statSync,
   symlinkSync,
 } from 'node:fs';
-import { dirname, relative, resolve } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { firstSymlinkedComponent } from '../../core/symlink-guard.ts';
 import type { AgentKind } from './agent-root-files.ts';
@@ -82,9 +84,11 @@ export interface SkillFarmResult {
   /** Targets already pointing at the expected source — left alone. */
   readonly skipped: readonly string[];
   /**
-   * Stale forge-owned farm symlinks removed because their skill/agent is no
-   * longer in the bundle (e.g. a skill deleted in a forge release). Only
-   * provenance-verified forge symlinks are pruned; user content is left alone.
+   * Stale forge-owned farm symlinks removed: entries whose skill/agent is no
+   * longer in the bundle (e.g. a skill deleted in a forge release), PLUS
+   * orphaned `*.bak` symlinks swept by the FORGE-221 self-heal. Only
+   * provenance-verified forge symlinks and regenerable `.bak` symlinks are
+   * pruned; user content (real files/dirs) is left alone.
    */
   readonly pruned: readonly string[];
   /** Effective mode (after platform detection if not overridden). */
@@ -148,7 +152,8 @@ type ApplyOutcome = 'created' | 'refreshed' | 'skipped';
  *
  * Symlink mode: a target that already points at `src` (via relative path
  * resolution) is left alone. A target that exists as a real file/dir, or a
- * symlink with a different target, is renamed to `<dest>.bak` and replaced.
+ * symlink with a different target, is removed and replaced in place (no `.bak`
+ * — FORGE-221).
  *
  * Copy mode: cheap idempotency check (existence + mtime) would race the
  * source's mtime when forge is re-installed at the same version, producing
@@ -175,15 +180,16 @@ function applyOne(args: ApplyArgs): ApplyOutcome {
         if (current === linkTarget) return 'skipped';
       }
     }
-    // Mismatch — backup then rewrite. A pre-existing `.bak` is removed first
-    // so the rename never fails with EEXIST; the user gets the most recent
-    // pre-refresh state in `.bak`.
+    // Mismatch — replace in place, NO `.bak` (FORGE-221). The old `.bak` rename
+    // left a duplicate-loading entry inside the skills-discovery dir. A symlink
+    // holds no data and is regenerable from the bundle; the copy-mode dest is
+    // regenerable too (maintainer accepted dropping the Windows backup — the
+    // source tree is intact, so a re-run restores it). rmSync on a symlink
+    // removes the link itself, never its target.
     if (!dryRun) {
-      const bak = `${dest}.bak`;
-      if (existsSync(bak) || isBrokenSymlink(bak)) rmSync(bak, { recursive: true, force: true });
-      renameSync(dest, bak);
+      rmSync(dest, { recursive: true, force: true });
+      writeTarget(src, dest, mode, linkTarget);
     }
-    if (!dryRun) writeTarget(src, dest, mode, linkTarget);
     return 'refreshed';
   }
 
@@ -312,6 +318,15 @@ export function applySkillFarm(opts: SkillFarmOptions): SkillFarmResult {
   for (const agent of opts.enabledAgents) {
     const hostDirs = HOST_DIRS[agent];
 
+    // FORGE-221 self-heal: sweep orphaned `*.bak` symlinks left by older forge
+    // versions (the pre-fix refresh renamed mismatched links to `<name>.bak`
+    // inside the skills-discovery dir, so each loaded as a duplicate skill).
+    // Runs for EVERY host regardless of the FORGE-160 guard below (USER CHOICE B)
+    // — but sweepOrphanBak refuses to unlink through a farm dir that resolves
+    // outside the working tree, so the FORGE-160 escape invariant still holds.
+    pruned.push(...sweepOrphanBak({ cwd, destDirRel: hostDirs.skills, dryRun }));
+    pruned.push(...sweepOrphanBak({ cwd, destDirRel: hostDirs.agents, dryRun }));
+
     // FORGE-160 symlink guard. The farm dir (e.g. cursor's `.agents/skills` or
     // `.cursor/agents`, claude's `.claude/skills`/`.claude/agents`) is a
     // directory forge mkdir/symlinks/renames INTO. If ANY component of that dir
@@ -407,6 +422,48 @@ function pruneStaleEntries(args: {
     // fail this check and are left alone.
     if (!isForgeOwnedSymlink(dest, resolve(args.bundleRoot, name))) continue;
     if (!args.dryRun) rmSync(dest, { recursive: true, force: true });
+    removed.push(`${args.destDirRel}/${name}`);
+  }
+  return removed;
+}
+
+/**
+ * FORGE-221 self-heal: remove orphaned `*.bak` symlinks from a farm directory.
+ *
+ * Only entries that are SYMBOLIC LINKS (live or broken) are removed — a symlink
+ * holds no data and is trivially regenerable, so deleting it loses nothing. Real
+ * files/dirs named `*.bak` are left alone (could be user content or a copy-mode
+ * artifact carrying real bytes).
+ *
+ * FORGE-160 containment (USER CHOICE B): this runs even when the host farm dir is
+ * symlink-guarded, so it FIRST verifies the farm dir resolves INSIDE the working
+ * tree. If any path component is a symlink escaping `cwd`, `rmSync` would unlink
+ * through it and delete outside the tree — we skip entirely in that case. The
+ * benign case (a symlinked component that still resolves within `cwd`) is swept.
+ */
+function sweepOrphanBak(args: {
+  readonly cwd: string;
+  readonly destDirRel: string;
+  readonly dryRun: boolean;
+}): string[] {
+  const removed: string[] = [];
+  const destDir = resolve(args.cwd, args.destDirRel);
+  let entries: string[];
+  try {
+    entries = readdirSync(destDir);
+  } catch {
+    return removed; // farm dir absent — nothing to sweep
+  }
+  // Containment guard — never unlink through a farm dir that escapes the tree.
+  const realCwd = canonicalizeIfExists(args.cwd);
+  const realDestDir = canonicalizeIfExists(destDir);
+  if (realDestDir !== realCwd && !realDestDir.startsWith(realCwd + sep)) return removed;
+  for (const name of entries) {
+    if (!name.endsWith('.bak')) continue;
+    const dest = resolve(destDir, name);
+    const st = safeLstat(dest);
+    if (!st || !st.isSymbolicLink()) continue; // real file/dir → leave (may hold data)
+    if (!args.dryRun) rmSync(dest, { force: true });
     removed.push(`${args.destDirRel}/${name}`);
   }
   return removed;
