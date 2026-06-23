@@ -52,6 +52,7 @@ import { writeStatusLineConfig, writeTripwireHookConfig } from './host-config.ts
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
 import { applySkillFarm, locatePackageRoot, pruneHostFarm } from './skill-farm.ts';
+import { ensureProjectContextStub } from './project-context.ts';
 import { locateContextTemplate } from './template-loader.ts';
 import {
   checkVersionDrift,
@@ -492,6 +493,22 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       if (!opts.dryRun) writeAtomic(filePath, updated);
       changed.push(fileName);
     }
+  }
+
+  // 7b. FORGE: ensure the committed project-context stub exists. The root-file
+  //     marker block (step 7) references spec/CONTEXT.md (claude @imports it;
+  //     codex/gemini/cursor point at it), so the import must always resolve —
+  //     even on a repo that predates this change or never ran /ingest-spec.
+  //     CREATE-IF-MISSING only (never overwrites /ingest-spec output) and
+  //     symlink-guarded via the shared helper (skip-with-notice, exit 0).
+  {
+    const stub = ensureProjectContextStub({
+      cwd,
+      projectName: settings.project.name,
+      ...(opts.dryRun ? { dryRun: true } : {}),
+    });
+    if (stub.notice) notices.push(stub.notice);
+    if (stub.changed) changed.push('spec/CONTEXT.md');
   }
 
   // 8. Refresh .gitignore marker block.

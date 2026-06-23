@@ -411,6 +411,11 @@ function buildArtifacts(opts: ScaffoldOptions, vars: TemplateVars): Artifact[] {
     { relPath: 'spec/PRD.md', contents: renderTemplate(templatesDir, 'PRD.template.md', vars) },
     { relPath: 'spec/SPEC.md', contents: renderTemplate(templatesDir, 'SPEC.template.md', vars) },
     { relPath: 'spec/DESIGN.md', contents: renderTemplate(templatesDir, 'DESIGN.template.md', vars) },
+    // FORGE: committed project-context stub. The agent-root marker block @imports
+    // (claude) / points at (codex/gemini/cursor) spec/CONTEXT.md so the project's
+    // "what" auto-loads on any machine after clone. /ingest-spec overwrites this
+    // stub with the real synthesis; the stub guarantees the import never dangles.
+    { relPath: 'spec/CONTEXT.md', contents: renderTemplate(templatesDir, 'CONTEXT.project.template.md', vars) },
     { relPath: 'CRITICAL.md', contents: renderTemplate(templatesDir, 'CRITICAL.template.md', vars) },
     ...rootFileArtifacts,
     { relPath: 'plans/tasks/.gitkeep', contents: '' },

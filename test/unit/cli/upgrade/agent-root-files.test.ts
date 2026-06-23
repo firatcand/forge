@@ -23,6 +23,14 @@ test('buildPrefixBlock: claude includes @import directive', () => {
   assert.match(block, /<!-- <<< forge-managed/);
 });
 
+test('buildPrefixBlock: claude also @imports the project spec (spec/CONTEXT.md)', () => {
+  // The methodology import (.forge/CONTEXT.md) is the "how"; spec/CONTEXT.md is
+  // THIS project's "what" — committed so it travels with a clone. Without this
+  // import a fresh agent gets process but no project context.
+  const block = buildPrefixBlock('claude', { repoUrl: REPO_URL });
+  assert.match(block, /@spec\/CONTEXT\.md/);
+});
+
 test('buildPrefixBlock: claude calls out the first-run approval dialog (A2.5)', () => {
   // A2.5: Claude Code shows a one-time approval prompt the first time it
   // encounters an @-import. If users decline, imports are silently disabled
@@ -46,6 +54,16 @@ test('buildPrefixBlock: gemini uses prose directive (mirrors codex)', () => {
   const block = buildPrefixBlock('gemini', { repoUrl: REPO_URL });
   assert.doesNotMatch(block, /@\.forge/);
   assert.match(block, /read `\.forge\/CONTEXT\.md`/);
+});
+
+test('buildPrefixBlock: codex/gemini prose points at spec/CONTEXT.md (no @import)', () => {
+  // Prose hosts can't @import — they must still mention the committed project
+  // spec so the agent reads it. And they must NOT introduce any @-import.
+  for (const agent of ['codex', 'gemini'] as const) {
+    const block = buildPrefixBlock(agent, { repoUrl: REPO_URL });
+    assert.match(block, /spec\/CONTEXT\.md/, `${agent} must point at spec/CONTEXT.md`);
+    assert.doesNotMatch(block, /@spec/, `${agent} must not use @import for spec`);
+  }
 });
 
 test('buildPrefixBlock: marker block has both open and close markers', () => {
@@ -214,6 +232,14 @@ test('FORGE-160 — buildCursorRuleFile: frontmatter is the FIRST bytes, then ma
 
 test('FORGE-160 — buildPrefixBlock throws for cursor (generic path must not be used)', () => {
   assert.throws(() => buildPrefixBlock('cursor', { repoUrl: REPO_URL }), /buildCursorRuleFile/);
+});
+
+test('cursor preamble points at spec/CONTEXT.md (pointer only — no spec inlined)', () => {
+  const file = buildCursorRuleFile({ repoUrl: REPO_URL }, INLINED);
+  assert.match(file, /spec\/CONTEXT\.md/, 'cursor preamble must point at the project spec');
+  // Only the methodology context is inlined; the project spec is a pointer, not
+  // inlined verbatim (it's project-specific + large).
+  assert.ok(file.includes(INLINED), 'methodology context still inlined');
 });
 
 test('FORGE-160 — writeCursorRuleBody: marker round-trip preserves frontmatter + replaces block', () => {

@@ -24,6 +24,8 @@ interface BootstrapOpts {
   readonly versionOverride?: string;
   /** Skip writing CLAUDE.md / AGENTS.md / GEMINI.md root files (defaults to writing them for enabledAgents). */
   readonly skipRootFiles?: boolean;
+  /** Skip writing the committed spec/CONTEXT.md stub (to exercise upgrade's create-if-missing path). */
+  readonly skipSpecContext?: boolean;
 }
 
 /** Create a temp dir that looks exactly like a freshly-init'd Forge repo at the
@@ -72,6 +74,18 @@ function bootstrap(opts: BootstrapOpts = {}): string {
     }
   }
 
+  // FORGE: a real init scaffolds a committed spec/CONTEXT.md stub (the
+  // @spec/CONTEXT.md import target). Mirror it so "clean repo = no-op" holds;
+  // tests exercising the create-if-missing path delete it explicitly.
+  if (!opts.skipSpecContext) {
+    const stubPath = resolve(import.meta.dirname, '../../../../templates/CONTEXT.project.template.md');
+    mkdirSync(join(cwd, 'spec'), { recursive: true });
+    writeFileSync(
+      join(cwd, 'spec/CONTEXT.md'),
+      readFileSync(stubPath, 'utf8').replace(/\{\{PROJECT_NAME\}\}/g, 'test-project'),
+    );
+  }
+
   // .gitignore with marker block
   writeFileSync(join(cwd, '.gitignore'), applyGitignoreBlock(''));
 
@@ -98,6 +112,45 @@ test('upgrade: no-op on clean repo with matching versions', async () => {
     assert.equal(result.exitCode, 0);
     assert.deepEqual([...result.filesChanged], []);
     assert.equal(result.stderr, '');
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade: creates a missing spec/CONTEXT.md stub (import target must resolve)', async () => {
+  const cwd = bootstrap({ skipSpecContext: true });
+  try {
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.filesChanged.includes('spec/CONTEXT.md'), 'stub reported changed');
+    assert.ok(existsSync(resolve(cwd, 'spec/CONTEXT.md')), 'stub created');
+    assert.match(readFileSync(resolve(cwd, 'spec/CONTEXT.md'), 'utf8'), /\/ingest-spec/);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade: does not overwrite an existing spec/CONTEXT.md', async () => {
+  const cwd = bootstrap();
+  try {
+    const real = '# test-project — Project Context\n\nReal /ingest-spec output.\n';
+    writeFileSync(resolve(cwd, 'spec/CONTEXT.md'), real);
+    const result = await upgrade({ cwd });
+    assert.equal(result.exitCode, 0);
+    assert.ok(!result.filesChanged.includes('spec/CONTEXT.md'), 'populated file untouched');
+    assert.equal(readFileSync(resolve(cwd, 'spec/CONTEXT.md'), 'utf8'), real);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test('upgrade --dry-run: does not write the spec/CONTEXT.md stub', async () => {
+  const cwd = bootstrap({ skipSpecContext: true });
+  try {
+    const result = await upgrade({ cwd, dryRun: true });
+    assert.equal(result.exitCode, 0);
+    assert.ok(result.filesChanged.includes('spec/CONTEXT.md'), 'reported as would-change');
+    assert.ok(!existsSync(resolve(cwd, 'spec/CONTEXT.md')), 'dry-run wrote nothing');
   } finally {
     cleanup(cwd);
   }

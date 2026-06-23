@@ -29,6 +29,7 @@ import { SettingsSchema } from '../../schemas/index.ts';
 import { CLI_VERBS, SLASH_COMMANDS } from '../registry.ts';
 import { buildPrefixBlock, extractPrefixBlock } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
+import { ensureProjectContextStub } from './project-context.ts';
 import { renderContext } from './render-context.ts';
 import { locateContextTemplate } from './template-loader.ts';
 import { readBundledMethodologyVersion } from './version-check.ts';
@@ -260,6 +261,7 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
       };
     }
   }
+  let projectName = '';
   try {
     const raw = yamlParse(readFileSync(settingsPath, 'utf8')) as unknown;
     const parsed = SettingsSchema.safeParse(raw);
@@ -272,6 +274,7 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
         stderr: `forge upgrade --migrate-claudemd: invalid .forge/settings.yaml — ${path}: ${firstIssue?.message ?? 'schema validation failed'}`,
       };
     }
+    projectName = parsed.data.project.name;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return {
@@ -355,6 +358,11 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
       'CLAUDE.md',
       '.forge/.version',
     ];
+    // The migrated CLAUDE.md carries the @spec/CONTEXT.md import; surface the
+    // stub create-if-missing so dry-run mirrors the real write set.
+    if (ensureProjectContextStub({ cwd, projectName, dryRun: true }).changed) {
+      wouldChange.push('spec/CONTEXT.md');
+    }
     const currentGi = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : '';
     if (applyGitignoreBlock(currentGi) !== currentGi) wouldChange.push('.gitignore');
     return {
@@ -398,6 +406,12 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
   writeAtomic(claudePath, newClaude);
   changed.push('CLAUDE.md');
 
+  // The new CLAUDE.md @imports spec/CONTEXT.md; ensure that target exists so the
+  // import never dangles after migration. Create-if-missing + symlink-guarded
+  // (skip-with-notice, never overwrites /ingest-spec output).
+  const stub = ensureProjectContextStub({ cwd, projectName });
+  if (stub.changed) changed.push('spec/CONTEXT.md');
+
   writeAtomic(versionPath, `${bundledVersion}\n`);
   changed.push('.forge/.version');
 
@@ -414,9 +428,10 @@ export async function migrateClaudemd(opts: MigrateOptions): Promise<MigrateResu
     stderr: [
       'forge upgrade --migrate-claudemd: migrated CLAUDE.md → split layout.',
       '  Original saved to CLAUDE.md.pre-migration.bak (gitignored once `/.bak` lands in .gitignore).',
-      '  Tracked (commit these):  CLAUDE.md, .gitignore',
+      '  Tracked (commit these):  CLAUDE.md, .gitignore, spec/CONTEXT.md',
       '  Gitignored (do NOT commit; regenerated per dev by `forge upgrade`):  .forge/CONTEXT.md, .forge/.version',
       '  Other devs run `forge upgrade` after pulling to materialize their own .forge/CONTEXT.md + .forge/.version.',
+      ...(stub.notice ? [`  ${stub.notice}`] : []),
     ].join('\n'),
   };
 }
