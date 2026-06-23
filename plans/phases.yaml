@@ -3,8 +3,9 @@ gate_check_command: npm run typecheck && npm run test && npm run build
 source:
   tracker: linear
   project_id: 768871a9-7f95-4bd8-a5da-2ab1b290753a
-  synced_at: 2026-06-11T23:39:57.832Z
-  spec_revision: d9919008a9514bbde992fd3f4854fbbaf177a4c6
+  synced_at: 2026-06-23T05:06:53.481Z
+  spec_revision: 189389c40d9cb37af50981e338736ac95da9d9d7
+  tracker_revision: linear:2026-06-23T05:06:53.481Z
 phases:
   - id: phase-2.5
     name: Closed-loop workflow control
@@ -643,18 +644,6 @@ phases:
           - npm ci (or pnpm/yarn by lockfile) runs after hydration when package.json exists
           - A failing install is reported but does not fatal the pickup
           - Step-7 output mentions deps were installed (or failed)
-      - id: P5-T03
-        tracker_issue_id: FORGE-71
-        title: Grant learning-curator Glob and LS tools
-        description: agents/learning-curator.md declares only Read/Write/Edit so it cannot enumerate docs/learnings/ and falsely returns none-found. Add Glob and LS to its tool allowlist so the documented search step works for the recall and dedup paths.
-        type: skill
-        priority: P2
-        depends_on: []
-        estimate: S
-        owner_type: backend-dev
-        acceptance:
-          - /pickup-task on a tagged task lists 1-5 real learnings (not none-found)
-          - Ranking reflects task tags (orchestrator task surfaces concurrency/file-write learnings)
       - id: P5-T04
         tracker_issue_id: FORGE-83
         title: "[hardening] Enforce UTF-8 byte caps on string fields in attempt/verdict schemas (M1 from FORGE-78 review)"
@@ -789,18 +778,6 @@ phases:
         acceptance:
           - Replace copyFileSync with an O_NOFOLLOW open+read+write (or equivalent re-lstat)
           - "Test: TOCTOU fixture swaps file->symlink mid-hydration; asserts SYMLINK_REJECTED or ELOOP"
-      - id: P5-T15
-        tracker_issue_id: FORGE-144
-        title: Produce Forge and Roster launch videos
-        description: "Launch Forge and Roster via a video-first approach on personal brand channels: per product show how it works, the workflows enabled and outcomes, with a HypeGen/Remotion animation layer. Resolve open questions (combined vs per-product, animation stack, length, distribution, sequencing) then break into script/storyboard/animation/edit/publish sub-tasks."
-        type: content
-        priority: P2
-        depends_on: []
-        estimate: L
-        owner_type: design-engineer
-        acceptance:
-          - Resolve the open questions (combined vs per-product, animation stack, format, distribution, sequencing)
-          - Break into sub-tasks and produce a launch video per product
       - id: P5-T16
         tracker_issue_id: FORGE-149
         title: "[FORGE-22 followup] Opt-in JSON warning surface for phases --ready / status (auto-gc visibility)"
@@ -827,19 +804,6 @@ phases:
           - New names work end-to-end; old names still work with a once-per-session deprecation warning
           - forge doctor flags the old codex.* schema; snapshot tests cover both shapes
           - Adopter docs reference the new names
-      - id: P5-T18
-        tracker_issue_id: FORGE-155
-        title: Add upgrade exit-2 dirty-tree and lease guard
-        description: "Add exit code 2 to forge upgrade: refuse refresh on a dirty working tree or an active worker lease, with --force overriding both. The lease half needs a design memo first (what counts as active, stale-lease handling, worktree locality, malformed-lease behavior, --force symmetry). Same .bak semantics as exit 1."
-        type: backend
-        priority: P2
-        depends_on: []
-        estimate: M
-        owner_type: backend-dev
-        acceptance:
-          - Design memo answering the 5 lease-semantics questions, approved before code
-          - Dirty tree -> exit 2; --force -> 0; clean tree + active lease -> exit 2; --force per memo
-          - Exit code 2 registered in the upgrade exit-code matrix with integration tests
       - id: P5-T19
         tracker_issue_id: FORGE-160
         title: Cursor host adopter — `.cursor/rules/` integration
@@ -962,3 +926,73 @@ phases:
           - src/cli/eject/**
           - src/cli/init/**
           - test/unit/**
+      - id: P5-T28
+        tracker_issue_id: FORGE-222
+        title: Allow claude in review_host_cli settings and init
+        description: Enable claude as a first-class agents.review_host_cli value in public settings and init answers. Keep review_host_cli:null unchanged, preserve the review-host-must-differ-from-primary invariant, keep Gemini gated behind FORGE_GEMINI_EXPERIMENTAL, and keep Cursor excluded from review hosts.
+        type: data
+        priority: P1
+        depends_on: []
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - REVIEW_HOSTS and settings/init schemas accept claude | codex | gemini
+          - review_host_cli:null behavior remains unchanged
+          - review_host_cli must still differ from primary_host_cli
+          - Gemini experimental gating remains unchanged
+          - Cursor remains excluded as a review host
+          - Init default for primary claude remains review codex; primary codex defaults review claude
+        write_globs:
+          - src/schemas/**
+          - src/cli/init/**
+          - test/unit/settings.schema.test.ts
+          - test/unit/cli/init.prompts.test.ts
+      - id: P5-T29
+        tracker_issue_id: FORGE-223
+        title: Implement Claude CLI runReview for /second-opinion
+        description: Implement Claude CLI-backed second-opinion review execution. ClaudeHarness.runReview should invoke claude -p --output-format text --no-session-persistence, pass the review prompt as argv, pass the diff via stdin, avoid permission/tool override flags, and parse fenced ReviewVerdict JSON with host:"claude" through the existing verdict parser.
+        type: backend
+        priority: P1
+        depends_on:
+          - P5-T28
+        estimate: M
+        owner_type: backend-dev
+        acceptance:
+          - ClaudeHarness.runReview invokes claude -p --output-format text --no-session-persistence
+          - Review prompt is passed as argv and diff is passed via stdin
+          - No permission/tool override flags are passed; Claude uses default tools and default permission behavior
+          - Fenced ReviewVerdict JSON with host:"claude" parses through the existing verdict parser
+          - ClaudeHarness.dispatchSubagent still requires an in-session spawnSubagent callback
+          - createHarness("claude") supports review construction with spawnSubprocess only
+        write_globs:
+          - src/harnesses/**
+          - src/cli/orchestrate/second-opinion.ts
+          - test/unit/harnesses/**
+          - test/unit/cli/orchestrate/second-opinion.test.ts
+          - test/integration/cli/orchestrate-second-opinion.test.ts
+      - id: P5-T30
+        tracker_issue_id: FORGE-224
+        title: Update review composition, docs, and verification for Claude review host
+        description: Update review composition policy, docs, and verification around Claude as a review host. Accept Claude second-opinion verdicts when the primary host differs, reject same-host primary/second pairs, and update /second-opinion docs, CRITICAL.md, registry summaries, and relevant spec prose.
+        type: docs
+        priority: P1
+        depends_on:
+          - P5-T28
+          - P5-T29
+        estimate: S
+        owner_type: backend-dev
+        acceptance:
+          - Review composition accepts host:"claude" as a second opinion when primary host differs
+          - Same-host primary/second verdict pairs are rejected, including claude + claude
+          - /second-opinion docs, CRITICAL.md, registry summaries, and relevant spec prose no longer say Claude cannot review
+          - Docs note Claude review uses non-interactive claude -p with default permission behavior
+          - Typecheck, lint, tests, and build pass
+        write_globs:
+          - src/orchestrator/review-compose.ts
+          - src/cli/orchestrate/review-compose.ts
+          - src/cli/registry.ts
+          - skills/second-opinion/SKILL.md
+          - CRITICAL.md
+          - spec/SPEC.md
+          - test/unit/orchestrator/**
+          - test/unit/cli/orchestrate/review-compose-verb.test.ts
