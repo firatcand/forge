@@ -63,6 +63,14 @@ dist/
   assert.ok(result.includes('!/.forge/my-custom-thing'), 'user exception survives');
 });
 
+test('applyGitignoreBlock: never ignores docs/learnings (learnings must stay tracked/portable)', () => {
+  // Compound learnings travel with the repo so a fresh clone reproduces the
+  // origin machine's accumulated context. Forge must never scaffold a
+  // docs/learnings ignore into any repo's marker block.
+  const result = applyGitignoreBlock('node_modules\n');
+  assert.doesNotMatch(result, /docs\/learnings/, 'docs/learnings must not be ignored by the forge block');
+});
+
 test('hasGitignoreBlock: true when marker present, false when absent', () => {
   assert.equal(hasGitignoreBlock(''), false);
   assert.equal(hasGitignoreBlock('node_modules\n'), false);

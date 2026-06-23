@@ -50,7 +50,10 @@ tmp/
 # (verified by a CI npm-pack gate). DO NOT re-add spec files here.
 /plans/tasks/*.plan.md
 /plans/tasks/*.investigation.md
-/docs/learnings/**
+# docs/learnings/ is TRACKED so compound learnings travel between machines/clones
+# (a fresh clone reproduces the origin machine's accumulated context). Excluded
+# from the published npm tarball via package.json#files allowlist + the CI
+# npm-pack gate (docs/ is a FORBIDDEN_PREFIX). DO NOT re-add it here.
 
 # >>> forge-managed (do not edit between markers) >>>
 /.forge/*

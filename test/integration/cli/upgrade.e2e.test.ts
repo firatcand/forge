@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execa } from 'execa';
@@ -50,6 +50,18 @@ function bootstrapInitdRepo(opts: { enabled?: AgentKind[]; primary?: AgentKind; 
       buildPrefixBlock(agent, { repoUrl: FORGE_REPO_URL }),
     );
   }
+  // FORGE: a real init now scaffolds a committed spec/CONTEXT.md stub (the
+  // @spec/CONTEXT.md import target). Mirror that here so "clean repo = no-op"
+  // holds — without it, upgrade's create-if-missing step would report it changed.
+  mkdirSync(join(cwd, 'spec'), { recursive: true });
+  writeFileSync(
+    join(cwd, 'spec/CONTEXT.md'),
+    readFileSync(resolve(repoRoot, 'templates/CONTEXT.project.template.md'), 'utf8').replace(
+      /\{\{PROJECT_NAME\}\}/g,
+      'test-project',
+    ),
+  );
+
   writeFileSync(join(cwd, '.gitignore'), applyGitignoreBlock(''));
 
   // FORGE-156: pre-create the skill farm so "no-op on clean repo" tests
@@ -146,6 +158,38 @@ test('e2e: forge upgrade is a no-op on a clean repo', async () => {
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout.trim(), '', `expected no "changed:" output, got: ${result.stdout}`);
+});
+
+test('e2e: forge upgrade creates a missing spec/CONTEXT.md stub and wires the @import', async () => {
+  // Simulate a repo that predates the spec-autoload change (or never ran
+  // /ingest-spec): delete the stub, then upgrade. The marker block @imports
+  // spec/CONTEXT.md, so upgrade must materialize the target so it never dangles.
+  const cwd = bootstrapInitdRepo();
+  rmSync(join(cwd, 'spec/CONTEXT.md'));
+
+  const first = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+  assert.equal(first.exitCode, 0);
+  assert.match(first.stdout, /changed: spec\/CONTEXT\.md/, 'stub should be created');
+  assert.ok(existsSync(join(cwd, 'spec/CONTEXT.md')), 'spec/CONTEXT.md exists after upgrade');
+  const stub = readFileSync(join(cwd, 'spec/CONTEXT.md'), 'utf8');
+  assert.match(stub, /\/ingest-spec/);
+  // The claude root file imports the project spec.
+  assert.match(readFileSync(join(cwd, 'CLAUDE.md'), 'utf8'), /@spec\/CONTEXT\.md/);
+
+  // Idempotent: a second upgrade does not touch it (create-if-missing only).
+  const second = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+  assert.equal(second.exitCode, 0);
+  assert.equal(second.stdout.trim(), '', `second upgrade should be a no-op, got: ${second.stdout}`);
+});
+
+test('e2e: forge upgrade never overwrites a populated spec/CONTEXT.md', async () => {
+  const cwd = bootstrapInitdRepo();
+  const real = '# test-project — Project Context\n\nReal synthesized content from /ingest-spec.\n';
+  writeFileSync(join(cwd, 'spec/CONTEXT.md'), real);
+
+  const result = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+  assert.equal(result.exitCode, 0);
+  assert.equal(readFileSync(join(cwd, 'spec/CONTEXT.md'), 'utf8'), real, 'user content preserved');
 });
 
 test('e2e: forge upgrade --dry-run reports without writing', async () => {

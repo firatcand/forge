@@ -49,6 +49,7 @@ test('scaffoldProject writes all expected artefacts', () => {
     'spec/PRD.md',
     'spec/SPEC.md',
     'spec/DESIGN.md',
+    'spec/CONTEXT.md',
     'CRITICAL.md',
     'CLAUDE.md',
     'plans/tasks/.gitkeep',
@@ -57,6 +58,16 @@ test('scaffoldProject writes all expected artefacts', () => {
     assert.ok(existsSync(resolve(cwd, f)), `expected ${f}`);
   }
   assert.ok(result.written.includes('.gitignore'));
+});
+
+test('scaffold writes a committed spec/CONTEXT.md stub that points at /ingest-spec', () => {
+  // The agent-root marker block @imports / points at spec/CONTEXT.md, so the
+  // import target must exist on a fresh init even before /ingest-spec runs.
+  const cwd = tmp();
+  scaffoldProject({ cwd, answers: fixtureAnswers(), templatesDir, isoDate: '2026-05-12' });
+  const stub = readFileSync(resolve(cwd, 'spec/CONTEXT.md'), 'utf8');
+  assert.match(stub, /# sample-app — Project Context/, 'PROJECT_NAME substituted');
+  assert.match(stub, /\/ingest-spec/, 'stub directs the user to /ingest-spec');
 });
 
 test('scaffold writes a .forge/.env credentials seed with the allowlisted keys', () => {

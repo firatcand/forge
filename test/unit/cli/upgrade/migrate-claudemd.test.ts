@@ -97,6 +97,13 @@ test('migrateClaudemd: happy path — v0.4 fixture → split layout', async () =
     assert.match(newClaude, /<!-- >>> forge-managed/, 'new CLAUDE.md should have open marker');
     assert.match(newClaude, /<!-- <<< forge-managed/, 'new CLAUDE.md should have close marker');
     assert.match(newClaude, /@\.forge\/CONTEXT\.md/, 'new CLAUDE.md should have @import directive');
+    assert.match(newClaude, /@spec\/CONTEXT\.md/, 'new CLAUDE.md should @import the project spec');
+
+    // The @spec/CONTEXT.md import target is materialized so it never dangles.
+    const specStub = join(cwd, 'spec/CONTEXT.md');
+    assert.ok(existsSync(specStub), 'migration creates spec/CONTEXT.md stub');
+    assert.match(readFileSync(specStub, 'utf8'), /\/ingest-spec/, 'stub points at /ingest-spec');
+    assert.ok(result.filesChanged.includes('spec/CONTEXT.md'), 'spec/CONTEXT.md in filesChanged');
 
     // Each stripped methodology heading is GONE from new CLAUDE.md
     for (const heading of METHODOLOGY_HEADINGS) {
