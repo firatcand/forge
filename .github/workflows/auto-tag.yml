@@ -29,7 +29,14 @@ permissions:
   id-token: write
 
 concurrency:
-  group: auto-tag-${{ github.ref }}
+  # Key on the commit SHA, NOT the branch: serializing all main pushes would let
+  # a third queued run supersede a second (cancel-in-progress is false, but only
+  # the latest PENDING run survives), so a rapid intermediate version bump could
+  # be skipped and never tagged. Per-SHA only dedups re-runs of the same commit;
+  # distinct merges run independently. Double-publish of one version is still
+  # prevented by the tag-absence gate, release.yml's per-tag concurrency, and
+  # npm's refusal to republish an existing version.
+  group: auto-tag-${{ github.sha }}
   cancel-in-progress: false
 
 jobs:

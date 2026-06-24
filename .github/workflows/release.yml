@@ -43,8 +43,11 @@ permissions:
   id-token: write    # required by --provenance
 
 concurrency:
-  # Serialize publishes per-tag so a re-pushed tag can't race itself.
-  group: release-${{ inputs.tag || github.ref }}
+  # Serialize publishes per-tag so a re-pushed tag can't race itself. Both paths
+  # resolve to the bare tag (e.g. v0.4.5): github.ref_name strips refs/tags/ on
+  # the push path, and inputs.tag is already bare on the workflow_call path — so
+  # the two paths share one key for the same tag.
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
