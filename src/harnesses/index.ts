@@ -26,7 +26,7 @@ import { ClaudeHarness, type ClaudeSpawnSubagent } from './claude.ts';
 import { CodexHarness } from './codex.ts';
 import { GeminiHarness } from './gemini.ts';
 import { CursorHarness } from './cursor.ts';
-import { HarnessError, type HarnessHost, type IHarness } from './base.ts';
+import { type HarnessHost, type IHarness } from './base.ts';
 import type { SpawnSubprocess } from './subprocess.ts';
 
 export interface CreateHarnessOpts {
@@ -47,19 +47,13 @@ export function createHarness(
 ): IHarness {
   switch (host) {
     case 'claude':
-      if (!opts.spawnSubagent) {
-        // /review B2: typed error so isHarnessError() narrows correctly
-        // across the entire harness boundary; matches the message of the
-        // ClaudeHarness ctor itself, which throws the same code when an
-        // adopter constructs ClaudeHarness directly without a callback.
-        throw new HarnessError(
-          'CALLBACK_MISSING',
-          'claude',
-          'createHarness("claude") requires opts.spawnSubagent — see ClaudeHarness docstring.',
-        );
-      }
+      // FORGE-223: Claude can be built as a REVIEW-only harness with just
+      // spawnSubprocess (runReview path) — no spawnSubagent required. The
+      // dispatch path still needs the callback, enforced at call time in
+      // ClaudeHarness.dispatchSubagent (CALLBACK_MISSING), not here.
       return new ClaudeHarness({
         spawnSubagent: opts.spawnSubagent,
+        spawnSubprocess: opts.spawnSubprocess,
         env: opts.env,
       });
     case 'codex':
