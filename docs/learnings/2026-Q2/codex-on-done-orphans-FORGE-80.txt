@@ -1,0 +1,871 @@
+Reading additional input from stdin...
+OpenAI Codex v0.130.0
+--------
+workdir: /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR, /Users/firatcandogan/.codex/memories]
+reasoning effort: none
+reasoning summaries: none
+session id: 019e309c-3f8f-7c73-b90b-44f3a3d46d15
+--------
+user
+You are giving a second opinion on an architectural fork in the forge repo. Forge is a TypeScript framework that orchestrates autonomous engineering tasks across host CLIs (Claude Code, Codex). It abstracts trackers (Linear, GitHub, Notion) behind a `Tracker` interface. This is a small but real design call — be concrete and brief.
+
+## Context
+
+- Worktree: /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+- Task: FORGE-80 — rewrite `/sync-status` to do two things:
+  1. Phase-completion suggestion: for each `active` phase in `plans/phases.yaml`, if all task `tracker_issue_id`s are `Done` in tracker, suggest `/phase-gate <id>` (NEVER auto-advance).
+  2. Orphan tracker issues: issues that exist in tracker but have no matching `tracker_issue_id` in `phases.yaml`.
+- Acceptance criteria includes: "Single `Tracker.listActiveIssues()` call (no N+1 — same constraint as FORGE-20)" and "No new write paths to phases.yaml (read-only diagnostic)".
+
+## The contradiction (the question)
+
+The Linear issue body gives this concrete example of orphan output:
+
+```
+Orphan tracker issues (in tracker, not in phases.yaml):
+  - FORGE-61  Done    "Motion → Notion correction (rename + MCP pattern)"
+  - FORGE-69  Done    "Question channel atomic-write hardening (Codex review)"
+2 orphan(s) — review whether to backfill or treat as historical.
+```
+
+Both example orphans are `Done`. But:
+
+- `src/trackers/linear.ts:521-551` — `listActiveIssues()` calls Linear API with `stateTypes: ['triage', 'backlog', 'unstarted', 'started']`. Done is excluded.
+- `src/trackers/github.ts:237-286` — `listActiveIssues()` calls `gh issue list --state open`. Done (closed) excluded.
+- `src/trackers/notion.ts:521-590` — same pattern; non-Done only.
+- `src/trackers/base.ts:22-38` — `Tracker` interface only exposes `listActiveIssues()`. No other read verb returns Done issues.
+
+So a single `listActiveIssues()` call **cannot** surface the Done orphans the example shows. The AC is internally inconsistent.
+
+## Three options being considered
+
+**(A) Live orphans only.** Single `listActiveIssues()` call. Surface only non-Done orphans. Treat the FORGE-61/69 example in the issue body as illustrative (they were Done by the time the example was written but were probably non-Done when surfacing would have mattered). File a follow-up if Done-orphan visibility is needed later.
+
+- Pros: Respects the AC's "single call, no N+1" constraint literally. Zero changes to Tracker abstraction. No impact on FORGE-76 (LinearTracker rewrite, in flight).
+- Cons: The two real-world examples in the spec wouldn't appear.
+
+**(B) Extend `Tracker` with `listAllProjectIssues(): Promise<Issue[]>`.** New abstract method on `BaseTracker`. Linear drops `stateTypes`; GitHub uses `--state all`; Notion drops the status filter. `/sync-status` calls this instead of `listActiveIssues()`. Surfaces Done orphans correctly.
+
+- Pros: 10/10 completeness, matches the spec example perfectly.
+- Cons: Cross-cuts 3 adapters + base. FORGE-76 worktree is mid-flight rewriting `LinearTracker.claim()` — would force a rebase. Adds an interface method that *only* `/sync-status` uses, which is a smell. Linear/GitHub return way more data this way (full project history).
+
+**(C) Opt-in `--include-done` flag.** Default = single call (option A). Flag = second call to a new `listAllProjectIssues()`. So you still pay the cost of option B's abstraction expansion, but only when invoked.
+
+- Pros: Default-path stays O(1) calls. Power-user can see Done orphans.
+- Cons: Same abstraction expansion as B, with extra flag-handling and two code paths.
+
+## Files to read before answering
+
+- `/Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md` — full v2 architecture. Pay attention to §CLI surface for FORGE-20 verb design constraints, especially the `forge orchestrate next` readiness algorithm (added 2026-05-15 post-Codex consult). It establishes a strong precedent: **dependency/graph reasoning belongs in phases.yaml + local logic; tracker is the status authority only.** Same kind of question here.
+- `/Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/base.ts` — current Tracker interface.
+- `/Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/linear.ts` (lines 521-551) — `listActiveIssues` impl.
+- `/Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/github.ts` (lines 237-286) — same.
+- `/Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md` — §gc reconciliation rules. The gc divergence table (FORGE-22) may already cover Done-orphan visibility differently.
+
+## What I want from you
+
+Answer these in order, with confidence 1-10 on each:
+
+1. **Which option (A, B, or C)?** Ground your pick in the FORGE-20 precedent (phases.yaml owns graph reasoning, tracker owns status only) and the cost of expanding the Tracker abstraction for one consumer.
+
+2. **Is the AC actually contradictory, or am I misreading?** Quote the relevant lines if there's a way to satisfy both literally that I'm missing.
+
+3. **Does the gc divergence table in ORCHESTRATOR.md (FORGE-22) already cover Done-orphan visibility from a different angle?** If yes, that strengthens (A) because the concern is addressed elsewhere.
+
+4. **Any third-rail risks** you see — things that would make (A) actively wrong, not just less complete? For example: does any other planned task (FORGE-22 gc, FORGE-79 file-glob, FORGE-74 dispatch skill) depend on `/sync-status` exposing Done orphans?
+
+Under 600 words total. Be direct. Cite file:line where relevant.
+codex
+I’ll read the architecture doc and the tracker interface/implementations first, then answer as a design review rather than speculate from the summary.
+exec
+/bin/zsh -lc 'rg -n "FORGE-20|forge orchestrate next|listActiveIssues|gc|divergence|orphan|Done|tracker owns|status authority|phases.yaml" spec/ORCHESTRATOR.md' in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+5:> Scope: contract for the orchestrator subsystem (Phase 2 tasks FORGE-20, FORGE-21, FORGE-31, FORGE-32, FORGE-22, FORGE-65).
+12:forge's orchestrator turns the dependency graph in `phases.yaml` into shipped PRs, with a human in the loop on architectural decisions and autonomy on tactical ones. It is structured as three layers:
+14:1. **Control plane** — the `forge` CLI. Stateless on-demand commands that own durable state on disk: task/attempt/run state machines, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation. Source of truth.
+30:| **CLI control plane** | State machine, leases, atomic file ops, tracker CAS, schema validation, gc reconciliation, status snapshots, event log | `src/cli/orchestrate/*.ts`, `src/orchestrator/state/*.ts`, `src/orchestrator/leases/*.ts` |
+54:| `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ | ✅ create/remove on dispatch/gc |
+81:The index is written atomically on every `forge orchestrate question` and `answer`. If the index is corrupted or out-of-sync (detectable via the global event log on next gc pass), it is fully rebuilt from the task tree — the canonical store is per-task; the index is derivable.
+88:forge orchestrate next [--limit N]                                  # claim & return ready tasks
+101:forge orchestrate gc [--dry-run] [--run <run-id>]                   # reconciliation pass
+200:Run lifecycle is light: `active` (heartbeating) → `quiesced` (no active workers) → `archived` (gc'd after retention window). The CLI tracks runs to scope ownership of leases and to bound gc behavior.
+233:`forge orchestrate next` is the only operation that can steal an expired lease:
+294:- gc operates on tasks, not runs.
+310:| Cleanup | All cleanup is gated through `forge orchestrate gc` (see "gc reconciliation rules"). No background reaper. |
+312:**Durability contract.** `fsync(fd)` before `link` protects readers from torn writes under crash-free I/O. It is **not** a power-loss-durability guarantee for the placement: after `link(tmp, target)` returns, a sudden host crash before the parent directory's dirent is persisted can lose the placement. We deliberately do not `fsync` the parent directory on every write — the CLI reconciles state from the tracker + filesystem on every `gc` pass, so a lost placement degrades to "the gc reports a divergence and offers a resolution," not data corruption. Adopters with stricter durability requirements should mount `.forge/` on a journaled filesystem (ext4 `data=journal`, ZFS, APFS with `sync` mount). See `docs/learnings/2026-Q2/link-vs-rename-for-never-overwrite-invariant.md`.
+358:Append-only structured JSONL with every CLI verb invocation, every state transition, every error. Rotated at 100 MB. Read by `forge orchestrate status` for snapshot aggregation and by `forge orchestrate gc` for reconciliation.
+395:## gc reconciliation rules
+397:`forge orchestrate gc` is the deterministic reconciler. Every CLI invocation may *trigger* a gc pass; an explicit `forge orchestrate gc` runs one synchronously with `--dry-run` support. The rules below are exhaustive — every state divergence has a defined resolution.
+403:| `running` | `done` / `cancelled` / closed | Mark local terminal; release lease; archive attempt; preserve worktree for inspection (gc with `--remove-worktrees` to delete) |
+409:| `shipped` | not closed | Re-check PR via tracker adapter; if PR merged, transition tracker; if not, log divergence. |
+412:| Worktree exists | no task with matching ID in `phases.yaml` | Orphan; report. `gc --remove-orphan-worktrees` to delete. |
+421:$ forge orchestrate gc --dry-run
+422:gc plan (no changes will be made):
+428:  FORGE-99        n/a         n/a         orphan worktree at .forge/worktrees/forge-99 (orphan)
+434:### Auto-gc
+436:A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate next` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
+455:<rendered from phases.yaml acceptance bullets>
+574:| `phases.yaml` | Dependency graph |
+584:- Dispatch skill calls `forge orchestrate next` to get a ready task.
+595:- Dispatch skill detects `ready_for_review` tasks via `forge orchestrate next --phase review`.
+614:- **Dependency check before dispatch:** all `depends_on` tasks in `phases.yaml` must be in state `shipped` *and* their PRs merged to base. If a dependency PR is still open, SHIP is deferred until the dep merges.
+631:- Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate next` tick).
+634:- `forge orchestrate next` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
+644:`phases.yaml` is extended to allow each task to declare its **expected write globs**:
+658:`write_globs` is optional. When present, `forge orchestrate next` performs an **overlap check** before dispatching parallel tasks:
+664:| Hard overlap (any guardrail glob from preflight list) | **Block dispatch.** The task that came second in `phases.yaml` waits until the first completes. |
+674:phases.yaml
+682:When `write_globs` is **absent**, the CLI assumes worst-case overlap and serializes more conservatively. This is a deliberate nudge for `/decompose` to fill in write_globs as part of task creation. v-next ships with `/decompose` updated to fill write_globs by inspection of task scope; pre-existing phases.yaml files without write_globs remain valid but get conservative scheduling.
+734:- Per-task `soft_cap` (default 3) and `hard_cap` (default 6) for total questions. Beyond `hard_cap`: forced autonomous decisions. Configurable per-task via `question_budget: { soft, hard }` in `phases.yaml`.
+766:1. **Discovery.** Each main runs `forge orchestrate next`. The CLI:
+767:   - Reads `phases.yaml` (graph hasn't changed).
+774:3. **Race resolution.** Two mains hitting `forge orchestrate next` within the same tracker-claim window may both write a tentative claim. The slower writer detects the conflict on re-fetch and releases. Worst case: both successfully write a claim to different tracker fields simultaneously (e.g., GitHub doesn't reject the second label-add); race-loss detection on re-fetch resolves: only one keeps its claim, the other releases.
+828:    - phases.yaml
+837:    - phases.yaml
+867:| FORGE-31 question infra | FORGE-20 CLI | `QuestionSchema`, `AnswerSchema`, `NotificationEvent` types; atomic-write helpers |
+869:| FORGE-20 CLI | FORGE-21 dispatch skill | CLI command surface + JSON envelope schema |
+871:| FORGE-65 lease + state machine | FORGE-20 CLI | Lease record schema; state transition table; gc reconciliation rules |
+872:| FORGE-20 CLI | tracker adapters | `ClaimResult`, `Tracker.claim`/`releaseClaim` interface |
+892:None remaining at the start of FORGE-20/21/31/32/65 implementation. The following are flagged for *Phase 3* design once the orchestrator is shipping in real projects:
+915:| `gc` mentioned without rules | **Deterministic divergence table with `--dry-run`** | Codex v2 review #10. |
+
+exec
+/bin/zsh -lc "nl -ba src/trackers/base.ts | sed -n '1,90p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+     1	import type { TrackerConfig } from '../schemas/settings.ts';
+     2	import {
+     3	  TrackerError,
+     4	  isRetriableTrackerErrorCode,
+     5	  type TrackerErrorCode,
+     6	} from './errors.ts';
+     7	import type {
+     8	  ClaimResult,
+     9	  CreateIssuePayload,
+    10	  Issue,
+    11	  IssueState,
+    12	  TrackerType,
+    13	} from './types.ts';
+    14	
+    15	export interface Logger {
+    16	  debug(event: string, fields?: Record<string, unknown>): void;
+    17	  info(event: string, fields?: Record<string, unknown>): void;
+    18	  warn(event: string, fields?: Record<string, unknown>): void;
+    19	  error(event: string, fields?: Record<string, unknown>): void;
+    20	}
+    21	
+    22	export interface Tracker {
+    23	  readonly type: TrackerType;
+    24	
+    25	  listActiveIssues(): Promise<Issue[]>;
+    26	
+    27	  claim(issueId: string, runId: string): Promise<ClaimResult>;
+    28	  releaseClaim(issueId: string, runId: string): Promise<void>;
+    29	
+    30	  updateState(issueId: string, state: IssueState): Promise<void>;
+    31	  comment(issueId: string, body: string): Promise<void>;
+    32	
+    33	  createProject(name: string, description?: string): Promise<{ id: string; url: string }>;
+    34	  createIssue(payload: CreateIssuePayload): Promise<Issue>;
+    35	  setBlockedBy(issueId: string, blockerId: string): Promise<void>;
+    36	
+    37	  healthCheck(): Promise<{ ok: boolean; detail?: string }>;
+    38	}
+    39	
+    40	export interface WithRetryOpts {
+    41	  attempts?: number;
+    42	  baseDelayMs?: number;
+    43	  maxDelayMs?: number;
+    44	  isRetriable?: (err: unknown) => boolean;
+    45	  sleep?: (ms: number) => Promise<void>;
+    46	}
+    47	
+    48	export interface NormalizeErrorHint {
+    49	  code: TrackerErrorCode;
+    50	  details?: Record<string, unknown>;
+    51	}
+    52	
+    53	const DEFAULT_ATTEMPTS = 3;
+    54	const DEFAULT_BASE_DELAY_MS = 1000;
+    55	
+    56	export abstract class BaseTracker<C extends TrackerConfig = TrackerConfig>
+    57	  implements Tracker
+    58	{
+    59	  static readonly MAX_BACKOFF_MS = 300_000;
+    60	
+    61	  abstract readonly type: TrackerType;
+    62	
+    63	  protected readonly config: C;
+    64	  protected readonly logger: Logger;
+    65	
+    66	  constructor(config: C, logger: Logger) {
+    67	    this.config = config;
+    68	    this.logger = logger;
+    69	  }
+    70	
+    71	  abstract listActiveIssues(): Promise<Issue[]>;
+    72	  abstract claim(issueId: string, runId: string): Promise<ClaimResult>;
+    73	  abstract releaseClaim(issueId: string, runId: string): Promise<void>;
+    74	  abstract updateState(issueId: string, state: IssueState): Promise<void>;
+    75	  abstract comment(issueId: string, body: string): Promise<void>;
+    76	  abstract createProject(
+    77	    name: string,
+    78	    description?: string,
+    79	  ): Promise<{ id: string; url: string }>;
+    80	  abstract createIssue(payload: CreateIssuePayload): Promise<Issue>;
+    81	  abstract setBlockedBy(issueId: string, blockerId: string): Promise<void>;
+    82	  abstract healthCheck(): Promise<{ ok: boolean; detail?: string }>;
+    83	
+    84	  // BaseTracker composes; it does not sniff provider-specific errors.
+    85	  // Adapters classify their own errors and pass the result via hint.
+    86	  protected normalizeError(
+    87	    op: string,
+    88	    err: unknown,
+    89	    hint: NormalizeErrorHint = { code: 'UNKNOWN' },
+    90	  ): TrackerError {
+
+exec
+/bin/zsh -lc "nl -ba src/trackers/linear.ts | sed -n '510,560p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   510	        detailFromHint.length > 0
+   511	          ? detailFromHint
+   512	          : err instanceof Error
+   513	            ? err.message
+   514	            : 'linear health check failed';
+   515	      return { ok: false, detail };
+   516	    }
+   517	  }
+   518	
+   519	  // ─── Stubs (implemented in subsequent commits) ─────────────────────────────
+   520	
+   521	  async listActiveIssues(): Promise<Issue[]> {
+   522	    const client = await this.getClient();
+   523	    return this.withRetry(
+   524	      'listActiveIssues',
+   525	      async () => {
+   526	        let issues: LinearIssueLike[];
+   527	        try {
+   528	          issues = await client.listIssues({
+   529	            teamId: this.teamId,
+   530	            stateTypes: ['triage', 'backlog', 'unstarted', 'started'],
+   531	            limit: LINEAR_LIST_LIMIT,
+   532	          });
+   533	        } catch (err) {
+   534	          throw this.normalizeError(
+   535	            'listActiveIssues',
+   536	            err,
+   537	            classifyLinearError(err),
+   538	          );
+   539	        }
+   540	        if (issues.length === LINEAR_LIST_LIMIT) {
+   541	          this.logger.warn('tracker.listActiveIssues', {
+   542	            reason: 'limit-hit',
+   543	            limit: LINEAR_LIST_LIMIT,
+   544	            teamId: this.teamId,
+   545	          });
+   546	        }
+   547	        return issues.map((i) => toIssue(i));
+   548	      },
+   549	      this.retryOpts,
+   550	    );
+   551	  }
+   552	
+   553	  // Three-step claim with tiebreak — mirrors GitHubTracker.claim exactly.
+   554	  //
+   555	  // Linear's public GraphQL API does NOT expose `revision`/`expectedRevision`
+   556	  // or `customFields` on IssueUpdateInput (verified against
+   557	  // packages/sdk/src/schema.graphql at master 2026-05). Strict optimistic
+   558	  // concurrency is not achievable. We use label-add + lexicographic tiebreak
+   559	  // on race losers; the tiebreak gives orchestrator-perspective atomicity
+   560	  // (exactly one agent ends up with the claim under contention) even though
+
+exec
+/bin/zsh -lc "nl -ba src/trackers/github.ts | sed -n '230,295p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   230	            : 'unknown error';
+   231	      return { ok: false, detail: message };
+   232	    }
+   233	  }
+   234	
+   235	  // ─── listActiveIssues ──────────────────────────────────────────────────────
+   236	
+   237	  async listActiveIssues(): Promise<Issue[]> {
+   238	    return this.withRetry(
+   239	      'listActiveIssues',
+   240	      async () => {
+   241	        const args = [
+   242	          'issue',
+   243	          'list',
+   244	          '--repo',
+   245	          this.repo,
+   246	          '--state',
+   247	          'open',
+   248	          '--json',
+   249	          'id,number,title,labels,body,url',
+   250	          '--limit',
+   251	          String(GH_LIST_LIMIT),
+   252	        ];
+   253	
+   254	        let result: GhExecResult;
+   255	        try {
+   256	          result = await this.gh(args);
+   257	        } catch (err) {
+   258	          throw this.normalizeError(
+   259	            'listActiveIssues',
+   260	            err,
+   261	            classifyGitHubError(err),
+   262	          );
+   263	        }
+   264	
+   265	        let parsed: GhIssueJson[];
+   266	        try {
+   267	          const raw = JSON.parse(result.stdout) as unknown;
+   268	          parsed = z.array(GhIssueJsonSchema).parse(raw);
+   269	        } catch (err) {
+   270	          throw this.normalizeError('listActiveIssues', err, {
+   271	            code: 'VALIDATION',
+   272	            details: {
+   273	              reason: 'gh-json-parse-failed',
+   274	              stdoutPreview: result.stdout.slice(0, 500),
+   275	            },
+   276	          });
+   277	        }
+   278	
+   279	        if (parsed.length === GH_LIST_LIMIT) {
+   280	          this.logger.warn('tracker.listActiveIssues', {
+   281	            reason: 'limit-hit',
+   282	            limit: GH_LIST_LIMIT,
+   283	            repo: this.repo,
+   284	          });
+   285	        }
+   286	
+   287	        return parsed.map((raw) => this.toIssue(raw));
+   288	      },
+   289	      this.retryOpts,
+   290	    );
+   291	  }
+   292	
+   293	  // ─── claim — load-bearing atomic-with-tiebreak primitive ───────────────────
+   294	
+   295	  async claim(issueId: string, runId: string): Promise<ClaimResult> {
+
+exec
+/bin/zsh -lc "nl -ba src/trackers/notion.ts | sed -n '515,600p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   515	  }
+   516	
+   517	  // ─── listActiveIssues ──────────────────────────────────────────────────────
+   518	  //
+   519	  // Queries the database. Filters out archived + done/cancelled states so the
+   520	  // orchestrator's eligibility pass doesn't have to.
+   521	
+   522	  async listActiveIssues(): Promise<Issue[]> {
+   523	    return this.withRetry(
+   524	      'listActiveIssues',
+   525	      async () => {
+   526	        const dataSourceId = await this.resolveDataSourceId('listActiveIssues');
+   527	        const issues: Issue[] = [];
+   528	        let cursor: string | undefined;
+   529	        let rawPagesFetched = 0;
+   530	        const pageSize = 100;
+   531	
+   532	        // Paginate until: (a) we accumulate NOTION_LIST_LIMIT active issues,
+   533	        // (b) the database has no more results, or (c) we hit the raw-page
+   534	        // safety cap. Stopping early based on raw-page count (the prior bug)
+   535	        // could miss active work in databases with many Done/Cancelled rows
+   536	        // at the front of the result order — filtering happens client-side.
+   537	        while (
+   538	          issues.length < NOTION_LIST_LIMIT &&
+   539	          rawPagesFetched < NOTION_RAW_PAGE_CAP
+   540	        ) {
+   541	          const args: Record<string, unknown> = {
+   542	            data_source_id: dataSourceId,
+   543	            page_size: pageSize,
+   544	          };
+   545	          if (cursor !== undefined) args.start_cursor = cursor;
+   546	
+   547	          const raw = await this.runTool(
+   548	            'API-query-data-source',
+   549	            args,
+   550	            'listActiveIssues',
+   551	          );
+   552	
+   553	          let parsed;
+   554	          try {
+   555	            parsed = NotionDatabaseQueryResponseSchema.parse(raw);
+   556	          } catch (err) {
+   557	            throw this.normalizeError('listActiveIssues', err, {
+   558	              code: 'VALIDATION',
+   559	              details: { reason: 'database-query-parse-failed' },
+   560	            });
+   561	          }
+   562	
+   563	          for (const page of parsed.results) {
+   564	            if (page.archived === true) continue;
+   565	            const issue = pageToIssue(page, this.databaseId);
+   566	            if (issue.state !== 'done' && issue.state !== 'cancelled') {
+   567	              issues.push(issue);
+   568	              if (issues.length >= NOTION_LIST_LIMIT) break;
+   569	            }
+   570	          }
+   571	
+   572	          rawPagesFetched++;
+   573	          if (parsed.has_more === true && parsed.next_cursor) {
+   574	            cursor = parsed.next_cursor;
+   575	          } else {
+   576	            break;
+   577	          }
+   578	        }
+   579	
+   580	        if (issues.length >= NOTION_LIST_LIMIT) {
+   581	          this.logger.warn('tracker.listActiveIssues', {
+   582	            reason: 'limit-hit',
+   583	            limit: NOTION_LIST_LIMIT,
+   584	            databaseId: this.databaseId,
+   585	          });
+   586	        } else if (rawPagesFetched >= NOTION_RAW_PAGE_CAP) {
+   587	          this.logger.warn('tracker.listActiveIssues', {
+   588	            reason: 'raw-page-cap-hit',
+   589	            cap: NOTION_RAW_PAGE_CAP,
+   590	            databaseId: this.databaseId,
+   591	          });
+   592	        }
+   593	
+   594	        return issues.slice(0, NOTION_LIST_LIMIT);
+   595	      },
+   596	      this.retryOpts,
+   597	    );
+   598	  }
+   599	
+   600	  // ─── claim — load-bearing atomic-with-tiebreak primitive ───────────────────
+
+codex
+The key implementation detail matches your read so far: the interface has only `listActiveIssues()`, and each adapter’s implementation deliberately filters terminal states. I’m pulling the surrounding architecture language now so the recommendation is anchored in the repo’s own precedent.
+exec
+/bin/zsh -lc "nl -ba spec/ORCHESTRATOR.md | sed -n '84,110p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+    84	
+    85	The `forge orchestrate` command tree is the entire public surface of the control plane. Every state mutation flows through one of these verbs. Every command is idempotent and validates inputs with zod before touching disk or tracker.
+    86	
+    87	```
+    88	forge orchestrate next [--limit N]                                  # claim & return ready tasks
+    89	forge orchestrate dispatch <task-id> --run <run-id>                 # register a new worker attempt
+    90	forge orchestrate heartbeat <task-id> --attempt <attempt-id>        # renew lease
+    91	forge orchestrate question <task-id> --attempt <attempt-id> \
+    92	    --decision-key <key> --question <text> [--options-file <path>]  # write a question
+    93	forge orchestrate answer <question-id> --answer <text>              # supervisor answers a question
+    94	forge orchestrate event <task-id> --attempt <attempt-id> \
+    95	    --type <event-type> [--data <json>]                             # append to attempt event log
+    96	forge orchestrate complete <task-id> --attempt <attempt-id> \
+    97	    --verdict-file <path>                                           # finalize an attempt
+    98	forge orchestrate cancel <task-id> [--reason <text>]                # cancel + flag cleanup
+    99	forge orchestrate status [--run <run-id>] [--task <task-id>] [--json]  # snapshot
+   100	forge orchestrate questions [--open] [--run <run-id>] [--json]      # list questions
+   101	forge orchestrate gc [--dry-run] [--run <run-id>]                   # reconciliation pass
+   102	forge orchestrate phases [--ready] [--blocked-by <task-id>] [--json]  # graph state
+   103	forge orchestrate run start [--name <text>]                         # start a new run
+   104	forge orchestrate run list [--active]                               # list runs
+   105	```
+   106	
+   107	Every command returns a stable JSON envelope on `--json` for skill consumption: `{ ok: boolean, data?: ..., error?: { code, message, retriable } }`. Plain output is human-formatted via chalk for direct terminal use.
+   108	
+   109	## State machine
+   110	
+
+exec
+/bin/zsh -lc "nl -ba spec/ORCHESTRATOR.md | sed -n '395,436p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   395	## gc reconciliation rules
+   396	
+   397	`forge orchestrate gc` is the deterministic reconciler. Every CLI invocation may *trigger* a gc pass; an explicit `forge orchestrate gc` runs one synchronously with `--dry-run` support. The rules below are exhaustive — every state divergence has a defined resolution.
+   398	
+   399	### Divergence table
+   400	
+   401	| Local state | Tracker state | Resolution |
+   402	|---|---|---|
+   403	| `running` | `done` / `cancelled` / closed | Mark local terminal; release lease; archive attempt; preserve worktree for inspection (gc with `--remove-worktrees` to delete) |
+   404	| `running` | no claim or claim by different `run_id` | If lease is expired beyond `steal_grace_ms`: mark `abandoned`, release lease. If lease still valid: keep local truth, log warning (tracker is the diverged party). |
+   405	| `claimed` (local) | not claimed (tracker) | Re-attempt tracker claim once; if fails, mark local `unclaimed`, release lease. |
+   406	| no local state | tracker claimed by *us* | Recover: write `state.json` and `lease.json` from tracker metadata. (Happens after `.forge/orchestrator/` wipe.) |
+   407	| `blocked_on_question` | any | Check `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/`. If answer exists, mark `awaiting_respawn`. If not and `attempt_started + question_timeout_ms` elapsed, mark `expired`. |
+   408	| `ready_for_review` (local) | `done` (tracker) | Trust tracker; mark `shipped`. (Likely manual merge.) |
+   409	| `shipped` | not closed | Re-check PR via tracker adapter; if PR merged, transition tracker; if not, log divergence. |
+   410	| Verdict file exists but `verdict.verified.json` missing | n/a | Re-run CLI verification; write `verdict.verified.json`. |
+   411	| Branch exists in repo | worktree missing | If task `shipped`: prune. If task `unclaimed` or terminal: prompt user with `--dry-run` output before pruning. |
+   412	| Worktree exists | no task with matching ID in `phases.yaml` | Orphan; report. `gc --remove-orphan-worktrees` to delete. |
+   413	| Question file exists | attempt is terminal | Archive the question under `attempts/<a>/archived/`. |
+   414	| Answer file exists | question file is missing | Log warning; archive. (Shouldn't happen.) |
+   415	| Multiple leases for same task | n/a | Only most recent `generation` is authoritative. Older leases are deleted. |
+   416	| Lease present | task state is terminal | Release lease. |
+   417	
+   418	### `--dry-run` output
+   419	
+   420	```
+   421	$ forge orchestrate gc --dry-run
+   422	gc plan (no changes will be made):
+   423	
+   424	  task            local       tracker     action
+   425	  ─────────────   ─────────   ─────────   ────────────────────────
+   426	  FORGE-31        shipped     done        archive attempt, prune worktree
+   427	  FORGE-32        running     unclaimed   mark abandoned (lease expired 47m ago)
+   428	  FORGE-99        n/a         n/a         orphan worktree at .forge/worktrees/forge-99 (orphan)
+   429	  FORGE-103       running     done        mark shipped, archive attempt, keep worktree
+   430	
+   431	4 actions queued. Re-run without --dry-run to apply.
+   432	```
+   433	
+   434	### Auto-gc
+   435	
+   436	A lightweight reconcile (only the cheap rows in the table — local-vs-tracker state alignment, lease expiry checks) runs on every `forge orchestrate next` and `forge orchestrate status` invocation. Expensive operations (branch/worktree scans) only run on explicit `gc`.
+
+exec
+/bin/zsh -lc "nl -ba spec/ORCHESTRATOR.md | sed -n '574,686p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   574	| `phases.yaml` | Dependency graph |
+   575	
+   576	This list lives in `.forge/settings.yaml` (`agents.preflight_globs`) so projects can tune it. The default ships with the list above. Guardrails compose with classification: even if the worker classifies a change as `decision_type: routine`, a write to a guardrail path forces an `architectural` question.
+   577	
+   578	## Phase machine — IMPLEMENT → REVIEW → SHIP
+   579	
+   580	Each task flows through three phases sequentially. Each phase is its own subagent dispatch in the appropriate host.
+   581	
+   582	### Phase 1 — IMPLEMENT (primary host)
+   583	
+   584	- Dispatch skill calls `forge orchestrate next` to get a ready task.
+   585	- Dispatch skill creates worktree at `.forge/worktrees/<sanitized-task-id>` via `git worktree add` (idempotent: skip if exists).
+   586	- Dispatch skill calls `forge orchestrate dispatch` to register the attempt.
+   587	- Subagent runs with worker prompt + task context.
+   588	- On completion: subagent writes verdict.json, calls `forge orchestrate complete`, returns to parent.
+   589	- CLI verifies verdict. If verified `ready_for_review`, task state advances to `ready_for_review`.
+   590	
+   591	### Phase 2 — REVIEW (secondary host — adversarial review)
+   592	
+   593	> **Cross-host direction restricted in v0.3.0.** Only `primary=Claude, review=Codex` is supported. The reverse (`primary=Codex, review=Claude`) requires spawning `claude -p` from a Codex session, which lands in Anthropic's Agent SDK quota and violates the v2 subscription-only invariant. The Codex direction is safe because OpenAI does NOT have an equivalent Agent-SDK-vs-interactive billing split — `codex exec` invoked from a Claude session bills against the user's ChatGPT Plus subscription identically to interactive Codex usage. The reverse direction unlocks in v0.3.1 alongside skill portability and proper MCP-based host bridging.
+   594	
+   595	- Dispatch skill detects `ready_for_review` tasks via `forge orchestrate next --phase review`.
+   596	- Dispatch skill spawns a Codex subagent when primary is Claude (only supported direction in v0.3.0), with a review prompt that includes the worktree diff. Implementation: skill calls `codex exec --cd <worktree> --sandbox read-only` via Bash with the review prompt. This is subprocess dispatch in shape but subscription-billed in substance.
+   597	- Review subagent reads `git diff <base>...HEAD`, runs the host's `/review` skill, writes `review_verdict.json` to the same attempt directory.
+   598	- Review verdict schema:
+   599	  ```ts
+   600	  type ReviewVerdict = {
+   601	    version: 1;
+   602	    verdict: 'pass' | 'changes_requested';
+   603	    findings: { severity: 'block' | 'improvement'; path: string; line?: number; message: string }[];
+   604	    host: 'claude' | 'codex' | 'cursor' | 'gemini';
+   605	  };
+   606	  ```
+   607	- `forge orchestrate complete --phase review` records the verdict.
+   608	- On `pass`: task state advances to `reviewed`.
+   609	- On `changes_requested`: task state regresses to `running`, a new IMPLEMENT attempt is dispatched with `priorReviewFindings` injected into the prompt. Attempt counter increments.
+   610	
+   611	### Phase 3 — SHIP (primary host)
+   612	
+   613	- Dispatch skill detects `reviewed` tasks.
+   614	- **Dependency check before dispatch:** all `depends_on` tasks in `phases.yaml` must be in state `shipped` *and* their PRs merged to base. If a dependency PR is still open, SHIP is deferred until the dep merges.
+   615	- Dispatch skill spawns a primary-host subagent with a ship prompt: rebase onto latest base, run final secrets scan, `gh pr create` (or tracker-equivalent), mark tracker `in_review`.
+   616	- On success: task state advances to `shipped`. PR URL recorded. Notification `shipped` event emitted.
+   617	- On failure (rare — usually a transient tracker/git issue): retry with backoff. After `retry_attempts` failures: task moves to `failed`, surfaces fatal notification.
+   618	
+   619	### Single-host mode
+   620	
+   621	If `agents.review_host_cli` is `null`, REVIEW phase is skipped. Task flows IMPLEMENT → SHIP directly. A one-time warning at orchestrator first-run: *"Second-opinion review disabled — running single-host. Forge recommends configuring review_host_cli for adversarial review."*
+   622	
+   623	## Branch / PR integration topology — merge-to-main-between-phases
+   624	
+   625	The branch strategy: **every task branches from `main`. SHIP merges to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
+   626	
+   627	Rationale (chosen over stacked PRs):
+   628	- Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
+   629	- Eliminates rebase churn that stacked PRs require when an upstream PR is amended during review.
+   630	- Each PR is reviewable in isolation against `main`.
+   631	- Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate next` tick).
+   632	
+   633	Concretely:
+   634	- `forge orchestrate next` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
+   635	- A task whose dependency is `reviewed` but PR not yet merged is **not ready** — it waits.
+   636	- If a dependency PR is closed without merge: task moves to `blocked`.
+   637	
+   638	Trade-off accepted: tasks with declared dependencies cannot run in parallel with their dependencies even if their dependency's IMPLEMENT phase is done. This is correct — dependencies exist *because* the consumer needs the producer's output committed.
+   639	
+   640	For projects that want stacked PRs (rare; adds rebase loops), an opt-in `agents.branch_strategy: 'stacked'` mode is reserved in the settings schema but not implemented in v-next. Documented as a future extension if real demand emerges.
+   641	
+   642	## File-glob declarations + overlap detection (file-level safety)
+   643	
+   644	`phases.yaml` is extended to allow each task to declare its **expected write globs**:
+   645	
+   646	```yaml
+   647	phases:
+   648	  - number: 2
+   649	    tasks:
+   650	      - id: FORGE-31
+   651	        title: Event payload schema
+   652	        write_globs:
+   653	          - src/schemas/events.ts
+   654	          - test/schemas/events.test.ts
+   655	        # ... existing fields
+   656	```
+   657	
+   658	`write_globs` is optional. When present, `forge orchestrate next` performs an **overlap check** before dispatching parallel tasks:
+   659	
+   660	| Overlap class | Behavior |
+   661	|---|---|
+   662	| No overlap | Dispatch both freely |
+   663	| Soft overlap (non-guardrail files) | Warn in dispatch output: `"FORGE-31 and FORGE-32 may both write src/utils/foo.ts — merge conflicts possible"` |
+   664	| Hard overlap (any guardrail glob from preflight list) | **Block dispatch.** The task that came second in `phases.yaml` waits until the first completes. |
+   665	| Either task declares a known-global file (`package.json`, lockfiles, migration directories) | Block: serialize them. |
+   666	
+   667	The hard-locked file list lives at `.forge/settings.yaml` → `agents.hard_lock_globs` and defaults to:
+   668	```
+   669	package.json
+   670	package-lock.json
+   671	pnpm-lock.yaml
+   672	yarn.lock
+   673	tsconfig.json
+   674	phases.yaml
+   675	src/index.ts
+   676	migrations/**
+   677	prisma/schema.prisma
+   678	```
+   679	
+   680	Adopters can extend this. The principle: any file where two unrelated changes can't be merged-cleanly via git's 3-way merge belongs on this list.
+   681	
+   682	When `write_globs` is **absent**, the CLI assumes worst-case overlap and serializes more conservatively. This is a deliberate nudge for `/decompose` to fill in write_globs as part of task creation. v-next ships with `/decompose` updated to fill write_globs by inspection of task scope; pre-existing phases.yaml files without write_globs remain valid but get conservative scheduling.
+   683	
+   684	## Question lifecycle (preserved from v1 with CLI-as-consumer adjustments)
+   685	
+   686	```
+
+exec
+/bin/zsh -lc 'rg -n "FORGE-22|FORGE-79|FORGE-74|sync-status|phase-gate|orphan tracker|orphan issue|listActiveIssues|listAllProjectIssues|include-done" -S .' in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+./src/trackers/linear.ts:521:  async listActiveIssues(): Promise<Issue[]> {
+./src/trackers/linear.ts:524:      'listActiveIssues',
+./src/trackers/linear.ts:535:            'listActiveIssues',
+./src/trackers/linear.ts:541:          this.logger.warn('tracker.listActiveIssues', {
+./skills/sync-status/SKILL.md:2:name: sync-status
+./skills/sync-status/SKILL.md:8:# /sync-status
+./src/trackers/base.ts:25:  listActiveIssues(): Promise<Issue[]>;
+./src/trackers/base.ts:71:  abstract listActiveIssues(): Promise<Issue[]>;
+./src/trackers/notion.ts:517:  // ─── listActiveIssues ──────────────────────────────────────────────────────
+./src/trackers/notion.ts:522:  async listActiveIssues(): Promise<Issue[]> {
+./src/trackers/notion.ts:524:      'listActiveIssues',
+./src/trackers/notion.ts:526:        const dataSourceId = await this.resolveDataSourceId('listActiveIssues');
+./src/trackers/notion.ts:550:            'listActiveIssues',
+./src/trackers/notion.ts:557:            throw this.normalizeError('listActiveIssues', err, {
+./src/trackers/notion.ts:581:          this.logger.warn('tracker.listActiveIssues', {
+./src/trackers/notion.ts:587:          this.logger.warn('tracker.listActiveIssues', {
+./spec/ORCHESTRATOR.md:5:> Scope: contract for the orchestrator subsystem (Phase 2 tasks FORGE-20, FORGE-21, FORGE-31, FORGE-32, FORGE-22, FORGE-65).
+./spec/ORCHESTRATOR.md:870:| FORGE-21 dispatch skill | FORGE-22 worker prompt template | `WorkerContext` shape; dispatch parameters; verdict file path |
+./src/trackers/github.ts:235:  // ─── listActiveIssues ──────────────────────────────────────────────────────
+./src/trackers/github.ts:237:  async listActiveIssues(): Promise<Issue[]> {
+./src/trackers/github.ts:239:      'listActiveIssues',
+./src/trackers/github.ts:259:            'listActiveIssues',
+./src/trackers/github.ts:270:          throw this.normalizeError('listActiveIssues', err, {
+./src/trackers/github.ts:280:          this.logger.warn('tracker.listActiveIssues', {
+./agents/phase-gatekeeper.md:2:name: phase-gatekeeper
+./agents/phase-gatekeeper.md:3:description: Ceremonial specialist for advancing phases. Invoked by /phase-gate.
+./docs/PHILOSOPHY.md:220:- Phase gate ceremony (`/phase-gate`) as a hard checkpoint, not just a soft prompt.
+./CHANGELOG.md:23:- **`/sync-status`** — preflight and body generalized to read `tracker.type` first; uses `tracker-syncer` subagent.
+./CHANGELOG.md:41:  - Setup: `/setup-repo`, `/push-to-linear`, `/sync-status`
+./CHANGELOG.md:44:  - Compound: `/learn`, `/phase-gate`, `/retro`
+./CHANGELOG.md:45:- **12 subagents**: product-decomposer, linear-syncer, frontend-dev, backend-dev, db-architect, qa-engineer, code-reviewer, security-auditor, phase-gatekeeper, learning-curator, devops-engineer, design-reviewer
+./agents/tracker-syncer.md:3:description: Specialist for tracker synchronization. Invoked by /push-to-tracker and /sync-status. Dispatches per .forge/settings.yaml `tracker.type` (linear|github|notion).
+./agents/tracker-syncer.md:33:Adapters share the `Tracker` interface (`src/trackers/base.ts`): `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`. Calls are uniform across providers.
+./agents/tracker-syncer.md:49:## /sync-status flow
+./agents/tracker-syncer.md:54:- `github` → `tracker.listActiveIssues()` + diff vs phases.yaml.
+./README.md:41:PHASE → /phase-gate → /retro → next phase
+./README.md:43:PROD  ← /phase-gate phase-3 ← (release from main)
+./skills/phase-gate/SKILL.md:2:name: phase-gate
+./skills/phase-gate/SKILL.md:5:subagent: phase-gatekeeper
+./skills/phase-gate/SKILL.md:8:# /phase-gate
+./skills/phase-gate/SKILL.md:10:Delegate to `phase-gatekeeper`.
+./docs/retros/phase-1.md:110:- **`node_modules/` was not installed** at gate-check time — `npm run typecheck` initially failed with `sh: tsc: command not found`. Ran `npm install` (73 packages, 1s) and re-ran. Suggests CI or a `postmerge` hook should keep deps fresh, or `phase-gate` should `npm ci` first.
+./docs/QUICKSTART.md:77:> /phase-gate phase-1
+./docs/LIFECYCLE.md:48:│                          /phase-gate phase-N                             │
+./docs/LIFECYCLE.md:201:### `/phase-gate phase-N`
+./docs/LIFECYCLE.md:210:- **When to invoke:** auto-invoked by `/phase-gate`. Standalone use is rare.
+./docs/LIFECYCLE.md:214:### `/sync-status`
+./docs/LIFECYCLE.md:230:**Manual tracker status moves.** If a teammate closes an issue manually outside `/ship`, run `/sync-status` to reconcile. Otherwise the next `/pickup-task` may show stale state.
+./skills/retro/SKILL.md:3:description: Write a phase retrospective. Auto-invoked by /phase-gate but can run standalone.
+./docs/adapters/linear.md:47:| `listActiveIssues()` | `client.issues({ filter: team + state.type IN [triage,backlog,unstarted,started] })` capped at `LINEAR_LIST_LIMIT = 200` |
+./docs/adapters/linear.md:83:Overlay labels exist because Linear has no native workflow-state type for "in review" or "blocked". The label preserves the semantic, and `deriveStateFromLinearIssue()` reads it back on `listActiveIssues()` so the state round-trips correctly.
+./docs/adapters/linear.md:154:- **Issue archival**: archived issues don't appear in `listActiveIssues` (filtered out by `state.type IN [...]`). Forge has no API to un-archive.
+./docs/adapters/github.md:40:| `listActiveIssues()` | `gh issue list --state open --json id,number,title,labels,body,url --limit 200`; warns on hitting `GH_LIST_LIMIT = 200` |
+./docs/adapters/github.md:175:- **State mapping uses overlay labels**. `state:in-progress`, `state:in-review`, `state:blocked` are precreated on `createProject` but a manually-deleted state label causes `listActiveIssues` to report the issue as `todo` until forge re-applies state on next update.
+./docs/adapters/github.md:178:- **`gh issue list --limit` ceiling**. `GH_LIST_LIMIT = 200`. Listing emits a `tracker.listActiveIssues` warn log when the limit is hit. For larger repos, GitHubTracker would need pagination — not yet implemented.
+./docs/trackers/linear.md:5:Forge can use Linear as the durable task system. Local `phases.yaml` is the source of truth at decomposition time; once `/push-to-tracker` runs against a Linear-configured project, Linear becomes the operational system of record. The `/sync-status` skill exists to reconcile drift if it happens.
+./docs/trackers/linear.md:101:   │          └─ /phase-gate moves Backlog → Todo when previous phase closes
+./docs/trackers/linear.md:109:| Todo | `/phase-gate` moves to Todo when phase activates | `/pickup-task` claims from here |
+./docs/trackers/linear.md:113:| Cancelled | manual | `/sync-status` will detect |
+./docs/trackers/linear.md:136:The Linear `team_id` lives in `.forge/settings.yaml` under `tracker.config.team_id` — not duplicated into `phases.yaml`. These IDs let `/sync-status` and `/pickup-task` query the right resources.
+./docs/trackers/linear.md:140:## Drift handling — when to run `/sync-status`
+./docs/trackers/linear.md:144:Run `/sync-status` when:
+./docs/trackers/linear.md:150:`/sync-status` only updates **local** `phases.yaml`. It does not push back to Linear. If you want the local state to be authoritative, edit `phases.yaml` and re-run `/push-to-tracker` with the `--update` flag (in v1.1).
+./docs/trackers/linear.md:194:Your Linear plan doesn't include GitHub integration (Free plan is limited). Either upgrade to Standard ($8/user/month at the time of writing) or use `/sync-status` periodically as a manual fallback.
+./test/integration/trackers/notion.test.ts:91:      const reFetch = await tracker.listActiveIssues();
+./test/integration/trackers/notion.test.ts:95:        'done page should be filtered out of listActiveIssues',
+./docs/trackers/README.md:13:All three speak the same `Tracker` interface (`src/trackers/base.ts`) — `createProject`, `createIssue`, `setBlockedBy`, `listActiveIssues`, `claim`, `releaseClaim`, `updateState`, `comment`, `healthCheck`.
+./test/integration/skills/push-to-tracker.test.ts:182:      const listed = await tracker.listActiveIssues();
+./test/integration/trackers/github.test.ts:82:    // Round-trip via listActiveIssues
+./test/integration/trackers/github.test.ts:83:    const listed = await tracker.listActiveIssues();
+./test/integration/trackers/github.test.ts:85:    assert.ok(found, 'issue should appear in listActiveIssues');
+./test/integration/trackers/github.test.ts:140:test('integration: setBlockedBy round-trips through listActiveIssues', {
+./test/integration/trackers/github.test.ts:166:    const listed = await tracker.listActiveIssues();
+./test/integration/README.md:33:| `full lifecycle` | `createProject` → `createIssue` (with `forgeTaskId` footer) → `listActiveIssues` (round-trips footer) → `claim` → `updateState('in_progress')` → `updateState('in_review')` → `comment` → `releaseClaim` → `updateState('done')` (issue closed) |
+./test/integration/README.md:35:| `setBlockedBy round-trip` | `setBlockedBy(B, A)` → `listActiveIssues` → reloaded issue B has `blockerIds: [A.id]` (via body footer) |
+./test/integration/README.md:85:| `full lifecycle` | `healthCheck` → `createProject` → `createIssue` (with footer) → `listActiveIssues` (round-trips footer + state) → `claim` → `updateState('in_progress')` → `updateState('in_review')` (overlay label) → `comment` → `releaseClaim` → `updateState('done')` |
+./test/integration/README.md:87:| `setBlockedBy` round-trip | `setBlockedBy(B, A)` writes the footer AND creates the native `IssueRelation(type:'blocks')`. `listActiveIssues` round-trips `blockerIds: [A.id]`. Second call is idempotent (no duplicate footer entries). |
+./test/integration/README.md:133:| `full lifecycle` | `createIssue` (round-trips `forge_task_id`) → `claim` → `updateState('in_progress')` → `comment` → `releaseClaim` → `updateState('done')` → `listActiveIssues` (done page filtered out) |
+./test/fixtures/trackers/notion-responses.ts:135:// Database query response (listActiveIssues fixture).
+./test/integration/trackers/linear.test.ts:88:      const listed = await tracker.listActiveIssues();
+./test/integration/trackers/linear.test.ts:90:      assert.ok(found, 'created issue should appear in listActiveIssues');
+./test/integration/trackers/linear.test.ts:180:      // Footer round-trip via listActiveIssues
+./test/integration/trackers/linear.test.ts:181:      const listed = await tracker.listActiveIssues();
+./test/integration/trackers/linear.test.ts:188:      const listed2 = await tracker.listActiveIssues();
+./test/fixtures/phases/live-snapshot.yaml:172:          - "forgeTaskId round-trips through createIssue → listActiveIssues"
+./test/fixtures/phases/live-snapshot.yaml:290:        description: "Move skills/push-to-linear/ → skills/push-to-tracker/. Update SKILL.md description and content to dispatch to the configured tracker.type (linear|github|motion) via the Tracker interface. Rename agents/linear-syncer → tracker-syncer (or generalize). Provide deprecation alias: /push-to-linear continues to work for one minor version emitting a chalk-warn 'deprecated; use /push-to-tracker'. Update README, /pickup-task, /sync-status, and any other internal references."
+./test/fixtures/phases/live-snapshot.yaml:301:          - "Internal cross-references in /pickup-task, /sync-status updated"
+./test/fixtures/orchestrator/README.md:3:Shared fixtures for FORGE-31 / FORGE-20 / FORGE-21 / FORGE-32 / FORGE-22 test suites. Each task's implementation tests load from this directory rather than constructing inline fixtures, so contract drift is caught immediately.
+./test/fixtures/orchestrator/README.md:9:| `phases.yaml` | Minimal 3-task dependency graph: T01 → T02, T01 → T03. Exercises eligibility filter, slot accounting, and the case where two tasks become eligible simultaneously after a blocker completes. | FORGE-20 dispatcher tests, FORGE-22 retry queue tests |
+./test/fixtures/trackers/conformance.ts:51:  // 2. listActiveIssues — returns Issue[]
+./test/fixtures/trackers/conformance.ts:52:  const issues = await tracker.listActiveIssues();
+./test/fixtures/trackers/conformance.ts:53:  assert.ok(Array.isArray(issues), 'listActiveIssues must return an array');
+./test/unit/cli/orchestrate-status.test.ts:65:        { task_id: 'FORGE-22', status: 'running' },
+./test/unit/trackers/base.test.ts:37:  async listActiveIssues(): Promise<Issue[]> {
+./test/unit/trackers/base.test.ts:103:  const result = t.callNormalizeError('listActiveIssues', execaErr, {
+./test/unit/trackers/base.test.ts:109:  assert.match(result.message, /tracker\.listActiveIssues: AUTH/);
+./test/unit/trackers/base.test.ts:188:    () => t.callWithRetry('listActiveIssues', fn, { sleep: instantSleep }),
+./test/unit/trackers/types.compile.test.ts:41:  listActiveIssues: async () => [fakeIssue],
+./test/unit/trackers/types.compile.test.ts:58:  listActiveIssues: async () => [],
+./test/unit/trackers/types.compile.test.ts:63:  const issues = await fakeAdapter.listActiveIssues();
+./test/unit/trackers/notion.test.ts:296:// ─── listActiveIssues ────────────────────────────────────────────────────────
+./test/unit/trackers/notion.test.ts:298:test('listActiveIssues: maps pages → Issue[]; filters done/cancelled/archived', async () => {
+./test/unit/trackers/notion.test.ts:303:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/notion.test.ts:313:test('listActiveIssues: paginates via next_cursor', async () => {
+./test/unit/trackers/notion.test.ts:319:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/notion.test.ts:328:test('listActiveIssues: retries on RATE_LIMITED then succeeds', async () => {
+./test/unit/trackers/notion.test.ts:329:  // The retry wraps the entire listActiveIssues body, including the lazy
+./test/unit/trackers/notion.test.ts:336:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/notion.test.ts:340:test('listActiveIssues: malformed response → VALIDATION', async () => {
+./test/unit/trackers/notion.test.ts:346:    () => tracker.listActiveIssues(),
+./test/unit/trackers/notion.test.ts:354:test('listActiveIssues: AUTH error → not retried; throws AUTH', async () => {
+./test/unit/trackers/notion.test.ts:359:    () => tracker.listActiveIssues(),
+./test/unit/trackers/notion.test.ts:828:test('listActiveIssues: paginates past Done-heavy front pages (codex P2-1)', async () => {
+./test/unit/trackers/notion.test.ts:859:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/notion.test.ts:865:test('listActiveIssues: hits raw-page cap and warns', async () => {
+./test/unit/trackers/notion.test.ts:881:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/notion.test.ts:888:        w.event === 'tracker.listActiveIssues' &&
+./test/unit/trackers/github.test.ts:234:// ─── listActiveIssues ────────────────────────────────────────────────────────
+./test/unit/trackers/github.test.ts:236:test('listActiveIssues parses 3 issues with mixed footers and states', async () => {
+./test/unit/trackers/github.test.ts:238:  const issues = await tracker.listActiveIssues();
+./test/unit/trackers/github.test.ts:255:test('listActiveIssues warns when at GH_LIST_LIMIT', async () => {
+./test/unit/trackers/github.test.ts:265:  await tracker.listActiveIssues();
+./test/unit/trackers/github.test.ts:267:    (w) => w.event === 'tracker.listActiveIssues',
+./test/unit/trackers/github.test.ts:289:test('listActiveIssues VALIDATION on bad JSON', async () => {
+./test/unit/trackers/github.test.ts:292:    () => tracker.listActiveIssues(),
+./test/unit/trackers/linear.test.ts:586:// ─── listActiveIssues ────────────────────────────────────────────────────────
+./test/unit/trackers/linear.test.ts:588:await test('listActiveIssues — filters by team + active state types, maps issues', async () => {
+./test/unit/trackers/linear.test.ts:604:  const result = await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:617:await test('listActiveIssues — warns when limit is hit', async () => {
+./test/unit/trackers/linear.test.ts:624:  await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:625:  const warn = logger.warnings.find((w) => w.event === 'tracker.listActiveIssues');
+./test/unit/trackers/linear.test.ts:629:await test('listActiveIssues — normalizes errors with classified code', async () => {
+./test/unit/trackers/linear.test.ts:636:    () => tracker.listActiveIssues(),
+./test/unit/trackers/linear.test.ts:641:await test('listActiveIssues — retries on transient errors then succeeds', async () => {
+./test/unit/trackers/linear.test.ts:652:  const result = await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:668:  const [issue] = await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:681:  const [issue] = await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:694:  const [issue] = await tracker.listActiveIssues();
+./test/unit/trackers/linear.test.ts:798:  // to misreport the state on subsequent listActiveIssues calls.
+./test/unit/trackers/linear.test.ts:877:  const [issue] = await tracker.listActiveIssues();
+
+exec
+/bin/zsh -lc "nl -ba agents/tracker-syncer.md | sed -n '45,62p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+    45	   - `linear` → print the manual Linear-GitHub integration setup (UI walk-through; the API doesn't expose this).
+    46	   - `github` → no-op.
+    47	   - `notion` → no-op for v0.3.0.
+    48	
+    49	## /sync-status flow
+    50	
+    51	For each task with a `tracker_issue_id`, query the tracker for current state. Update local `phases.yaml.tasks[].status`. Report drift.
+    52	
+    53	- `linear` → Linear MCP query.
+    54	- `github` → `tracker.listActiveIssues()` + diff vs phases.yaml.
+    55	- `notion` → Notion MCP query.
+    56	
+    57	## Per-tracker dispatch notes
+    58	
+    59	### linear (MCP, no TS class until FORGE-16)
+    60	
+    61	- Linear concepts: Project per `phases.project`, Cycle per phase, Issue per task, "blocks" relation per `depends_on` (inverted: A depends on B means B blocks A).
+    62	- Priority mapping: P0=1, P1=2, P2=3 (Linear's scale).
+
+exec
+/bin/zsh -lc "nl -ba docs/LIFECYCLE.md | sed -n '214,232p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   214	### `/sync-status`
+   215	
+   216	- **When to invoke:** rarely. Linear ↔ GitHub native sync handles drift automatically; the GitHub tracker reads issue state directly. Use when manual closes happen out-of-band.
+   217	- **Inputs:** `plans/phases.yaml`, `.forge/settings.yaml`.
+   218	- **Outputs:** `phases.yaml` updated to match the tracker; drift report.
+   219	
+   220	---
+   221	
+   222	## Common deviations
+   223	
+   224	**Skipping `/draft-design`.** Pure CLI tools, libraries, and developer tooling don't need a DESIGN doc. Skip it. `/ingest-spec` doesn't require DESIGN.
+   225	
+   226	**`--quickfix` override on `/implement`.** Single-file CSS tweaks, copy changes, or bug fixes <50 lines can skip `/plan-task` with a justification. Don't abuse this — three quickfixes in a row probably means the work is bigger than expected.
+   227	
+   228	**Skipping `/codex` on critical paths.** Don't. The 30-second cost of running it has saved entire incidents in dogfooding. If Codex is unavailable (no membership, offline), document why in the PR description.
+   229	
+   230	**Manual tracker status moves.** If a teammate closes an issue manually outside `/ship`, run `/sync-status` to reconcile. Otherwise the next `/pickup-task` may show stale state.
+   231	
+   232	**Pre-existing repos.** `/setup-repo` is idempotent — it skips repo creation if origin exists, but still applies branch protection and workflows. Useful for adopting forge on an in-flight project.
+
+exec
+/bin/zsh -lc "nl -ba docs/trackers/linear.md | sed -n '140,152p'" in /Users/firatcandogan/repos/forge-worktrees/FORGE-80
+ succeeded in 0ms:
+   140	## Drift handling — when to run `/sync-status`
+   141	
+   142	You normally don't need to. Linear ↔ GitHub native sync handles every transition that goes through a PR.
+   143	
+   144	Run `/sync-status` when:
+   145	
+   146	- A teammate closed an issue manually in Linear (no PR involved)
+   147	- An issue was reassigned to a different project or cycle
+   148	- You manually edited `phases.yaml` after `/push-to-tracker` and want Linear to reflect the changes (this is the wrong direction — `/push-to-tracker` should be re-run instead)
+   149	
+   150	`/sync-status` only updates **local** `phases.yaml`. It does not push back to Linear. If you want the local state to be authoritative, edit `phases.yaml` and re-run `/push-to-tracker` with the `--update` flag (in v1.1).
+   151	
+   152	---
+
+codex
+1. **Pick A, but tighten the wording. Confidence: 8/10.**  
+Use one `Tracker.listActiveIssues()` call and report **live tracker orphans only**. Do not add `listAllProjectIssues()` for this. The architecture keeps graph/dependency reasoning local in `phases.yaml` ([ORCHESTRATOR.md:574](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:574>), [634](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:634>)); tracker reads should answer operational status, not become a second project-history API. Expanding `Tracker` for one diagnostic consumer is too much surface area.
+
+2. **Yes, the AC/example is contradictory for Done orphans. Confidence: 10/10.**  
+The interface exposes only `listActiveIssues()` ([base.ts:25](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/base.ts:25>)). Linear filters `stateTypes: ['triage', 'backlog', 'unstarted', 'started']` ([linear.ts:528](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/linear.ts:528>)-[531](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/linear.ts:531>)); GitHub uses `--state open` ([github.ts:241](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/github.ts:241>)-[248](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/github.ts:248>)); Notion explicitly filters out `done` and `cancelled` ([notion.ts:563](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/notion.ts:563>)-[567](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/notion.ts:567>)). A single literal call cannot surface `Done` orphans unless you redefine “active” to mean “all,” which would break the adapter contract and tests.
+
+3. **gc partially covers this, but not Done tracker orphans. Confidence: 7/10.**  
+The gc table handles known local tasks whose tracker state becomes terminal, e.g. `running` → `done/cancelled`, and `ready_for_review` → `done` ([ORCHESTRATOR.md:403](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:403>), [408](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:408>)). It also reports orphan **worktrees**, not orphan tracker issues ([ORCHESTRATOR.md:412](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:412>)). So it supports A’s philosophy, but it does not fully replace Done-orphan visibility.
+
+4. **Third-rail risk: phase-completion inference. Confidence: 9/10.**  
+With `listActiveIssues()`, “not returned” means not active, not necessarily `Done`; it could be cancelled, archived, closed without merge, missing due to limits, or inaccessible. So `/sync-status` should phrase phase completion as “no active tracker issues remain for this phase; verify and run `/phase-gate <id>`,” not “all are Done,” unless local `phases.yaml` statuses already prove that. I don’t see FORGE-79 file-glob or dispatch depending on Done orphans; FORGE-22 gc owns deeper reconciliation.
+tokens used
+27,377
+1. **Pick A, but tighten the wording. Confidence: 8/10.**  
+Use one `Tracker.listActiveIssues()` call and report **live tracker orphans only**. Do not add `listAllProjectIssues()` for this. The architecture keeps graph/dependency reasoning local in `phases.yaml` ([ORCHESTRATOR.md:574](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:574>), [634](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:634>)); tracker reads should answer operational status, not become a second project-history API. Expanding `Tracker` for one diagnostic consumer is too much surface area.
+
+2. **Yes, the AC/example is contradictory for Done orphans. Confidence: 10/10.**  
+The interface exposes only `listActiveIssues()` ([base.ts:25](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/base.ts:25>)). Linear filters `stateTypes: ['triage', 'backlog', 'unstarted', 'started']` ([linear.ts:528](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/linear.ts:528>)-[531](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/linear.ts:531>)); GitHub uses `--state open` ([github.ts:241](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/github.ts:241>)-[248](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/github.ts:248>)); Notion explicitly filters out `done` and `cancelled` ([notion.ts:563](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/notion.ts:563>)-[567](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/src/trackers/notion.ts:567>)). A single literal call cannot surface `Done` orphans unless you redefine “active” to mean “all,” which would break the adapter contract and tests.
+
+3. **gc partially covers this, but not Done tracker orphans. Confidence: 7/10.**  
+The gc table handles known local tasks whose tracker state becomes terminal, e.g. `running` → `done/cancelled`, and `ready_for_review` → `done` ([ORCHESTRATOR.md:403](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:403>), [408](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:408>)). It also reports orphan **worktrees**, not orphan tracker issues ([ORCHESTRATOR.md:412](</Users/firatcandogan/repos/forge-worktrees/FORGE-80/spec/ORCHESTRATOR.md:412>)). So it supports A’s philosophy, but it does not fully replace Done-orphan visibility.
+
+4. **Third-rail risk: phase-completion inference. Confidence: 9/10.**  
+With `listActiveIssues()`, “not returned” means not active, not necessarily `Done`; it could be cancelled, archived, closed without merge, missing due to limits, or inaccessible. So `/sync-status` should phrase phase completion as “no active tracker issues remain for this phase; verify and run `/phase-gate <id>`,” not “all are Done,” unless local `phases.yaml` statuses already prove that. I don’t see FORGE-79 file-glob or dispatch depending on Done orphans; FORGE-22 gc owns deeper reconciliation.
