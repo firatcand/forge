@@ -4,6 +4,17 @@ All notable changes to forge are documented here. The format follows [Keep a Cha
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-06-24
+
+### Added
+
+- **Project spec auto-loads on clone (cross-machine portability).** The agent-root marker block now imports the committed `spec/CONTEXT.md` (the `/ingest-spec` project synthesis) alongside `.forge/CONTEXT.md` (methodology) — Claude via `@import`, Codex/Gemini/Cursor via a prose pointer. `forge init` scaffolds a `spec/CONTEXT.md` stub, and `forge upgrade` / `--migrate-claudemd` create it if missing (symlink-guarded, never overwriting `/ingest-spec` output). A freshly cloned repo + `forge upgrade` now reproduces the origin machine's project context instead of seeing only the methodology.
+- **Release automation.** A merge to `main` that bumps `package.json` auto-creates and pushes the matching `v<version>` tag, which drives the existing npm publish (with SLSA provenance) and GitHub Release. `release.yml` / `release-draft.yml` are now reusable (`workflow_call`); the tag is created with the default token (no PAT) and the publish is invoked directly, sidestepping GitHub's same-token workflow-trigger block.
+
+### Changed
+
+- **Compound learnings are tracked.** Removed `/docs/learnings/**` from forge's `.gitignore` so accumulated learnings travel with clones. The npm pack-gate (`docs/` is a forbidden prefix) plus the `package.json#files` allowlist still keep them out of the published tarball.
+
 ## [0.4.4] - 2026-06-18
 
 ### Removed
