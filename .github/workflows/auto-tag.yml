@@ -36,6 +36,15 @@ concurrency:
   # distinct merges run independently. Double-publish of one version is still
   # prevented by the tag-absence gate, release.yml's per-tag concurrency, and
   # npm's refusal to republish an existing version.
+  #
+  # Accepted trade-off (chosen: lossless over in-order — GitHub concurrency can't
+  # give both without external locking): if TWO version-bump merges land within
+  # the same ~3-5 min publish window, both publish but may finish out of order,
+  # briefly setting npm `latest` / the GitHub "latest" release to the older
+  # version. This is rare for deliberate releases and recoverable — re-run the
+  # newer version's release, or `npm dist-tag add @firatcand/forge@<newer> latest`.
+  # The alternative (branch-level serialization) would instead SKIP an
+  # intermediate release entirely, which is the worse, silent failure.
   group: auto-tag-${{ github.sha }}
   cancel-in-progress: false
 
