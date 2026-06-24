@@ -1,0 +1,97 @@
+name: Auto-tag release
+
+# FORGE: on merge to main, if package.json declares a version that has no
+# matching `v<version>` git tag yet, create + push that tag and run the release
+# pipeline (npm publish + GitHub Release). The version bump lives in the merged
+# PR (the PR "tags" the version by editing package.json); this workflow turns
+# that bump into a published release with no manual tagging step.
+#
+# Why it calls release.yml/release-draft.yml directly instead of just pushing a
+# tag: a tag pushed with the default GITHUB_TOKEN does NOT trigger another
+# workflow (GitHub's loop prevention), so the `push: tags` trigger on those
+# workflows would never fire for an auto-created tag. Making them reusable
+# (workflow_call) lets us invoke them directly — no PAT or extra secret needed.
+#
+# Idempotent: a merge that does not change the version finds the tag already
+# present and exits without releasing. NPM_TOKEN is consumed by release.yml via
+# `secrets: inherit`.
+
+on:
+  push:
+    branches:
+      - main
+
+# Granted at the top level so the reusable release workflows inherit them:
+#   contents: write  → push the tag (detect) + create the GitHub Release
+#   id-token: write  → npm publish --provenance (SLSA attestation)
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  # Key on the commit SHA, NOT the branch: serializing all main pushes would let
+  # a third queued run supersede a second (cancel-in-progress is false, but only
+  # the latest PENDING run survives), so a rapid intermediate version bump could
+  # be skipped and never tagged. Per-SHA only dedups re-runs of the same commit;
+  # distinct merges run independently. Double-publish of one version is still
+  # prevented by the tag-absence gate, release.yml's per-tag concurrency, and
+  # npm's refusal to republish an existing version.
+  #
+  # Accepted trade-off (chosen: lossless over in-order — GitHub concurrency can't
+  # give both without external locking): if TWO version-bump merges land within
+  # the same ~3-5 min publish window, both publish but may finish out of order,
+  # briefly setting npm `latest` / the GitHub "latest" release to the older
+  # version. This is rare for deliberate releases and recoverable — re-run the
+  # newer version's release, or `npm dist-tag add @firatcand/forge@<newer> latest`.
+  # The alternative (branch-level serialization) would instead SKIP an
+  # intermediate release entirely, which is the worse, silent failure.
+  group: auto-tag-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: detect version bump
+    runs-on: ubuntu-latest
+    outputs:
+      released: ${{ steps.check.outputs.released }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - id: check
+        name: Tag the version if it is new
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists — no release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+          echo "Created and pushed ${TAG}."
+
+  release:
+    name: npm publish
+    needs: detect
+    if: needs.detect.outputs.released == 'true'
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.detect.outputs.tag }}
+    secrets: inherit
+
+  github-release:
+    name: GitHub release
+    needs: detect
+    if: needs.detect.outputs.released == 'true'
+    uses: ./.github/workflows/release-draft.yml
+    with:
+      tag: ${{ needs.detect.outputs.tag }}
+    secrets: inherit

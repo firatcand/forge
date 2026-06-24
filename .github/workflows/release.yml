@@ -26,14 +26,28 @@ on:
   push:
     tags:
       - 'v*'
+  # FORGE: also callable from auto-tag.yml. A tag pushed by a workflow's default
+  # GITHUB_TOKEN does NOT re-trigger the `push: tags` path above (GitHub's loop
+  # prevention), so auto-tag.yml creates the tag and invokes this workflow
+  # directly, passing the tag as input. The `push: tags` path is untouched, so a
+  # manually pushed tag still publishes exactly as before.
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release, e.g. v0.4.5 (defaults to the pushed ref).'
+        required: false
+        type: string
 
 permissions:
   contents: read
   id-token: write    # required by --provenance
 
 concurrency:
-  # Serialize publishes per-tag so a re-pushed tag can't race itself.
-  group: release-${{ github.ref }}
+  # Serialize publishes per-tag so a re-pushed tag can't race itself. Both paths
+  # resolve to the bare tag (e.g. v0.4.5): github.ref_name strips refs/tags/ on
+  # the push path, and inputs.tag is already bare on the workflow_call path — so
+  # the two paths share one key for the same tag.
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -43,8 +57,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Refuse if tag != package.json version
+        # RELEASE_TAG resolves to the workflow_call input when present, else the
+        # pushed ref. Consumed via env (never inline ${{ }}) per workflow-injection
+        # guidance; the value is forge-controlled (package.json version) regardless.
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          TAG="${GITHUB_REF_NAME#v}"
+          TAG="${RELEASE_TAG#v}"
           PKG="$(node -p "require('./package.json').version")"
           if [ "$TAG" != "$PKG" ]; then
             echo "::error::Tag v${TAG} does not match package.json version ${PKG}. Refusing to publish."
