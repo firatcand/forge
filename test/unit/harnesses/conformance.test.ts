@@ -97,19 +97,47 @@ for (const { name, harness } of makeHarnesses()) {
   });
 }
 
-test('claude: runReview throws NOT_SUPPORTED (conformance rule)', async () => {
-  const h = new ClaudeHarness({ spawnSubagent: async () => stubHandle });
-  await assert.rejects(
-    () => h.runReview('d', 'p', dispatchOpts),
-    (err: unknown) =>
-      isHarnessError(err) && err.code === 'NOT_SUPPORTED',
-  );
+// FORGE-223: claude is now a reviewable host. runReview parses a fenced verdict
+// from the `claude -p` subprocess through the same path as codex/gemini.
+test('claude: runReview parses a fenced verdict (FORGE-223)', async () => {
+  const reviewSpawn: SpawnSubprocess = async () => ({
+    stdout:
+      '```json\n{"version":1,"verdict":"pass","findings":[],"host":"claude"}\n```',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 1,
+  });
+  const h = new ClaudeHarness({ spawnSubprocess: reviewSpawn });
+  const verdict = await h.runReview('d', 'p', dispatchOpts);
+  assert.equal(verdict.verdict, 'pass');
+  assert.equal(verdict.host, 'claude');
 });
 
-// /review B2: createHarness must throw a typed HarnessError, not a plain Error.
-test('createHarness("claude") throws HarnessError(CALLBACK_MISSING) without spawnSubagent', () => {
-  assert.throws(
-    () => createHarness('claude'),
+// FORGE-223: createHarness("claude") with only spawnSubprocess builds a
+// review-capable harness (no throw); the dispatch path still requires the
+// callback, enforced at call time.
+test('createHarness("claude", { spawnSubprocess }) wires the spawner through runReview', async () => {
+  // Codex review: assert the injected spawner actually drives runReview, not
+  // just that .host is set — proves the review path is wired end-to-end.
+  const reviewSpawn: SpawnSubprocess = async () => ({
+    stdout:
+      '```json\n{"version":1,"verdict":"pass","findings":[],"host":"claude"}\n```',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 1,
+  });
+  const h = createHarness('claude', { spawnSubprocess: reviewSpawn });
+  assert.equal(h.host, 'claude');
+  const verdict = await h.runReview('d', 'p', dispatchOpts);
+  assert.equal(verdict.verdict, 'pass');
+  assert.equal(verdict.host, 'claude');
+});
+
+test('createHarness("claude") dispatch still rejects CALLBACK_MISSING without a callback', async () => {
+  const h = createHarness('claude');
+  assert.equal(h.host, 'claude');
+  await assert.rejects(
+    () => h.dispatchSubagent('p', dispatchOpts),
     (err: unknown) =>
       isHarnessError(err) &&
       err.code === 'CALLBACK_MISSING' &&

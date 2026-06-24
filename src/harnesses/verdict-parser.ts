@@ -5,7 +5,10 @@ import { HarnessError, type HarnessHost } from './base.ts';
 const FENCED_JSON_RE = /```json\s*\n([\s\S]*?)\n```/;
 const MAX_FINDING_MESSAGE_BYTES = 2000;
 
-export type ReviewableHost = Extract<HarnessHost, 'codex' | 'gemini'>;
+// FORGE-223: `claude` joins as a reviewable host. ClaudeHarness.runReview now
+// runs a `claude -p` subprocess and parses its fenced verdict through this same
+// path; ReviewVerdictSchema.host already accepts 'claude' (FORGE-187).
+export type ReviewableHost = Extract<HarnessHost, 'codex' | 'gemini' | 'claude'>;
 
 export interface ParseOpts {
   readonly host: ReviewableHost;
