@@ -125,8 +125,17 @@ forge orchestrate review-compose \
   --primary /tmp/auto-review-<task_id>.primary.json \
   [--second-opinion /tmp/auto-review-<task_id>.second.json] \
   --branch <branch> --summary "<one-line summary>" \
+  --expected-primary-host claude \
   [--critical-path] [--second-opinion-available] --json
 ```
+
+`--expected-primary-host` (FORGE-225) is the host that actually produced the
+primary review. In this skill that is the in-session `code-reviewer` subagent,
+which runs under **Claude** — so pass `claude`. This is the trusted, orchestrator-
+known provenance: `review-compose` verifies the primary verdict's self-declared
+`host` matches it, so a forged primary verdict can't fake dual lineage. Always
+pass it — omitting it downgrades the gate to trusting the self-declared host
+(the verb warns on stderr when it is absent).
 
 Act on `data.kind`:
 

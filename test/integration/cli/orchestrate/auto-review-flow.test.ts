@@ -190,7 +190,7 @@ test('auto-review PASS path: ready_for_review → review-compose verdict → com
   });
 
   let res = runVerb(
-    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-1', '--summary', 'Review passed.', '--forge-dir', forgeDir],
+    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-1', '--summary', 'Review passed.', '--expected-primary-host', 'claude', '--forge-dir', forgeDir],
     work,
   );
   assert.equal(res.status, 0, `review-compose failed: ${res.stderr}`);
@@ -223,7 +223,7 @@ test('auto-review ESCALATE path: critical block → review-compose escalate → 
   });
 
   let res = runVerb(
-    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-2', '--summary', 'Architectural concern.', '--critical-path', '--forge-dir', forgeDir],
+    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-2', '--summary', 'Architectural concern.', '--critical-path', '--expected-primary-host', 'claude', '--forge-dir', forgeDir],
     work,
   );
   assert.equal(res.status, 0, `review-compose failed: ${res.stderr}`);
@@ -289,6 +289,7 @@ test('auto-review SECOND-OPINION seam: runOrchestrateSecondOpinion(fakeSpawn) ve
       '--summary', 'Both reviews passed.',
       '--critical-path',
       '--second-opinion-available',
+      '--expected-primary-host', 'claude',
       '--forge-dir', forgeDir,
     ],
     work,
