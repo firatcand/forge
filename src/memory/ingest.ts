@@ -16,7 +16,7 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 
 import { loadPhases, resolvePhasesYaml } from '../core/phases.ts';
-import { projectEvents } from './project.ts';
+import { projectDecisions, projectEvents } from './project.ts';
 import { extractSymbols } from './symbols.ts';
 import {
   MEMORY_ATTR_ARRAY_MAX_LEN,
@@ -68,6 +68,10 @@ export interface ReindexResult {
   // FORGE-219 (Loom I2b-1): code-symbol counts from the tree-sitter extractor.
   readonly symbol_nodes: number;
   readonly defines_edges: number;
+  // FORGE-226 (Loom I3): decision counts from the three-source decision projector.
+  readonly decision_nodes: number;
+  readonly decided_in_edges: number;
+  readonly affects_edges: number;
   readonly warnings: string[];
 }
 
@@ -222,6 +226,21 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
   for (const defEdge of definesEdges) edges.push(defEdge);
   for (const w of symbolWarnings) warnings.push(w);
 
+  // ── 3c. decision projection → decision nodes + decided_in/affects edges (FORGE-226) ──
+  // Three durable sources (answered questions, autonomous_decision events,
+  // completed apply-journals). Reuses the same resolveTaskNodeId closure as the
+  // event projector. Best-effort: never throws — a missing orchestrator/journal
+  // tree degrades to warnings + an empty projection.
+  const decisions = projectDecisions({
+    forgeDir,
+    repoRoot: args.repoRoot,
+    resolveTaskNodeId,
+  });
+  for (const decisionNode of decisions.decisionNodes) nodes.push(decisionNode);
+  for (const decidedInEdge of decisions.decidedInEdges) edges.push(decidedInEdge);
+  for (const affectsEdge of decisions.affectsEdges) edges.push(affectsEdge);
+  for (const w of decisions.warnings) warnings.push(w);
+
   // ── 4. deterministic write: reset, then upsert sorted lists ──
   // Sort so repeated reindex produces an identical write order (idempotency).
   nodes.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -243,6 +262,9 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
     touches_edges: projection.touchesEdges.length,
     symbol_nodes: symbolNodes.length,
     defines_edges: definesEdges.length,
+    decision_nodes: decisions.decisionNodes.length,
+    decided_in_edges: decisions.decidedInEdges.length,
+    affects_edges: decisions.affectsEdges.length,
     warnings,
   };
 }

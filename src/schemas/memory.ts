@@ -18,8 +18,21 @@ import { z } from 'zod';
 // files via bundled tree-sitter (symbol:<sha256(relpath#name@line)> nodes;
 // file→symbol `defines` edges). The enums are additive so the I1/I2a graph stays
 // valid; `references` edges (symbol mentions) arrive in I2b-2.
-export const NODE_KINDS = ['task', 'learning', 'file', 'symbol'] as const;
-export const EDGE_KINDS = ['depends_on', 'learned_from', 'touches', 'defines'] as const;
+// FORGE-226 (Loom I3) adds the `decision` node kind + `decided_in`/`affects`
+// edge kinds — projected from three durable sources (answered questions,
+// autonomous_decision attempt events, completed apply-journals). `decided_in`
+// links a decision to the task it was decided in (answered/autonomous Qs);
+// `affects` links an applied ADR decision to each phases task it touched. The
+// enums are additive so the I1/I2a/I2b graph stays valid.
+export const NODE_KINDS = ['task', 'learning', 'file', 'symbol', 'decision'] as const;
+export const EDGE_KINDS = [
+  'depends_on',
+  'learned_from',
+  'touches',
+  'defines',
+  'decided_in',
+  'affects',
+] as const;
 
 export type NodeKind = (typeof NODE_KINDS)[number];
 export type EdgeKind = (typeof EDGE_KINDS)[number];

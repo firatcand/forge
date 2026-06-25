@@ -31,7 +31,7 @@ test('MemoryNodeSchema accepts a learning node without attrs and empty body', ()
 });
 
 test('MemoryNodeSchema rejects an unknown kind', () => {
-  const r = MemoryNodeSchema.safeParse({ id: 'x', kind: 'decision', title: 't', body: 'b' });
+  const r = MemoryNodeSchema.safeParse({ id: 'x', kind: 'not-a-real-kind', title: 't', body: 'b' });
   assert.equal(r.success, false);
 });
 
@@ -123,11 +123,19 @@ test('RecallHitSchema accepts both sources and rejects an unknown source', () =>
   );
 });
 
-test('node/edge kind constants include the I2a + I2b-1 additions (FORGE-218/219)', () => {
+test('node/edge kind constants include the I2a + I2b-1 + I3 additions (FORGE-218/219/226)', () => {
   // I1 shipped task/learning + depends_on/learned_from; I2a adds file + touches;
-  // I2b-1 (FORGE-219) adds symbol + defines.
-  assert.deepEqual([...NODE_KINDS], ['task', 'learning', 'file', 'symbol']);
-  assert.deepEqual([...EDGE_KINDS], ['depends_on', 'learned_from', 'touches', 'defines']);
+  // I2b-1 (FORGE-219) adds symbol + defines; I3 (FORGE-226) adds decision +
+  // decided_in/affects.
+  assert.deepEqual([...NODE_KINDS], ['task', 'learning', 'file', 'symbol', 'decision']);
+  assert.deepEqual([...EDGE_KINDS], [
+    'depends_on',
+    'learned_from',
+    'touches',
+    'defines',
+    'decided_in',
+    'affects',
+  ]);
 });
 
 test('MemoryNodeSchema accepts a symbol node + defines edge (FORGE-219)', () => {

@@ -7,6 +7,7 @@ import {
   writeFileSync,
   existsSync,
   statSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,6 +15,7 @@ import {
   appendAttemptEvent,
   readAttemptEvents,
   tryParseEventLine,
+  __eventsFsForTesting,
 } from '../../src/orchestrator/attempt-events.ts';
 import { acquire } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
@@ -279,4 +281,116 @@ test('attempt-events: large default threshold does not rotate normal traffic', (
   const evPath = eventsFilePath(fd, 'TASK-AEN', 'att-1');
   assert.equal(existsSync(`${evPath}.1`), false, 'no rotation under 10 MiB default');
   assert.ok(statSync(evPath).size > 0);
+});
+
+// ---- FORGE-226: events.jsonl symlink is NEVER followed ----
+
+test('attempt-events: readAttemptEvents returns [] when events.jsonl is a SYMLINK (does not follow)', () => {
+  const fd = forgeDir('ae-symlink');
+  const evPath = eventsFilePath(fd, 'TASK-AESL', 'att-1');
+  mkdirSync(join(fd, 'orchestrator', 'tasks', 'TASK-AESL', 'attempts', 'att-1'), {
+    recursive: true,
+  });
+  // A real, valid event log placed OUTSIDE the attempt tree; events.jsonl is a
+  // symlink to it. A naive reader would follow the link and leak its contents.
+  const decoy = join(fd, 'decoy-events.jsonl');
+  writeFileSync(decoy, JSON.stringify(heartbeatEvent()) + '\n', 'utf8');
+  symlinkSync(decoy, evPath);
+
+  const events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AESL', attemptId: 'att-1' });
+  assert.deepEqual(events, [], 'a symlinked events.jsonl is treated as absent');
+});
+
+// ---- FORGE-226: an oversized events file is read-bounded ----
+
+test('attempt-events: an events file larger than the cap is bounded (only the capped prefix parses)', () => {
+  const fd = forgeDir('ae-oversize');
+  const evPath = eventsFilePath(fd, 'TASK-AEOV', 'att-1');
+  mkdirSync(join(fd, 'orchestrator', 'tasks', 'TASK-AEOV', 'attempts', 'att-1'), {
+    recursive: true,
+  });
+  // Use the real cap via a small monkeypatch would be brittle; instead build a
+  // file whose VALID prefix is followed by enough junk to exceed the 32 MiB cap.
+  // The bounded read truncates mid-junk; the junk tail parses as ok:false (a
+  // partial/garbage line), and the real heartbeat at the head parses ok:true.
+  const head = JSON.stringify(heartbeatEvent()) + '\n';
+  // 33 MiB of non-newline filler (> MAX_EVENTS_FILE_BYTES = 32 MiB). A single
+  // huge line — the reader must not load it whole, and must not crash.
+  const filler = 'x'.repeat(33 * 1024 * 1024);
+  writeFileSync(evPath, head + filler, 'utf8');
+
+  let events!: ReturnType<typeof readAttemptEvents>;
+  assert.doesNotThrow(() => {
+    events = readAttemptEvents({ forgeDir: fd, taskId: 'TASK-AEOV', attemptId: 'att-1' });
+  });
+  // The valid head event still parsed.
+  assert.ok(events.some((e) => e.ok), 'the valid head event must survive the bounded read');
+  // The read was bounded: we never materialized the full (32 MiB + head) of text.
+  // Sum of raw line lengths across failed entries must be < the on-disk filler size.
+  const failedRawBytes = events
+    .filter((e) => !e.ok)
+    .reduce((n, e) => n + (e as { raw: string }).raw.length, 0);
+  assert.ok(
+    failedRawBytes < filler.length,
+    `bounded read: junk seen (${failedRawBytes}) must be under the on-disk filler (${filler.length})`,
+  );
+});
+
+// FORGE-226 (security): the leaf O_NOFOLLOW protects only events.jsonl itself.
+// A symlinked PARENT dir (attempts/<id> → external) must NOT be followed —
+// readAttemptEvents' realpath parent-containment refuses to read outside .forge.
+test('attempt-events: readAttemptEvents refuses a symlinked parent dir escaping .forge', () => {
+  const root = mkdtempSync(join(tmpdir(), 'forge-events-sym-'));
+  try {
+    const forgeDir = join(root, '.forge');
+    const taskDir = join(forgeDir, 'orchestrator', 'tasks', 'TASK-SYM');
+    mkdirSync(taskDir, { recursive: true });
+    // External attempt tree with a real, valid events.jsonl.
+    const ext = join(root, 'outside');
+    mkdirSync(join(ext, 'att-1'), { recursive: true });
+    writeFileSync(
+      join(ext, 'att-1', 'events.jsonl'),
+      JSON.stringify({ type: 'files_modified', ts: '2026-06-17T00:00:00.000Z', files: ['src/leak.ts'] }) + '\n',
+    );
+    // attempts → external dir; the leaf events.jsonl is itself a regular file.
+    symlinkSync(ext, join(taskDir, 'attempts'));
+
+    const events = readAttemptEvents({ forgeDir, taskId: 'TASK-SYM', attemptId: 'att-1' });
+    assert.deepEqual(events, [], 'external events must not be read through a symlinked parent');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// FORGE-226 (security, TOCTOU): even if a parent dir is swapped to an external
+// symlink AFTER the pre-open containment check, the POST-open re-check (mirror
+// symbols.ts) must refuse to return the external events. Simulated via the fs
+// seam: realpathSync resolves the LEAF (post-open) outside .forge while forgeDir
+// + parent (pre-open) resolve normally — exactly the parent-swap race.
+test('attempt-events: readAttemptEvents post-open re-check blocks a parent-swap TOCTOU', async () => {
+  const { realpathSync: realRealpath } = await import('node:fs');
+  const root = mkdtempSync(join(tmpdir(), 'forge-events-toctou-'));
+  const orig = { ...__eventsFsForTesting };
+  try {
+    const forgeDir = join(root, '.forge');
+    const attemptDir = join(forgeDir, 'orchestrator', 'tasks', 'TASK-TT', 'attempts', 'att-1');
+    mkdirSync(attemptDir, { recursive: true });
+    const leaf = join(attemptDir, 'events.jsonl');
+    writeFileSync(
+      leaf,
+      JSON.stringify({ type: 'files_modified', ts: '2026-06-17T00:00:00.000Z', files: ['src/race-leak.ts'] }) + '\n',
+    );
+    // Override ONLY realpathSync: the leaf resolves to an "external" path (as if a
+    // parent was swapped post-check); everything else resolves for real.
+    __eventsFsForTesting.realpathSync = ((p: string) => {
+      if (p === leaf) return join(root, 'outside', 'events.jsonl');
+      return realRealpath(p);
+    }) as typeof realRealpath;
+
+    const events = readAttemptEvents({ forgeDir, taskId: 'TASK-TT', attemptId: 'att-1' });
+    assert.deepEqual(events, [], 'post-open containment must reject a leaf resolving outside .forge');
+  } finally {
+    Object.assign(__eventsFsForTesting, orig);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
