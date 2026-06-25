@@ -201,18 +201,22 @@ export function runOrchestrateReviewCompose(
     if ('error' in secondParsed) {
       return { exitCode: writeEnvelope(secondParsed.error, out) };
     }
-    // A second opinion MUST be a different-lineage external reviewer
-    // (codex|gemini). The host enum includes 'claude' for the in-session
-    // PRIMARY review only; accepting host:'claude' here would let a critical-path
-    // change pass with two Claude reviews — defeating the dual-lineage gate.
-    if (secondParsed.verdict.host === 'claude') {
+    // Dual-lineage invariant (generalized FORGE-224): a second opinion MUST
+    // come from a DIFFERENT host than the primary review. The host enum now
+    // includes 'claude' as a valid reviewer, so the gate is no longer "reject
+    // host:claude" — it is "reject same-host pairs". Accepting a same-host pair
+    // (e.g. claude+claude, codex+codex) would let a critical-path change pass
+    // with two reviews from the same lineage, defeating the adversarial gate.
+    const primaryHost = primaryParsed.verdict.host;
+    const secondHost = secondParsed.verdict.host;
+    if (secondHost === primaryHost) {
       return {
         exitCode: writeEnvelope(
           fail(
             'INVALID_VERDICT',
-            `second-opinion verdict at ${opts.secondOpinionPath} has host:'claude'; a second opinion must be an external reviewer (codex|gemini).`,
+            `second-opinion verdict at ${opts.secondOpinionPath} has host:'${secondHost}' which matches the primary review host; a second opinion must come from a different host than the primary review (same-host pairs, including claude+claude, are rejected).`,
             false,
-            { kind: 'second-opinion', path: opts.secondOpinionPath, host: 'claude' },
+            { kind: 'second-opinion', path: opts.secondOpinionPath, primaryHost, secondHost },
           ),
           out,
         ),

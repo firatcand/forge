@@ -18,12 +18,16 @@ import { v7 as uuidv7 } from 'uuid';
 export const MAX_DIFF_BYTES = 1_000_000;   // 1MB — typical diffs are <50KB
 export const MAX_PROMPT_BYTES = 200_000;   // 200KB — six-piece briefs are <10KB
 
+import { execa } from 'execa';
+
 import {
   SecondOpinionArgsSchema,
   type SecondOpinionArgs,
 } from '../../schemas/cli-args.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { loadSettings } from '../../core/settings.ts';
+import { HOST_CLI_BIN, probeBinVersion } from '../../orchestrator/host-probe.ts';
+import type { ExecaLike } from '../init/validate.ts';
 import {
   createHarness,
   isHarnessError,
@@ -50,17 +54,28 @@ export type SecondOpinionHarnessFactory = (
 ) => IHarness;
 
 const defaultFactory: SecondOpinionHarnessFactory = (host, spawnSubprocess) => {
-  if (host === 'claude') {
-    throw new Error(
-      `createHarness('claude') is not a reviewer — review_host_cli must be 'codex' or 'gemini'`,
-    );
-  }
+  // FORGE-224: claude is now a valid review host (ClaudeHarness.runReview via
+  // `claude -p`). createHarness builds a review-only ClaudeHarness from just
+  // spawnSubprocess — no in-session callback needed for the review path.
   return createHarness(host, spawnSubprocess ? { spawnSubprocess } : {});
 };
 
 export interface RunSecondOpinionDeps {
   readonly factory?: SecondOpinionHarnessFactory;
   readonly spawnSubprocess?: SpawnSubprocess;
+  // FORGE-224 (#2): REVIEW-path reachability probe for the claude review host.
+  // Returns true iff the `claude` CLI is on PATH (probes `claude --version`).
+  // Injected so tests exercise both reachable/unreachable cases without the
+  // real binary. Default runs the shared probeBinVersion via execa. This is
+  // SEPARATE from computeAvailability's claude case, which deliberately does
+  // NOT probe the binary (it gates on the CLAUDE_CODE in-session env signal so
+  // it never falsely fails an in-session DISPATCH).
+  readonly probeReviewBin?: (bin: string) => Promise<boolean>;
+}
+
+// Default REVIEW-path claude-binary probe: `claude --version` via execa.
+async function defaultProbeReviewBin(bin: string): Promise<boolean> {
+  return probeBinVersion(bin, execa as unknown as ExecaLike);
 }
 
 export async function runOrchestrateSecondOpinion(
@@ -106,13 +121,37 @@ export async function runOrchestrateSecondOpinion(
       exitCode: emit(
         fail(
           'REVIEW_DISABLED',
-          `second-opinion review is disabled — settings.agents.review_host_cli is null at ${settingsPath}. Set it to 'codex' or 'gemini' to enable.`,
+          `second-opinion review is disabled — settings.agents.review_host_cli is null at ${settingsPath}. Set it to 'claude', 'codex', or 'gemini' to enable.`,
           false,
           { settingsPath },
         ),
         { json: opts.json },
       ),
     };
+  }
+
+  // FORGE-224 (#2): REVIEW-path reachability gate for the claude review host.
+  // claude REVIEW shells out to `claude -p` (NOT the in-session Task tool), so
+  // the `claude` CLI must actually be on PATH. Probe `claude --version` before
+  // dispatching and return a clear, non-throwing error envelope on failure.
+  // (computeAvailability's claude case intentionally does NOT probe the binary
+  // — that gate is for the in-session DISPATCH path; this one is review-only.)
+  if (reviewHost === 'claude') {
+    const probe = deps.probeReviewBin ?? defaultProbeReviewBin;
+    const reachable = await probe(HOST_CLI_BIN.claude);
+    if (!reachable) {
+      return {
+        exitCode: emit(
+          fail(
+            'BINARY_NOT_FOUND',
+            `claude review host requires the 'claude' CLI on PATH (claude -p); not found`,
+            false,
+            { reviewHost, bin: HOST_CLI_BIN.claude },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
   }
 
   // Read diff + prompt files. Two separate reads so the failing input is
@@ -252,7 +291,7 @@ function readBoundedFile(
 export const secondOpinionHandler: VerbHandler = {
   band: 'mutate',
   synopsis:
-    'Dispatch a second-opinion review through review_host_cli (codex | gemini); emits a ReviewVerdict envelope.',
+    'Dispatch a second-opinion review through review_host_cli (claude | codex | gemini); emits a ReviewVerdict envelope.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const taskId = parseFlag(rest, 'task') ?? '';

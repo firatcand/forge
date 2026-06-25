@@ -151,7 +151,7 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
   },
   {
     name: 'second-opinion',
-    summary: 'Dispatch a second-opinion review through review_host_cli (codex | gemini); emits a ReviewVerdict envelope.',
+    summary: 'Dispatch a second-opinion review through review_host_cli (claude | codex | gemini); emits a ReviewVerdict envelope.',
   },
 ] as const;
 
@@ -235,7 +235,7 @@ export const SLASH_COMMANDS: readonly RegistryEntry[] = [
   },
   {
     name: 'second-opinion',
-    summary: 'Dispatch a second-opinion review through the configured review host (Codex or Gemini).',
+    summary: 'Dispatch a second-opinion review through the configured review host (Claude, Codex, or Gemini).',
   },
   {
     name: 'drive',

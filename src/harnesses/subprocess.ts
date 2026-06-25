@@ -32,7 +32,10 @@ const SAFE_ENV_KEYS = [
   'SHELL',
 ] as const;
 
-function buildSubprocessEnv(
+// Exported (FORGE-224) so the host-CLI `--version` probe (probeBinVersion)
+// reuses the SAME env allowlist instead of duplicating it — a probe that shells
+// out to a (possibly PATH-hijacked) binary must not inherit secrets either.
+export function buildSubprocessEnv(
   override: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> {
   const base: Record<string, string> = {};

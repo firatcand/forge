@@ -96,7 +96,7 @@ export function notSupported(host: HarnessHost, capability: string): HarnessErro
   return new HarnessError(
     'NOT_SUPPORTED',
     host,
-    `${host} harness does not support ${capability}. See .forge/settings.yaml review_host_cli — Claude is excluded as a reviewer because second-opinion review requires a different model lineage.`,
+    `${host} harness does not support ${capability}. See .forge/settings.yaml review_host_cli — review hosts are claude / codex / gemini (the second-opinion host must differ from the primary host); cursor does not support review.`,
     { capability },
   );
 }

@@ -1,6 +1,6 @@
 ---
 name: second-opinion
-description: Get a second opinion on a plan, diff, or specific files from Codex or Gemini (whichever is configured as `settings.agents.review_host_cli`). The reviewer reads the working tree directly, so it can reason about both the proposed change AND surrounding production code (dependency graph, sibling adapters, recently-merged PRs). Required for changes touching CRITICAL.md paths.
+description: Get a second opinion on a plan, diff, or specific files from Claude, Codex, or Gemini (whichever is configured as `settings.agents.review_host_cli`, a different host than the primary worker). The reviewer reads the working tree directly, so it can reason about both the proposed change AND surrounding production code (dependency graph, sibling adapters, recently-merged PRs). Required for changes touching CRITICAL.md paths.
 tools: Bash(forge*), Bash(git*), Read, Edit, Write
 ---
 
@@ -8,8 +8,8 @@ tools: Bash(forge*), Bash(git*), Read, Edit, Write
 
 ## Preconditions
 
-- `.forge/settings.yaml` exists and `agents.review_host_cli` is set to `codex` or `gemini` (not `null`, not `claude`).
-- The configured reviewer CLI is installed (`which codex` / `which gemini`).
+- `.forge/settings.yaml` exists and `agents.review_host_cli` is set to a host that DIFFERS from the primary — `claude`, `codex`, or `gemini` (not `null`). FORGE-224: `claude` is a valid review host (it reviews via `claude -p`, metered against the Agent SDK credit pool — see ORCHESTRATOR.md §Phase 2).
+- The configured reviewer CLI is installed (`which claude` / `which codex` / `which gemini`).
 - **Working tree is rebased onto current `main`.** The reviewer reads files from disk; if the worktree is stale, the reviewer reasons about old code and may miss recently-merged dependencies (sibling adapters, new abstractions, refactored APIs). Always `git fetch origin main && git rebase origin/main` in the worktree before invoking.
 - For framework projects using gitignored project meta (e.g., `spec/`, `plans/`, `docs/learnings/`): re-hydrate them in the worktree after rebase so the reviewer sees the canonical source-of-truth, not just the tracked source files.
 
@@ -24,7 +24,7 @@ Two things to leverage:
 
 ## Invocation (via `forge orchestrate second-opinion`)
 
-The skill never spawns `codex exec` or `gemini` directly. Dispatch goes through the CLI verb, which is the sole boundary that knows about `settings.agents.review_host_cli` (codex vs gemini). The verb internally calls `IHarness.runReview` on the chosen adapter; `spawnSubprocess` inside the adapter already sets `stdin: 'ignore'` (FORGE-135), so the stdin-hang failure mode that bit `/codex` in v0.3.x can't recur.
+The skill never spawns `codex exec`, `gemini`, or `claude -p` directly. Dispatch goes through the CLI verb, which is the sole boundary that knows about `settings.agents.review_host_cli` (claude vs codex vs gemini). The verb internally calls `IHarness.runReview` on the chosen adapter; `spawnSubprocess` inside the adapter already sets `stdin: 'ignore'` (FORGE-135), so the stdin-hang failure mode that bit `/codex` in v0.3.x can't recur.
 
 ### Standard pattern
 
@@ -104,7 +104,7 @@ Not every finding is right. After reading the verdict:
 - **Scope / "you should also do X"** → defer unless it's actually blocking. Add to a follow-up ticket rather than ballooning the current task.
 - **Style** → ignore unless it affects correctness or readability of the artifact.
 
-When updating an artifact in response to a finding, cite the source explicitly ("Codex 2nd-pass: …" or "Gemini 2nd-pass: …") so the reasoning is traceable in git history.
+When updating an artifact in response to a finding, cite the source explicitly ("Codex 2nd-pass: …", "Gemini 2nd-pass: …", or "Claude 2nd-pass: …") so the reasoning is traceable in git history.
 
 ## When to use
 

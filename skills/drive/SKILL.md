@@ -97,7 +97,7 @@ note). It rewrites the note (with `updated_at`) after each stage transition.
 ## Cross-review rule — the implementer never reviews its own code
 
 The cross-review in step 8 is run by the **OTHER** model lineage — the configured
-`agents.review_host_cli` (Codex or Gemini), via `forge orchestrate second-opinion`
+`agents.review_host_cli` (Claude, Codex, or Gemini; a different host than the primary), via `forge orchestrate second-opinion`
 — precisely because the model that wrote the code must not be the model that
 clears it. This dual-lineage gate is the whole point of cross-review.
 

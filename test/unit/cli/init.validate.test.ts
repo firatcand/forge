@@ -72,6 +72,38 @@ test('validateTooling: git pass + claude pass + linear MCP pass + codex pass + e
   assert.equal(statuses['secret_mgr_env_file'], 'pass');
 });
 
+test('validateTooling: host-CLI + git `--version` probes run with a sanitized env (FORGE-224, no secret leak via PATH-hijacked bin)', async () => {
+  const cwd = tmp();
+  writeFileSync(join(cwd, '.env.local'), 'X=1\n');
+  const SECRET = 'GITHUB_TOKEN';
+  const hadSecret = process.env[SECRET];
+  process.env[SECRET] = 'ghp_secret';
+  try {
+    const seen: Record<string, Record<string, unknown>> = {};
+    const exec: ExecaLike = async (cmd, args, opts) => {
+      seen[`${cmd} ${args.join(' ')}`] = opts as Record<string, unknown>;
+      return { exitCode: 0, stdout: cmd === 'git' ? 'git version 2.40.1\n' : '1.0.0', stderr: '' };
+    };
+    await validateTooling(baseAnswers(), {
+      cwd,
+      exec,
+      autoSkipFailures: true,
+      getEnv: (n) => (n === 'LINEAR_API_KEY' ? 'lin_api_test' : undefined),
+    });
+    for (const key of ['claude --version', 'codex --version', 'git --version']) {
+      const opts = seen[key];
+      assert.ok(opts, `${key} was probed`);
+      assert.equal(opts.extendEnv, false, `${key} runs with extendEnv:false`);
+      const env = opts.env as Record<string, string>;
+      assert.equal(env[SECRET], undefined, `${key} does NOT forward ${SECRET}`);
+      assert.equal(env.PATH, process.env.PATH, `${key} still forwards PATH`);
+    }
+  } finally {
+    if (hadSecret === undefined) delete process.env[SECRET];
+    else process.env[SECRET] = hadSecret;
+  }
+});
+
 test('validateTooling: linear tracker without LINEAR_API_KEY env → linear_api_key probe fails', async () => {
   const cwd = tmp();
   writeFileSync(join(cwd, '.env.local'), 'X=1\n');

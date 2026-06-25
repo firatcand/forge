@@ -59,3 +59,29 @@ test('probeBinVersion calls <bin> --version with stdin:ignore and a timeout', as
   assert.equal(seen?.opts.reject, false);
   assert.equal(seen?.opts.stdin, 'ignore');
 });
+
+test('probeBinVersion runs with a sanitized env (extendEnv:false, no secrets leak to a hijacked probe bin)', async () => {
+  // FORGE-224: a PATH-hijacked probe binary must not inherit secrets. The probe
+  // forwards only the HOME/PATH/locale allowlist (buildSubprocessEnv) and sets
+  // extendEnv:false so process.env is NOT inherited.
+  const SECRET = 'GITHUB_TOKEN';
+  const hadSecret = process.env[SECRET];
+  process.env[SECRET] = 'ghp_super_secret_value';
+  try {
+    let seen: { opts: Record<string, unknown> } | undefined;
+    const exec = (async (_cmd: string, _args: readonly string[], opts: Record<string, unknown>) => {
+      seen = { opts };
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }) as unknown as ExecaLike;
+    await probeBinVersion('claude', exec, 100);
+    assert.equal(seen?.opts.extendEnv, false);
+    const env = seen?.opts.env as Record<string, string>;
+    assert.ok(env, 'a sanitized env object is passed');
+    assert.equal(env[SECRET], undefined, 'secret env var is NOT forwarded to the probe');
+    // PATH IS forwarded (the probe must still resolve the binary off PATH).
+    assert.equal(env.PATH, process.env.PATH);
+  } finally {
+    if (hadSecret === undefined) delete process.env[SECRET];
+    else process.env[SECRET] = hadSecret;
+  }
+});

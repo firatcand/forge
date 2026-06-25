@@ -284,6 +284,67 @@ test('FORGE-160 — collectAnswers: checkbox can add cursor as an enabled root f
   assert.deepEqual([...answers.agents.enabled_root_files].sort(), ['claude', 'cursor']);
 });
 
+test('FORGE-224 — collectAnswers: claude is selectable as the review host CLI', async (t) => {
+  t.after(() => {
+    __resetForTests();
+    __setNumberConfirmForTests(null);
+  });
+  __setPromptModuleForTests(
+    scriptedPromptModule([
+      { match: /Project name/, value: 'claude-reviewer-app' },
+      { match: /description/, value: '' },
+      { match: /goal/, value: 'review with claude' },
+      { match: /task tracker/, value: 'linear' },
+      { match: /team_id/, value: 'TEAM-7' },
+      { match: /secret manager/, value: 'env_file' },
+      { match: /Env file path/, value: './.env.local' },
+      // primary=codex so review=claude is a different host (passes the refine).
+      { match: /Primary host CLI/, value: 'codex' },
+      { match: /Review host CLI/, value: 'claude' },
+    ]),
+  );
+  __setNumberConfirmForTests(scriptedNumberConfirm([10, 10]));
+  const answers = await collectAnswers({ cwd: '/tmp/claude-reviewer' });
+  assert.equal(answers.agents.primary_host_cli, 'codex');
+  assert.equal(answers.agents.review_host_cli, 'claude');
+});
+
+test('FORGE-224 — InitAnswersSchema accepts review_host_cli: claude (different primary)', () => {
+  const ok = InitAnswersSchema.safeParse({
+    project: { name: 'a' },
+    goal: 'x',
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file', env_file_path: './.env' },
+    agents: {
+      max_concurrent: 5,
+      retry_attempts: 3,
+      primary_host_cli: 'codex',
+      review_host_cli: 'claude',
+      enabled_root_files: ['codex'],
+    },
+    design: { mode: 'project_owned' },
+  });
+  assert.equal(ok.success, true);
+});
+
+test('FORGE-224 — InitAnswersSchema rejects review_host_cli: claude when primary is also claude', () => {
+  const bad = InitAnswersSchema.safeParse({
+    project: { name: 'a' },
+    goal: 'x',
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file', env_file_path: './.env' },
+    agents: {
+      max_concurrent: 5,
+      retry_attempts: 3,
+      primary_host_cli: 'claude',
+      review_host_cli: 'claude',
+      enabled_root_files: ['claude'],
+    },
+    design: { mode: 'project_owned' },
+  });
+  assert.equal(bad.success, false);
+});
+
 test('collectAnswers — positional name skips prompt 1', async (t) => {
   t.after(() => {
     __resetForTests();

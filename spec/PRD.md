@@ -279,7 +279,7 @@ Interactive CLI Q&A during `npx @firatcand/forge init [name]` that captures proj
    - High-level goal / what you're building (free text, multi-line)
    - Task tracker — Linear / GitHub Issues / Notion (default: GitHub Issues)
    - Primary coding agent CLI — Claude Code / Codex CLI / Gemini CLI (default: Claude Code; Cursor was dropped per FORGE-88 — no runtime adapter ever shipped)
-   - Secondary coding agent CLI for adversarial review — Codex CLI / Gemini CLI / disabled (default: Codex when primary is Claude, else Codex)
+   - Secondary coding agent CLI for adversarial review — Claude Code / Codex CLI / Gemini CLI / disabled (FORGE-224: Claude is a valid review host via `claude -p`; must differ from primary; default: Codex when primary is Claude, else Codex)
    - **Which agent root files to write (FORGE-152)** — multi-select for CLAUDE.md / AGENTS.md / GEMINI.md. The primary host CLI is pre-checked; user can add others so teammates on those agents have a tracked root file with the methodology breadcrumb. Validator: must include primary.
    - GitHub connected? — yes / no (if yes, validates `gh auth status`)
    - Secret manager — `.env` file [default] / 1Password / AWS Secrets / Doppler / Infisical
@@ -347,7 +347,7 @@ secrets:
   env_file_path: ./.env.local       # only when manager = env_file
 agents:
   primary_host_cli: claude          # claude | codex | gemini  (cursor dropped FORGE-88)
-  review_host_cli: codex            # codex | gemini | null  (must differ from primary; null disables REVIEW)
+  review_host_cli: codex            # claude | codex | gemini | null  (FORGE-224; must differ from primary; null disables REVIEW)
   enabled_root_files:               # FORGE-152: which agent root files init writes
     - claude                        # → CLAUDE.md
     # - codex                       # → AGENTS.md  (add for Codex-on-the-team)

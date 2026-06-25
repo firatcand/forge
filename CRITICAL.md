@@ -49,10 +49,14 @@ src/search/**
 src/cli/init/**
 
 # Harness adapters (FORGE-88) — spawn primary worker / review subprocesses.
-# Claude path is the subscription-billing surface (must NOT spawn `claude` CLI);
-# Codex + Gemini paths spawn subprocesses with worktree cwd and parse stdout
-# into a verdict. Same review reasoning as tracker adapters: subprocess
-# boundary, structured-output parsing, security-sensitive defaults.
+# All three review-capable paths (claude / codex / gemini) can REVIEW via a
+# subprocess that parses stdout into a verdict. FORGE-223/224: claude REVIEW
+# shells out to `claude -p` (non-interactive: `claude -p --output-format text
+# --no-session-persistence`, default tools + default permission behavior),
+# while claude PRIMARY dispatch stays in-session — the subscription-billing
+# surface that must NOT spawn the `claude` CLI. Same review reasoning as tracker
+# adapters: subprocess boundary, structured-output parsing, security-sensitive
+# defaults.
 src/harnesses/**
 
 # ─── adopter-template defaults (kept for reference; not applicable to forge core) ─

@@ -44,9 +44,12 @@ confirmation gates, and the auto-codex second-opinion hook.
       `phases.yaml` and the tracker, with the drift notice listing any active
       attempt.
 
-`primary_host_cli: claude` + `review_host_cli: codex` is the supported pairing.
-Cursor + Gemini are **verified-deferred** (no Cursor adapter yet; FORGE-160 adds
-it first) — do not gate a release on them.
+`primary_host_cli: claude` + `review_host_cli: codex` is the default supported
+pairing. FORGE-224: `review_host_cli: claude` is also supported (Claude reviews
+via `claude -p`) so long as it differs from the primary — e.g.
+`primary_host_cli: codex` + `review_host_cli: claude`. Cursor + Gemini are
+**verified-deferred** (no Cursor adapter yet; FORGE-160 adds it first) — do not
+gate a release on them.
 
 ## 2. Live tracker integration suites
 

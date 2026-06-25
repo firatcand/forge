@@ -143,7 +143,7 @@ Single-model blind spots. Claude is excellent, but every model has consistent ga
 
 ### The mechanism
 
-For changes touching paths in your project's `CRITICAL.md` (typically: auth, billing, webhooks, infrastructure, schema migrations), `/ship` requires `/codex review` to have run. `/codex` shells out to your Codex CLI for an adversarial second look.
+For changes touching paths in your project's `CRITICAL.md` (typically: auth, billing, webhooks, infrastructure, schema migrations), `/ship` requires a second-opinion review to have run. The review fires through your configured review host (claude | codex | gemini), a different lineage than the primary worker, for an adversarial second look. With the default `primary: claude`, `/codex` shells out to your Codex CLI; when Claude is the reviewer it runs non-interactively via `claude -p`.
 
 ### Worked example
 

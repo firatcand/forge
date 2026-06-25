@@ -2,6 +2,7 @@ import { execa } from 'execa';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { HOST_CLI_BIN } from '../../orchestrator/host-probe.ts';
+import { buildSubprocessEnv } from '../../harnesses/subprocess.ts';
 import type { InitAnswers } from './prompts.ts';
 
 export type ProbeStatus = 'pass' | 'fail' | 'skip';
@@ -26,7 +27,17 @@ export type ExecaLike = (
   // FORGE-213: `stdin` added so the availability prober can pass `stdin: 'ignore'`
   // (reject stdin / never block on an interactive binary). Optional, so existing
   // callers (runProbe) need no change.
-  opts: { timeout: number; reject: false; cwd?: string; stdin?: 'ignore' },
+  // FORGE-224: `env` + `extendEnv` added so probeBinVersion can run `<bin>
+  // --version` with a sanitized env allowlist (extendEnv:false) — a PATH-hijacked
+  // probe binary must not inherit secrets. Optional; test mocks ignore them.
+  opts: {
+    timeout: number;
+    reject: false;
+    cwd?: string;
+    stdin?: 'ignore';
+    env?: Readonly<Record<string, string>>;
+    extendEnv?: boolean;
+  },
 ) => Promise<{
   // execa@9 under reject:false resolves spawn failures with exitCode
   // undefined and a string `code` (e.g. 'ENOENT') — modeled here so runProbe
@@ -91,9 +102,19 @@ async function runProbe(
   timeoutMs: number,
   passPredicate: (r: { exitCode: number | null | undefined; stdout: string; stderr: string; timedOut?: boolean }) => true | string,
   failMessage: string,
+  // FORGE-224: opt in for pure `<bin> --version` presence probes (host CLIs,
+  // git). They never need secrets, and the binary is resolved off PATH and could
+  // be hijacked — so run with the sanitized env allowlist (extendEnv:false), the
+  // same policy as harness subprocesses / probeBinVersion. Auth/capability probes
+  // (gh auth, tracker) leave this false: they may legitimately need env vars.
+  sanitizeEnv = false,
 ): Promise<ProbeResult> {
   try {
-    const r = await exec(cmd, args, { timeout: timeoutMs, reject: false });
+    const r = await exec(cmd, args, {
+      timeout: timeoutMs,
+      reject: false,
+      ...(sanitizeEnv ? { env: buildSubprocessEnv(undefined), extendEnv: false } : {}),
+    });
     if (r.timedOut) {
       return { key, label, status: 'fail', message: `${failMessage} (probe timed out after ${timeoutMs}ms)`, installLink };
     }
@@ -137,6 +158,7 @@ async function probeGit(exec: ExecaLike, timeoutMs: number): Promise<ProbeResult
       return true;
     },
     'git ≥ 2.20 is required; forge orchestrator uses worktrees.',
+    true, // FORGE-224: `git --version` is a pure presence probe — sanitized env.
   );
 }
 
@@ -159,6 +181,8 @@ async function probeHostCli(
     timeoutMs,
     (r) => (r.exitCode === 0 ? true : `${bin} --version exited ${r.exitCode}`),
     `${label} host CLI \`${bin}\` not found on PATH.`,
+    true, // FORGE-224: host-CLI `--version` is a pure presence probe — sanitized
+    //        env so a PATH-hijacked claude/codex/gemini/agent can't read secrets.
   );
 }
 

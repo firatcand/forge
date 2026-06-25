@@ -1,7 +1,8 @@
 // FORGE-160: CursorHarness — subprocess-backed primary dispatch via the beta
 // Cursor CLI (`agent -p --force --output-format json <prompt>`, CURSOR_API_KEY
 // auth passthrough). Modeled on CodexHarness (subprocess shape) but PRIMARY-ONLY:
-// runReview throws NOT_SUPPORTED (review hosts remain codex | gemini).
+// runReview throws NOT_SUPPORTED. Review hosts are claude | codex | gemini
+// (FORGE-224 added claude via `claude -p`); cursor is NOT a review host.
 //
 // Beta gate (defense in depth with the schema refine in src/schemas/settings.ts):
 // the ctor throws EXPERIMENTAL_GATE_CLOSED unless `betaOptIn: true` is passed.

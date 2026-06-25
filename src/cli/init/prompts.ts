@@ -89,12 +89,14 @@ const SecretsSchema = z.discriminatedUnion('manager', [
   SecretsInfisical,
 ]);
 
-// FORGE-88: primary/review enums diverge. Primary may be any of the three
-// supported harnesses; review excludes claude (different-model-lineage rule).
+// FORGE-88 / FORGE-224: primary may be any supported harness. Review now
+// INCLUDES claude (ClaudeHarness.runReview via `claude -p`); the only rule is
+// that review must DIFFER from primary (enforced by the refine below + the
+// settings refine at load).
 // FORGE-160: cursor joins primary (beta — gated by cursor_host_beta_opt_in in
 // the settings schema) and enabled_root_files (passive breadcrumb, ungated).
 const PrimaryHostCliEnum = z.enum(['claude', 'codex', 'gemini', 'cursor']);
-const ReviewHostCliEnum = z.enum(['codex', 'gemini']);
+const ReviewHostCliEnum = z.enum(['claude', 'codex', 'gemini']);
 // FORGE-152/FORGE-160: enabled_root_files. Init writes one root file per
 // selected agent (CLAUDE.md / AGENTS.md / GEMINI.md / .cursor/rules/forge-context.mdc).
 const EnabledRootFileEnum = z.enum(['claude', 'codex', 'gemini', 'cursor']);
@@ -232,8 +234,11 @@ function primaryHostCliChoices(): readonly ('claude' | 'codex' | 'gemini')[] {
     ? [...base, 'gemini']
     : base;
 }
-function reviewHostCliChoices(): readonly ('codex' | 'gemini')[] {
-  const base = ['codex'] as const;
+// FORGE-224: claude is now a valid review host. Default stays codex (offered
+// first); claude is always selectable (no experimental gate). The primary/review
+// collision is enforced by the AgentsAnswersSchema refine in the prompt loop.
+function reviewHostCliChoices(): readonly ('claude' | 'codex' | 'gemini')[] {
+  const base = ['codex', 'claude'] as const;
   return process.env.FORGE_GEMINI_EXPERIMENTAL === '1'
     ? [...base, 'gemini']
     : base;
@@ -412,13 +417,13 @@ export async function collectAnswers(opts: CollectAnswersOptions): Promise<InitA
   // without the gemini gate → review choices is just ['codex','none']).
   const defaultReview =
     (reviewChoices as readonly string[]).find((c) => c !== primaryHostCli) ?? 'none';
-  let reviewHostCli: 'codex' | 'gemini' | null;
+  let reviewHostCli: 'claude' | 'codex' | 'gemini' | null;
   while (true) {
     const reviewChoice = (await loggerPrompt('Review host CLI (second-opinion)?', {
       choices: reviewChoices as unknown as readonly string[],
       default: defaultReview,
     })) as string;
-    const value = reviewChoice === 'none' ? null : (reviewChoice as 'codex' | 'gemini');
+    const value = reviewChoice === 'none' ? null : (reviewChoice as 'claude' | 'codex' | 'gemini');
     // FORGE-152: the enabled_root_files field is collected AFTER this loop.
     // Seed it with the primary so the .min(1) + must-include-primary refinements
     // pass here — they're validated for real once the checkbox prompt fires

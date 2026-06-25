@@ -125,8 +125,9 @@ for contamination (`git -C <main> status --porcelain src/`) after each implement
 ## Cross-review rule — the implementer never reviews its own code
 
 Every batch's cross-review (step 5f below) is run by the **OTHER** model
-lineage — the configured `agents.review_host_cli` (Codex or Gemini), via
-`forge orchestrate second-opinion` — never the model that wrote the code. This
+lineage — the configured `agents.review_host_cli` (Claude, Codex, or Gemini; a
+different host than the primary), via `forge orchestrate second-opinion` — never
+the model that wrote the code. This
 dual-lineage gate is inherited from `/drive`.
 
 ---

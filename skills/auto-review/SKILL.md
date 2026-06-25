@@ -31,10 +31,13 @@ This skill runs **only in an interactive session**, for two reasons:
    to you through the host's `AskUserQuestion` / `Task` tooling — there is no
    non-interactive path for a human decision.
 2. **Billing invariant.** The primary review runs as an **in-session subagent
-   under your subscription** via the host `Task` tool. This skill NEVER shells
-   out to `claude -p`, `claude --print`, the Anthropic API, or any headless
-   metered invocation. The only external reviewer it may call is the configured
-   `second-opinion` host (Codex/Gemini), and only on a critical path.
+   under your subscription** via the host `Task` tool. For the primary review
+   this skill NEVER shells out to `claude -p`, `claude --print`, the Anthropic
+   API, or any headless metered invocation. The only external reviewer it may
+   call is the configured `second-opinion` host (Codex, Gemini, or Claude), and
+   only on a critical path. Note: a `second-opinion` host of `claude` runs via
+   metered `claude -p` (FORGE-224) — that is the second-opinion path, distinct
+   from the subscription-billed in-session primary review above.
 
 ## Skill ↔ verb contract
 
@@ -74,8 +77,9 @@ Spawn the `code-reviewer` agent (`agents/code-reviewer.md`) through the host
 (`{version, verdict, findings, host}`).
 
 The in-session primary reviewer is Claude, so the verdict file it writes carries
-`host: "claude"` (the `ReviewVerdict` schema now permits `claude` for the
-primary review; the `second-opinion` verb still only emits `codex`/`gemini`).
+`host: "claude"` (the `ReviewVerdict` schema permits `claude` for the primary
+review; the `second-opinion` verb may now emit `codex`, `gemini`, or `claude`
+per FORGE-224 — a `claude` second opinion uses metered `claude -p`).
 Write the verdict the subagent returns to `/tmp/auto-review-<task_id>.primary.json`.
 
 If the subagent's output is unparseable, treat it as `changes_requested` and

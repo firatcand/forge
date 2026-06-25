@@ -372,11 +372,13 @@ test('regression — invalid primary_host_cli enum value rejected', () => {
   assert.equal(result.success, false);
 });
 
-// FORGE-88: enum tightening — claude no longer accepted as a review_host_cli;
-// gemini gated on env var.
+// FORGE-88: gemini gated on env var.
+// FORGE-224: claude is now ACCEPTED as a review_host_cli (different lineage
+// from a non-claude primary); the only invariant is review !== primary, so
+// claude+claude is still rejected by the refine (see below).
 // FORGE-160: cursor is now a VALID primary host, BUT only behind the
 // cursor_host_beta_opt_in gate; it remains rejected as a review host (review
-// lineage stays codex | gemini).
+// lineage stays claude | codex | gemini).
 
 test('FORGE-160 — primary_host_cli=cursor WITHOUT cursor_host_beta_opt_in rejected (beta gate)', () => {
   const result = SettingsSchema.safeParse({
@@ -420,7 +422,7 @@ test('FORGE-88 — review_host_cli=cursor rejected (no longer supported)', () =>
   assert.equal(result.success, false);
 });
 
-test('FORGE-88 — review_host_cli=claude rejected (different-lineage rule)', () => {
+test('FORGE-224 — review_host_cli=claude accepted when primary differs (codex)', () => {
   const result = SettingsSchema.safeParse({
     version: 1,
     project: { name: 'x' },
@@ -428,7 +430,28 @@ test('FORGE-88 — review_host_cli=claude rejected (different-lineage rule)', ()
     secrets: { manager: 'env_file' },
     agents: { primary_host_cli: 'codex', review_host_cli: 'claude' },
   });
+  assert.equal(result.success, true);
+  if (result.success) {
+    assert.equal(result.data.agents.review_host_cli, 'claude');
+  }
+});
+
+test('FORGE-224 — review_host_cli=claude rejected when primary is also claude (same host)', () => {
+  const result = SettingsSchema.safeParse({
+    version: 1,
+    project: { name: 'x' },
+    tracker: { type: 'linear', config: { team_id: 'T' } },
+    secrets: { manager: 'env_file' },
+    agents: { primary_host_cli: 'claude', review_host_cli: 'claude' },
+  });
   assert.equal(result.success, false);
+  if (!result.success) {
+    assert.ok(
+      result.error.issues.some((i) =>
+        i.message.includes('review_host_cli must differ from primary_host_cli'),
+      ),
+    );
+  }
 });
 
 test('FORGE-88 — primary_host_cli=gemini rejected without FORGE_GEMINI_EXPERIMENTAL=1', () => {
@@ -548,7 +571,7 @@ test('type-level — Settings.agents.max_concurrent is non-optional number', () 
       worktree_root: string;
       on_persistent_failure: 'notify' | 'block_task' | 'move_to_next';
       primary_host_cli: 'claude' | 'codex' | 'gemini' | 'cursor';
-      review_host_cli: 'codex' | 'gemini' | null;
+      review_host_cli: 'claude' | 'codex' | 'gemini' | null;
     };
     design: {
       mode: 'project_owned' | 'reference_external';

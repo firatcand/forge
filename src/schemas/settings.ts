@@ -123,9 +123,11 @@ export const AgentsSchema = z
     // FORGE-160: opt-in for the beta Cursor CLI as the primary dispatch host.
     // Required to set primary_host_cli: cursor (see refine below).
     cursor_host_beta_opt_in: z.boolean().default(false),
-    // FORGE-88: review hosts are codex / gemini. Claude is excluded as a
-    // reviewer — second-opinion review requires a different model lineage
-    // than the primary worker. `null` disables second-opinion review entirely.
+    // FORGE-88 / FORGE-223 / FORGE-224: review hosts are claude / codex /
+    // gemini. Claude is now an allowed review host (ClaudeHarness.runReview
+    // shells out to `claude -p`). The invariant is that second-opinion review
+    // requires a host DIFFERENT from primary_host_cli (enforced by the refine
+    // below). `null` disables second-opinion review entirely.
     review_host_cli: z
       .enum(REVIEW_HOSTS)
       .nullable()
