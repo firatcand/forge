@@ -114,6 +114,8 @@ export class LocalMemoryBackend implements MemoryBackend {
         // their title is a bare code identifier (e.g. `get`, `id`) that would
         // pollute full-text recall with name-token noise (symbols are structural-
         // only in I2b-1; recall does not surface them).
+        // FORGE-226: `decision` nodes ARE indexed (searchable prose like
+        // learnings) — they are NOT in this exclusion list.
         if (valid.kind !== 'file' && valid.kind !== 'symbol') {
           insFts.run(valid.id, valid.title, valid.body);
         }
@@ -164,6 +166,7 @@ export class LocalMemoryBackend implements MemoryBackend {
         // pollute full-text recall); they remain in `nodes` as structural-only.
         // FORGE-219: exclude `symbol` nodes too (bare identifier titles would add
         // name-token noise; symbols are structural-only in I2b-1).
+        // FORGE-226: `decision` nodes ARE indexed (searchable prose) — not excluded.
         if (node.kind !== 'file' && node.kind !== 'symbol') {
           insFts.run(node.id, node.title, node.body);
         }
@@ -182,7 +185,7 @@ export class LocalMemoryBackend implements MemoryBackend {
       .all() as Array<{ kind: string; c: number }>;
     // Honest zero output (Codex): always state every kind explicitly, even at 0
     // (FORGE-218 adds `file`; FORGE-219 adds `symbol`).
-    const by_kind: Record<string, number> = { task: 0, learning: 0, file: 0, symbol: 0 };
+    const by_kind: Record<string, number> = { task: 0, learning: 0, file: 0, symbol: 0, decision: 0 };
     for (const row of byKindRows) by_kind[row.kind] = row.c;
     return {
       node_count: total.c,
@@ -275,6 +278,13 @@ export class LocalMemoryBackend implements MemoryBackend {
     const selLearnedFrom = this.db.prepare(
       'SELECT src FROM edges WHERE kind = ? AND dst = ?',
     );
+    // FORGE-226: decisions link to their task the OPPOSITE direction
+    // (`decision --decided_in--> task`, `decision --affects--> task`) — so a
+    // scope task is the EDGE DST. Pull every decision whose decided_in/affects
+    // dst is in scope; rank 1000 alongside learnings (Codex CRITICAL: the I1
+    // structural logic was learning-only; this generalizes it to admit
+    // `decision` nodes too).
+    const selDecidedIn = this.db.prepare('SELECT src FROM edges WHERE kind = ? AND dst = ?');
     const addStructuralLearnings = (target: string, via: string): void => {
       const rows = selLearnedFrom.all('learned_from', target) as Array<{ src: string }>;
       for (const r of rows) {
@@ -293,6 +303,25 @@ export class LocalMemoryBackend implements MemoryBackend {
         });
       }
     };
+    const addStructuralDecisions = (target: string, viaPrefix: string): void => {
+      for (const edgeKind of ['decided_in', 'affects'] as const) {
+        const rows = selDecidedIn.all(edgeKind, target) as Array<{ src: string }>;
+        for (const r of rows) {
+          if (seen.has(r.src)) continue;
+          const node = this.getNode(r.src);
+          if (!node || node.kind !== 'decision') continue;
+          seen.add(r.src);
+          hits.push({
+            id: node.id,
+            kind: 'decision',
+            title: node.title,
+            score: 1000,
+            why: `${viaPrefix} (${edgeKind})`,
+            source: 'structural',
+          });
+        }
+      }
+    };
     // Scope (depends_on) learnings first — these are the I1 hits, kept verbatim.
     for (const target of scope) {
       const via =
@@ -300,6 +329,13 @@ export class LocalMemoryBackend implements MemoryBackend {
           ? `linked via learned_from→${stripTaskPrefix(target)}`
           : `linked via depends_on→${stripTaskPrefix(target)} learned_from`;
       addStructuralLearnings(target, via);
+      // FORGE-226: decisions decided_in / affecting the scope task (∪ depends_on
+      // ancestors) surface alongside learnings as structural hits.
+      const decisionVia =
+        target === taskNodeId
+          ? `decided in ${stripTaskPrefix(target)}`
+          : `decided in depends_on ancestor ${stripTaskPrefix(target)}`;
+      addStructuralDecisions(target, decisionVia);
     }
     // Then co-touching tasks' learnings (new in I2a).
     for (const [coTask, sharedFile] of coTouchVia) {
@@ -333,9 +369,17 @@ export class LocalMemoryBackend implements MemoryBackend {
         // never surface one as a hit even if a stale row slipped through.
         if (node.kind === 'file') continue;
         seen.add(r.id);
+        // FORGE-226 (Codex CRITICAL): surface the ACTUAL node kind. The prior
+        // logic mapped every non-learning FTS hit to `task`, so a `decision` FTS
+        // hit was mislabelled `task`. Trust the indexed kind (validated on write);
+        // fall back to `task` only for an unexpected/legacy value.
+        const ftsKind =
+          node.kind === 'learning' || node.kind === 'decision' || node.kind === 'task'
+            ? node.kind
+            : 'task';
         hits.push({
           id: node.id,
-          kind: node.kind === 'learning' ? 'learning' : 'task',
+          kind: ftsKind,
           title: node.title,
           score: 1,
           why: `FTS match on task title/description`,

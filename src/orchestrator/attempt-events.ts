@@ -17,15 +17,20 @@
 
 import {
   closeSync as _closeSync,
+  constants as _constants,
+  fstatSync as _fstatSync,
+  lstatSync as _lstatSync,
   mkdirSync as _mkdirSync,
   openSync as _openSync,
   readFileSync as _readFileSync,
+  readSync as _readSync,
+  realpathSync as _realpathSync,
   renameSync as _renameSync,
   statSync as _statSync,
   unlinkSync as _unlinkSync,
   writeSync as _writeSync,
 } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative } from 'node:path';
 import { OrchestratorError } from '../core/errors.ts';
 import { AttemptEventSchema, type AttemptEvent } from '../schemas/attempt.ts';
 import { eventsFilePath, validateIdSegment } from './questions/paths.ts';
@@ -41,15 +46,25 @@ import {
 // mocked seam exercises rotation too).
 export const __eventsFsForTesting = {
   closeSync: _closeSync,
+  constants: _constants,
+  fstatSync: _fstatSync,
+  lstatSync: _lstatSync,
   mkdirSync: _mkdirSync,
   openSync: _openSync,
   readFileSync: _readFileSync,
+  readSync: _readSync,
+  realpathSync: _realpathSync,
   renameSync: _renameSync,
   statSync: _statSync,
   unlinkSync: _unlinkSync,
   writeSync: _writeSync,
 };
 const fs = __eventsFsForTesting;
+
+// Bound a single event-log read. Generous vs the 10 MiB rotation default so a
+// legitimate (un-rotated) log still reads in full, but a multi-GB malicious /
+// runaway log is truncated rather than loaded whole.
+const MAX_EVENTS_FILE_BYTES = 32 * 1024 * 1024;
 
 function validateOrchestratorId(id: string, fieldName: string): string {
   try {
@@ -220,19 +235,127 @@ export function readAttemptEvents(
 
   const targetPath = eventsFilePath(forgeDir, taskId, attemptId);
 
+  // FORGE-226: parent-dir containment. O_NOFOLLOW below guards only the
+  // events.jsonl LEAF; a symlinked PARENT (e.g. tasks/<id> or attempts/<id> →
+  // external) would still be followed, letting the projectors ingest event logs
+  // from outside .forge. Canonical real .forge root, kept for BOTH the pre-open
+  // fast reject AND readOne's per-file post-open re-check (the TOCTOU close).
+  let realForge: string;
+  try {
+    realForge = fs.realpathSync(forgeDir);
+  } catch (err) {
+    if (isNodeFsError(err) && err.code === 'ENOENT') return []; // no .forge → no events
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to resolve .forge root at ${forgeDir}`,
+      { taskId, attemptId, path: forgeDir, cause: err },
+    );
+  }
+  // Pre-open fast reject for a statically-escaping parent (the common, non-race
+  // case). The TOCTOU race — parent swapped to a symlink AFTER this check — is
+  // caught per-file by the post-open re-check in readOne (mirrors symbols.ts).
+  try {
+    const realParent = fs.realpathSync(dirname(targetPath));
+    const relParent = relative(realForge, realParent);
+    if (relParent === '' || relParent.startsWith('..') || isAbsolute(relParent)) {
+      return []; // attempt dir resolves outside .forge — never read it.
+    }
+  } catch (err) {
+    if (isNodeFsError(err) && err.code === 'ENOENT') return []; // no attempt dir
+    throw new OrchestratorError(
+      'IO_ERROR',
+      `Failed to resolve events dir for ${taskId}/${attemptId}`,
+      { taskId, attemptId, path: targetPath, cause: err },
+    );
+  }
+
   // FORGE-85: merge the rotated generation with the current file. Read `.1`
   // FIRST (older events) then `<file>` (newer), concatenated in chronological
   // order so a rotation that just happened doesn't drop the older half.
   const readOne = (path: string): string | null => {
+    // lstat the path's OWN type (never the target's). ENOENT → absent (null);
+    // any other lstat error is a genuine IO failure → surface as OrchestratorError.
+    let st;
     try {
-      return fs.readFileSync(path, 'utf8');
+      st = fs.lstatSync(path);
     } catch (err) {
       if (isNodeFsError(err) && err.code === 'ENOENT') return null;
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to stat events.jsonl at ${path}`,
+        { taskId, attemptId, path, cause: err },
+      );
+    }
+    // NEVER follow an event-log symlink — a best-effort reader treats it as absent.
+    if (st.isSymbolicLink()) return null;
+    if (!st.isFile()) return null;
+
+    // O_NOFOLLOW open (TOCTOU: reject a symlink swapped in after lstat). A genuine
+    // open failure surfaces; a symlink-swap (ELOOP) / vanished file is treated as
+    // absent.
+    let fd: number;
+    try {
+      fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    } catch (err) {
+      if (isNodeFsError(err) && (err.code === 'ELOOP' || err.code === 'ENOENT')) {
+        return null;
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to open events.jsonl at ${path}`,
+        { taskId, attemptId, path, cause: err },
+      );
+    }
+    try {
+      // TOCTOU re-check on the fd itself.
+      const fst = fs.fstatSync(fd);
+      if (!fst.isFile()) return null;
+      // FORGE-226 post-open re-check (mirror symbols.ts): O_NOFOLLOW guards only
+      // the LEAF, so a PARENT dir swapped to a symlink between the pre-open
+      // containment check and this open could point the fd OUTSIDE .forge.
+      // Re-resolve the real path post-open and require (a) it is still contained
+      // under .forge, (b) the opened fd is that same inode (dev+ino). Either
+      // failing means a swap happened mid-flight → treat as absent.
+      let real: string;
+      try {
+        real = fs.realpathSync(path);
+      } catch {
+        return null; // vanished between checks
+      }
+      const relReal = relative(realForge, real);
+      if (relReal === '' || relReal.startsWith('..') || isAbsolute(relReal)) {
+        return null; // resolves outside .forge — a parent was swapped post-check
+      }
+      try {
+        const realStat = fs.statSync(real);
+        if (fst.dev !== realStat.dev || fst.ino !== realStat.ino) return null;
+      } catch {
+        return null; // vanished between checks
+      }
+      // Bounded read: at most MAX_EVENTS_FILE_BYTES (truncate an oversized log
+      // rather than load it whole). A truncated trailing line is already tolerated
+      // by the line-split below.
+      const limit = Math.min(fst.size, MAX_EVENTS_FILE_BYTES);
+      const buf = Buffer.allocUnsafe(limit);
+      let offset = 0;
+      while (offset < limit) {
+        const n = fs.readSync(fd, buf, offset, limit - offset, offset);
+        if (n === 0) break;
+        offset += n;
+      }
+      return buf.subarray(0, offset).toString('utf8');
+    } catch (err) {
       throw new OrchestratorError(
         'IO_ERROR',
         `Failed to read events.jsonl at ${path}`,
         { taskId, attemptId, path, cause: err },
       );
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort: a close failure must not mask a successful read.
+      }
     }
   };
 

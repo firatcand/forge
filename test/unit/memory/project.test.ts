@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -190,5 +190,57 @@ test('projector returns empty + no throw when there is no orchestrator dir', () 
     assert.deepEqual(res.warnings, []);
   } finally {
     rmSync(forgeDir, { recursive: true, force: true });
+  }
+});
+
+// FORGE-226 (security): a symlinked PARENT dir (orchestrator/tasks → external)
+// must NOT let the projector ingest event logs from outside .forge. Reproduces
+// the Codex round-2 finding; safeReaddir's realpath containment closes it.
+test('projector refuses a symlinked orchestrator/tasks dir pointing outside .forge', () => {
+  const root = mkdtempSync(join(tmpdir(), 'loom-proj-sym-'));
+  try {
+    const forgeDir = join(root, '.forge');
+    mkdirSync(join(forgeDir, 'orchestrator'), { recursive: true });
+    // External tree with a real attempt + events.jsonl that would project a leak.
+    const ext = join(root, 'outside');
+    const extAttempt = join(ext, 'P1-T01', 'attempts', 'a1');
+    mkdirSync(extAttempt, { recursive: true });
+    writeFileSync(join(extAttempt, 'events.jsonl'), filesModifiedLine(['src/leak.ts']) + '\n');
+    // orchestrator/tasks → external dir.
+    symlinkSync(ext, join(forgeDir, 'orchestrator', 'tasks'));
+
+    const res = projectEvents({ forgeDir, repoRoot: root, resolveTaskNodeId: makeResolver() });
+
+    // No external content projected.
+    assert.deepEqual(res.fileNodes, []);
+    assert.deepEqual(res.touchesEdges, []);
+    // And it is surfaced, not silent.
+    assert.ok(
+      res.warnings.some((w) => /symlink/.test(w) && /orchestrator\/tasks/.test(w)),
+      `expected a symlink warning, got: ${JSON.stringify(res.warnings)}`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Belt-and-suspenders: even if the walk reached an external attempt dir,
+// readAttemptEvents' own parent-containment refuses to read its events.jsonl.
+test('projector does not ingest events through a symlinked attempts/<id> dir', () => {
+  const root = mkdtempSync(join(tmpdir(), 'loom-proj-sym2-'));
+  try {
+    const forgeDir = join(root, '.forge');
+    const taskDir = join(forgeDir, 'orchestrator', 'tasks', 'P1-T01');
+    mkdirSync(taskDir, { recursive: true });
+    const ext = join(root, 'outside-attempts');
+    mkdirSync(join(ext, 'a1'), { recursive: true });
+    writeFileSync(join(ext, 'a1', 'events.jsonl'), filesModifiedLine(['src/leak.ts']) + '\n');
+    symlinkSync(ext, join(taskDir, 'attempts'));
+
+    const res = projectEvents({ forgeDir, repoRoot: root, resolveTaskNodeId: makeResolver() });
+    assert.deepEqual(res.fileNodes, []);
+    assert.deepEqual(res.touchesEdges, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
