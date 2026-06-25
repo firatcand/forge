@@ -278,10 +278,11 @@ test('review-compose: invalid ctx (empty branch) → INVALID_ARGS', () => {
   assert.equal(lastEnvelope(cap.lines()).error!.code, 'INVALID_ARGS');
 });
 
-// Review-fix #1: a second opinion must be a different-lineage external reviewer.
-// host:'claude' is valid for the PRIMARY but must be rejected as a second opinion
-// (else a critical-path change could pass with two Claude reviews).
-test('review-compose: second-opinion with host:claude → INVALID_VERDICT', () => {
+// FORGE-224 dual-lineage gate (generalized): a second opinion must come from a
+// DIFFERENT host than the primary review. The gate is now a SAME-HOST check, so
+// claude+claude (and codex+codex, gemini+gemini) are rejected — a critical-path
+// change must not pass with two reviews from the same lineage.
+test('review-compose: claude(primary)+claude(second) → INVALID_VERDICT (same host)', () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
@@ -298,10 +299,66 @@ test('review-compose: second-opinion with host:claude → INVALID_VERDICT', () =
   const env = lastEnvelope(cap.lines());
   assert.equal(env.ok, false);
   assert.equal(env.error!.code, 'INVALID_VERDICT');
-  assert.match(env.error!.message, /external reviewer \(codex\|gemini\)/);
+  assert.match(env.error!.message, /matches the primary review host/);
+  assert.match(env.error!.message, /claude\+claude/);
 });
 
-test('review-compose: a codex second-opinion (host:codex) is accepted', () => {
+test('review-compose: codex(primary)+codex(second) → INVALID_VERDICT (same host)', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const cap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    stdout: cap.stream,
+  });
+  assert.equal(r.exitCode, 1);
+  const env = lastEnvelope(cap.lines());
+  assert.equal(env.error!.code, 'INVALID_VERDICT');
+  assert.match(env.error!.message, /matches the primary review host/);
+});
+
+test('review-compose: gemini(primary)+gemini(second) → INVALID_VERDICT (same host)', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'gemini' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'gemini' }));
+  const cap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    stdout: cap.stream,
+  });
+  assert.equal(r.exitCode, 1);
+  const env = lastEnvelope(cap.lines());
+  assert.equal(env.error!.code, 'INVALID_VERDICT');
+  assert.match(env.error!.message, /matches the primary review host/);
+});
+
+test('review-compose: codex(primary)+claude(second) → accepted (different hosts)', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
+  const cap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    stdout: cap.stream,
+  });
+  assert.equal(r.exitCode, 0);
+  assert.equal(lastEnvelope(cap.lines()).data!.kind, 'verdict');
+});
+
+test('review-compose: claude(primary)+codex(second) is accepted (different hosts)', () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));

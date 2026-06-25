@@ -16,13 +16,14 @@ import {
   type HealthResult,
   type IHarness,
   type ReviewVerdict,
+  type SpawnSubprocess,
   type SubagentHandle,
 } from '../../../../src/harnesses/index.ts';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────
 
 function freshProject(opts: {
-  reviewHostCli?: 'codex' | 'gemini' | null;
+  reviewHostCli?: 'claude' | 'codex' | 'gemini' | null;
   primaryHostCli?: 'claude' | 'codex' | 'gemini';
   diffContent?: string;
   promptContent?: string;
@@ -81,7 +82,7 @@ function lastEnvelope(lines: string[]): {
 
 // Minimal fake harness that returns a fixed verdict shape; tests assert the
 // envelope ferries it through unchanged.
-function fakeHarness(host: 'codex' | 'gemini', verdict?: Partial<ReviewVerdict>): IHarness {
+function fakeHarness(host: 'claude' | 'codex' | 'gemini', verdict?: Partial<ReviewVerdict>): IHarness {
   const base: ReviewVerdict = {
     version: 1,
     host,
@@ -324,6 +325,146 @@ test('second-opinion: gemini variant returns equivalent verdict shape (different
   // Shape parity with the codex case: same verdict/findings keys.
   assert.equal(verdict.verdict, 'pass');
   assert.deepEqual(verdict.findings, []);
+});
+
+// ── FORGE-224: claude as review host ─────────────────────────────────────────
+
+test('second-opinion: claude reviewer happy-path (binary reachable) returns verdict envelope', async (t) => {
+  // primary must differ from review (settings refine): primary=codex, review=claude.
+  const { forgeDir, diffPath, promptPath, cleanup } = freshProject({
+    primaryHostCli: 'codex',
+    reviewHostCli: 'claude',
+  });
+  const { lines } = captureStdout(t);
+  t.after(cleanup);
+
+  const factory: SecondOpinionHarnessFactory = (host) =>
+    fakeHarness(host as 'claude' | 'codex' | 'gemini');
+  const result = await runOrchestrateSecondOpinion(
+    {
+      taskId: 'FORGE-99',
+      diffPath,
+      promptPath,
+      forgeDir,
+      json: true,
+    },
+    {
+      factory,
+      // Inject a reachable probe so the test never touches the real claude binary.
+      probeReviewBin: async () => true,
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.ok, true);
+  assert.equal(env.data?.host, 'claude');
+  const verdict = env.data?.verdict as ReviewVerdict;
+  assert.equal(verdict.host, 'claude');
+  assert.equal(verdict.verdict, 'pass');
+});
+
+test('second-opinion: claude reviewer with claude binary UNREACHABLE → BINARY_NOT_FOUND (no throw, no dispatch)', async (t) => {
+  const { forgeDir, diffPath, promptPath, cleanup } = freshProject({
+    primaryHostCli: 'codex',
+    reviewHostCli: 'claude',
+  });
+  const { lines } = captureStdout(t);
+  t.after(cleanup);
+
+  // The factory must NOT be invoked when the probe fails — assert via a throwing
+  // factory that would surface as HARNESS_INIT_FAILED if reached.
+  const factory: SecondOpinionHarnessFactory = () => {
+    throw new Error('factory must not be called when claude binary is unreachable');
+  };
+  const result = await runOrchestrateSecondOpinion(
+    {
+      taskId: 'FORGE-99',
+      diffPath,
+      promptPath,
+      forgeDir,
+      json: true,
+    },
+    {
+      factory,
+      probeReviewBin: async () => false,
+    },
+  );
+
+  assert.equal(result.exitCode, 1);
+  const env = lastEnvelope(lines);
+  assert.equal(env.ok, false);
+  assert.equal(env.error?.code, 'BINARY_NOT_FOUND');
+  assert.ok(env.error?.message.includes("claude' CLI on PATH"));
+  assert.equal(env.error?.details?.reviewHost, 'claude');
+});
+
+test('second-opinion: codex reviewer does NOT run the claude binary probe', async (t) => {
+  // The probe is claude-only; a codex review must not invoke it even if injected.
+  const { forgeDir, diffPath, promptPath, cleanup } = freshProject({ reviewHostCli: 'codex' });
+  // Suppress stdout for this run; this test asserts probe behaviour, not output.
+  captureStdout(t);
+  t.after(cleanup);
+
+  let probed = false;
+  const factory: SecondOpinionHarnessFactory = (host) =>
+    fakeHarness(host as 'claude' | 'codex' | 'gemini');
+  const result = await runOrchestrateSecondOpinion(
+    {
+      taskId: 'FORGE-1',
+      diffPath,
+      promptPath,
+      forgeDir,
+      json: true,
+    },
+    {
+      factory,
+      probeReviewBin: async () => {
+        probed = true;
+        return false;
+      },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(probed, false, 'claude probe must not run for a codex review host');
+});
+
+test('second-opinion: claude via the PRODUCTION factory + injected spawnSubprocess parses a claude -p verdict', async (t) => {
+  // Codex review gap: the happy-path above injects a fake factory. This test
+  // uses NO factory, so defaultFactory → createHarness('claude', { spawnSubprocess })
+  // builds a real review-only ClaudeHarness; we only stub the subprocess. This
+  // proves the production bridge (ClaudeHarness.runReview → claude -p → verdict
+  // parser) end to end.
+  const { forgeDir, diffPath, promptPath, cleanup } = freshProject({
+    primaryHostCli: 'codex',
+    reviewHostCli: 'claude',
+  });
+  const { lines } = captureStdout(t);
+  t.after(cleanup);
+
+  // Fake `claude -p` stdout: a fenced ReviewVerdict JSON with host:claude.
+  const spawnSubprocess: SpawnSubprocess = async (_cmd, _args, _opts) => ({
+    stdout: '```json\n{"version":1,"host":"claude","verdict":"pass","findings":[]}\n```',
+    stderr: '',
+    exitCode: 0,
+    durationMs: 1,
+  });
+
+  const result = await runOrchestrateSecondOpinion(
+    { taskId: 'FORGE-99', diffPath, promptPath, forgeDir, json: true },
+    {
+      // No factory → exercises defaultFactory + the real createHarness('claude').
+      spawnSubprocess,
+      probeReviewBin: async () => true,
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  const env = lastEnvelope(lines);
+  assert.equal(env.ok, true);
+  assert.equal(env.data?.host, 'claude');
+  assert.equal((env.data?.verdict as ReviewVerdict).verdict, 'pass');
 });
 
 // ── Harness error pass-through ─────────────────────────────────────────────

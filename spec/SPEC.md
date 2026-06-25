@@ -225,7 +225,8 @@ export const SettingsSchema = z.object({
     .object({
       // Host CLI selection — see ORCHESTRATOR.md "Phase machine"
       // FORGE-88: cursor dropped without back-compat (no runtime adapter ever shipped).
-      // FORGE-152: review_host_cli excludes 'claude' (different-model-lineage rule).
+      // FORGE-224: review_host_cli includes 'claude' (ClaudeHarness.runReview
+      // via `claude -p`); the only invariant is review_host_cli !== primary_host_cli.
       primary_host_cli: z
         .enum(['claude', 'codex', 'gemini'])
         .default('claude'),
@@ -1217,7 +1218,7 @@ The worktree's hydrated copy is a snapshot — it is allowed to drift from `${MA
 
 ### Multi-host review (generalizes ETHOS principle 6)
 
-ETHOS principle 6 ("Multi-model Second Opinion on critical paths") **upgrades to**: every orchestrator-shipped task gets a review from the secondary host (`agents.review_host_cli` ∈ {codex, gemini}), not just CRITICAL.md paths. The canonical interactive surface is the host-agnostic `/second-opinion` skill (FORGE-89 / P2-T21), which dispatches via `forge orchestrate second-opinion` → `IHarness.runReview` on the configured adapter. Claude is excluded as a reviewer (different-model-lineage rule); `cursor` was never wired up and is dropped.
+ETHOS principle 6 ("Multi-model Second Opinion on critical paths") **upgrades to**: every orchestrator-shipped task gets a review from the configured review host (`agents.review_host_cli` ∈ {claude, codex, gemini}), a different lineage than the primary worker, not just CRITICAL.md paths. The canonical interactive surface is the host-agnostic `/second-opinion` skill (FORGE-89 / P2-T21), which dispatches via `forge orchestrate second-opinion` → `IHarness.runReview` on the configured adapter. FORGE-224: claude is now a valid review host — Claude review runs non-interactively via `claude -p --output-format text --no-session-persistence` with Claude's default tools and default permission behavior (no permission/tool overrides). The only invariant is that the review host must DIFFER from the primary host (enforced by the settings refine + review-compose same-host gate); `cursor` was never wired up and is dropped.
 
 For interactive (non-orchestrator) work, `/second-opinion` is auto-triggered on CRITICAL.md hits by `/ship` (block-severity findings halt PR creation) and by `/review` (advisory — folded into severity bucketing, gated on `review_host_cli !== null`). The universal-review behaviour in the orchestrator's REVIEW phase (Flow 3b) uses the same verb and the same verdict envelope, so interactive and orchestrated paths share one code path.
 

@@ -7,8 +7,15 @@
 // SAFETY (R5): the only thing these primitives ever do is run `<bin> --version`
 // — no model invocation, no paid API call. Every probe uses a short timeout and
 // rejects stdin so a hung/interactive binary can never block the prober.
+//
+// SAFETY (FORGE-224): the probe also runs with the AI-subprocess env allowlist
+// (buildSubprocessEnv + extendEnv:false). The probed binary is resolved off PATH
+// and could be hijacked (a fake `claude`/`codex` placed earlier on PATH); without
+// a sanitized env it would inherit GITHUB_TOKEN / tracker keys / injected secrets
+// just to answer `--version`. One source of truth with the harness subprocess env.
 
 import type { ExecaLike } from '../cli/init/validate.ts';
+import { buildSubprocessEnv } from '../harnesses/subprocess.ts';
 
 // FORGE-160: cursor's probe binary differs from its host key — the CLI is
 // `agent`, not `cursor`. All other hosts probe their own name. validate.ts
@@ -42,6 +49,10 @@ export async function probeBinVersion(
       timeout: timeoutMs,
       reject: false,
       stdin: 'ignore',
+      // FORGE-224: sanitized env — a PATH-hijacked probe binary must not inherit
+      // secrets. Only HOME/PATH/locale/term are forwarded (buildSubprocessEnv).
+      env: buildSubprocessEnv(undefined),
+      extendEnv: false,
     });
     if (r.timedOut) return false;
     return r.exitCode === 0;

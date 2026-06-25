@@ -12,7 +12,7 @@
 3. **Confusion Protocol** — clarify, don't guess
 4. **Test-or-die** — every PR ships with tests
 5. **Compound Learning** — capture notable learnings
-6. **Multi-model Second Opinion** — `/second-opinion` (Codex or Gemini) on critical paths
+6. **Multi-model Second Opinion** — `/second-opinion` (Claude, Codex, or Gemini) on critical paths
 7. **Plan Mode Mandatory** — no multi-file changes without `/plan-task`
 8. **12-Factor Env Discipline** — never commit secrets
 
@@ -67,7 +67,7 @@ The `apply-decision` CLI verb (the apply engine, resumable journal, and `spec/de
 
 Files matching patterns in your repo's `CRITICAL.md` trigger `/second-opinion` auto-review on `/ship`. The **list** is user-curated in `CRITICAL.md` at your repo root. The **convention** (what the list means, when it triggers, which reviewer fires) is Forge-defined and documented here.
 
-The reviewer (Codex or Gemini) is configured in `.forge/settings.yaml` `agents.review_host_cli`. Forge defaults to Codex when the primary host is Claude.
+The reviewer (Claude, Codex, or Gemini) is configured in `.forge/settings.yaml` `agents.review_host_cli`; it must be a different host than the primary worker. Claude review runs non-interactively via `claude -p --output-format text --no-session-persistence` with Claude's default tools and default permission behavior (no permission/tool overrides). Forge defaults to Codex when the primary host is Claude.
 
 ---
 
