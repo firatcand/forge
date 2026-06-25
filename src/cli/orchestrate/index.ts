@@ -357,6 +357,7 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     { flag: 'summary', takesValue: true, description: 'Verdict summary (passed into ComposeCtx).', valueLabel: '<str>' },
     { flag: 'critical-path', takesValue: false, description: 'The diff touches a CRITICAL.md / architectural path.' },
     { flag: 'second-opinion-available', takesValue: false, description: 'A second-opinion review host was configured & reachable.' },
+    { flag: 'expected-primary-host', takesValue: true, description: 'FORGE-225: trusted host that produced the primary review (claude|codex|gemini); verifies the primary verdict’s self-declared host. Absent → provenance check inactive (warns).', valueLabel: '<host>' },
     JSON_FLAG,
     FD,
   ],

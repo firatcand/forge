@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
-import { runOrchestrateReviewCompose } from '../../../../src/cli/orchestrate/review-compose.ts';
+import {
+  runOrchestrateReviewCompose,
+  reviewComposeHandler,
+} from '../../../../src/cli/orchestrate/review-compose.ts';
 import type { ReviewVerdict } from '../../../../src/schemas/verdict.ts';
 
 // FORGE-187 (R3): the review-compose verb wraps the pure composeReviewVerdict
@@ -392,4 +395,169 @@ test('review-compose: a non-regular --primary path → INVALID_VERDICT', () => {
   const env = lastEnvelope(cap.lines());
   assert.equal(env.error!.code, 'INVALID_VERDICT');
   assert.match(env.error!.message, /not a regular file/);
+});
+
+// ── FORGE-225: primary-review provenance check (--expected-primary-host) ──────
+
+test('review-compose: expectedPrimaryHost matches primary → composes normally', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const cap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    expectedPrimaryHost: 'claude',
+    stdout: cap.stream,
+  });
+  assert.equal(r.exitCode, 0);
+  assert.equal(lastEnvelope(cap.lines()).data!.kind, 'verdict');
+});
+
+test('review-compose: FORGED primary host (expected claude, verdict codex) → INVALID_VERDICT (provenance)', () => {
+  // The ticket's spoof scenario: a forged primary verdict claims host:codex to
+  // fake a different lineage from the real claude second opinion. With the
+  // trusted expected host, the provenance check rejects it.
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
+  const cap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    expectedPrimaryHost: 'claude',
+    stdout: cap.stream,
+  });
+  assert.equal(r.exitCode, 1);
+  const env = lastEnvelope(cap.lines());
+  assert.equal(env.error!.code, 'INVALID_VERDICT');
+  assert.match(env.error!.message, /does not match the expected primary review host/);
+  assert.match(env.error!.message, /verifies provenance/);
+});
+
+test('review-compose: expectedPrimaryHost absent → warns on stderr, stdout stays one JSON envelope', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
+  const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
+  const cap = capture();
+  const errCap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    secondOpinionPath: second,
+    criticalPath: true,
+    secondOpinionAvailable: true,
+    // no expectedPrimaryHost
+    stdout: cap.stream,
+    stderr: errCap.stream,
+  });
+  assert.equal(r.exitCode, 0);
+  // stdout is exactly one JSON envelope line (not corrupted by the warning).
+  const lines = cap.lines();
+  assert.equal(lines.length, 1);
+  assert.equal(lastEnvelope(lines).data!.kind, 'verdict');
+  // the warning went to stderr.
+  const errText = errCap.lines().join('\n');
+  assert.match(errText, /provenance verification inactive/);
+  assert.match(errText, /--expected-primary-host/);
+});
+
+// Handler-level flag validation (process.stdout capture). A present-but-valueless
+// or invalid --expected-primary-host must FAIL, never silently disable provenance.
+function withCapturedStdout(fn: () => Promise<{ exitCode: number }>): Promise<{
+  exitCode: number;
+  out: string;
+}> {
+  const orig = process.stdout.write.bind(process.stdout);
+  let buf = '';
+  process.stdout.write = ((chunk: unknown) => {
+    buf += String(chunk);
+    return true;
+  }) as typeof process.stdout.write;
+  return fn()
+    .then((r) => ({ exitCode: r.exitCode, out: buf }))
+    .finally(() => {
+      process.stdout.write = orig;
+    });
+}
+
+test('review-compose handler: --expected-primary-host with NO value → INVALID_ARGS (no silent downgrade)', async () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ host: 'claude' }));
+  const { exitCode, out } = await withCapturedStdout(() =>
+    reviewComposeHandler.run(
+      ['--primary', primary, '--branch', 'b', '--summary', 's', '--expected-primary-host'],
+      { cwd: dir },
+    ),
+  );
+  assert.equal(exitCode, 1);
+  const env = JSON.parse(out.trim().split('\n').pop()!);
+  assert.equal(env.error.code, 'INVALID_ARGS');
+  assert.match(env.error.message, /expected-primary-host/);
+  assert.match(env.error.message, /no value/);
+});
+
+test('review-compose handler: --expected-primary-host with an invalid host (cursor) → INVALID_ARGS', async () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ host: 'claude' }));
+  const { exitCode, out } = await withCapturedStdout(() =>
+    reviewComposeHandler.run(
+      ['--primary', primary, '--branch', 'b', '--summary', 's', '--expected-primary-host', 'cursor'],
+      { cwd: dir },
+    ),
+  );
+  assert.equal(exitCode, 1);
+  const env = JSON.parse(out.trim().split('\n').pop()!);
+  assert.equal(env.error.code, 'INVALID_ARGS');
+  assert.match(env.error.message, /must be one of/);
+});
+
+test('review-compose handler: --expected-primary-host= (empty value) → INVALID_ARGS', async () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ host: 'claude' }));
+  const { exitCode, out } = await withCapturedStdout(() =>
+    reviewComposeHandler.run(
+      ['--primary', primary, '--branch', 'b', '--summary', 's', '--expected-primary-host='],
+      { cwd: dir },
+    ),
+  );
+  assert.equal(exitCode, 1);
+  assert.equal(JSON.parse(out.trim().split('\n').pop()!).error.code, 'INVALID_ARGS');
+});
+
+test('review-compose handler: --expected-primary-host immediately followed by another flag → INVALID_ARGS', async () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ host: 'claude' }));
+  const { exitCode, out } = await withCapturedStdout(() =>
+    reviewComposeHandler.run(
+      ['--primary', primary, '--branch', 'b', '--summary', 's', '--expected-primary-host', '--json'],
+      { cwd: dir },
+    ),
+  );
+  assert.equal(exitCode, 1);
+  assert.equal(JSON.parse(out.trim().split('\n').pop()!).error.code, 'INVALID_ARGS');
+});
+
+test('review-compose: expectedPrimaryHost set + matching → NO warning on stderr', () => {
+  const dir = tmpDir();
+  const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
+  const cap = capture();
+  const errCap = capture();
+  const r = runOrchestrateReviewCompose({
+    ...BASE,
+    primaryPath: primary,
+    criticalPath: false,
+    secondOpinionAvailable: false,
+    expectedPrimaryHost: 'claude',
+    stdout: cap.stream,
+    stderr: errCap.stream,
+  });
+  assert.equal(r.exitCode, 0);
+  assert.equal(errCap.lines().length, 0, 'no warning when provenance is verified');
 });

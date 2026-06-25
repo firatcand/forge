@@ -19,6 +19,7 @@
 import { lstatSync, readFileSync } from 'node:fs';
 
 import { ReviewVerdictSchema, type ReviewVerdict } from '../../schemas/verdict.ts';
+import { REVIEW_HOSTS, type ReviewHost } from '../../schemas/hosts.ts';
 import {
   composeReviewVerdict,
   type ComposeCtx,
@@ -50,6 +51,13 @@ export interface OrchestrateReviewComposeOptions {
   readonly json?: boolean;
   readonly stdout?: NodeJS.WritableStream;
   readonly stderr?: NodeJS.WritableStream;
+  // FORGE-225: the expected host of the PRIMARY review, supplied by the TRUSTED
+  // caller (the orchestrator/skill knows which session host produced the primary
+  // review). When set, the primary verdict's self-declared `host` is verified
+  // against it (anti-spoofing). When absent, provenance verification is inactive
+  // and a warning is emitted (lenient/back-compat). Never sourced from a
+  // worker-writable file. One of the ReviewVerdict hosts (claude|codex|gemini).
+  readonly expectedPrimaryHost?: ReviewHost;
 }
 
 export interface OrchestrateReviewComposeResult {
@@ -173,6 +181,10 @@ export function runOrchestrateReviewCompose(
   // distinct from the envelope). `opts.json` is accepted for surface
   // consistency with the other verbs but does not change the output shape.
   const out = opts.stdout ?? process.stdout;
+  // FORGE-225: warnings go to STDERR so the stdout envelope stays a single pure
+  // JSON line for the consumer (the core logger writes human output to stdout —
+  // not usable here). Injectable for tests.
+  const err = opts.stderr ?? process.stderr;
 
   if (!opts.primaryPath) {
     return {
@@ -188,6 +200,44 @@ export function runOrchestrateReviewCompose(
   const primaryParsed = extractAndValidate(primaryRead.value, opts.primaryPath, 'primary');
   if ('error' in primaryParsed) {
     return { exitCode: writeEnvelope(primaryParsed.error, out) };
+  }
+
+  // 1b. FORGE-225: provenance check on the PRIMARY review verdict. Its `host` is
+  // self-declared (the primary review is an in-session subagent that writes the
+  // verdict file), so a forged label can fake dual lineage and slip a critical
+  // change past the gate. When the TRUSTED caller supplies the host that
+  // actually produced the review (the session host — NEVER read from a
+  // worker-writable file like worktree settings), verify the verdict matches it.
+  // When absent, fall back to the same-host check below and warn that provenance
+  // verification is inactive (lenient/back-compat — FORGE-225 decision). The
+  // second opinion is already harness-bound (parseHarnessVerdict), so it is not
+  // re-pinned here; a raw second-opinion file that bypasses the verb remains a
+  // documented residual gap (needs orchestrator-recorded attestation).
+  if (opts.expectedPrimaryHost) {
+    if (primaryParsed.verdict.host !== opts.expectedPrimaryHost) {
+      return {
+        exitCode: writeEnvelope(
+          fail(
+            'INVALID_VERDICT',
+            `primary review verdict at ${opts.primaryPath} has host:'${primaryParsed.verdict.host}' which does not match the expected primary review host '${opts.expectedPrimaryHost}' supplied by the orchestrator; the dual-lineage gate verifies provenance, not the self-declared host.`,
+            false,
+            {
+              kind: 'primary',
+              path: opts.primaryPath,
+              claimed: primaryParsed.verdict.host,
+              expected: opts.expectedPrimaryHost,
+            },
+          ),
+          out,
+        ),
+      };
+    }
+  } else {
+    err.write(
+      'warn: review-compose — provenance verification inactive: no --expected-primary-host supplied; ' +
+        'the dual-lineage gate is trusting the self-declared primary verdict host. Pass ' +
+        '--expected-primary-host <session-host> to verify provenance.\n',
+    );
   }
 
   // 2. Read + validate the OPTIONAL second-opinion verdict.
@@ -256,7 +306,7 @@ export function runOrchestrateReviewCompose(
 export const reviewComposeHandler: VerbHandler = {
   band: 'read',
   synopsis:
-    'Compose a machine Verdict from a primary review (+ optional second opinion) via the FORGE-186 policy; escalate or park instead when a human is required.',
+    'Compose a machine Verdict from a primary review (+ optional second opinion) via the FORGE-186 policy; verifies primary-review provenance when --expected-primary-host is supplied (FORGE-225); escalate or park instead when a human is required.',
   async run(rest, opts) {
     const forgeDir = resolveForgeDir(rest, opts.cwd);
     const primaryPath = parseFlag(rest, 'primary') ?? '';
@@ -266,6 +316,33 @@ export const reviewComposeHandler: VerbHandler = {
     const criticalPath = hasFlag(rest, 'critical-path');
     const secondOpinionAvailable = hasFlag(rest, 'second-opinion-available');
     const json = hasFlag(rest, 'json');
+    // FORGE-225: optional provenance flag. Validate against the ReviewVerdict
+    // host enum (claude|codex|gemini) — NOT the broader Host enum (which includes
+    // cursor, never a review host). A bad value is a clear INVALID_ARGS, not a
+    // confusing host-mismatch downstream.
+    const expectedPrimaryHostRaw = parseFlag(rest, 'expected-primary-host');
+    // A present-but-valueless flag (`--expected-primary-host` at end of argv →
+    // parseFlag undefined) or an invalid value must FAIL, never silently disable
+    // provenance verification (security footgun). hasFlag detects the token even
+    // when parseFlag yields undefined.
+    if (
+      hasFlag(rest, 'expected-primary-host') &&
+      (expectedPrimaryHostRaw === undefined ||
+        !(REVIEW_HOSTS as readonly string[]).includes(expectedPrimaryHostRaw))
+    ) {
+      return {
+        exitCode: writeEnvelope(
+          fail(
+            'INVALID_ARGS',
+            `--expected-primary-host must be one of: ${REVIEW_HOSTS.join(', ')} (got ${
+              expectedPrimaryHostRaw === undefined ? '(no value)' : `'${expectedPrimaryHostRaw}'`
+            })`,
+            false,
+          ),
+          process.stdout,
+        ),
+      };
+    }
     return runOrchestrateReviewCompose({
       primaryPath,
       branch,
@@ -275,6 +352,7 @@ export const reviewComposeHandler: VerbHandler = {
       forgeDir,
       json,
       ...(secondOpinionPath ? { secondOpinionPath } : {}),
+      ...(expectedPrimaryHostRaw ? { expectedPrimaryHost: expectedPrimaryHostRaw as ReviewHost } : {}),
     });
   },
 };
