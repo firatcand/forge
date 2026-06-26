@@ -10,18 +10,29 @@
 // db. src/bin/forge.ts additionally dynamic-imports this module only inside the
 // `command === 'loom'` branch, so non-loom invocations never touch loom code.
 
+import {
+  NODE_KINDS,
+  MEMORY_ID_MAX_LEN,
+  MEMORY_TITLE_MAX_LEN,
+  type NodeKind,
+} from '../../schemas/memory.ts';
+import type { QueryFilter } from '../../memory/types.ts';
 import { emit, fail } from '../envelope.ts';
 import { hasFlag, parseFlag } from '../orchestrate/flags.ts';
+import { parseValuedFlag, parsePositiveInt } from './args.ts';
 import { resolveContext } from './context.ts';
 import { runLoomReindex } from './reindex.ts';
 import { runLoomRecall } from './recall.ts';
 import { runLoomStatus } from './status.ts';
+import { runLoomQuery } from './query.ts';
+import { runLoomTraverse } from './traverse.ts';
+import { runLoomDoctor } from './doctor.ts';
 
 export interface LoomDispatcherOpts {
   readonly cwd: string;
 }
 
-export const LOOM_VERB_NAMES = ['reindex', 'recall', 'status'] as const;
+export const LOOM_VERB_NAMES = ['reindex', 'recall', 'status', 'query', 'traverse', 'doctor'] as const;
 
 export async function dispatchLoom(
   rest: readonly string[],
@@ -66,6 +77,68 @@ export async function dispatchLoom(
       const ctx = resolveContext(opts.cwd);
       return runLoomStatus({ ctx, json });
     }
+    case 'query': {
+      const id = parseValuedFlag(verbArgs, 'id');
+      const kindRaw = parseValuedFlag(verbArgs, 'kind');
+      const title = parseValuedFlag(verbArgs, 'title');
+      const limit = parsePositiveInt(verbArgs, 'limit');
+      for (const [name, v] of [
+        ['id', id],
+        ['kind', kindRaw],
+        ['title', title],
+        ['limit', limit],
+      ] as const) {
+        if (v instanceof Error) return invalidArgs('query', `--${name}: ${v.message}`, json);
+      }
+      const idVal = id as string | undefined;
+      const kindVal = kindRaw as string | undefined;
+      const titleVal = title as string | undefined;
+      const limitVal = limit as number | undefined;
+      if (idVal === undefined && kindVal === undefined && titleVal === undefined) {
+        return invalidArgs('query', 'at least one of --id / --kind / --title is required', json);
+      }
+      if (idVal !== undefined && idVal.length > MEMORY_ID_MAX_LEN) {
+        return invalidArgs('query', `--id exceeds ${MEMORY_ID_MAX_LEN} chars`, json);
+      }
+      if (titleVal !== undefined && titleVal.length > MEMORY_TITLE_MAX_LEN) {
+        return invalidArgs('query', `--title exceeds ${MEMORY_TITLE_MAX_LEN} chars`, json);
+      }
+      if (kindVal !== undefined && !(NODE_KINDS as readonly string[]).includes(kindVal)) {
+        return invalidArgs('query', `--kind must be one of ${NODE_KINDS.join('|')}`, json);
+      }
+      const filter: QueryFilter = {
+        ...(idVal !== undefined ? { id: idVal } : {}),
+        ...(kindVal !== undefined ? { kind: kindVal as NodeKind } : {}),
+        ...(titleVal !== undefined ? { title: titleVal } : {}),
+        ...(limitVal !== undefined ? { limit: limitVal } : {}),
+      };
+      const ctx = resolveContext(opts.cwd);
+      return runLoomQuery({ ctx, json, filter });
+    }
+    case 'traverse': {
+      const node = parseValuedFlag(verbArgs, 'node');
+      const depth = parsePositiveInt(verbArgs, 'depth');
+      const limit = parsePositiveInt(verbArgs, 'limit');
+      if (node instanceof Error) return invalidArgs('traverse', `--node: ${node.message}`, json);
+      if (depth instanceof Error) return invalidArgs('traverse', `--depth: ${depth.message}`, json);
+      if (limit instanceof Error) return invalidArgs('traverse', `--limit: ${limit.message}`, json);
+      if (node === undefined) return invalidArgs('traverse', '--node <id> is required', json);
+      if (node.length > MEMORY_ID_MAX_LEN) {
+        return invalidArgs('traverse', `--node exceeds ${MEMORY_ID_MAX_LEN} chars`, json);
+      }
+      const ctx = resolveContext(opts.cwd);
+      return runLoomTraverse({
+        ctx,
+        json,
+        node,
+        ...(depth !== undefined ? { depth } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      });
+    }
+    case 'doctor': {
+      const ctx = resolveContext(opts.cwd);
+      return runLoomDoctor({ ctx, json });
+    }
     default:
       return {
         exitCode: emit(
@@ -92,6 +165,11 @@ function parseLimit(args: readonly string[]): number | undefined | Error {
   return n;
 }
 
+// Shared INVALID_ARGS emitter for the verb dispatch cases (FORGE-227).
+function invalidArgs(verb: string, msg: string, json: boolean): { exitCode: number } {
+  return { exitCode: emit(fail('INVALID_ARGS', `loom ${verb}: ${msg}`, false), { json }) };
+}
+
 function usage(): string {
   return [
     'Usage: forge loom <verb> [options]',
@@ -100,12 +178,20 @@ function usage(): string {
     '  reindex   Rebuild the local memory graph from plans/phases.yaml + docs/learnings/** (--scope all).',
     '  recall    Dependency-aware recall for a task (--task <id> [--limit <n>]); structural hits rank over FTS.',
     '  status    Node/edge counts + by-kind breakdown + db path.',
+    '  query     Look up nodes by --id / --kind / --title substring (>=1 required) [--limit <n>].',
+    '  traverse  Reachable subgraph from --node <id> over edges both ways [--depth <n>] [--limit <n>].',
+    '  doctor    Graph health: orphan edges, isolated nodes, stale FTS rows, invalid rows (exit 2 if any).',
     '',
     'Flags:',
     '  --json    Emit a stable JSON envelope on stdout.',
     '  --task    (recall) Task id — phases id or tracker issue id.',
-    '  --limit   (recall) Cap the number of hits.',
+    '  --limit   (recall/query/traverse) Cap the number of hits/nodes.',
     '  --scope   (reindex) Source scope; I1 supports only "all".',
+    '  --id      (query) Exact node id.',
+    '  --kind    (query) Node kind: task|learning|file|symbol|decision.',
+    '  --title   (query) Case-insensitive title substring (literal; wildcards escaped).',
+    '  --node    (traverse) Root node id.',
+    '  --depth   (traverse) Max hops out from the root (default 2).',
     '',
   ].join('\n') + '\n';
 }

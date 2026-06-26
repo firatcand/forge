@@ -10,18 +10,76 @@
 //   4. Rank structural ABOVE fts; dedup by node id; each hit carries `why`.
 
 import {
+  EDGE_KINDS,
   MemoryEdgeSchema,
   MemoryNodeSchema,
+  NODE_KINDS,
   type MemoryEdge,
   type MemoryNode,
   type RecallHit,
 } from '../../schemas/memory.ts';
-import type { MemoryBackend, MemoryStatus, RecallOptions } from '../types.ts';
+import type {
+  GraphHealth,
+  GraphSubgraph,
+  MemoryBackend,
+  MemoryStatus,
+  QueryFilter,
+  RecallOptions,
+  TraverseOptions,
+} from '../types.ts';
 import { openDb, type OpenDb, type SqliteDatabase } from './db.ts';
 import { matchAny, InvalidGlobError } from '../../orchestrator/glob-match.ts';
 
 const DEFAULT_RECALL_LIMIT = 20;
 const DEFAULT_MAX_DEPTH = 6;
+
+// FORGE-227 (symbol recall): symbols defined in scope-touched files rank as
+// structural hits BELOW learnings/decisions (1000) and ABOVE fts (1). Bounded
+// per-file and overall so one giant file cannot flood recall.
+const SYMBOL_RECALL_SCORE = 900;
+const MAX_SYMBOL_HITS_PER_FILE = 20;
+const MAX_SYMBOL_HITS_TOTAL = 100;
+
+// FORGE-227 (query/traverse/doctor): hard bounds so a single inspection call on a
+// huge/corrupt graph stays finite. Every limit is clamped to its MAX.
+const DEFAULT_QUERY_LIMIT = 50;
+const MAX_QUERY_LIMIT = 200;
+const DEFAULT_TRAVERSE_DEPTH = 2;
+const MAX_TRAVERSE_DEPTH = 6;
+const DEFAULT_TRAVERSE_MAX_NODES = 200;
+const MAX_TRAVERSE_EDGES = 2000;
+// Per-node, per-direction SQL LIMIT during BFS expansion: a high-degree node
+// cannot materialize an unbounded row set before the node cap kicks in.
+const MAX_EDGE_EXPANSION = 1000;
+const DOCTOR_SAMPLE_CAP = 50;
+// Page size for doctor's row-validation scans: schema validation cannot be done
+// in SQL, so nodes/edges are scanned in bounded pages (never more than one page
+// held in memory at a time) while counts stay exact.
+const DOCTOR_SCAN_PAGE = 1000;
+
+// Clamp a caller-supplied limit to [1, max], defaulting when absent. (The CLI
+// already rejects non-positive ints, but the backend is the enforcement gate.)
+function clampLimit(value: number | undefined, dflt: number, max: number): number {
+  if (value === undefined || !Number.isInteger(value) || value <= 0) return dflt;
+  return Math.min(value, max);
+}
+
+// Escape LIKE wildcards so `--title` is a literal substring, never a pattern.
+// Paired with `ESCAPE '\'` in the query. A bare `%` would otherwise match all.
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+// Clip a sample value so a hand-edited DB with a megabyte id/kind cannot blow up
+// doctor's output. Coerces non-string scalars (a corrupt row may carry a NULL or
+// numeric id under the TEXT schema) so the diagnostic never throws on the very
+// corruption it reports. Schema ids are bounded to 256, so a longer value is
+// itself a corruption signal — keep enough to identify it, mark it clipped.
+const SAMPLE_STR_MAX = 256;
+function clip(value: unknown): string {
+  const s = typeof value === 'string' ? value : String(value);
+  return s.length > SAMPLE_STR_MAX ? `${s.slice(0, SAMPLE_STR_MAX)}…` : s;
+}
 
 // Build a SAFE FTS5 MATCH query from arbitrary task text (Codex blocking-ish).
 // FTS5 treats `-`, `:`, `*`, `"`, `^`, `(`, `)`, and the bareword operators
@@ -195,6 +253,269 @@ export class LocalMemoryBackend implements MemoryBackend {
     };
   }
 
+  // FORGE-227: ad-hoc node lookup. Filters (id / kind / title-substring) AND
+  // together; at least one is required by the CLI. title uses an escaped LIKE so
+  // wildcards are literal. Rows are validated on the way out (corrupt row throws).
+  query(filter: QueryFilter): MemoryNode[] {
+    const limit = clampLimit(filter.limit, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT);
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.id !== undefined) {
+      where.push('id = ?');
+      params.push(filter.id);
+    }
+    if (filter.kind !== undefined) {
+      where.push('kind = ?');
+      params.push(filter.kind);
+    }
+    if (filter.title !== undefined) {
+      where.push("title LIKE ? ESCAPE '\\'");
+      params.push(`%${escapeLike(filter.title)}%`);
+    }
+    const sql =
+      'SELECT id, kind, title, body, attrs FROM nodes' +
+      (where.length > 0 ? ` WHERE ${where.join(' AND ')}` : '') +
+      ' ORDER BY id LIMIT ?';
+    params.push(limit);
+    const rows = this.db.prepare(sql).all(...params) as NodeRow[];
+    return rows.map((r) => this.rowToNode(r));
+  }
+
+  // FORGE-227: bounded reachable subgraph from `nodeId`. BFS over edges in BOTH
+  // directions up to `depth` hops, capped at a max node count; the visited-set is
+  // the loop guard (a corrupt cycle cannot loop). Returns every edge whose BOTH
+  // endpoints are in the returned node set (sorted, capped) — so dangling edges
+  // never appear. `truncated` flags that a cap was hit.
+  traverse(nodeId: string, opts?: TraverseOptions): GraphSubgraph {
+    const depth = clampLimit(opts?.depth, DEFAULT_TRAVERSE_DEPTH, MAX_TRAVERSE_DEPTH);
+    const maxNodes = clampLimit(opts?.limit, DEFAULT_TRAVERSE_MAX_NODES, DEFAULT_TRAVERSE_MAX_NODES);
+    if (!this.getNode(nodeId)) {
+      return { root: nodeId, nodes: [], edges: [], truncated: false };
+    }
+
+    const visited = new Set<string>([nodeId]);
+    let truncated = false;
+    // SELECT DISTINCT so the per-node LIMIT bounds DISTINCT NEIGHBORS, not raw
+    // edge rows — otherwise many parallel edges (different kinds) between the same
+    // endpoints would silently drop reachable nodes before the node cap applies.
+    const selOut = this.db.prepare(
+      'SELECT DISTINCT dst AS n FROM edges WHERE src = ? ORDER BY dst LIMIT ?',
+    );
+    const selIn = this.db.prepare(
+      'SELECT DISTINCT src AS n FROM edges WHERE dst = ? ORDER BY src LIMIT ?',
+    );
+    let frontier: string[] = [nodeId];
+    let d = 0;
+    while (frontier.length > 0 && d < depth) {
+      const next: string[] = [];
+      for (const cur of frontier) {
+        for (const stmt of [selOut, selIn]) {
+          const rows = stmt.all(cur, MAX_EDGE_EXPANSION) as Array<{ n: string }>;
+          // The neighbor read itself hit the cap → more may exist beyond it.
+          if (rows.length >= MAX_EDGE_EXPANSION) truncated = true;
+          for (const r of rows) {
+            if (visited.has(r.n)) continue;
+            if (visited.size >= maxNodes) {
+              truncated = true;
+              continue;
+            }
+            visited.add(r.n);
+            next.push(r.n);
+          }
+        }
+      }
+      frontier = next;
+      d += 1;
+    }
+
+    // Materialize only nodes that actually exist (a visited id that is purely a
+    // dangling edge target has no node row → excluded). Validate each on the way
+    // out. Deterministic order via sorted ids.
+    const present = new Set<string>();
+    const nodes: MemoryNode[] = [];
+    for (const id of [...visited].sort()) {
+      const row = this.getNode(id);
+      if (!row) continue;
+      nodes.push(this.rowToNode(row));
+      present.add(id);
+    }
+
+    // Internal edges only: BOTH endpoints in the present node set. One bounded
+    // query (`src IN (…) AND dst IN (…)`) over the ≤maxNodes present ids — no
+    // wasted reads of edges to absent nodes, so a valid internal edge can never be
+    // cut off by a per-node read cap. Fetch one past MAX_TRAVERSE_EDGES to detect
+    // (and flag) genuine edge truncation.
+    const edges: MemoryEdge[] = [];
+    const presentIds = [...present].sort();
+    if (presentIds.length > 0) {
+      const placeholders = presentIds.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT src, dst, kind FROM edges WHERE src IN (${placeholders}) AND dst IN (${placeholders}) ` +
+            'ORDER BY src, dst, kind LIMIT ?',
+        )
+        .all(...presentIds, ...presentIds, MAX_TRAVERSE_EDGES + 1) as Array<{
+        src: string;
+        dst: string;
+        kind: string;
+      }>;
+      if (rows.length > MAX_TRAVERSE_EDGES) truncated = true;
+      for (const r of rows.slice(0, MAX_TRAVERSE_EDGES)) edges.push(MemoryEdgeSchema.parse(r));
+    }
+    return { root: nodeId, nodes, edges, truncated };
+  }
+
+  // FORGE-227: graph health report. Counts + structural-integrity checks (orphan
+  // edges, isolated nodes, stale FTS rows) run as SET-BASED SQL so the whole graph
+  // is never materialized in JS. Schema validation (invalid node/edge rows) cannot
+  // be expressed in SQL, so those scans page through the tables (one bounded page
+  // in memory at a time) while keeping exact counts. Every sample is capped.
+  // Read-only; never mutates.
+  doctor(): GraphHealth {
+    const count = (sql: string): number =>
+      (this.db.prepare(sql).get() as { c: number }).c;
+
+    const node_count = count('SELECT COUNT(*) AS c FROM nodes');
+    const edge_count = count('SELECT COUNT(*) AS c FROM edges');
+
+    // Count only KNOWN kinds individually, lumping anything else into a single
+    // `<unknown>` bucket. A GROUP BY kind on a hand-edited DB with a unique kind
+    // per row would otherwise materialize an unbounded map; this is fixed-size.
+    const nodes_by_kind = this.countByKind('nodes', NODE_KINDS);
+    const edges_by_kind = this.countByKind('edges', EDGE_KINDS);
+
+    // Orphan edges: a src or dst with no backing node. Count + capped sample, all
+    // in SQL (anti-join), so a million-edge table never lands in JS at once.
+    const orphanWhere =
+      'NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = edges.src) ' +
+      'OR NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = edges.dst)';
+    const orphanCount = count(`SELECT COUNT(*) AS c FROM edges WHERE ${orphanWhere}`);
+    // Normalize raw sqlite rows to plain objects (node:sqlite rows have a null
+    // prototype, which would surprise deepStrictEqual / structured consumers).
+    const orphanSample = (
+      this.db
+        .prepare(`SELECT src, dst, kind FROM edges WHERE ${orphanWhere} ORDER BY src, dst, kind LIMIT ?`)
+        .all(DOCTOR_SAMPLE_CAP) as Array<{ src: string; dst: string; kind: string }>
+    ).map((r) => ({ src: clip(r.src), dst: clip(r.dst), kind: clip(r.kind) }));
+
+    // Isolated nodes: no incident edge in either direction.
+    const isoWhere =
+      'NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = nodes.id OR e.dst = nodes.id)';
+    const isolatedCount = count(`SELECT COUNT(*) AS c FROM nodes WHERE ${isoWhere}`);
+    const isolatedSample = (
+      this.db
+        .prepare(`SELECT id FROM nodes WHERE ${isoWhere} ORDER BY id LIMIT ?`)
+        .all(DOCTOR_SAMPLE_CAP) as Array<{ id: string }>
+    ).map((r) => clip(r.id));
+
+    // Stale FTS rows: an FTS id with no backing node.
+    const staleWhere = 'NOT EXISTS (SELECT 1 FROM nodes n WHERE n.id = nodes_fts.id)';
+    const staleCount = count(`SELECT COUNT(*) AS c FROM nodes_fts WHERE ${staleWhere}`);
+    const staleSample = (
+      this.db
+        .prepare(`SELECT id FROM nodes_fts WHERE ${staleWhere} ORDER BY id LIMIT ?`)
+        .all(DOCTOR_SAMPLE_CAP) as Array<{ id: string }>
+    ).map((r) => clip(r.id));
+
+    // Invalid rows: schema validation is not expressible in SQL, so page through
+    // both tables bounded. A bad edge between EXISTING nodes is not orphan/stale,
+    // so without this scan doctor could report clean while traverse later throws
+    // on MemoryEdgeSchema.parse — these checks predict that failure.
+    const invalidNodes = this.scanInvalidNodes();
+    const invalidEdges = this.scanInvalidEdges();
+
+    return {
+      node_count,
+      edge_count,
+      nodes_by_kind,
+      edges_by_kind,
+      orphan_edges: { count: orphanCount, sample: orphanSample },
+      isolated_nodes: { count: isolatedCount, sample: isolatedSample },
+      stale_fts_rows: { count: staleCount, sample: staleSample },
+      invalid_rows: { count: invalidNodes.count, sample: invalidNodes.sample },
+      invalid_edges: { count: invalidEdges.count, sample: invalidEdges.sample },
+      db_path: this.dbPath,
+    };
+  }
+
+  // Paged scan: count + capped sample of node rows that fail schema validation
+  // (corrupt attrs JSON / unknown kind / over-bound field). Holds at most one
+  // page in memory.
+  private scanInvalidNodes(): { count: number; sample: string[] } {
+    const sel = this.db.prepare(
+      'SELECT id, kind, title, body, attrs FROM nodes ORDER BY id LIMIT ? OFFSET ?',
+    );
+    let count = 0;
+    const sample: string[] = [];
+    let offset = 0;
+    for (;;) {
+      const rows = sel.all(DOCTOR_SCAN_PAGE, offset) as NodeRow[];
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        try {
+          this.rowToNode(r);
+        } catch {
+          count += 1;
+          if (sample.length < DOCTOR_SAMPLE_CAP) sample.push(clip(r.id));
+        }
+      }
+      if (rows.length < DOCTOR_SCAN_PAGE) break;
+      offset += DOCTOR_SCAN_PAGE;
+    }
+    return { count, sample };
+  }
+
+  // Paged scan: count + capped sample of edge rows that fail schema validation
+  // (e.g. an unknown edge kind). Holds at most one page in memory.
+  private scanInvalidEdges(): {
+    count: number;
+    sample: Array<{ src: string; dst: string; kind: string }>;
+  } {
+    const sel = this.db.prepare(
+      'SELECT src, dst, kind FROM edges ORDER BY src, dst, kind LIMIT ? OFFSET ?',
+    );
+    let count = 0;
+    const sample: Array<{ src: string; dst: string; kind: string }> = [];
+    let offset = 0;
+    for (;;) {
+      const rows = sel.all(DOCTOR_SCAN_PAGE, offset) as Array<{
+        src: string;
+        dst: string;
+        kind: string;
+      }>;
+      if (rows.length === 0) break;
+      for (const r of rows) {
+        if (!MemoryEdgeSchema.safeParse(r).success) {
+          count += 1;
+          if (sample.length < DOCTOR_SAMPLE_CAP) {
+            sample.push({ src: clip(r.src), dst: clip(r.dst), kind: clip(r.kind) });
+          }
+        }
+      }
+      if (rows.length < DOCTOR_SCAN_PAGE) break;
+      offset += DOCTOR_SCAN_PAGE;
+    }
+    return { count, sample };
+  }
+
+  // Bounded kind histogram: count each KNOWN kind individually + lump every other
+  // value into a single `<unknown>` bucket. The result map is fixed-size (known
+  // kinds + 1) regardless of how many distinct kinds a corrupt DB invents. `table`
+  // is a trusted literal ('nodes' | 'edges'); `kinds` are bound as parameters.
+  private countByKind(table: 'nodes' | 'edges', kinds: readonly string[]): Record<string, number> {
+    const out: Record<string, number> = {};
+    const one = this.db.prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE kind = ?`);
+    for (const k of kinds) out[k] = (one.get(k) as { c: number }).c;
+    const placeholders = kinds.map(() => '?').join(', ');
+    const unknown = (
+      this.db
+        .prepare(`SELECT COUNT(*) AS c FROM ${table} WHERE kind NOT IN (${placeholders})`)
+        .get(...kinds) as { c: number }
+    ).c;
+    if (unknown > 0) out['<unknown>'] = unknown;
+    return out;
+  }
+
   recallForTask(taskId: string, opts?: RecallOptions): RecallHit[] {
     const limit = opts?.limit ?? DEFAULT_RECALL_LIMIT;
     const maxDepth = opts?.maxDepth ?? DEFAULT_MAX_DEPTH;
@@ -235,6 +556,11 @@ export class LocalMemoryBackend implements MemoryBackend {
       const rows = selTouchesDst.all('touches', member) as Array<{ dst: string }>;
       for (const r of rows) candidateFiles.add(r.dst);
     }
+    // FORGE-227: capture the files the scope ACTUALLY touched (pre-glob), sorted
+    // for deterministic symbol-hit order. The glob expansion below only widens
+    // `candidateFiles` to find co-touching tasks — it must NOT pull symbols from
+    // files the scope never touched, so symbol surfacing uses this subset.
+    const scopeTouchedFiles = [...candidateFiles].sort();
     const scopeGlobs = this.collectScopeWriteGlobs(scope);
     if (scopeGlobs.length > 0) {
       // Glob-match file node paths (file:<relpath>) against the scope's globs.
@@ -289,7 +615,7 @@ export class LocalMemoryBackend implements MemoryBackend {
       const rows = selLearnedFrom.all('learned_from', target) as Array<{ src: string }>;
       for (const r of rows) {
         if (seen.has(r.src)) continue;
-        const node = this.getNode(r.src);
+        const node = this.getValidNode(r.src);
         if (!node || node.kind !== 'learning') continue;
         seen.add(r.src);
         hits.push({
@@ -308,7 +634,7 @@ export class LocalMemoryBackend implements MemoryBackend {
         const rows = selDecidedIn.all(edgeKind, target) as Array<{ src: string }>;
         for (const r of rows) {
           if (seen.has(r.src)) continue;
-          const node = this.getNode(r.src);
+          const node = this.getValidNode(r.src);
           if (!node || node.kind !== 'decision') continue;
           seen.add(r.src);
           hits.push({
@@ -343,6 +669,39 @@ export class LocalMemoryBackend implements MemoryBackend {
       addStructuralLearnings(coTask, via);
     }
 
+    // ── 3b. STRUCTURAL symbol hits (FORGE-227). Symbols DEFINED in files the
+    // scope (task ∪ depends_on ancestors) touched: file --defines--> symbol.
+    // Ranked below learnings/decisions (1000), above fts (1). Deterministic via
+    // sorted files + ORDER BY dst; bounded per-file and overall so a giant file
+    // cannot flood recall. Symbols are excluded from FTS, so this is the only
+    // path that surfaces them.
+    const selDefines = this.db.prepare(
+      'SELECT dst FROM edges WHERE kind = ? AND src = ? ORDER BY dst LIMIT ?',
+    );
+    let symbolHitCount = 0;
+    for (const file of scopeTouchedFiles) {
+      if (symbolHitCount >= MAX_SYMBOL_HITS_TOTAL) break;
+      const rows = selDefines.all('defines', file, MAX_SYMBOL_HITS_PER_FILE) as Array<{
+        dst: string;
+      }>;
+      for (const r of rows) {
+        if (symbolHitCount >= MAX_SYMBOL_HITS_TOTAL) break;
+        if (seen.has(r.dst)) continue;
+        const node = this.getValidNode(r.dst);
+        if (!node || node.kind !== 'symbol') continue;
+        seen.add(r.dst);
+        symbolHitCount += 1;
+        hits.push({
+          id: node.id,
+          kind: 'symbol',
+          title: node.title,
+          score: SYMBOL_RECALL_SCORE,
+          why: `linked via touches→${stripFilePrefix(file)} defines`,
+          source: 'structural',
+        });
+      }
+    }
+
     // ── 4. FTS hits over title+body using the task's title+description. ──
     const queryText = `${taskRow.title} ${taskRow.body}`;
     const ftsQuery = buildFtsQuery(queryText);
@@ -363,7 +722,7 @@ export class LocalMemoryBackend implements MemoryBackend {
         // Never surface the task itself as its own fts hit.
         if (r.id === taskNodeId) continue;
         if (seen.has(r.id)) continue;
-        const node = this.getNode(r.id);
+        const node = this.getValidNode(r.id);
         if (!node) continue;
         // Belt (FORGE-218): file nodes are excluded from FTS at index time, but
         // never surface one as a hit even if a stale row slipped through.
@@ -444,6 +803,40 @@ export class LocalMemoryBackend implements MemoryBackend {
       .prepare('SELECT id, kind, title, body, attrs FROM nodes WHERE id = ?')
       .get(id) as NodeRow | undefined;
     return row ?? undefined;
+  }
+
+  // FORGE-227: convert a raw DB row into a VALIDATED MemoryNode. attrs is stored
+  // as a JSON TEXT column; parse it and re-validate the whole node through
+  // MemoryNodeSchema (bounded fields, known kind, strict keys). Throws on a
+  // corrupt row — query/traverse fail loud; doctor catches per-row and reports it.
+  // FORGE-227: best-effort validated read for the RECALL path. recall feeds
+  // /pickup-task and must never crash on one corrupt row, so a row that fails the
+  // schema boundary is DROPPED (not surfaced, not thrown) — unlike query/traverse,
+  // which fail loud. `forge loom doctor` is the tool that surfaces such rows.
+  private getValidNode(id: string): MemoryNode | undefined {
+    const row = this.getNode(id);
+    if (!row) return undefined;
+    try {
+      return this.rowToNode(row);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private rowToNode(row: NodeRow): MemoryNode {
+    let attrs: unknown;
+    if (row.attrs !== null) {
+      // JSON.parse throws on a corrupt attrs blob — that is a corrupt-row signal,
+      // surfaced to the caller (fail-loud for query/traverse; counted by doctor).
+      attrs = JSON.parse(row.attrs);
+    }
+    return MemoryNodeSchema.parse({
+      id: row.id,
+      kind: row.kind,
+      title: row.title,
+      body: row.body,
+      ...(attrs !== undefined ? { attrs } : {}),
+    });
   }
 
   // BFS over depends_on edges (src --depends_on--> dst). Returns the set of

@@ -173,6 +173,18 @@ export const LOOM_VERBS: readonly RegistryEntry[] = [
     name: 'status',
     summary: 'Report loom.db node/edge counts, the by-kind breakdown (task/learning), and the resolved db path.',
   },
+  {
+    name: 'query',
+    summary: 'Look up nodes by --id, --kind, or --title substring (>=1 filter required; combined with AND, bounded limit).',
+  },
+  {
+    name: 'traverse',
+    summary: 'Return the bounded reachable subgraph from --node over edges in both directions (--depth hops, node/edge capped).',
+  },
+  {
+    name: 'doctor',
+    summary: 'Graph health report: orphan edges, isolated nodes, stale FTS rows, and invalid node rows (exit 2 when any found).',
+  },
 ] as const;
 
 // User-facing slash commands shipped by the forge npm package under skills/.
