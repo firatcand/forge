@@ -516,3 +516,75 @@ test('e2e: --migrate-claudemd --dry-run leaves filesystem inert', async () => {
     '.gitignore must not exist after dry-run',
   );
 });
+
+// ============================================================================
+// FORGE-155 — exit-2 in-flight guard (dirty tree / active lease)
+// ============================================================================
+
+/** Write an active (far-future expiry) lease for a task into the repo's orchestrator tree. */
+function writeActiveLease(cwd: string, taskId: string): void {
+  const taskDir = join(cwd, '.forge', 'orchestrator', 'tasks', taskId);
+  mkdirSync(taskDir, { recursive: true });
+  writeFileSync(
+    join(taskDir, 'lease.json'),
+    JSON.stringify({
+      version: 1,
+      claim_id: 'claim-1',
+      task_id: taskId,
+      attempt_id: null,
+      owner_run_id: 'run-1',
+      acquired_at: '2026-06-26T11:00:00.000Z',
+      expires_at: '2099-01-01T00:00:00.000Z',
+      last_heartbeat_at: '2026-06-26T11:55:00.000Z',
+      generation: 0,
+      spec_revision: 'abc123',
+    }),
+  );
+}
+
+test('e2e: active worker lease → forge upgrade exits 2 (nothing written)', async () => {
+  const cwd = bootstrapInitdRepo();
+  writeActiveLease(cwd, 'FORGE-1');
+
+  const result = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+
+  assert.equal(result.exitCode, 2, `expected exit 2, got ${result.exitCode}: ${result.all}`);
+  assert.match(result.stderr, /active worker lease/);
+});
+
+test('e2e: active lease + --force → upgrade proceeds (exit 0)', async () => {
+  const cwd = bootstrapInitdRepo();
+  writeActiveLease(cwd, 'FORGE-1');
+
+  const result = await execa(tsxBin, [entry, 'upgrade', '--force'], { cwd, reject: false, all: true });
+
+  assert.equal(result.exitCode, 0, `expected exit 0, got ${result.exitCode}: ${result.all}`);
+});
+
+test('e2e: upgrade.guard_in_flight: false → active lease is ignored (exit 0)', async () => {
+  const cwd = bootstrapInitdRepo();
+  writeActiveLease(cwd, 'FORGE-1');
+  // Disable the guard via settings.
+  const settingsPath = join(cwd, '.forge/settings.yaml');
+  writeFileSync(settingsPath, `${readFileSync(settingsPath, 'utf8')}upgrade:\n  guard_in_flight: false\n`);
+
+  const result = await execa(tsxBin, [entry, 'upgrade'], { cwd, reject: false, all: true });
+
+  assert.equal(result.exitCode, 0, `expected exit 0, got ${result.exitCode}: ${result.all}`);
+});
+
+test('e2e: --migrate-claudemd is EXEMPT from the in-flight guard (lease present → not exit 2)', async () => {
+  // The migrate route is a documented carve-out: it only runs on pre-v0.5 repos
+  // where a lease cannot exist, so an active lease must NOT make it exit 2.
+  const cwd = bootstrapInitdRepo();
+  writeActiveLease(cwd, 'FORGE-1');
+
+  const result = await execa(tsxBin, [entry, 'upgrade', '--migrate-claudemd'], {
+    cwd,
+    reject: false,
+    all: true,
+  });
+
+  assert.notEqual(result.exitCode, 2, `migrate must not be gated by the lease guard: ${result.all}`);
+  assert.doesNotMatch(result.stderr, /active worker lease/);
+});
