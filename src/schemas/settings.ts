@@ -486,6 +486,18 @@ export const SearchSchema = z
   ])
   .default({ provider: 'native' });
 
+// FORGE-155: `forge upgrade` in-flight guard knobs. Mirrors DriveSchema's nested
+// `.default({})` so a settings.yaml with no `upgrade:` block still yields full
+// defaults. `guard_in_flight` (default TRUE) gates the exit-2 refusal: when on,
+// `forge upgrade` refuses (exit 2) if the working tree is dirty or a non-expired
+// worker lease exists, unless `--force` is passed. Set false to disable the
+// in-flight checks entirely (upgrade proceeds without them).
+const UpgradeSchema = z
+  .object({
+    guard_in_flight: z.boolean().default(true),
+  })
+  .default({});
+
 export const SettingsSchema = z.object({
   version: z.literal(1),
   project: z.object({
@@ -528,6 +540,9 @@ export const SettingsSchema = z.object({
   // → absent block resolves to the keyless native provider (Tripwire-scanned at
   // the adapter base).
   search: SearchSchema,
+  // FORGE-155: `forge upgrade` in-flight guard (exit-2). Nested `.default({})` →
+  // absent block resolves to guard_in_flight: true.
+  upgrade: UpgradeSchema,
 });
 
 export type Settings = z.infer<typeof SettingsSchema>;

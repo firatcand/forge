@@ -10,6 +10,8 @@
 // Exit codes (design §9):
 //   0 — success or no-op
 //   1 — local edit detected without --force
+//   2 — in-flight work: dirty tree or active worker lease (FORGE-155; --force
+//       overrides; gated by settings upgrade.guard_in_flight, default true)
 //   3 — settings.yaml missing or malformed
 //   4 — repo's methodology is NEWER than CLI bundles (silent-rollback guard)
 
@@ -48,6 +50,7 @@ import {
   type AgentKind,
 } from './agent-root-files.ts';
 import { applyGitignoreBlock } from './gitignore-block.ts';
+import { checkInFlight } from './in-flight-guard.ts';
 import { writeStatusLineConfig, writeTripwireHookConfig } from './host-config.ts';
 import { migrateClaudemd } from './migrate-claudemd.ts';
 import { renderContext } from './render-context.ts';
@@ -203,6 +206,13 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
   // Mutex with other write-modifying flags is enforced at the CLI router
   // (src/bin/forge.ts) so by the time we reach here, no conflict is possible.
   if (opts.migrateClaudemd) {
+    // FORGE-155: the exit-2 in-flight guard is EXEMPT on this route by design.
+    // `--migrate-claudemd` is a one-shot v0.4 → v0.5 transition whose precondition
+    // is that `.forge/CONTEXT.md` does not yet exist — i.e. it only runs on repos
+    // that PRE-DATE the orchestrator/lease surface, so an active worker lease
+    // cannot exist here. The migration has its own symlink preflight and `.bak`
+    // reversibility. Documented in
+    // spec/decisions/2026-06-26-upgrade-exit-2-lease-semantics.md.
     return migrateClaudemd({ cwd, dryRun: opts.dryRun });
   }
 
@@ -344,6 +354,19 @@ export async function upgrade(opts: UpgradeOptions): Promise<UpgradeResult> {
       filesChanged: [],
       stderr: formatCliTooOldRefusal(drift),
     };
+  }
+
+  // 2b. FORGE-155 — refuse with exit 2 when work is in flight (dirty tree or an
+  //     active worker lease). Runs AFTER the version-drift guard and BEFORE any
+  //     file write, so an exit-2 refusal mutates nothing. --force overrides;
+  //     gated by settings upgrade.guard_in_flight (default true).
+  const inFlight = checkInFlight({
+    cwd,
+    force: opts.force === true,
+    guardEnabled: validated.upgrade.guard_in_flight,
+  });
+  if (inFlight) {
+    return { exitCode: inFlight.exitCode, filesChanged: [], stderr: inFlight.stderr };
   }
 
   // 3. Mutate settings if --add-agent / --remove-agent. The mutation happens
