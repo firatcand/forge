@@ -14,7 +14,7 @@ export interface DoctorHandlerArgs {
 }
 
 export async function runLoomDoctor(args: DoctorHandlerArgs): Promise<{ exitCode: number }> {
-  if (!dbExists(args.ctx)) {
+  if (!(await dbExists(args.ctx))) {
     return {
       exitCode: emit(
         ok({
@@ -27,10 +27,10 @@ export async function runLoomDoctor(args: DoctorHandlerArgs): Promise<{ exitCode
           stale_fts_rows: { count: 0, sample: [] },
           invalid_rows: { count: 0, sample: [] },
           invalid_edges: { count: 0, sample: [] },
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [
             ...args.ctx.warnings,
-            `no loom.db at ${args.ctx.dbPath} — run \`forge loom reindex --scope all\` to build it`,
+            `no loom graph at ${args.ctx.location} — run \`forge loom reindex --scope all\` to build it`,
           ],
         }),
         { json: args.json },
@@ -46,7 +46,7 @@ export async function runLoomDoctor(args: DoctorHandlerArgs): Promise<{ exitCode
       exitCode: emit(
         fail(
           'LOOM_DB_CORRUPT',
-          `loom doctor: could not open loom.db at ${args.ctx.dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+          `loom doctor: could not open loom.db at ${args.ctx.location}: ${err instanceof Error ? err.message : String(err)}`,
           false,
         ),
         { json: args.json },
@@ -55,7 +55,7 @@ export async function runLoomDoctor(args: DoctorHandlerArgs): Promise<{ exitCode
   }
 
   try {
-    const health = backend.doctor();
+    const health = await backend.doctor();
     // Only genuine CORRUPTION drives a non-zero exit: orphan edges (missing
     // endpoint), stale FTS rows (no backing node), invalid rows (fail schema).
     // Isolated nodes are a benign structural observation (a learning with no task
@@ -84,6 +84,6 @@ export async function runLoomDoctor(args: DoctorHandlerArgs): Promise<{ exitCode
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

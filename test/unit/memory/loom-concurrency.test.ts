@@ -32,7 +32,7 @@ test('N parallel upsert transactions across separate WAL connections lose no row
   const dbPath = join(dir, 'loom.db');
   // Initialize the schema once.
   const init = await openLocalBackend(dbPath);
-  init.close();
+  await init.close();
 
   const N = 10;
   const perWriter = 5;
@@ -48,19 +48,19 @@ test('N parallel upsert transactions across separate WAL connections lose no row
           title: `node ${w}-${i}`,
           body: `body ${w}-${i}`,
         }));
-        backend.upsertNodes(nodes);
+        await backend.upsertNodes(nodes);
       } finally {
-        backend.close();
+        await backend.close();
       }
     }),
   );
 
   const verify = await openLocalBackend(dbPath);
   try {
-    const s = verify.status();
+    const s = await verify.status();
     assert.equal(s.node_count, N * perWriter, 'every concurrently-upserted row must be present');
   } finally {
-    verify.close();
+    await verify.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

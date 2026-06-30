@@ -16,7 +16,7 @@ export interface TraverseHandlerArgs {
 }
 
 export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exitCode: number }> {
-  if (!dbExists(args.ctx)) {
+  if (!(await dbExists(args.ctx))) {
     return {
       exitCode: emit(
         ok({
@@ -24,10 +24,10 @@ export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exit
           nodes: [],
           edges: [],
           truncated: false,
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [
             ...args.ctx.warnings,
-            `no loom.db at ${args.ctx.dbPath} — run \`forge loom reindex --scope all\` first; returning empty subgraph`,
+            `no loom graph at ${args.ctx.location} — run \`forge loom reindex --scope all\` first; returning empty subgraph`,
           ],
         }),
         { json: args.json },
@@ -43,7 +43,7 @@ export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exit
       exitCode: emit(
         fail(
           'LOOM_DB_CORRUPT',
-          `loom traverse: could not open loom.db at ${args.ctx.dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+          `loom traverse: could not open loom.db at ${args.ctx.location}: ${err instanceof Error ? err.message : String(err)}`,
           false,
         ),
         { json: args.json },
@@ -56,7 +56,7 @@ export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exit
       ...(args.depth !== undefined ? { depth: args.depth } : {}),
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
     };
-    const sub = backend.traverse(args.node, opts);
+    const sub = await backend.traverse(args.node, opts);
     const warnings = [...args.ctx.warnings];
     if (sub.nodes.length === 0) {
       warnings.push(`node '${args.node}' not found in loom.db; returning empty subgraph`);
@@ -68,7 +68,7 @@ export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exit
           nodes: sub.nodes,
           edges: sub.edges,
           truncated: sub.truncated,
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings,
         }),
         { json: args.json },
@@ -86,6 +86,6 @@ export async function runLoomTraverse(args: TraverseHandlerArgs): Promise<{ exit
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

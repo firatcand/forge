@@ -79,27 +79,30 @@ export interface GraphHealth {
   readonly db_path: string;
 }
 
+// FORGE-228 (Loom I4): the method surface is async. A remote/serverless backend
+// (Neon Postgres) cannot be synchronous; the local SQLite backend wraps its sync
+// bodies in async methods (zero behaviour change). Every caller awaits.
 export interface MemoryBackend {
   // Delete every node + edge (in one txn). Keeps the schema/FTS table stable so
   // a rebuild re-inserts into the same shape — reindex is reset()+upsert.
-  reset(): void;
-  upsertNodes(nodes: readonly MemoryNode[]): void;
-  upsertEdges(edges: readonly MemoryEdge[]): void;
+  reset(): Promise<void>;
+  upsertNodes(nodes: readonly MemoryNode[]): Promise<void>;
+  upsertEdges(edges: readonly MemoryEdge[]): Promise<void>;
   // Atomic rebuild: validate ALL nodes/edges, then delete-all + insert-all inside
   // ONE transaction. This is what reindex uses so a validation failure (or any
   // throw) can NEVER leave a wiped DB — the prior graph is preserved on error
   // (GPT-5.5 re-review B3: reset()-then-upsert as two txns could delete the DB
   // and then throw on a malformed source row, losing the previous graph).
-  replaceGraph(nodes: readonly MemoryNode[], edges: readonly MemoryEdge[]): void;
+  replaceGraph(nodes: readonly MemoryNode[], edges: readonly MemoryEdge[]): Promise<void>;
   // Dependency-aware recall for a task node. Returns [] when the task is absent.
-  recallForTask(taskId: string, opts?: RecallOptions): RecallHit[];
-  status(): MemoryStatus;
+  recallForTask(taskId: string, opts?: RecallOptions): Promise<RecallHit[]>;
+  status(): Promise<MemoryStatus>;
   // FORGE-227: ad-hoc graph inspection. query = node lookup; traverse = bounded
   // reachable subgraph from a node; doctor = graph health report. All three
   // validate rows on the way out (a corrupt DB fails loud for query/traverse and
   // is reported by doctor rather than crashing).
-  query(filter: QueryFilter): MemoryNode[];
-  traverse(nodeId: string, opts?: TraverseOptions): GraphSubgraph;
-  doctor(): GraphHealth;
-  close(): void;
+  query(filter: QueryFilter): Promise<MemoryNode[]>;
+  traverse(nodeId: string, opts?: TraverseOptions): Promise<GraphSubgraph>;
+  doctor(): Promise<GraphHealth>;
+  close(): Promise<void>;
 }

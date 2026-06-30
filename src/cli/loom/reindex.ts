@@ -59,7 +59,7 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
           decision_nodes: result.decision_nodes,
           decided_in_edges: result.decided_in_edges,
           affects_edges: result.affects_edges,
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [...warnings, ...result.warnings],
         }),
         { json: args.json },
@@ -77,6 +77,6 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

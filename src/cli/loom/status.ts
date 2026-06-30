@@ -12,7 +12,7 @@ export interface StatusHandlerArgs {
 }
 
 export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode: number }> {
-  if (!dbExists(args.ctx)) {
+  if (!(await dbExists(args.ctx))) {
     return {
       exitCode: emit(
         ok({
@@ -21,10 +21,10 @@ export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode
           // Explicit zero for all kinds (honest zero output; file added in I2a,
           // symbol in I2b-1, decision in I3).
           by_kind: { task: 0, learning: 0, file: 0, symbol: 0, decision: 0 },
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [
             ...args.ctx.warnings,
-            `no loom.db at ${args.ctx.dbPath} — run \`forge loom reindex --scope all\` to build it`,
+            `no loom graph at ${args.ctx.location} — run \`forge loom reindex --scope all\` to build it`,
           ],
         }),
         { json: args.json },
@@ -40,7 +40,7 @@ export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode
       exitCode: emit(
         fail(
           'LOOM_DB_CORRUPT',
-          `loom status: could not open loom.db at ${args.ctx.dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+          `loom status: could not open loom.db at ${args.ctx.location}: ${err instanceof Error ? err.message : String(err)}`,
           false,
         ),
         { json: args.json },
@@ -49,7 +49,7 @@ export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode
   }
 
   try {
-    const status = backend.status();
+    const status = await backend.status();
     return {
       exitCode: emit(
         ok({
@@ -75,6 +75,6 @@ export async function runLoomStatus(args: StatusHandlerArgs): Promise<{ exitCode
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

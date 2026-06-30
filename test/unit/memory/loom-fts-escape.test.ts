@@ -33,7 +33,7 @@ test('recall over a node with FTS-hostile title/description does not throw and m
   const dbPath = join(dir, 'loom.db');
   const backend = await openLocalBackend(dbPath);
   try {
-    backend.upsertNodes([
+    await backend.upsertNodes([
       {
         id: 'task:A',
         kind: 'task',
@@ -48,11 +48,11 @@ test('recall over a node with FTS-hostile title/description does not throw and m
       },
     ]);
     // Must not throw on the hostile query; the learning should match via FTS.
-    const hits = backend.recallForTask('A');
+    const hits = await backend.recallForTask('A');
     assert.ok(Array.isArray(hits));
     assert.ok(hits.some((h) => h.id === 'learning:l'), 'expected an FTS match on shared terms');
   } finally {
-    backend.close();
+    await backend.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

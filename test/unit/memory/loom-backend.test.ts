@@ -17,23 +17,23 @@ test('upsert nodes/edges then status reports counts and by_kind', async () => {
   const { dbPath, cleanup } = tmpDb();
   const backend: MemoryBackend = await openLocalBackend(dbPath);
   try {
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'A', body: 'alpha body' },
       { id: 'task:B', kind: 'task', title: 'B', body: 'beta body' },
       { id: 'learning:l1', kind: 'learning', title: 'L1', body: 'lesson one' },
     ]);
-    backend.upsertEdges([
+    await backend.upsertEdges([
       { src: 'task:A', dst: 'task:B', kind: 'depends_on' },
       { src: 'learning:l1', dst: 'task:B', kind: 'learned_from' },
     ]);
-    const s = backend.status();
+    const s = await backend.status();
     assert.equal(s.node_count, 3);
     assert.equal(s.edge_count, 2);
     assert.equal(s.by_kind.task, 2);
     assert.equal(s.by_kind.learning, 1);
     assert.equal(s.db_path, dbPath);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -44,17 +44,17 @@ test('recallForTask ranks structural above fts and carries why provenance', asyn
   try {
     // A depends_on B. learning:struct is learned_from B (ancestor of A) → structural.
     // learning:fts only shares a word with A's body → fts.
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'Widget pipeline', body: 'build the widget pipeline' },
       { id: 'task:B', kind: 'task', title: 'B', body: 'base task' },
       { id: 'learning:struct', kind: 'learning', title: 'Structural lesson', body: 'unrelated text' },
       { id: 'learning:fts', kind: 'learning', title: 'Widget gotcha', body: 'widget pipeline caveat' },
     ]);
-    backend.upsertEdges([
+    await backend.upsertEdges([
       { src: 'task:A', dst: 'task:B', kind: 'depends_on' },
       { src: 'learning:struct', dst: 'task:B', kind: 'learned_from' },
     ]);
-    const hits = backend.recallForTask('A');
+    const hits = await backend.recallForTask('A');
     assert.ok(hits.length >= 2, `expected >=2 hits, got ${hits.length}`);
     // Structural first.
     assert.equal(hits[0]!.id, 'learning:struct');
@@ -66,7 +66,7 @@ test('recallForTask ranks structural above fts and carries why provenance', asyn
     assert.equal(fts!.source, 'fts');
     assert.ok(hits[0]!.score > fts!.score, 'structural score must exceed fts score');
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -75,10 +75,10 @@ test('recallForTask returns [] for an absent task', async () => {
   const { dbPath, cleanup } = tmpDb();
   const backend = await openLocalBackend(dbPath);
   try {
-    backend.upsertNodes([{ id: 'task:A', kind: 'task', title: 'A', body: 'a' }]);
-    assert.deepEqual(backend.recallForTask('NOPE'), []);
+    await backend.upsertNodes([{ id: 'task:A', kind: 'task', title: 'A', body: 'a' }]);
+    assert.deepEqual(await backend.recallForTask('NOPE'), []);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -88,7 +88,7 @@ test('recallForTask resolves a tracker_issue_id, not just the phases id (B1)', a
   const backend = await openLocalBackend(dbPath);
   try {
     // The node id is the phases id; the tracker id lives in attrs (as ingest stores it).
-    backend.upsertNodes([
+    await backend.upsertNodes([
       {
         id: 'task:P1-T1',
         kind: 'task',
@@ -99,24 +99,24 @@ test('recallForTask resolves a tracker_issue_id, not just the phases id (B1)', a
       { id: 'task:P1-T2', kind: 'task', title: 'Base', body: 'base task' },
       { id: 'learning:l1', kind: 'learning', title: 'Loom lesson', body: 'x' },
     ]);
-    backend.upsertEdges([
+    await backend.upsertEdges([
       { src: 'task:P1-T1', dst: 'task:P1-T2', kind: 'depends_on' },
       { src: 'learning:l1', dst: 'task:P1-T1', kind: 'learned_from' },
     ]);
     // /pickup-task passes the TRACKER id — it must resolve to the same node and
     // surface the structural learning hit (previously returned []).
-    const byTracker = backend.recallForTask('FORGE-200');
+    const byTracker = await backend.recallForTask('FORGE-200');
     assert.ok(byTracker.some((h) => h.id === 'learning:l1' && h.source === 'structural'),
       `tracker-id recall must find the structural hit, got ${JSON.stringify(byTracker)}`);
     // Same result via the phases id and the prefixed form.
-    const byPhases = backend.recallForTask('P1-T1');
-    const byPrefixed = backend.recallForTask('task:P1-T1');
+    const byPhases = await backend.recallForTask('P1-T1');
+    const byPrefixed = await backend.recallForTask('task:P1-T1');
     assert.deepEqual(byTracker, byPhases);
     assert.deepEqual(byTracker, byPrefixed);
     // An unknown tracker id still returns [].
-    assert.deepEqual(backend.recallForTask('FORGE-999'), []);
+    assert.deepEqual(await backend.recallForTask('FORGE-999'), []);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -126,32 +126,32 @@ test('replaceGraph is atomic: a malformed node throws WITHOUT wiping the prior g
   const backend = await openLocalBackend(dbPath);
   try {
     // Seed a good graph.
-    backend.replaceGraph(
+    await backend.replaceGraph(
       [
         { id: 'task:A', kind: 'task', title: 'A', body: 'alpha' },
         { id: 'task:B', kind: 'task', title: 'B', body: 'beta' },
       ],
       [{ src: 'task:A', dst: 'task:B', kind: 'depends_on' }],
     );
-    assert.equal(backend.status().node_count, 2);
-    assert.equal(backend.status().edge_count, 1);
+    assert.equal((await backend.status()).node_count, 2);
+    assert.equal((await backend.status()).edge_count, 1);
 
     // A rebuild whose node set contains an over-long title must throw BEFORE any
     // delete — the previous graph survives intact (no data loss).
     const huge = 'x'.repeat(600);
-    assert.throws(() =>
+    await assert.rejects(
       backend.replaceGraph(
         [{ id: 'task:C', kind: 'task', title: huge, body: 'c' }],
         [],
       ),
     );
-    const after = backend.status();
+    const after = await backend.status();
     assert.equal(after.node_count, 2, 'prior nodes must be preserved on a failed rebuild');
     assert.equal(after.edge_count, 1, 'prior edges must be preserved on a failed rebuild');
     // And recall still works against the preserved graph.
-    assert.ok(backend.recallForTask('A') !== undefined);
+    assert.ok(await backend.recallForTask('A') !== undefined);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -161,15 +161,15 @@ test('upsertNodes is a fail-closed bounds gate: an over-long node throws (B2)', 
   const backend = await openLocalBackend(dbPath);
   try {
     const huge = 'x'.repeat(600); // > MAX_TITLE_LEN (512)
-    assert.throws(
-      () => backend.upsertNodes([{ id: 'task:big', kind: 'task', title: huge, body: 'b' }]),
+    await assert.rejects(
+      backend.upsertNodes([{ id: 'task:big', kind: 'task', title: huge, body: 'b' }]),
       /title|512|too big|String must contain at most/i,
       'an unbounded title must be rejected, not written to SQLite/FTS',
     );
     // The rejected write left no row (transaction rolled back).
-    assert.equal(backend.status().node_count, 0);
+    assert.equal((await backend.status()).node_count, 0);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -178,10 +178,10 @@ test('status reports file by_kind explicitly even at 0 (FORGE-218)', async () =>
   const { dbPath, cleanup } = tmpDb();
   const backend = await openLocalBackend(dbPath);
   try {
-    backend.upsertNodes([{ id: 'task:A', kind: 'task', title: 'A', body: 'a' }]);
-    assert.equal(backend.status().by_kind.file, 0);
+    await backend.upsertNodes([{ id: 'task:A', kind: 'task', title: 'A', body: 'a' }]);
+    assert.equal((await backend.status()).by_kind.file, 0);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -193,18 +193,18 @@ test('co-touch recall: a co-touching task’s learning surfaces structurally (FO
     // Task A touches file F. Task B touches the SAME file F and has a learning L
     // (learned_from B). A and B are NOT depends_on related — the only link is the
     // shared file. recall(A) must surface L structurally with a co-touch `why`.
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'Alpha work', body: 'unrelated alpha body' },
       { id: 'task:B', kind: 'task', title: 'Beta work', body: 'unrelated beta body' },
       { id: 'file:src/shared.ts', kind: 'file', title: 'src/shared.ts', body: '' },
       { id: 'learning:l1', kind: 'learning', title: 'Shared gotcha', body: 'a lesson from B' },
     ]);
-    backend.upsertEdges([
+    await backend.upsertEdges([
       { src: 'task:A', dst: 'file:src/shared.ts', kind: 'touches' },
       { src: 'task:B', dst: 'file:src/shared.ts', kind: 'touches' },
       { src: 'learning:l1', dst: 'task:B', kind: 'learned_from' },
     ]);
-    const hits = backend.recallForTask('A');
+    const hits = await backend.recallForTask('A');
     const l1 = hits.find((h) => h.id === 'learning:l1');
     assert.ok(l1, `expected the co-touching learning, got ${JSON.stringify(hits)}`);
     assert.equal(l1!.source, 'structural');
@@ -212,7 +212,7 @@ test('co-touch recall: a co-touching task’s learning surfaces structurally (FO
     // File nodes are NEVER returned as hits.
     assert.ok(!hits.some((h) => h.id.startsWith('file:')), 'file nodes must not be hits');
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -223,14 +223,14 @@ test('file nodes are excluded from FTS recall (FORGE-218)', async () => {
   try {
     // The task body shares the word "pipeline" with a file node's path-ish title.
     // A non-file FTS match would surface; the file node must NOT (excluded at index).
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'Pipeline task', body: 'build the pipeline' },
       { id: 'file:src/pipeline.ts', kind: 'file', title: 'src/pipeline.ts', body: '' },
     ]);
-    const hits = backend.recallForTask('A');
+    const hits = await backend.recallForTask('A');
     assert.ok(!hits.some((h) => h.id === 'file:src/pipeline.ts'), 'file node must not be an FTS hit');
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -240,22 +240,22 @@ test('a task with no touches still returns I1-style depends_on + fts results (FO
   const backend = await openLocalBackend(dbPath);
   try {
     // No touches edges at all → behaves exactly like I1.
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'Widget pipeline', body: 'build the widget pipeline' },
       { id: 'task:B', kind: 'task', title: 'B', body: 'base task' },
       { id: 'learning:struct', kind: 'learning', title: 'Structural lesson', body: 'unrelated text' },
     ]);
-    backend.upsertEdges([
+    await backend.upsertEdges([
       { src: 'task:A', dst: 'task:B', kind: 'depends_on' },
       { src: 'learning:struct', dst: 'task:B', kind: 'learned_from' },
     ]);
-    const hits = backend.recallForTask('A');
+    const hits = await backend.recallForTask('A');
     const struct = hits.find((h) => h.id === 'learning:struct');
     assert.ok(struct, 'depends_on-ancestor learning must still surface (I1 behavior)');
     assert.equal(struct!.source, 'structural');
     assert.match(struct!.why, /depends_on→B learned_from/);
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });
@@ -279,10 +279,10 @@ test('BFS depth/visited guard: a cyclic depends_on row does not loop recall', as
   const backend = await openLocalBackend(dbPath);
   try {
     // If the visited-set guard were missing this would loop forever.
-    const hits = backend.recallForTask('A', { maxDepth: 50 });
+    const hits = await backend.recallForTask('A', { maxDepth: 50 });
     assert.ok(Array.isArray(hits), 'recall terminated and returned an array');
   } finally {
-    backend.close();
+    await backend.close();
     cleanup();
   }
 });

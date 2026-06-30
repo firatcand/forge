@@ -71,6 +71,42 @@ test('AC2 — accepts review_host_cli !== primary_host_cli (claude/codex)', () =
   assert.equal(result.success, true);
 });
 
+// FORGE-228 (Loom I4): the memory-backend discriminated union.
+const memoryBase = {
+  version: 1 as const,
+  project: { name: 'forge-memory' },
+  tracker: { type: 'linear' as const, config: { team_id: 'T' } },
+  secrets: { manager: 'env_file' as const },
+  agents: { primary_host_cli: 'claude' as const, review_host_cli: 'codex' as const },
+};
+
+test('FORGE-228 — memory defaults to the local backend when absent', () => {
+  const result = SettingsSchema.safeParse({ ...memoryBase });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.deepEqual(result.data.memory, { backend: 'local' });
+});
+
+test('FORGE-228 — accepts the opt-in neon backend (zero config fields)', () => {
+  const result = SettingsSchema.safeParse({ ...memoryBase, memory: { backend: 'neon' } });
+  assert.equal(result.success, true);
+  if (!result.success) return;
+  assert.equal(result.data.memory.backend, 'neon');
+});
+
+test('FORGE-228 — rejects extra fields on the neon block (strict; no secret in settings)', () => {
+  const result = SettingsSchema.safeParse({
+    ...memoryBase,
+    memory: { backend: 'neon', connection: 'postgres://x' },
+  });
+  assert.equal(result.success, false);
+});
+
+test('FORGE-228 — rejects an unknown memory backend', () => {
+  const result = SettingsSchema.safeParse({ ...memoryBase, memory: { backend: 'mongo' } });
+  assert.equal(result.success, false);
+});
+
 test('AC3 — applies defaults when agents+design absent', () => {
   const data = loadFixture('minimal.yaml');
   const result = SettingsSchema.safeParse(data);

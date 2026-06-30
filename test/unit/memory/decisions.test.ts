@@ -399,13 +399,13 @@ test('reindex projects decisions, counts them, and is byte-identical across runs
   try {
     const b1 = await openLocalBackend(dbPath);
     const r1 = await reindex({ repoRoot, backend: b1 });
-    b1.close();
+    await b1.close();
     const snap1 = await snapshot(dbPath);
 
     const b2 = await openLocalBackend(dbPath);
     const r2 = await reindex({ repoRoot, backend: b2 });
-    const status = b2.status();
-    b2.close();
+    const status = await b2.status();
+    await b2.close();
     const snap2 = await snapshot(dbPath);
 
     assert.deepEqual(snap2, snap1, 'graph incl. decisions must be identical across runs');
@@ -441,8 +441,8 @@ test('recall surfaces a decision structurally (decided_in the task) and via a de
   try {
     const b = await openLocalBackend(dbPath);
     await reindex({ repoRoot, backend: b });
-    const hits = b.recallForTask('P1-T02');
-    b.close();
+    const hits = await b.recallForTask('P1-T02');
+    await b.close();
     const decisionHits = hits.filter((h) => h.kind === 'decision');
     assert.equal(decisionHits.length, 2, `expected 2 decision hits, got ${JSON.stringify(hits)}`);
     assert.ok(decisionHits.every((h) => h.source === 'structural' && h.score === 1000));
@@ -467,8 +467,8 @@ test('recall surfaces an applied-ADR decision for a phases task it AFFECTS (affe
   try {
     const b = await openLocalBackend(dbPath);
     await reindex({ repoRoot, backend: b });
-    const hits = b.recallForTask('P1-T02');
-    b.close();
+    const hits = await b.recallForTask('P1-T02');
+    await b.close();
     const adrHit = hits.find((h) => h.id === 'decision:adr:switch-to-grpc');
     assert.ok(adrHit, `expected the affects-ADR decision hit, got ${JSON.stringify(hits)}`);
     assert.equal(adrHit!.kind, 'decision');
@@ -487,15 +487,15 @@ test('recall returns a decision FTS hit with kind=decision, ranked below structu
     const backend = await openLocalBackend(dbPath);
     // Task A's title has a rare word; a decision body shares that word → FTS hit.
     // The decision has NO edge to A, so it can ONLY appear via FTS.
-    backend.upsertNodes([
+    await backend.upsertNodes([
       { id: 'task:A', kind: 'task', title: 'Quasar pipeline', body: 'build the quasar pipeline' },
       { id: 'decision:question:abc', kind: 'decision', title: 'pipeline-choice', body: 'we chose the quasar approach', attrs: { source: 'question' } },
       // A structural decision (edge to A) to prove ordering: structural > fts.
       { id: 'decision:question:def', kind: 'decision', title: 'struct-choice', body: 'unrelated prose', attrs: { source: 'question' } },
     ]);
-    backend.upsertEdges([{ src: 'decision:question:def', dst: 'task:A', kind: 'decided_in' }]);
-    const hits = backend.recallForTask('A');
-    backend.close();
+    await backend.upsertEdges([{ src: 'decision:question:def', dst: 'task:A', kind: 'decided_in' }]);
+    const hits = await backend.recallForTask('A');
+    await backend.close();
     const fts = hits.find((h) => h.id === 'decision:question:abc');
     assert.ok(fts, `expected the FTS decision hit, got ${JSON.stringify(hits)}`);
     assert.equal(fts!.kind, 'decision', 'FTS decision hit must carry kind=decision, not task');
