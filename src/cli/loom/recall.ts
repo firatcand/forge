@@ -24,17 +24,17 @@ export async function runLoomRecall(args: RecallHandlerArgs): Promise<{ exitCode
   }
 
   // Soft-fail: no db yet (never reindexed) → empty hits + a warning, exit 0.
-  if (!dbExists(args.ctx)) {
+  if (!(await dbExists(args.ctx))) {
     return {
       exitCode: emit(
         ok({
           task: args.task,
           hits: [],
           learning_nodes: 0,
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [
             ...args.ctx.warnings,
-            `no loom.db at ${args.ctx.dbPath} — run \`forge loom reindex --scope all\` first; returning empty recall`,
+            `no loom graph at ${args.ctx.location} — run \`forge loom reindex --scope all\` first; returning empty recall`,
           ],
         }),
         { json: args.json },
@@ -51,7 +51,7 @@ export async function runLoomRecall(args: RecallHandlerArgs): Promise<{ exitCode
       exitCode: emit(
         fail(
           'LOOM_DB_CORRUPT',
-          `loom recall: could not open loom.db at ${args.ctx.dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+          `loom recall: could not open loom.db at ${args.ctx.location}: ${err instanceof Error ? err.message : String(err)}`,
           false,
         ),
         { json: args.json },
@@ -60,8 +60,8 @@ export async function runLoomRecall(args: RecallHandlerArgs): Promise<{ exitCode
   }
 
   try {
-    const status = backend.status();
-    const hits = backend.recallForTask(args.task, {
+    const status = await backend.status();
+    const hits = await backend.recallForTask(args.task, {
       ...(args.limit !== undefined ? { limit: args.limit } : {}),
     });
     const warnings = [...args.ctx.warnings];
@@ -78,7 +78,7 @@ export async function runLoomRecall(args: RecallHandlerArgs): Promise<{ exitCode
           learning_nodes: status.by_kind.learning ?? 0,
           node_count: status.node_count,
           edge_count: status.edge_count,
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings,
         }),
         { json: args.json },
@@ -96,6 +96,6 @@ export async function runLoomRecall(args: RecallHandlerArgs): Promise<{ exitCode
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

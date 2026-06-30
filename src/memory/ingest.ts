@@ -252,7 +252,7 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
 
   // Atomic rebuild: validate-all + delete-all + insert-all in ONE transaction so
   // a malformed source row can never wipe the prior graph and then fail (B3).
-  args.backend.replaceGraph(nodes, edges);
+  await args.backend.replaceGraph(nodes, edges);
 
   return {
     nodes: nodes.length,

@@ -32,6 +32,10 @@ export const TRACKER_ENV_ALLOWLIST: readonly string[] = [
   'GITHUB_TOKEN',
   'GH_TOKEN',
   'FORGE_NOTION_PARENT_PAGE_ID',
+  // FORGE-228 (Loom I4): connection string for the opt-in `memory.backend: neon`
+  // remote graph. Allowlisted so it loads from .forge/.env like a tracker secret;
+  // never stored in settings.yaml.
+  'NEON_DATABASE_URL',
 ];
 
 const ALLOWED = new Set(TRACKER_ENV_ALLOWLIST);

@@ -459,15 +459,18 @@ const DocsCoverageSchema = z
   .strict()
   .default({});
 
-// FORGE-200 (Loom I1): the memory-backend selector. A discriminated union on
-// `backend` so adding a remote variant (Athena) later is purely additive — the
-// only I1 variant is `local` (SQLite WAL+FTS5 under <main-checkout>/.forge/loom.db,
-// resolved via src/memory/paths.ts). Wrapped with `.default({ backend: 'local' })`
-// so a settings.yaml with no `memory:` block still yields a full default — mirrors
-// how `audit`/`drive` mount via nested defaults.
+// FORGE-200 (Loom I1) / FORGE-228 (Loom I4): the memory-backend selector. A
+// discriminated union on `backend`. `local` (SQLite WAL+FTS5 under
+// <main-checkout>/.forge/loom.db, resolved via src/memory/paths.ts) is the default.
+// `neon` is an opt-in remote Postgres backend (FORGE-228): a shared team graph.
+// It carries NO config fields — the connection string is ALWAYS read from the
+// allowlisted env var NEON_DATABASE_URL (never committed to settings.yaml), and
+// the schema is always `public`. Wrapped with `.default({ backend: 'local' })` so
+// a settings.yaml with no `memory:` block still yields a full default.
 const MemorySchema = z
   .discriminatedUnion('backend', [
     z.object({ backend: z.literal('local') }).strict(),
+    z.object({ backend: z.literal('neon') }).strict(),
   ])
   .default({ backend: 'local' });
 

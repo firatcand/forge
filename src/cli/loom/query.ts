@@ -15,15 +15,15 @@ export interface QueryHandlerArgs {
 }
 
 export async function runLoomQuery(args: QueryHandlerArgs): Promise<{ exitCode: number }> {
-  if (!dbExists(args.ctx)) {
+  if (!(await dbExists(args.ctx))) {
     return {
       exitCode: emit(
         ok({
           nodes: [],
-          db_path: args.ctx.dbPath,
+          db_path: args.ctx.location,
           warnings: [
             ...args.ctx.warnings,
-            `no loom.db at ${args.ctx.dbPath} — run \`forge loom reindex --scope all\` first; returning no nodes`,
+            `no loom graph at ${args.ctx.location} — run \`forge loom reindex --scope all\` first; returning no nodes`,
           ],
         }),
         { json: args.json },
@@ -39,7 +39,7 @@ export async function runLoomQuery(args: QueryHandlerArgs): Promise<{ exitCode: 
       exitCode: emit(
         fail(
           'LOOM_DB_CORRUPT',
-          `loom query: could not open loom.db at ${args.ctx.dbPath}: ${err instanceof Error ? err.message : String(err)}`,
+          `loom query: could not open loom.db at ${args.ctx.location}: ${err instanceof Error ? err.message : String(err)}`,
           false,
         ),
         { json: args.json },
@@ -48,10 +48,10 @@ export async function runLoomQuery(args: QueryHandlerArgs): Promise<{ exitCode: 
   }
 
   try {
-    const nodes = backend.query(args.filter);
+    const nodes = await backend.query(args.filter);
     return {
       exitCode: emit(
-        ok({ nodes, db_path: args.ctx.dbPath, warnings: args.ctx.warnings }),
+        ok({ nodes, db_path: args.ctx.location, warnings: args.ctx.warnings }),
         { json: args.json },
       ),
     };
@@ -69,6 +69,6 @@ export async function runLoomQuery(args: QueryHandlerArgs): Promise<{ exitCode: 
       ),
     };
   } finally {
-    backend.close();
+    await backend.close();
   }
 }

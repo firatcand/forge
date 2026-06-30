@@ -65,12 +65,12 @@ test('reindex is idempotent: two runs produce identical logical nodes+edges', as
   try {
     const b1 = await openLocalBackend(dbPath);
     const r1 = await reindex({ repoRoot, backend: b1 });
-    b1.close();
+    await b1.close();
     const snap1 = await snapshot(dbPath);
 
     const b2 = await openLocalBackend(dbPath);
     const r2 = await reindex({ repoRoot, backend: b2 });
-    b2.close();
+    await b2.close();
     const snap2 = await snapshot(dbPath);
 
     assert.deepEqual(snap2, snap1, 'logical graph must be identical across reindex runs');
@@ -107,12 +107,12 @@ test('reindex with a seeded events fixture is idempotent incl. file/touches (FOR
   try {
     const b1 = await openLocalBackend(dbPath);
     const r1 = await reindex({ repoRoot, backend: b1 });
-    b1.close();
+    await b1.close();
     const snap1 = await snapshot(dbPath);
 
     const b2 = await openLocalBackend(dbPath);
     const r2 = await reindex({ repoRoot, backend: b2 });
-    b2.close();
+    await b2.close();
     const snap2 = await snapshot(dbPath);
 
     assert.deepEqual(snap2, snap1, 'graph incl. file/touches must be identical across runs');
@@ -153,12 +153,12 @@ test('reindex extracts code symbols + defines edges idempotently (FORGE-219)', a
   try {
     const b1 = await openLocalBackend(dbPath);
     const r1 = await reindex({ repoRoot, backend: b1 });
-    b1.close();
+    await b1.close();
     const snap1 = await snapshot(dbPath);
 
     const b2 = await openLocalBackend(dbPath);
     const r2 = await reindex({ repoRoot, backend: b2 });
-    b2.close();
+    await b2.close();
     const snap2 = await snapshot(dbPath);
 
     assert.deepEqual(snap2, snap1, 'graph incl. symbols/defines must be identical across runs');
@@ -218,7 +218,7 @@ phases:
     const snap = await snapshot(dbPath);
     const node = snap.nodes[0] as { body: string };
     assert.ok(node.body.length <= 100_000, `body must be capped, got ${node.body.length}`);
-    b.close();
+    await b.close();
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -241,8 +241,8 @@ test('reindex links learned_from edges by phases id and tracker id, tolerating u
     // learning node present; learned_from edges: P1-T01 (direct) + FX-1 (tracker→P1-T01).
     // NOPE-9 is unknown → no edge + a warning.
     assert.equal(r.learning_nodes, 1);
-    const hits = b.recallForTask('P1-T01');
-    b.close();
+    const hits = await b.recallForTask('P1-T01');
+    await b.close();
     assert.ok(hits.some((h) => h.id === 'learning:docs/learnings/2026-Q2/lesson.md'));
     assert.ok(r.warnings.some((w) => /NOPE-9/.test(w)), 'expected a warning about the unknown ref');
   } finally {
