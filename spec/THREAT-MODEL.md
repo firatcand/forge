@@ -185,21 +185,37 @@ tree-sitter. This deliberately stays inside the trust boundary above:
 - The extractor stores **names, kinds, start/end line, and the file path ONLY** —
   it never reads or persists function bodies, docstrings, comments, or any other
   source text. (Asserted in `test/unit/memory/symbols.test.ts`.)
-- Symbol nodes are **excluded from FTS** and **not surfaced by recall** in
-  I2b-1: there is no `references` edge and `recallForTask` is unchanged, so no
-  symbol name reaches a rendered worker prompt. Symbols are structural
-  intermediaries (file → symbol `defines`), invisible to the prompt today.
-- Therefore I2b-1 introduces **no new external→prompt path** and needs no
-  Tripwire boundary scan. The file paths it consumes are the same untrusted
-  worker self-reports the I2a projector already path-validates; the extractor
+- Symbol nodes are **excluded from FTS**. In I2b-1 they were also **not surfaced
+  by recall** — symbols were structural intermediaries (file → symbol `defines`)
+  invisible to the prompt, so I2b-1 introduced no new external→prompt path.
+- The file paths the extractor consumes are the same untrusted worker
+  self-reports the I2a projector already path-validates; the extractor
   additionally lstat/realpath/O_NOFOLLOW-guards every read (no symlink escape).
 
-The decision on whether symbol **names** may ever appear in recall `why`
-strings / worker prompts (vs. constrained payloads) is **deferred to I2b-2** and
-is a Tripwire-adjacent fork. Per the binding guardrail above, the I2b-2 change
-that first surfaces symbol names into a prompt MUST land with the corresponding
-Tripwire decision + scan; doing so without updating this table is a gate
-violation.
+**Superseded by FORGE-227 + FORGE-229 (I2b-2) — symbol names DO reach the prompt
+now.** FORGE-227 began surfacing symbols in `recallForTask` (via `defines`), and
+FORGE-229 adds `mentions`-sourced symbol hits. Symbol titles therefore appear in
+recall `why` strings / the `/pickup-task` prompt. The I2b-2 decision closes the
+gate on **both** sides:
+
+- **Constrain at write:** every stored symbol name (definition names AND
+  reference callee names) must match an identifier charset whitelist
+  (`SYMBOL_NAME_RE` in `src/memory/symbols.ts` — letters/digits/`_`/`$`/`?`/`!`/`~`,
+  ≤256 chars). A name that fails is dropped + counted (`symbols_rejected`), so
+  injection-shaped text can never enter the graph as a symbol name. Exotic-but-
+  legit unicode identifiers are a documented, accepted casualty.
+- **Scan at read:** `forge loom recall` runs each hit's model-visible text
+  (`id` + `title` + `why` — the exact fields `/pickup-task` renders, including a
+  learning's repo-path `id`) through `scanText(…, 'loom_recall')` and **drops**
+  any hit that scans `hostile` before returning. The warning is constants-only (a
+  count), never echoing the flagged text — consistent with the model-visible-
+  warnings rule above. Free-form learning/decision/task titles (not just symbol
+  names) are covered by this boundary. Reindex-side warnings that could carry an
+  untrusted path (e.g. the over-long-file-id skip) are likewise constants-only +
+  aggregated, since `/pickup-task` also surfaces `forge loom reindex --json`.
+
+`references` edges (symbol→symbol) carry no new text into the prompt (both
+endpoints are already-constrained symbol names) and are not walked by recall.
 
 ## What Tripwire does NOT defend (limitations — read before trusting it)
 

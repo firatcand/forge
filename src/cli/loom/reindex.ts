@@ -3,6 +3,7 @@
 
 import path from 'node:path';
 
+import { scanText } from '../../security/tripwire/scan.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { reindex } from '../../memory/ingest.ts';
 import { resolveBackend, type LoomContext } from './context.ts';
@@ -13,6 +14,21 @@ export interface ReindexHandlerArgs {
   // I1 ships only `--scope all`; any other value is accepted + ignored with a
   // warning (forward-compat with future scopes).
   readonly scope?: string;
+}
+
+// FORGE-229 (THREAT-MODEL I2b-2, boundary sanitizer): `/pickup-task` runs
+// `forge loom reindex --json` and surfaces its output to the implementer, so the
+// warning list is an untrusted→prompt channel. Most warnings are constants, but
+// some reindex sources still embed repo-derived content (a learning/file path, a
+// task ref). Scan EVERY warning at this boundary and replace any that trips
+// Tripwire as hostile with a fixed constant — the same engine + bar recall uses,
+// so a single choke point covers all current and future warning producers.
+export function sanitizeReindexWarnings(warnings: readonly string[]): string[] {
+  return warnings.map((w) =>
+    scanText(w, 'loom_reindex').severity === 'hostile'
+      ? 'loom reindex: a warning was withheld (flagged as potentially unsafe)'
+      : w,
+  );
 }
 
 export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCode: number }> {
@@ -55,12 +71,18 @@ export async function runLoomReindex(args: ReindexHandlerArgs): Promise<{ exitCo
           // FORGE-219: code-symbol counts from the tree-sitter extractor.
           symbol_nodes: result.symbol_nodes,
           defines_edges: result.defines_edges,
+          // FORGE-229: reference + mention edge counts.
+          references_edges: result.references_edges,
+          references_unresolved: result.references_unresolved,
+          symbols_rejected: result.symbols_rejected,
+          mentions_edges: result.mentions_edges,
+          source_file_nodes: result.source_file_nodes,
           // FORGE-226: decision counts from the three-source decision projector.
           decision_nodes: result.decision_nodes,
           decided_in_edges: result.decided_in_edges,
           affects_edges: result.affects_edges,
           db_path: args.ctx.location,
-          warnings: [...warnings, ...result.warnings],
+          warnings: sanitizeReindexWarnings([...warnings, ...result.warnings]),
         }),
         { json: args.json },
       ),

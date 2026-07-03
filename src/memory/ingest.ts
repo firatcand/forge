@@ -13,11 +13,12 @@
 
 import { Dirent, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { execa } from 'execa';
 import { parse as parseYaml } from 'yaml';
 
 import { loadPhases, resolvePhasesYaml } from '../core/phases.ts';
 import { projectDecisions, projectEvents } from './project.ts';
-import { extractSymbols } from './symbols.ts';
+import { extractSymbols, isIndexableSourcePath } from './symbols.ts';
 import {
   MEMORY_ATTR_ARRAY_MAX_LEN,
   MEMORY_ATTR_STRING_MAX_LEN,
@@ -68,6 +69,14 @@ export interface ReindexResult {
   // FORGE-219 (Loom I2b-1): code-symbol counts from the tree-sitter extractor.
   readonly symbol_nodes: number;
   readonly defines_edges: number;
+  // FORGE-229 (Loom I2b-2): reference + mention edge counts.
+  readonly references_edges: number;
+  readonly references_unresolved: number;
+  readonly symbols_rejected: number;
+  readonly mentions_edges: number;
+  // File nodes minted by the repo-source walk for symbol-defining files that no
+  // task touched (the projector's file_nodes count them only for TOUCHED files).
+  readonly source_file_nodes: number;
   // FORGE-226 (Loom I3): decision counts from the three-source decision projector.
   readonly decision_nodes: number;
   readonly decided_in_edges: number;
@@ -78,6 +87,41 @@ export interface ReindexResult {
 const LEARNINGS_REL = path.join('docs', 'learnings');
 // Bound the recursion so a pathological / symlink-looped tree cannot run away.
 const MAX_LEARNINGS_DEPTH = 16;
+
+// FORGE-229: repo source discovery + mention-scan bounds.
+// A tracked file whose extension maps to a grammar is a symbol source, whether or
+// not any task touched it — extracting from the WHOLE tracked tree makes the
+// "unique repo-wide" reference tier honest (Codex CRITICAL#1). Bounded so a huge
+// repo cannot balloon the walk (extractSymbols enforces its own per-file caps).
+const MAX_REPO_SOURCE_FILES = 20_000;
+// Per-node + total caps on mention edges so scanning many long text bodies stays
+// bounded regardless of graph size.
+const MAX_MENTIONS_PER_NODE = 50;
+const MAX_TOTAL_MENTION_EDGES = 20_000;
+// A backtick match may fan out to multiple defs of a name; a prose match never
+// does (unique-only). Cap the fan-out so a common name in a code span stays bounded.
+const MAX_MENTION_TARGETS_PER_NAME = 3;
+
+// FORGE-229: list tracked source files via `git ls-files -z` (NUL-delimited so
+// paths with odd characters survive), filtered to grammar-mapped extensions.
+// Best-effort: not-a-git-repo / git-missing / any failure → null (caller falls
+// back to the projector's touched files + warns). Paths are git-relative POSIX.
+async function discoverRepoSourceFiles(repoRoot: string): Promise<string[] | null> {
+  let stdout: string;
+  try {
+    ({ stdout } = await execa('git', ['ls-files', '-z'], { cwd: repoRoot, reject: true }));
+  } catch {
+    return null;
+  }
+  const out: string[] = [];
+  for (const rel of stdout.split('\0')) {
+    if (rel.length === 0) continue;
+    if (!isIndexableSourcePath(rel)) continue;
+    out.push(rel);
+    if (out.length >= MAX_REPO_SOURCE_FILES) break;
+  }
+  return out;
+}
 
 export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
   const warnings: string[] = [];
@@ -208,23 +252,56 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
   for (const touchEdge of projection.touchesEdges) edges.push(touchEdge);
   for (const w of projection.warnings) warnings.push(w);
 
-  // ── 3b. code symbols (FORGE-219 / Loom I2b-1) ──
-  // Extract symbols from the SOURCE of every file node the projector minted
-  // (`file:<relpath>` → its repo-relative path). Symbols attach to file nodes via
-  // `defines` edges, so this MUST run AFTER file nodes exist (I2a). Best-effort:
-  // extractSymbols never throws — a malformed source / missing wasm degrades to
-  // warnings, so reindex still succeeds on a repo with no code. Lazy-loads
-  // tree-sitter (wasm) only here, only when there is indexable source.
-  const symbolRelFiles = projection.fileNodes.map((n) =>
+  // ── 3b. code symbols + references (FORGE-219 I2b-1 / FORGE-229 I2b-2) ──
+  // Extract symbols from the UNION of (a) the projector's touched files and (b)
+  // every tracked source file in the repo (git ls-files). The repo walk (Codex
+  // CRITICAL#1) makes the "unique repo-wide" reference tier honest: a callee is
+  // only resolved when its name is unique across the WHOLE tracked tree, not just
+  // among touched files. Best-effort: extractSymbols never throws; git discovery
+  // failure degrades to touched-files-only + a warning. Recall scoping is
+  // UNCHANGED — only `touches` edges widen recall, so walked-but-untouched files
+  // never leak into a task's recall.
+  const touchedRelFiles = projection.fileNodes.map((n) =>
     n.id.startsWith('file:') ? n.id.slice('file:'.length) : n.title,
   );
-  const { symbolNodes, definesEdges, warnings: symbolWarnings } = await extractSymbols({
+  const repoSourceFiles = await discoverRepoSourceFiles(args.repoRoot);
+  if (repoSourceFiles === null) {
+    warnings.push(
+      'loom: could not enumerate tracked source files (git ls-files failed) — reference resolution limited to touched files',
+    );
+  }
+  const symbolRelFiles = Array.from(new Set([...touchedRelFiles, ...(repoSourceFiles ?? [])]));
+  const {
+    symbolNodes,
+    definesEdges,
+    referencesEdges,
+    referencesUnresolved,
+    symbolsRejected,
+    warnings: symbolWarnings,
+  } = await extractSymbols({
     repoRoot: args.repoRoot,
     relFiles: symbolRelFiles,
   });
+  for (const w of symbolWarnings) warnings.push(w);
+  // Ensure a `file:` node exists for every file that DEFINED a symbol, so its
+  // `defines`/`references` edges are internal (the projector only minted nodes for
+  // TOUCHED files; a walked-but-untouched source file needs its node here). Dedup
+  // against the projector's file nodes by id.
+  const presentFileIds = new Set<string>(nodes.filter((n) => n.kind === 'file').map((n) => n.id));
+  let sourceFileNodes = 0;
+  for (const sym of symbolNodes) {
+    const rel = typeof sym.attrs?.file === 'string' ? sym.attrs.file : null;
+    if (rel === null) continue;
+    const fileId = `file:${rel}`;
+    if (presentFileIds.has(fileId)) continue;
+    if (fileId.length > MEMORY_ID_MAX_LEN) continue; // guarded in extractSymbols too
+    presentFileIds.add(fileId);
+    nodes.push({ id: fileId, kind: 'file', title: rel, body: '' });
+    sourceFileNodes += 1;
+  }
   for (const symbolNode of symbolNodes) nodes.push(symbolNode);
   for (const defEdge of definesEdges) edges.push(defEdge);
-  for (const w of symbolWarnings) warnings.push(w);
+  for (const refEdge of referencesEdges) edges.push(refEdge);
 
   // ── 3c. decision projection → decision nodes + decided_in/affects edges (FORGE-226) ──
   // Three durable sources (answered questions, autonomous_decision events,
@@ -240,6 +317,28 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
   for (const decidedInEdge of decisions.decidedInEdges) edges.push(decidedInEdge);
   for (const affectsEdge of decisions.affectsEdges) edges.push(affectsEdge);
   for (const w of decisions.warnings) warnings.push(w);
+
+  // ── 3d. mentions (FORGE-229 / Loom I2b-2) ──
+  // Link a text node (task / learning / decision) to the symbols it NAMES. Hybrid
+  // matching (locked decision): a backtick `code span` matches ANY symbol name
+  // (fanning out to up to MAX_MENTION_TARGETS_PER_NAME defs); plain PROSE matches
+  // only identifier-shaped names (snake_case / camelCase / ≥8 chars) that resolve
+  // to a UNIQUE definition — so a common English word that happens to be a symbol
+  // name cannot flood the graph. Single scan per document + O(1) hash lookups
+  // (Codex CRITICAL#2 — never symbols × documents). Runs AFTER every text/symbol
+  // node exists so edges are internal; mention edges are text → symbol.
+  const mentionIndex = buildMentionNameIndex(symbolNodes);
+  let mentionEdgeCount = 0;
+  for (const node of nodes) {
+    if (node.kind !== 'task' && node.kind !== 'learning' && node.kind !== 'decision') continue;
+    if (mentionEdgeCount >= MAX_TOTAL_MENTION_EDGES) break;
+    const dsts = mentionTargetsForText(`${node.title}\n${node.body}`, mentionIndex);
+    for (const dst of dsts) {
+      if (mentionEdgeCount >= MAX_TOTAL_MENTION_EDGES) break;
+      edges.push({ src: node.id, dst, kind: 'mentions' });
+      mentionEdgeCount += 1;
+    }
+  }
 
   // ── 4. deterministic write: reset, then upsert sorted lists ──
   // Sort so repeated reindex produces an identical write order (idempotency).
@@ -262,6 +361,11 @@ export async function reindex(args: ReindexArgs): Promise<ReindexResult> {
     touches_edges: projection.touchesEdges.length,
     symbol_nodes: symbolNodes.length,
     defines_edges: definesEdges.length,
+    references_edges: referencesEdges.length,
+    references_unresolved: referencesUnresolved,
+    symbols_rejected: symbolsRejected,
+    mentions_edges: mentionEdgeCount,
+    source_file_nodes: sourceFileNodes,
     decision_nodes: decisions.decisionNodes.length,
     decided_in_edges: decisions.decidedInEdges.length,
     affects_edges: decisions.affectsEdges.length,
@@ -362,4 +466,93 @@ function walkMarkdown(dir: string, warnings: string[]): string[] {
   };
   recur(dir, 0);
   return out;
+}
+
+// ── FORGE-229: mention matching ────────────────────────────────────────────────
+interface MentionNameIndex {
+  // symbol name → its sorted unique symbol ids (backtick fan-out target set).
+  readonly byName: Map<string, string[]>;
+  // names with EXACTLY ONE definition → that id (the prose-eligible target set).
+  readonly unique: Map<string, string>;
+}
+
+// Group symbol ids by their name once, so per-document scanning is O(1) lookups.
+function buildMentionNameIndex(symbolNodes: readonly MemoryNode[]): MentionNameIndex {
+  const groups = new Map<string, Set<string>>();
+  for (const s of symbolNodes) {
+    const name = typeof s.attrs?.name === 'string' ? s.attrs.name : null;
+    if (name === null || name.length === 0) continue;
+    let set = groups.get(name);
+    if (!set) {
+      set = new Set<string>();
+      groups.set(name, set);
+    }
+    set.add(s.id);
+  }
+  const byName = new Map<string, string[]>();
+  const unique = new Map<string, string>();
+  for (const [name, ids] of groups) {
+    const sorted = [...ids].sort();
+    byName.set(name, sorted);
+    if (sorted.length === 1) unique.set(name, sorted[0]!);
+  }
+  return { byName, unique };
+}
+
+// A prose token is mention-eligible only when it is clearly an identifier (not an
+// ordinary English word): snake_case, mixed-case (camelCase/PascalCase), or ≥8
+// chars — and ≥4 chars overall. Keeps `status`/`reset`/`answer` (real symbols but
+// common words) from linking to every document, while still matching
+// `resolveTaskNodeId` / `write_globs` / `buildMentionNameIndex` in prose.
+function isProseEligibleName(token: string): boolean {
+  if (token.length < 4) return false;
+  return token.includes('_') || (/[a-z]/.test(token) && /[A-Z]/.test(token)) || token.length >= 8;
+}
+
+const BACKTICK_SPAN_RE = /`([^`]+)`/g;
+const IDENT_TOKEN_RE = /[A-Za-z_$][A-Za-z0-9_$]*/g;
+// Split a backtick span into candidate symbol tokens, so `obj.method`,
+// `path#name`, and `NS::fn` each yield their component names. The character class
+// MATCHES the stored-symbol charset (SYMBOL_NAME_RE incl. ?, !, ~) so a backtick
+// span can link Ruby names like `valid?`/`save!` and C++ `~Dtor` (FORGE-229 Codex
+// review, MINOR#3) — separators like `.`/`#`/`:` still split as before.
+const NON_IDENT_RE = /[^A-Za-z0-9_$?!~]+/;
+
+// Return the DISTINCT symbol ids a single text node mentions, capped, deterministic.
+function mentionTargetsForText(text: string, index: MentionNameIndex): string[] {
+  const targets = new Set<string>();
+  const cap = MAX_MENTIONS_PER_NODE;
+
+  // 1. Backtick code spans → match ANY symbol name (fan-out capped per name).
+  let m: RegExpExecArray | null;
+  BACKTICK_SPAN_RE.lastIndex = 0;
+  while ((m = BACKTICK_SPAN_RE.exec(text)) !== null) {
+    if (targets.size >= cap) break;
+    for (const token of m[1]!.split(NON_IDENT_RE)) {
+      if (token.length === 0) continue;
+      const ids = index.byName.get(token);
+      if (!ids) continue;
+      for (const id of ids.slice(0, MAX_MENTION_TARGETS_PER_NAME)) {
+        targets.add(id);
+        if (targets.size >= cap) break;
+      }
+      if (targets.size >= cap) break;
+    }
+  }
+
+  // 2. Plain prose (backtick spans blanked so they are not re-scanned) → match
+  // only identifier-shaped names resolving to a UNIQUE definition.
+  if (targets.size < cap) {
+    const prose = text.replace(BACKTICK_SPAN_RE, ' ');
+    IDENT_TOKEN_RE.lastIndex = 0;
+    while ((m = IDENT_TOKEN_RE.exec(prose)) !== null) {
+      if (targets.size >= cap) break;
+      const token = m[0];
+      if (!isProseEligibleName(token)) continue;
+      const id = index.unique.get(token);
+      if (id) targets.add(id);
+    }
+  }
+
+  return [...targets].sort();
 }
