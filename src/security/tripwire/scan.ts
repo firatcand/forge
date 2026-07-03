@@ -21,7 +21,16 @@ export type TripwireSource =
   | 'prior_attempts'
   | 'conventions'
   | 'search_result'
-  | 'browser_page';
+  | 'browser_page'
+  // FORGE-229 (Loom I2b-2): a recall hit's model-visible text (id + title + why)
+  // scanned at the `forge loom recall` → /pickup-task boundary. Indexed symbol
+  // names + learning/decision/task titles + learning ids (repo paths) derive from
+  // repo content, so they are untrusted on the way into a worker prompt.
+  | 'loom_recall'
+  // FORGE-229: a `forge loom reindex --json` warning, scanned at the same
+  // /pickup-task boundary. Some reindex warnings can carry repo-derived content
+  // (learning/file paths, task refs); a hostile one is replaced with a constant.
+  | 'loom_reindex';
 
 export const TRIPWIRE_SOURCES: readonly TripwireSource[] = [
   'task_description',
@@ -31,6 +40,8 @@ export const TRIPWIRE_SOURCES: readonly TripwireSource[] = [
   'conventions',
   'search_result',
   'browser_page',
+  'loom_recall',
+  'loom_reindex',
 ];
 
 /**

@@ -123,10 +123,11 @@ test('RecallHitSchema accepts both sources and rejects an unknown source', () =>
   );
 });
 
-test('node/edge kind constants include the I2a + I2b-1 + I3 additions (FORGE-218/219/226)', () => {
+test('node/edge kind constants include the I2a + I2b-1 + I3 + I2b-2 additions (FORGE-218/219/226/229)', () => {
   // I1 shipped task/learning + depends_on/learned_from; I2a adds file + touches;
   // I2b-1 (FORGE-219) adds symbol + defines; I3 (FORGE-226) adds decision +
-  // decided_in/affects.
+  // decided_in/affects; I2b-2 (FORGE-229) adds references + mentions edges (no
+  // new node kind).
   assert.deepEqual([...NODE_KINDS], ['task', 'learning', 'file', 'symbol', 'decision']);
   assert.deepEqual([...EDGE_KINDS], [
     'depends_on',
@@ -135,6 +136,8 @@ test('node/edge kind constants include the I2a + I2b-1 + I3 additions (FORGE-218
     'defines',
     'decided_in',
     'affects',
+    'references',
+    'mentions',
   ]);
 });
 

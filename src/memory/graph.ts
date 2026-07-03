@@ -335,6 +335,40 @@ export async function recallForTask(
     }
   }
 
+  // 3c. STRUCTURAL symbol hits via `mentions` (FORGE-229): symbols NAMED in a
+  // scope task's text or in a learning/decision already surfaced above. Shares the
+  // symbol budget (symbolHitCount) with 3b so recall can never exceed the cap.
+  // `references` (symbol→symbol) is deliberately NOT walked here — recall is
+  // task-anchored, so call-graph edges serve `traverse`, not recall.
+  const mentionSources: Array<{ id: string; label: string }> = [];
+  for (const t of scope) {
+    mentionSources.push({ id: t, label: `mentioned in ${stripTaskPrefix(t)}` });
+  }
+  for (const h of [...hits]) {
+    if (h.kind === 'learning' || h.kind === 'decision') {
+      mentionSources.push({ id: h.id, label: `mentioned in ${h.kind} ${h.id}` });
+    }
+  }
+  for (const srcNode of mentionSources) {
+    if (symbolHitCount >= MAX_SYMBOL_HITS_TOTAL) break;
+    for (const dst of await prims.edgesFrom('mentions', srcNode.id, MAX_SYMBOL_HITS_PER_FILE)) {
+      if (symbolHitCount >= MAX_SYMBOL_HITS_TOTAL) break;
+      if (seen.has(dst)) continue;
+      const node = await getValidNode(prims, dst);
+      if (!node || node.kind !== 'symbol') continue;
+      seen.add(dst);
+      symbolHitCount += 1;
+      hits.push({
+        id: node.id,
+        kind: 'symbol',
+        title: node.title,
+        score: SYMBOL_RECALL_SCORE,
+        why: srcNode.label,
+        source: 'structural',
+      });
+    }
+  }
+
   // 4. FTS hits over title+body using the task's title+description.
   const terms = tokenizeFtsTerms(`${taskRow.title} ${taskRow.body}`);
   if (terms.length > 0) {

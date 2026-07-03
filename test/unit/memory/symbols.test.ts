@@ -131,7 +131,11 @@ test('extractSymbols skips an oversize file with a warning', async () => {
     writeFileSync(join(repoRoot, 'src', 'big.py'), big);
     const { symbolNodes, warnings } = await extractSymbols({ repoRoot, relFiles: ['src/big.py'] });
     assert.equal(symbolNodes.length, 0);
-    assert.ok(warnings.some((w) => /cap|bytes/i.test(w)), `expected an oversize warning: ${warnings.join('; ')}`);
+    // FORGE-229: warnings are now constants-only/aggregated by reason (no path echo).
+    assert.ok(
+      warnings.some((w) => w.includes('skipped (too large)')),
+      `expected an oversize warning: ${warnings.join('; ')}`,
+    );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
