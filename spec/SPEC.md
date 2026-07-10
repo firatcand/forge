@@ -821,7 +821,7 @@ on /forge orchestrate:
 - `"Blocked on question <q>: <summary>"` → the worker has called `forge orchestrate question`; task is `blocked_on_question`; the next loop iteration's polling step surfaces the question.
 - Subagent returns without calling `complete` or `question` (i.e., it crashed or was interrupted) → CLI detects lease still alive but no terminal event; gc on next pass marks attempt `abandoned` after lease expiry.
 
-**Single-host mode:** if `agents.review_host_cli` is `null`, REVIEW dispatch is skipped. Tasks flow IMPLEMENT → SHIP directly. A one-time warning fires from the skill on first run.
+**Single-host mode:** if `agents.review_host_cli` is `null`, REVIEW dispatch is skipped. Tasks flow IMPLEMENT → SHIP directly: on CLI-verified IMPLEMENT completion the task advances straight to `reviewed`, and the CLI records the verified worktree HEAD as `reviewed_head_sha` (the ship target — what ships is exactly what the CLI verified; see ORCHESTRATOR.md §Single-host mode). `ship.merge_policy: 'auto'` is a settings validation error single-host; only `approval` applies. A one-time warning fires from the skill on first run.
 
 ### Flow 3 — Worker subagent lifecycle (per phase)
 
