@@ -521,7 +521,7 @@ When `forge orchestrate ensure-worktree` creates a new worktree, it populates th
 
 | File class | Source | Mechanism |
 |---|---|---|
-| **Tracked files** (anything reported by `git ls-files` — `CLAUDE.md`, `CRITICAL.md`, `spec/*.md`, `plans/phases.yaml`, `src/**`, `test/**`, `package.json`, …) | `base` ref — `origin/<RepoHost-resolved default branch>`, resolved + persisted **before** worktree creation and reused later for the PR base (ADR `orchestrator-ship-auto-merge`; literal `origin/main` wherever the resolved default is `main`) | `git worktree add -b <branch> <path> <base>` |
+| **Tracked files** (anything reported by `git ls-files` — `CLAUDE.md`, `CRITICAL.md`, `spec/*.md`, `plans/phases.yaml`, `src/**`, `test/**`, `package.json`, …) | `base` ref — `origin/<resolved default branch>`. Default-branch resolution is **host-independent git** (`git symbolic-ref refs/remotes/origin/HEAD`, fallback `git remote show origin`) so it works on every remote type — no RepoHost required; it runs **before** worktree creation and is persisted, and the RepoHost consumes the same persisted value later for the PR base (ADR `orchestrator-ship-auto-merge`; literal `origin/main` wherever the resolved default is `main`) | `git worktree add -b <branch> <path> <base>` |
 | **Untracked project meta** under the hydration roots (canonically: `plans/tasks/*.plan.md`, `docs/learnings/**`, `.forge/settings.yaml` — all gitignored in forge's own layout, plus any other untracked files under those roots) | Local main checkout's **working tree** | Filesystem copy in `workspace.create()` after a `git ls-files` filter drops tracked entries from the plan |
 
 **Rationale.** Tracked files belong to git: they have a HEAD and any deviation from HEAD is a real modification a worker is expected to commit. The hydration loop must NEVER touch them — `git worktree add` already places the correct content from `base`, and overwriting that content from main's filesystem creates a spurious diff whenever `base` resolves to a different revision than local main (e.g., `base=origin/main` while local main lags). The pre-FORGE-136 code copied `CLAUDE.md`, `CRITICAL.md`, `spec/*.md`, and `plans/*` from main's working tree on top of the `git worktree add` checkout, manifesting as phantom modifications immediately after worktree creation when local main and `base` resolved to different revisions for those files.
@@ -884,7 +884,7 @@ Single-host mode is incompatible with `ship.merge_policy: 'auto'` — that combi
 
 The branch strategy: **every task branches from `main`. SHIP opens the PR against `main`; under `ship.merge_policy: 'auto'` forge executes the platform-gated, head-bound merge once required checks are green; a task is `shipped` only when its PR is confirmed merged to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
 
-Throughout this document, `main` denotes the **RepoHost-resolved repository default branch** — resolved and persisted **before `ensure-worktree` creates the worktree** (so hydration checks out `origin/<resolved-default>`), and the same persisted record supplies the PR base at ship time (ADR `orchestrator-ship-auto-merge`; fixes the former `/ship --base dev` split). Repositories whose default branch is not literally named `main` use their resolved default everywhere this document says `main`.
+Throughout this document, `main` denotes the **resolved repository default branch** — resolved via host-independent git (`git symbolic-ref refs/remotes/origin/HEAD`, fallback `git remote show origin`; no RepoHost involved, so IMPLEMENT worktrees work on every remote type) and persisted **before `ensure-worktree` creates the worktree** (hydration checks out `origin/<resolved-default>`), and the same persisted value supplies the PR base at ship time via the RepoHost (ADR `orchestrator-ship-auto-merge`; fixes the former `/ship --base dev` split). Repositories whose default branch is not literally named `main` use their resolved default everywhere this document says `main`.
 
 Rationale (chosen over stacked PRs):
 - Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
@@ -909,7 +909,7 @@ PR/merge operations live in a **RepoHost** interface, deliberately separate from
 
 **Operations (spec-level contract; exact signatures in FORGE-231):**
 
-- `resolveBase()` — base repo + default/base branch + push remote; resolved once, persisted in the ship record (never re-sniffed from remote URLs).
+- `resolveBase()` — base repo identity + push remote; **consumes** the persisted host-independent default-branch resolution (recorded before `ensure-worktree` — see §Hydration) rather than re-resolving it; all persisted in the ship record (never re-sniffed from remote URLs).
 - `probe()` — the **honesty probe**: evaluates *effective* base-branch rules (classic branch protection + rulesets + merge queue) and reports: blocking required-check count, allowed merge methods, authenticated write permission, admin-bypass exposure.
 - `createOrGetPullRequest(head, base)` — idempotent by head branch (crash/duplicate-PR safe).
 - `requiredChecksGreen(pr)` — whether every blocking required check currently passes (gates the merge step).

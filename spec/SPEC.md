@@ -843,7 +843,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
 #### Flow 3b — REVIEW phase (secondary host subagent)
 
 1. Dispatch skill detects `ready_for_review` tasks via `forge orchestrate phases --ready --phase review --run <run_id> --json` (read-only). REVIEW phase dispatch does NOT require fresh user approval per task — the original IMPLEMENT approval (Flow 2 step 2) covers the full IMPLEMENT→REVIEW→SHIP arc for that task. Skill calls `forge orchestrate dispatch <task_id> --phase review --claim <existing_claim_id>` to continue.
-2. Skill spawns a review subagent in the **secondary host** (e.g., Codex when primary is Claude). Implementation: for Codex, the skill calls `codex` with a review prompt that includes the worktree's `git diff <base>...HEAD`. For Claude as reviewer (primary is Codex), the skill uses Claude's Task tool to spawn a second subagent on the same worktree.
+2. Skill spawns a review subagent in the **secondary host** (e.g., Codex when primary is Claude). At dispatch the CLI records **`review_target_sha`** (the worktree HEAD at that moment — ADR `orchestrator-ship-auto-merge`); the review prompt pins the diff to it. Implementation: for Codex, the skill calls `codex` with a review prompt that includes the worktree's `git diff <base>...<review_target_sha>` (never a floating `HEAD`). For Claude as reviewer (primary is Codex), the skill uses Claude's Task tool to spawn a second subagent on the same worktree.
 3. Review subagent reads the diff, runs the host's `/review` skill against it, writes `review_verdict.json`:
    ```ts
    type ReviewVerdict = {
@@ -851,6 +851,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
      verdict: 'pass' | 'changes_requested';
      findings: { severity: 'block' | 'improvement'; path: string; line?: number; message: string }[];
      host: 'claude' | 'codex' | 'cursor' | 'gemini';
+     target_sha: string; // the exact SHA reviewed — must equal the dispatch-time review_target_sha
    };
    ```
 4. Review subagent calls `forge orchestrate complete --phase review --verdict-file review_verdict.json` and returns.
@@ -905,7 +906,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
                             [shipped]
 ```
 
-`merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify + re-review); PR closed unmerged / auto-merge disabled / probe loss → park (`blocked_on_question`).
+`merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify + re-review); PR closed unmerged / honesty-probe or policy loss → park (`blocked_on_question`).
 
 Failures at any phase enter the retry queue with exponential backoff (CLI-managed). After `agents.retry_attempts` total failures, the task is marked `failed` per `agents.on_persistent_failure`.
 
