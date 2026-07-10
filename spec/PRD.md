@@ -229,7 +229,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 3. For each claimed task: skill calls `forge orchestrate dispatch <claim_id>` (refuses without a valid claim_id from step 2); spawns a Task-tool subagent (Claude) or native subagent (Codex) with the worker prompt template (worker reads `spec/SPEC.md` + `plans/phases.yaml` task body + `CLAUDE.md` for conventions; no ADR hydration needed since SPEC is already authoritative)
 4. Subagent works inside the worktree: heartbeats every 5 min, escalates architectural decisions via `forge orchestrate question`, writes a verdict via `forge orchestrate complete` when done
 5. Skill surfaces any open questions to the user, records the answer via `forge orchestrate answer`, and re-dispatches a fresh subagent that picks up the prior worker's worktree state
-6. After IMPLEMENT verdict verified, skill dispatches a REVIEW subagent in the secondary host; after REVIEW passes, the ship operation pushes and opens the PR (only when all `depends_on` PRs are merged to base) — the task enters `merge_pending`, and under the opt-in `ship.merge_policy: 'auto'` the platform's auto-merge is enabled head-bound to the reviewed SHA; the task is `shipped` only when the merge is confirmed (ADR `orchestrator-ship-auto-merge`, 2026-07-10)
+6. After IMPLEMENT verdict verified, skill dispatches a REVIEW subagent in the secondary host; after REVIEW passes, the ship operation pushes and opens the PR (only when all `depends_on` PRs are merged to base) — the task enters `merge_pending`, and under the opt-in `ship.merge_policy: 'auto'` forge executes the platform-gated merge once required checks are green, head-bound to the reviewed SHA; the task is `shipped` only when the merge is confirmed (ADR `orchestrator-ship-auto-merge`, 2026-07-10)
 7. After `agents.retry_attempts` failures, notifies user, marks issue `failed`, moves to next ready task
 8. To stop: user simply closes the main session. To cancel a specific task: `forge orchestrate cancel <task-id>`. Recovery on next session via `forge orchestrate gc`.
 
@@ -237,7 +237,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 - [ ] Subagent cap respected per main (default `agents.subagent_cap_per_main: 3`); multiple mains coexist via lease-backed coordination
 - [ ] Tasks with unmerged dependencies are **never** dispatched to SHIP (`shipped` = RepoHost-confirmed merged-to-base at the reviewed head SHA; `merge_pending` does not count)
 - [ ] `ship.merge_policy` defaults to `approval` (human merges); an absent `ship:` block never enables unattended merging
-- [ ] `ship.merge_policy: 'auto'` is rejected at settings validation unless dual-host review is configured AND the RepoHost honesty probe passes (fail-closed park otherwise); auto-merge enablement is head-bound to the reviewed SHA (`--match-head-commit`)
+- [ ] `ship.merge_policy: 'auto'` is rejected at settings validation unless dual-host review is configured AND the RepoHost honesty probe passes (fail-closed park otherwise); the merge call is head-bound to the reviewed SHA (`--match-head-commit`, expected-head enforced server-side at merge time; no standing auto-merge enablement)
 - [ ] Each task gets a deterministic worktree path; collision-safe sanitization
 - [ ] Failures retry with exponential backoff (1s base, capped at `agents.retry_backoff_ms_max`, default 5min — Symphony pattern)
 - [ ] After max retries, user is notified AND tracker comment posted on the issue
@@ -367,7 +367,7 @@ agents:
   on_persistent_failure: notify     # notify | block_task | move_to_next
   # preflight_globs and hard_lock_globs default lists — see SPEC.md
 ship:
-  merge_policy: approval            # approval (DEFAULT — human merges) | auto (platform auto-merge, head-bound to reviewed SHA; requires dual-host review + honesty probe — ADR orchestrator-ship-auto-merge)
+  merge_policy: approval            # approval (DEFAULT — human merges) | auto (forge merges on green, head-bound to reviewed SHA, platform-gated; requires dual-host review + honesty probe — ADR orchestrator-ship-auto-merge)
 design:
   mode: project_owned | reference_external
   reference: <url-or-path>          # only when mode = reference_external

@@ -124,6 +124,9 @@ export const BASE_SYMBOL_ALLOWLIST: readonly string[] = [
   // ADR orchestrator-ship-auto-merge (FORGE-230): specced ahead of
   // implementation — REMOVE when FORGE-232 ships the class under this name.
   'GitHubRepoHost',
+  // GitHub GraphQL field named in ORCHESTRATOR prose (external API, never a
+  // forge export — same category as ifMatch/IssueUpdate above).
+  'expectedHeadOid',
 ] as const;
 
 interface BoundedFsAdapter {

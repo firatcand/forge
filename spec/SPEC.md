@@ -354,8 +354,10 @@ export const SettingsSchema = z.object({
     .object({
       // approval (DEFAULT) = open PR, human merges — an absent ship: block can
       // never silently enable unattended merging.
-      // auto = enable the PLATFORM's auto-merge, head-bound to the reviewed SHA
-      // (gh pr merge --auto --squash --match-head-commit <reviewed_head_sha>).
+      // auto = forge executes the platform-gated, head-bound merge once
+      // required checks are green (gh pr merge --squash --match-head-commit
+      // <reviewed_head_sha>; server-side expected-head check; NO standing
+      // gh pr merge --auto enablement — it cannot pin a SHA).
       merge_policy: z.enum(['approval', 'auto']).default('approval'),
     })
     .default({}),
@@ -853,7 +855,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
    ```
 4. Review subagent calls `forge orchestrate complete --phase review --verdict-file review_verdict.json` and returns.
 5. CLI advances state:
-   - `pass` → `reviewed`, eligible for SHIP.
+   - `pass` → `reviewed`, eligible for SHIP. The CLI first verifies the verdict's `target_sha` equals the dispatch-time `review_target_sha` and the current worktree HEAD; that verified SHA is recorded as `reviewed_head_sha` (ADR `orchestrator-ship-auto-merge` — the review binds to an exact SHA, never a floating HEAD).
    - `changes_requested` → back to `running`; new IMPLEMENT attempt dispatched with `priorReviewFindings` injected into the worker prompt. Attempt counter increments.
 
 #### Flow 3c — SHIP phase (rewritten 2026-07-10 per ADR `orchestrator-ship-auto-merge`)
@@ -864,7 +866,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
    - Re-run `settings.verify` in the task worktree; final secrets scan; conventional-commit verification.
    - **Final-SHA binding:** the worktree head must equal `reviewed_head_sha` (recorded by the CLI when REVIEW passed). Any post-review head change (rebase, `update-branch`, third-party push) re-enters verify + cross-review first.
    - Push; create-or-get the PR via the RepoHost; mark tracker issue `in_review`.
-   - Under `ship.merge_policy: 'auto'` with the honesty probe passing: enable platform auto-merge head-bound to the reviewed SHA (`gh pr merge --auto --squash --match-head-commit "<reviewed_head_sha>"`; `--admin`/bypass prohibited).
+   - Under `ship.merge_policy: 'auto'` with the honesty probe passing: on subsequent `merge_pending` ticks, when every required check is green AND the PR head still equals the reviewed SHA, forge executes the **atomic head-bound merge** (`gh pr merge --squash --match-head-commit "<reviewed_head_sha>"` — expected-head enforced server-side at merge time; `--admin`/bypass prohibited). NO standing `gh pr merge --auto` enablement is created — GitHub's persisted auto-merge cannot pin a SHA, so it cannot hold the final-SHA invariant.
 4. `forge orchestrate complete --phase ship --verdict-file ship_verdict.json` records the PR identity into the ship record.
 5. On success: task state → **`merge_pending`**; notification `merge_pending` emitted with PR URL + auto-merge status.
 6. **`merge_pending` → `shipped`** only on RepoHost confirmation that the PR merged into the recorded base at `reviewed_head_sha` (gc/reconcile or dispatch tick); notification `shipped` emitted then. Fail-closed regressions per ORCHESTRATOR.md §Phase 3 (head drift → `ready_for_review` re-review; closure/disablement/probe-loss → park with question).
@@ -892,8 +894,8 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
                                 ▼
                           [running (ship)]
                                 │
-                                │ PR opened (± platform auto-merge,
-                                │ head-bound to reviewed SHA)
+                                │ PR opened ('auto': head-bound
+                                │ merge executes on green)
                                 ▼
                           [merge_pending]
                                 │

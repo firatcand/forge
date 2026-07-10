@@ -242,14 +242,18 @@ endpoints are already-constrained symbol names) and are not walked by recall.
   definition: ORCHESTRATOR.md §Phase 3 — SHIP, "Auto-merge preconditions" +
   §RepoHost): (1) the platform branch-protection gate, honesty-probed over the
   *effective* rules — classic protection + rulesets + merge queue — requiring
-  ≥1 blocking required status check, the squash method allowed, repo-level
-  auto-merge enabled, authenticated write permission, and no `--admin`/bypass
-  path (probe failure parks the task; never warn-and-merge, never silent
-  downgrade); (2) mandatory dual-host review (single-host + auto is a settings
-  validation error); (3) final-SHA binding (enablement is head-bound via
-  `--match-head-commit <reviewed_head_sha>`; the merged head must equal the
-  reviewed SHA; drift revokes enablement and the new head re-enters verify +
-  cross-review before any re-enable). **Residual accepted risk:**
+  ≥1 blocking required status check, the squash method allowed, authenticated
+  write permission, and no `--admin`/bypass path (probe failure parks the
+  task; never warn-and-merge, never silent downgrade); (2) mandatory dual-host
+  review (single-host + auto is a settings validation error); (3) final-SHA
+  binding with **no standing auto-merge enablement** (GitHub's persisted
+  auto-merge cannot pin a SHA and auto-disables only for non-write pushes):
+  forge itself executes the merge, only when required checks are green,
+  atomically head-bound server-side (`gh pr merge --squash --match-head-commit
+  <reviewed_head_sha>`); the merged head must equal the reviewed SHA; head
+  drift regresses the task into verify + cross-review; a PR merged externally
+  at any other SHA is a **tainted merge** — parked with a fatal notification,
+  never marked shipped. **Residual accepted risk:**
   with `auto` opted in, code reaches `main` without a human click while
   Tripwire remains report-only — explicitly accepted by the owner in the ADR.
 - **Unicode-normalization / homoglyph bypasses (I1 limitation).** The I1 rules
