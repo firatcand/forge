@@ -14,8 +14,9 @@ ambient authority. The assets at risk:
 - **Secrets** — `.forge/.env`, `~/.config/gh`, Linear/Notion tokens, any env the
   worker process inherits. Exfiltration is the highest-value outcome.
 - **Repository write + merge** — a worker can edit the worktree, push a branch,
-  and (under `/drive`/`/deliver` auto-merge on green CI) reach `main`. Injected
-  code is the second-highest-value outcome.
+  and (under `/drive`/`/deliver` auto-merge on green CI, or the orchestrator's
+  opt-in `ship.merge_policy: 'auto'` — ADR `orchestrator-ship-auto-merge`,
+  2026-07-10) reach `main`. Injected code is the second-highest-value outcome.
 - **Autonomous PR creation** — `/ship` opens PRs with the operator's `gh` auth;
   an attacker who steers a worker can open/modify PRs.
 - **Tracker mutation** — claim/answer/issue writes via the configured tracker.
@@ -234,7 +235,16 @@ endpoints are already-constrained symbol names) and are not walked by recall.
 - **Semantic injection that survives scanning.** A deterministic scanner catches
   known injection patterns + boundary-wraps untrusted spans; it is best-effort,
   not a proof. Defense-in-depth (least-privilege secrets, sandboxed egress, the
-  human merge gate) remains primary.
+  merge gate) remains primary. **Merge-gate change (ADR
+  `orchestrator-ship-auto-merge`, 2026-07-10):** under the default
+  `ship.merge_policy: 'approval'` the human merge gate stands unchanged. With
+  the opt-in `'auto'` policy it is replaced by three stacked defenses: the
+  platform branch-protection gate (honesty-probed, fail-closed — park on any
+  gap), mandatory dual-host review (single-host + auto is a settings error),
+  and final-SHA binding (the head GitHub merges must equal the reviewed SHA;
+  drift revokes enablement and re-enters review). **Residual accepted risk:**
+  with `auto` opted in, code reaches `main` without a human click while
+  Tripwire remains report-only — explicitly accepted by the owner in the ADR.
 - **Unicode-normalization / homoglyph bypasses (I1 limitation).** The I1 rules
   match on the raw string without NFKC normalization, so a full-width or
   homoglyph rendering of an injection phrase (e.g. `Ｉｇｎｏｒｅ all previous

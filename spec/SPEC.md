@@ -269,6 +269,10 @@ export const SettingsSchema = z.object({
 
       // Worktree + branch strategy
       worktree_root: z.string().default('./.forge/worktrees'),
+      // NOTE (ADR orchestrator-ship-auto-merge, 2026-07-10): branch_strategy is
+      // reserved in this pseudocode only — src/schemas/settings.ts does not
+      // implement it. Ship/merge policy is the separate top-level `ship:` block
+      // (FORGE-231), not this field.
       branch_strategy: z.enum(['merge-to-main', 'stacked']).default('merge-to-main'),
 
       // Preflight + overlap detection — see ORCHESTRATOR.md "Worker prompt template" and "File-glob declarations"
@@ -1373,7 +1377,7 @@ Each PR is decomposable and parallelizable in `phases.yaml`. PR-2 through PR-5 c
 - Web dashboard / TUI (CLI `--json` output is the machine surface)
 - Stacked-PR branch strategy (schema reserved, not implemented)
 - Direct GitHub REST/GraphQL fallback (`gh` CLI required)
-- Auto-merge of PRs (dependency-shipped check uses merged-to-base state — humans merge)
+- Unconditional auto-merge of PRs (default remains human merge — `ship.merge_policy: 'approval'`; opt-in platform-gated auto-merge via `ship.merge_policy: 'auto'` requires dual-host review + a fail-closed branch-protection honesty probe + final-SHA binding. Dependency-shipped check uses merged-to-base state. ADR `orchestrator-ship-auto-merge` 2026-07-10, FORGE-189/FORGE-230 — see ORCHESTRATOR.md §Phase 3 — SHIP)
 - Encrypted settings.yaml (secrets stay in secret manager)
 - Skill portability across host CLIs (deferred to Phase 3)
 

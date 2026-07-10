@@ -275,7 +275,7 @@ test/{unit,integration,schemas,orchestrator,fixtures,helpers}/
 - No cross-machine orchestration
 - No agent-to-agent comms beyond dependency graph
 - No web UI / dashboard
-- No auto-merge of PRs
+- No unconditional auto-merge of PRs (opt-in platform-gated auto-merge via `ship.merge_policy: 'auto'` — dual-host review + honesty probe + final-SHA binding required; default remains human merge. ADR `orchestrator-ship-auto-merge`, 2026-07-10)
 - No encrypted settings.yaml
 - No runtime tracker switch (refuse with "tracker.type cannot change at runtime")
 - Notion / Trello / Jira / Asana adapters deferred to v-next+1
@@ -288,7 +288,7 @@ A user can:
 1. `npx @firatcand/forge init` → `claude` → `/forge` → ... → `forge orchestrate`
 2. Build a full software product end-to-end without leaving Claude Code
 3. Watch progress in their tracker (Linear / GitHub / Notion)
-4. Ship PRs reviewed by a second host before merge
+4. Ship PRs reviewed by a second host before the PR can merge (human merge by default; opt-in platform-gated auto-merge per ADR `orchestrator-ship-auto-merge`)
 5. Total time-to-first-shipped-task ≤ 2 hours including thinking
 
 No metrics. No vanity KPIs. Engineering delivery quality is the only signal.

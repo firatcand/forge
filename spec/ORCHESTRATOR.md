@@ -843,19 +843,27 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 
 ### Phase 3 — SHIP (primary host)
 
+> Rewritten 2026-07-10 per ADR `orchestrator-ship-auto-merge` (FORGE-189/FORGE-230): adds the
+> non-terminal `merge_pending` state, final-SHA binding, and opt-in platform-gated auto-merge.
+> Implementation lands in FORGE-231…235.
+
 - Dispatch skill detects `reviewed` tasks.
-- **Dependency check before dispatch:** all `depends_on` tasks in `phases.yaml` must be in state `shipped` *and* their PRs merged to base. If a dependency PR is still open, SHIP is deferred until the dep merges.
-- Dispatch skill spawns a primary-host subagent with a ship prompt: rebase onto latest base, run final secrets scan, `gh pr create` (or tracker-equivalent), mark tracker `in_review`.
-- On success: task state advances to `shipped`. PR URL recorded. Notification `shipped` event emitted.
-- On failure (rare — usually a transient tracker/git issue): retry with backoff. After `retry_attempts` failures: task moves to `failed`, surfaces fatal notification.
+- **Dependency check before dispatch:** all `depends_on` tasks must be in state `shipped` — which per the lifecycle below means their PRs are **merged to base**. A dependency in `merge_pending` (PR open, not yet merged) defers SHIP until it merges.
+- **The ship operation** (idempotent + crash-safe; FORGE-234): re-run `settings.verify` in the task worktree; verify the head SHA equals the recorded reviewed SHA (**final-SHA binding** — any post-review change to the head, including rebase-on-drift and `update-branch`, produces a new SHA that must pass verify + cross-review before shipping proceeds, and revokes any stale auto-merge enablement); run the final secrets scan; push the branch; open the PR via the RepoHost (`gh pr create` on GitHub); mark tracker `in_review`; and — only under `ship.merge_policy: 'auto'` with the honesty probe passing (below) — enable the **platform's** auto-merge (`gh pr merge --auto`, squash; `--admin` and every bypass path prohibited; forge never merges directly).
+- On success: task state advances to **`merge_pending`** (non-terminal). A durable **PR record** is persisted (PR id/URL, head SHA, base repo + base branch, auto-merge status). Notification `merge_pending` event emitted.
+- **`merge_pending → shipped` (terminal) only when the PR is confirmed merged to base** (gc/reconcile or dispatch-tick probe). Notification `shipped` emitted on confirmation.
+- Failure/regression paths (fail-closed, each with an event): PR closed without merge, auto-merge disabled externally, or head drifted while pending → revoke auto-merge enablement and regress to `reviewed` (or park with a question when ambiguous). Red PR CI → regress via the changes-requested path with findings injected. Transient git/tracker failures → retry with backoff; after `retry_attempts` failures → `failed`, fatal notification.
+- **Auto-merge preconditions** (`ship.merge_policy: 'auto'`; default is `'approval'` = open PR, human merges): requires `agents.review_host_cli` configured (dual-host review — single-host + `auto` is a settings validation error) AND the RepoHost **honesty probe** passing: the *effective* base-branch rules (classic branch protection + rulesets + merge queue) enforce at least one blocking required status check; the squash method is allowed; repo-level auto-merge is enabled; the authenticated identity has write permission; no admin bypass is in play. Probe failure → **park the task with a question** — never warn-and-merge, never a silent downgrade. Non-GitHub remotes: `approval` behavior at most; `auto` there is a settings validation error. (Tracker and repo host are orthogonal — a Linear-tracked repo hosted on GitHub gets the full path.)
 
 ### Single-host mode
 
 If `agents.review_host_cli` is `null`, REVIEW phase is skipped. Task flows IMPLEMENT → SHIP directly. A one-time warning at orchestrator first-run: *"Second-opinion review disabled — running single-host. Forge recommends configuring review_host_cli for adversarial review."*
 
+Single-host mode is incompatible with `ship.merge_policy: 'auto'` — that combination is a settings validation error (ADR `orchestrator-ship-auto-merge` D2: unattended merge requires dual-host review).
+
 ## Branch / PR integration topology — merge-to-main-between-phases
 
-The branch strategy: **every task branches from `main`. SHIP merges to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
+The branch strategy: **every task branches from `main`. SHIP opens the PR against `main` and (with auto-merge opted in) hands the merge to the platform; a task is `shipped` only when its PR is merged to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
 
 Rationale (chosen over stacked PRs):
 - Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
@@ -864,9 +872,9 @@ Rationale (chosen over stacked PRs):
 - Dependency latency is small (PR merge → next task dispatch on next `forge orchestrate phases --ready` tick).
 
 Concretely:
-- `forge orchestrate phases --ready` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged).
-- A task whose dependency is `reviewed` but PR not yet merged is **not ready** — it waits.
-- If a dependency PR is closed without merge: task moves to `blocked`.
+- `forge orchestrate phases --ready` filters ready tasks to those whose `depends_on` are all `shipped` (i.e., PRs merged — `merge_pending` does not count).
+- A task whose dependency is `reviewed` or `merge_pending` but PR not yet merged is **not ready** — it waits.
+- If a dependency PR is closed without merge: the dependency regresses to `reviewed` (Phase 3 failure path) and dependent tasks simply remain not-ready. (There is no dedicated `blocked` task state; operator-input cases park via `blocked_on_question`.)
 
 Trade-off accepted: tasks with declared dependencies cannot run in parallel with their dependencies even if their dependency's IMPLEMENT phase is done. This is correct — dependencies exist *because* the consumer needs the producer's output committed.
 
@@ -1107,7 +1115,7 @@ agents:
   worktree_root: ./.forge/worktrees
   
   # Branch strategy
-  branch_strategy: merge-to-main        # merge-to-main | stacked (stacked not implemented in v-next)
+  branch_strategy: merge-to-main        # merge-to-main | stacked (stacked not implemented in v-next; reserved in spec pseudocode only — ship/merge policy is the separate `ship:` block, ADR orchestrator-ship-auto-merge)
   
   # Preflight guardrails
   preflight_globs:

@@ -260,7 +260,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 **Non-goals (this feature)**
 - Cross-machine orchestration (single-machine only)
 - Agents sharing intermediate artifacts (independent worktrees only — Symphony pattern)
-- Auto-merge to main (user merges PRs through GitHub UI)
+- Unconditional auto-merge to main (default: user merges PRs through the GitHub UI; opt-in platform-gated auto-merge via `ship.merge_policy: 'auto'` — ADR `orchestrator-ship-auto-merge`, 2026-07-10)
 - Built-in dashboard / web UI (use the tracker's existing UI)
 - Coordination beyond dependency graph (no agent-to-agent comms)
 
@@ -361,7 +361,7 @@ agents:
   question_timeout_ms: 1800000
   question_max_attempts: 3
   worktree_root: ./.forge/worktrees
-  branch_strategy: merge-to-main
+  branch_strategy: merge-to-main    # reserved in spec pseudocode only; ship/merge policy = separate `ship:` block (ADR orchestrator-ship-auto-merge)
   on_persistent_failure: notify     # notify | block_task | move_to_next
   # preflight_globs and hard_lock_globs default lists — see SPEC.md
 design:
@@ -572,7 +572,7 @@ End-to-end criteria that prove v-next ships:
   - No cross-machine orchestration
   - No agent-to-agent communication beyond dependency graph
   - No web UI / dashboard
-  - No auto-merge of PRs
+  - No unconditional auto-merge of PRs (opt-in platform-gated auto-merge per ADR `orchestrator-ship-auto-merge`, 2026-07-10 — default remains human merge)
   - No automatic tracker switching mid-pipeline
   - No support for non-`@firatcand/forge` install paths (i.e. no `git clone` adoption flow)
 
