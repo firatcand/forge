@@ -339,9 +339,17 @@ forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-ru
                   │                                       ▼
                   │                                  reviewed
                   │                                       │
-                  │                                       │ ship_completed
+                  │                                       │ ship_op_completed (push + PR ± platform auto-merge)
                   │                                       ▼
-                  │                                   shipped (terminal)
+                  │                                  merge_pending ── merge_confirmed ──▶ shipped (terminal)
+                  │                                       │        (RepoHost: PR merged to recorded base
+                  │                                       │         at the reviewed head SHA)
+                  │                                       │
+                  │                                       ├─── head_drift ──▶ ready_for_review
+                  │                                       │    (auto-merge revoked; new head re-verifies + re-reviews)
+                  │                                       │
+                  │                                       └─── pr_closed_unmerged / automerge_disabled /
+                  │                                            probe_or_policy_loss ──▶ blocked_on_question (park)
                   │
                   ├─── lease_expired (no heartbeat) ──▶ abandoned ──┐
                   │                                                  │
@@ -562,7 +570,8 @@ type NotificationEvent =
   | { type: 'question'; ts: string; run_id: string; task_id: string; question_id: string; decision_key: string; attempt: number; question: string; context: string; options: Option[]; recommended_option_id?: string; what_happens_if_unanswered?: string }
   | { type: 'question_resolved'; ts: string; run_id: string; task_id: string; question_id: string; resolution: 'answered' | 'expired' | 'budget_exhausted' | 'duplicate'; answer_option_id?: string }
   | { type: 'ready_for_review'; ts: string; run_id: string; task_id: string; attempt_id: string; summary: string }
-  | { type: 'shipped'; ts: string; run_id: string; task_id: string; pr_url: string }
+  | { type: 'merge_pending'; ts: string; run_id: string; task_id: string; pr_url: string; auto_merge: boolean }  // ship op done: PR open; auto_merge=true when platform auto-merge enabled (ADR orchestrator-ship-auto-merge)
+  | { type: 'shipped'; ts: string; run_id: string; task_id: string; pr_url: string }  // emitted ONLY on RepoHost-confirmed merge-to-base at the reviewed head SHA
   | { type: 'fatal'; ts: string; reason: string; details?: Record<string, unknown> };
 ```
 
@@ -615,13 +624,14 @@ interface Tracker {
 
 | Local state | Tracker state | Resolution |
 |---|---|---|
-| `running` | `done` / `cancelled` / closed | Mark local terminal; release lease; archive attempt; preserve worktree for inspection (gc with `--remove-worktrees` to delete) |
+| `running` | `done` / `cancelled` / closed | Mark local `cancelled` — never `shipped` from tracker status alone (tracker state is not merge proof; only RepoHost confirmation establishes `shipped` — ADR `orchestrator-ship-auto-merge`); release lease; archive attempt; preserve worktree for inspection (gc with `--remove-worktrees` to delete) |
 | `running` | no claim or claim by different `run_id` | If lease is expired beyond `steal_grace_ms`: mark `abandoned`, release lease. If lease still valid: keep local truth, log warning (tracker is the diverged party). |
 | `claimed` (local) | not claimed (tracker) | Re-attempt tracker claim once; if fails, mark local `unclaimed`, release lease. |
 | no local state | tracker claimed by *us* | Recover: write `state.json` and `lease.json` from tracker metadata. (Happens after `.forge/orchestrator/` wipe.) |
 | `blocked_on_question` | any | Check `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/`. If answer exists, mark `awaiting_respawn`. If not and `attempt_started + question_timeout_ms` elapsed, mark `expired`. |
-| `ready_for_review` (local) | `done` (tracker) | Trust tracker; mark `shipped`. (Likely manual merge.) |
-| `shipped` | not closed | Re-check PR via tracker adapter; if PR merged, transition tracker; if not, log divergence. |
+| `ready_for_review` (local) | `done` (tracker) | Report divergence + park with a question — do **not** mark `shipped` (tracker `done` — even a closed GitHub issue — cannot prove that a specific PR merged to the recorded base at the reviewed head SHA). If the operator confirms an out-of-band manual merge, gc resolves via RepoHost confirmation → `shipped`, else `cancelled` with a note. |
+| `shipped` | not closed | Confirm via RepoHost + PR record: if merged at the reviewed head SHA, transition tracker to done. If NOT merged, local `shipped` is corrupt — park with a question (never re-open/re-merge silently). |
+| `merge_pending` | any | Probe via RepoHost + PR record. Merged to recorded base at the reviewed head SHA → `shipped`; update tracker; emit `shipped` notification. PR closed without merge / auto-merge disabled externally / honesty-probe or policy loss → confirm auto-merge disablement, then park with a question (fail-closed — the next tick must NOT silently recreate or re-enable). Head SHA drifted → confirmed-disable auto-merge, regress to `ready_for_review` (the new head re-enters verify + cross-review). Unconfirmed/failed disablement → park AND block every later create/enable attempt for this task until an operator answers. |
 | Verdict file exists but `verdict.verified.json` missing | n/a | Re-run CLI verification; write `verdict.verified.json`. |
 | Branch exists in repo | worktree missing | If task `shipped`: prune. If task `unclaimed` or terminal: prompt user with `--dry-run` output before pruning. |
 | Worktree exists | no task with matching ID in `phases.yaml` | Orphan; report. `gc --remove-orphan-worktrees` to delete. |
@@ -849,10 +859,15 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 
 - Dispatch skill detects `reviewed` tasks.
 - **Dependency check before dispatch:** all `depends_on` tasks must be in state `shipped` — which per the lifecycle below means their PRs are **merged to base**. A dependency in `merge_pending` (PR open, not yet merged) defers SHIP until it merges.
-- **The ship operation** (idempotent + crash-safe; FORGE-234): re-run `settings.verify` in the task worktree; verify the head SHA equals the recorded reviewed SHA (**final-SHA binding** — any post-review change to the head, including rebase-on-drift and `update-branch`, produces a new SHA that must pass verify + cross-review before shipping proceeds, and revokes any stale auto-merge enablement); run the final secrets scan; push the branch; open the PR via the RepoHost (`gh pr create` on GitHub); mark tracker `in_review`; and — only under `ship.merge_policy: 'auto'` with the honesty probe passing (below) — enable the **platform's** auto-merge (`gh pr merge --auto`, squash; `--admin` and every bypass path prohibited; forge never merges directly).
-- On success: task state advances to **`merge_pending`** (non-terminal). A durable **PR record** is persisted (PR id/URL, head SHA, base repo + base branch, auto-merge status). Notification `merge_pending` event emitted.
-- **`merge_pending → shipped` (terminal) only when the PR is confirmed merged to base** (gc/reconcile or dispatch-tick probe). Notification `shipped` emitted on confirmation.
-- Failure/regression paths (fail-closed, each with an event): PR closed without merge, auto-merge disabled externally, or head drifted while pending → revoke auto-merge enablement and regress to `reviewed` (or park with a question when ambiguous). Red PR CI → regress via the changes-requested path with findings injected. Transient git/tracker failures → retry with backoff; after `retry_attempts` failures → `failed`, fatal notification.
+- **Reviewed-SHA recording (final-SHA binding, part 1):** when REVIEW passes, the CLI (`complete --phase review`) records the worktree head as **`reviewed_head_sha`** — CLI-owned, immutable for the attempt, persisted in the ship record (below). This is the ONLY SHA the ship operation may ship.
+- **The ship operation** (idempotent + crash-safe; FORGE-234): (1) **write-ahead**: persist/refresh the durable **ship record** at `.forge/orchestrator/tasks/<task_id>/ship-record.json` (reviewed_head_sha, resolved base repo + base branch, then per-side-effect: PR id/URL, auto-merge status) — the record is written **before** each external side effect and reconciled idempotently after it, so a crash between push, PR-create, and enablement recovers via create-or-get; (2) re-run `settings.verify` in the task worktree; (3) verify the local head equals `reviewed_head_sha` — any post-review change (rebase-on-drift, `update-branch`, conflict resolution, third-party push) produces a new SHA that must re-enter verify + cross-review before shipping proceeds, and revokes any stale enablement; (4) final secrets scan; (5) push; (6) create-or-get the PR via the RepoHost; (7) mark tracker `in_review`; (8) only under `ship.merge_policy: 'auto'` with the honesty probe passing (below) — enable the **platform's** auto-merge bound to the exact reviewed head: `gh pr merge --auto --squash --match-head-commit "<reviewed_head_sha>"` (the platform rejects enablement if the PR head has moved; `--admin` and every bypass path prohibited; forge never merges directly).
+- On success: task state advances to **`merge_pending`** (non-terminal). Notification `merge_pending` event emitted (`auto_merge: true|false`).
+- **`merge_pending → shipped` (terminal) requires RepoHost confirmation** (gc/reconcile or dispatch-tick probe) that the PR merged into the **recorded base repo + base branch** AND the merged PR head equals **`reviewed_head_sha`**. Tracker status is never merge proof (see gc divergence table). Notification `shipped` emitted on confirmation.
+- Failure/regression paths (fail-closed, each with an event):
+  - **Head drift while pending** → confirmed-disable auto-merge, regress to `ready_for_review`: the new head MUST re-enter verify + cross-host review (never plain `reviewed`, which would allow silent re-enable).
+  - **PR closed without merge, auto-merge disabled externally, or honesty-probe/policy loss while pending** → confirmed-disable any enablement, then **park with a question** — the next tick must NOT silently recreate the PR or re-enable auto-merge.
+  - **Failed or unconfirmed disablement** → park AND block every subsequent create/enable attempt for this task until an operator answers.
+  - Red PR CI → regress via the changes-requested path with findings injected. Transient git/tracker failures → retry with backoff; after `retry_attempts` failures → `failed`, fatal notification.
 - **Auto-merge preconditions** (`ship.merge_policy: 'auto'`; default is `'approval'` = open PR, human merges): requires `agents.review_host_cli` configured (dual-host review — single-host + `auto` is a settings validation error) AND the RepoHost **honesty probe** passing: the *effective* base-branch rules (classic branch protection + rulesets + merge queue) enforce at least one blocking required status check; the squash method is allowed; repo-level auto-merge is enabled; the authenticated identity has write permission; no admin bypass is in play. Probe failure → **park the task with a question** — never warn-and-merge, never a silent downgrade. Non-GitHub remotes: `approval` behavior at most; `auto` there is a settings validation error. (Tracker and repo host are orthogonal — a Linear-tracked repo hosted on GitHub gets the full path.)
 
 ### Single-host mode
@@ -864,6 +879,8 @@ Single-host mode is incompatible with `ship.merge_policy: 'auto'` — that combi
 ## Branch / PR integration topology — merge-to-main-between-phases
 
 The branch strategy: **every task branches from `main`. SHIP opens the PR against `main` and (with auto-merge opted in) hands the merge to the platform; a task is `shipped` only when its PR is merged to `main`. A task with declared dependencies cannot SHIP until all dependency PRs are merged.**
+
+Throughout this document, `main` denotes the **RepoHost-resolved repository default branch** — resolved once, persisted in the ship record, and used consistently for worktree hydration base and PR base (ADR `orchestrator-ship-auto-merge`; fixes the former `/ship --base dev` split). Repositories whose default branch is not literally named `main` use their resolved default everywhere this document says `main`.
 
 Rationale (chosen over stacked PRs):
 - Matches the dependency-graph philosophy: parallel-dispatched tasks are independent by graph construction, so they don't need to share a branch.
@@ -879,6 +896,23 @@ Concretely:
 Trade-off accepted: tasks with declared dependencies cannot run in parallel with their dependencies even if their dependency's IMPLEMENT phase is done. This is correct — dependencies exist *because* the consumer needs the producer's output committed.
 
 For projects that want stacked PRs (rare; adds rebase loops), an opt-in `agents.branch_strategy: 'stacked'` mode is reserved in the settings schema but not implemented in v-next. Documented as a future extension if real demand emerges.
+
+## RepoHost — repository-host abstraction (ADR orchestrator-ship-auto-merge)
+
+PR/merge operations live in a **RepoHost** interface, deliberately separate from `Tracker` — tracker and repository host are orthogonal (forge itself is Linear-tracked on a GitHub repo). Interface + fake land in FORGE-231; `GitHubRepoHost` in FORGE-232.
+
+**Discovery/auth is independent of `tracker.type`:** the GitHub RepoHost activates on a GitHub remote + authenticated `gh`, regardless of tracker. Fork topologies (base repo ≠ push repo) are detected and **parked** — out of scope for v0.4. Non-GitHub remotes have no RepoHost: SHIP degrades to `approval`-equivalent behavior at most, and `ship.merge_policy: 'auto'` is a settings validation error there.
+
+**Operations (spec-level contract; exact signatures in FORGE-231):**
+
+- `resolveBase()` — base repo + default/base branch + push remote; resolved once, persisted in the ship record (never re-sniffed from remote URLs).
+- `probe()` — the **honesty probe**: evaluates *effective* base-branch rules (classic branch protection + rulesets + merge queue) and reports: blocking required-check count, allowed merge methods, repo-level auto-merge capability, authenticated write permission, admin-bypass exposure.
+- `createOrGetPullRequest(head, base)` — idempotent by head branch (crash/duplicate-PR safe).
+- `enableAutoMerge(pr, matchHeadSha)` / `disableAutoMerge(pr)` — enablement is always head-bound (`--match-head-commit`); disablement must be **confirmed**, and unconfirmed disablement blocks later enable attempts.
+- `mergeResult(pr)` — `{ merged, baseRef, mergeCommit, mergedHeadSha }` — the ONLY source of merge proof (`shipped` requires `merged && baseRef == recorded base && mergedHeadSha == reviewed_head_sha`).
+- `headSha(pr)` — drift detection while `merge_pending`.
+
+**Ship record** (`.forge/orchestrator/tasks/<task_id>/ship-record.json`, CLI-owned): `reviewed_head_sha`, resolved base repo + branch + push remote, PR id/URL, auto-merge status, disablement-confirmation flag. Written **write-ahead** (before each external side effect) and reconciled idempotently after, so every crash window (post-push, post-create, post-enable) recovers without duplicate side effects.
 
 ## File-glob declarations + overlap detection (file-level safety)
 
@@ -1146,6 +1180,17 @@ agents:
   
   # Failure policy
   on_persistent_failure: notify         # notify | block_task | move_to_next
+
+# ADR orchestrator-ship-auto-merge (2026-07-10) — top-level ship block
+# (schema lands in FORGE-231). Scoped to the orchestrator SHIP path only:
+# no inheritance to/from drive.merge_policy / deliver.merge_policy.
+ship:
+  # approval (DEFAULT) = open PR, human merges.
+  # auto = enable the PLATFORM's auto-merge (gh pr merge --auto --squash
+  #        --match-head-commit <reviewed_head_sha>). Validation errors:
+  #        auto + review_host_cli null (single-host), or auto + unsupported
+  #        RepoHost (non-GitHub remote).
+  merge_policy: approval                # approval | auto
 ```
 
 ## Security posture

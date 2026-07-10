@@ -238,11 +238,18 @@ endpoints are already-constrained symbol names) and are not walked by recall.
   merge gate) remains primary. **Merge-gate change (ADR
   `orchestrator-ship-auto-merge`, 2026-07-10):** under the default
   `ship.merge_policy: 'approval'` the human merge gate stands unchanged. With
-  the opt-in `'auto'` policy it is replaced by three stacked defenses: the
-  platform branch-protection gate (honesty-probed, fail-closed — park on any
-  gap), mandatory dual-host review (single-host + auto is a settings error),
-  and final-SHA binding (the head GitHub merges must equal the reviewed SHA;
-  drift revokes enablement and re-enters review). **Residual accepted risk:**
+  the opt-in `'auto'` policy it is replaced by three stacked defenses (normative
+  definition: ORCHESTRATOR.md §Phase 3 — SHIP, "Auto-merge preconditions" +
+  §RepoHost): (1) the platform branch-protection gate, honesty-probed over the
+  *effective* rules — classic protection + rulesets + merge queue — requiring
+  ≥1 blocking required status check, the squash method allowed, repo-level
+  auto-merge enabled, authenticated write permission, and no `--admin`/bypass
+  path (probe failure parks the task; never warn-and-merge, never silent
+  downgrade); (2) mandatory dual-host review (single-host + auto is a settings
+  validation error); (3) final-SHA binding (enablement is head-bound via
+  `--match-head-commit <reviewed_head_sha>`; the merged head must equal the
+  reviewed SHA; drift revokes enablement and the new head re-enters verify +
+  cross-review before any re-enable). **Residual accepted risk:**
   with `auto` opted in, code reaches `main` without a human click while
   Tripwire remains report-only — explicitly accepted by the owner in the ADR.
 - **Unicode-normalization / homoglyph bypasses (I1 limitation).** The I1 rules

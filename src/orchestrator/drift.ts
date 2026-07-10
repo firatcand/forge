@@ -121,6 +121,9 @@ export const BASE_SYMBOL_ALLOWLIST: readonly string[] = [
   'IssueUpdate', 'IssueQuery', 'VersionConflict', 'QuestionIndex',
   'ArtifactKind', 'WorkerContext', 'priorReviewFindings', 'collectTasksByState',
   'issueRemoveLabel', 'ifMatch',
+  // ADR orchestrator-ship-auto-merge (FORGE-230): specced ahead of
+  // implementation — REMOVE when FORGE-232 ships the class under this name.
+  'GitHubRepoHost',
 ] as const;
 
 interface BoundedFsAdapter {
