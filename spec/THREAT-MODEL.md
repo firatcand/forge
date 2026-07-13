@@ -251,7 +251,8 @@ endpoints are already-constrained symbol names) and are not walked by recall.
   forge itself executes the merge, only when required checks are green,
   atomically head-bound server-side (`gh pr merge --squash --match-head-commit
   <reviewed_head_sha>`); the merged head must equal the reviewed SHA; head
-  drift regresses the task into verify + cross-review; a PR merged externally
+  drift regresses the task into verify + cross-review (`auto` mandates
+  dual-host review, so a cross reviewer always exists here); a PR merged externally
   at any other SHA is a **tainted merge** — parked with a fatal notification,
   never marked shipped. **Residual accepted risk:**
   with `auto` opted in, code reaches `main` without a human click while

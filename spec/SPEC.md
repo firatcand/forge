@@ -865,12 +865,12 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
 2. **Dependency check before dispatch:** CLI filters to tasks whose `depends_on` are all in `shipped` state — which now MEANS RepoHost-confirmed merged-to-base at each dependency's reviewed head SHA. `merge_pending` dependencies wait. (See ORCHESTRATOR.md → "Branch / PR integration topology" + "§RepoHost".)
 3. The ship operation runs (verb-driven, idempotent + crash-safe; FORGE-234), against the **ship record** (`.forge/orchestrator/tasks/<t>/ship-record.json`, write-ahead — persisted before each external side effect):
    - Re-run `settings.verify` in the task worktree; final secrets scan; conventional-commit verification.
-   - **Final-SHA binding:** the worktree head must equal `reviewed_head_sha` (recorded by the CLI when REVIEW passed). Any post-review head change (rebase, `update-branch`, third-party push) re-enters verify + cross-review first.
+   - **Final-SHA binding:** the worktree head must equal `reviewed_head_sha` (recorded by the CLI when REVIEW passed). Any post-review head change (rebase, `update-branch`, third-party push) re-enters verify + re-review first (dual-host: cross-host review; single-host: CLI re-verification — see the Single-host mode note above).
    - Push; create-or-get the PR via the RepoHost; mark tracker issue `in_review`.
    - Under `ship.merge_policy: 'auto'` with the honesty probe passing: on subsequent `merge_pending` ticks, when every required check is green AND the PR head still equals the reviewed SHA, forge executes the **atomic head-bound merge** (`gh pr merge --squash --match-head-commit "<reviewed_head_sha>"` — expected-head enforced server-side at merge time; `--admin`/bypass prohibited). NO standing `gh pr merge --auto` enablement is created — GitHub's persisted auto-merge cannot pin a SHA, so it cannot hold the final-SHA invariant.
 4. `forge orchestrate complete --phase ship --verdict-file ship_verdict.json` records the PR identity into the ship record.
 5. On success: task state → **`merge_pending`**; notification `merge_pending` emitted with PR URL + auto-merge status.
-6. **`merge_pending` → `shipped`** only on RepoHost confirmation that the PR merged into the recorded base at `reviewed_head_sha` (gc/reconcile or dispatch tick); notification `shipped` emitted then. Fail-closed regressions per ORCHESTRATOR.md §Phase 3 (head drift → `ready_for_review` re-review; closure/disablement/probe-loss → park with question).
+6. **`merge_pending` → `shipped`** only on RepoHost confirmation that the PR merged into the recorded base at `reviewed_head_sha` (gc/reconcile or dispatch tick); notification `shipped` emitted then. Fail-closed regressions per ORCHESTRATOR.md §Phase 3 (head drift → `ready_for_review` re-entry — dual-host re-reviews, single-host CLI re-verifies; closure/probe-loss → park with question).
 7. On failure (rare; usually transient): retry with backoff. After `retry_attempts` failures: task `failed`, fatal notification.
 
 #### Phase machine diagram
@@ -906,7 +906,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
                             [shipped]
 ```
 
-`merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify + re-review); PR closed unmerged / honesty-probe or policy loss → park (`blocked_on_question`).
+`merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify; dual-host also re-reviews, single-host CLI-only); PR closed unmerged / honesty-probe or policy loss → park (`blocked_on_question`).
 
 Failures at any phase enter the retry queue with exponential backoff (CLI-managed). After `agents.retry_attempts` total failures, the task is marked `failed` per `agents.on_persistent_failure`.
 
