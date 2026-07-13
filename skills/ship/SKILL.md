@@ -74,7 +74,7 @@ If any gate fails, list what's missing. Do not proceed.
 ## Push and PR
 
 1. `git push origin HEAD`
-2. `gh pr create --base dev --title "[LINEAR-ID] {title from issue}" --body "{description}"`
+2. `gh pr create --base "$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)" --title "[LINEAR-ID] {title from issue}" --body "{description}"` — the PR base is the repo's default branch per the merge-to-main topology (ORCHESTRATOR.md §Branch / PR integration topology; was hardcoded `dev`, fixed by ADR `orchestrator-ship-auto-merge`)
 3. PR body template:
    - What changed (3-5 bullets)
    - Why

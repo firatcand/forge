@@ -229,13 +229,16 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 3. For each claimed task: skill calls `forge orchestrate dispatch <claim_id>` (refuses without a valid claim_id from step 2); spawns a Task-tool subagent (Claude) or native subagent (Codex) with the worker prompt template (worker reads `spec/SPEC.md` + `plans/phases.yaml` task body + `CLAUDE.md` for conventions; no ADR hydration needed since SPEC is already authoritative)
 4. Subagent works inside the worktree: heartbeats every 5 min, escalates architectural decisions via `forge orchestrate question`, writes a verdict via `forge orchestrate complete` when done
 5. Skill surfaces any open questions to the user, records the answer via `forge orchestrate answer`, and re-dispatches a fresh subagent that picks up the prior worker's worktree state
-6. After IMPLEMENT verdict verified, skill dispatches a REVIEW subagent in the secondary host; after REVIEW passes, a SHIP subagent opens the PR (only when all `depends_on` PRs are merged to base)
+6. After IMPLEMENT verdict verified, skill dispatches a REVIEW subagent in the secondary host; after REVIEW passes, the ship operation pushes and opens the PR (only when all `depends_on` PRs are merged to base) — the task enters `merge_pending`, and under the opt-in `ship.merge_policy: 'auto'` forge executes the platform-gated merge once required checks are green, head-bound to the reviewed SHA; the task is `shipped` only when the merge is confirmed (ADR `orchestrator-ship-auto-merge`, 2026-07-10)
 7. After `agents.retry_attempts` failures, notifies user, marks issue `failed`, moves to next ready task
 8. To stop: user simply closes the main session. To cancel a specific task: `forge orchestrate cancel <task-id>`. Recovery on next session via `forge orchestrate gc`.
 
 **Acceptance criteria**
 - [ ] Subagent cap respected per main (default `agents.subagent_cap_per_main: 3`); multiple mains coexist via lease-backed coordination
-- [ ] Tasks with unmerged dependencies are **never** dispatched to SHIP
+- [ ] Tasks with unmerged dependencies are **never** dispatched to SHIP (`shipped` = RepoHost-confirmed merged-to-base at the reviewed head SHA; `merge_pending` does not count)
+- [ ] `ship.merge_policy` defaults to `approval` (human merges); an absent `ship:` block never enables unattended merging
+- [ ] **Static settings validation** rejects `ship.merge_policy: 'auto'` when dual-host review is not configured (single-host) or the repo has no supported RepoHost (non-GitHub remote); **at runtime**, an honesty-probe failure parks the task with a question (fail-closed — never warn-and-merge, never silent downgrade)
+- [ ] The merge call is head-bound to the reviewed SHA (`--match-head-commit`, expected-head enforced server-side at merge time; no standing auto-merge enablement)
 - [ ] Each task gets a deterministic worktree path; collision-safe sanitization
 - [ ] Failures retry with exponential backoff (1s base, capped at `agents.retry_backoff_ms_max`, default 5min — Symphony pattern)
 - [ ] After max retries, user is notified AND tracker comment posted on the issue
@@ -260,7 +263,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 **Non-goals (this feature)**
 - Cross-machine orchestration (single-machine only)
 - Agents sharing intermediate artifacts (independent worktrees only — Symphony pattern)
-- Auto-merge to main (user merges PRs through GitHub UI)
+- Unconditional auto-merge to main (default: user merges PRs through the GitHub UI; opt-in platform-gated auto-merge via `ship.merge_policy: 'auto'` — ADR `orchestrator-ship-auto-merge`, 2026-07-10)
 - Built-in dashboard / web UI (use the tracker's existing UI)
 - Coordination beyond dependency graph (no agent-to-agent comms)
 
@@ -361,9 +364,11 @@ agents:
   question_timeout_ms: 1800000
   question_max_attempts: 3
   worktree_root: ./.forge/worktrees
-  branch_strategy: merge-to-main
+  branch_strategy: merge-to-main    # reserved in spec pseudocode only; ship/merge policy = separate `ship:` block (ADR orchestrator-ship-auto-merge)
   on_persistent_failure: notify     # notify | block_task | move_to_next
   # preflight_globs and hard_lock_globs default lists — see SPEC.md
+ship:
+  merge_policy: approval            # approval (DEFAULT — human merges) | auto (forge merges on green, head-bound to reviewed SHA, platform-gated; requires dual-host review + honesty probe — ADR orchestrator-ship-auto-merge)
 design:
   mode: project_owned | reference_external
   reference: <url-or-path>          # only when mode = reference_external
@@ -572,7 +577,7 @@ End-to-end criteria that prove v-next ships:
   - No cross-machine orchestration
   - No agent-to-agent communication beyond dependency graph
   - No web UI / dashboard
-  - No auto-merge of PRs
+  - No unconditional auto-merge of PRs (opt-in platform-gated auto-merge per ADR `orchestrator-ship-auto-merge`, 2026-07-10 — default remains human merge)
   - No automatic tracker switching mid-pipeline
   - No support for non-`@firatcand/forge` install paths (i.e. no `git clone` adoption flow)
 

@@ -269,6 +269,10 @@ export const SettingsSchema = z.object({
 
       // Worktree + branch strategy
       worktree_root: z.string().default('./.forge/worktrees'),
+      // NOTE (ADR orchestrator-ship-auto-merge, 2026-07-10): branch_strategy is
+      // reserved in this pseudocode only — src/schemas/settings.ts does not
+      // implement it. Ship/merge policy is the separate top-level `ship:` block
+      // (FORGE-231), not this field.
       branch_strategy: z.enum(['merge-to-main', 'stacked']).default('merge-to-main'),
 
       // Preflight + overlap detection — see ORCHESTRATOR.md "Worker prompt template" and "File-glob declarations"
@@ -342,7 +346,27 @@ export const SettingsSchema = z.object({
       spec_code_check_enabled: z.boolean().default(true),     // grep SPEC for symbols, check src/ for hits
     })
     .default({}),
+  // ADR orchestrator-ship-auto-merge (2026-07-10) — orchestrator SHIP merge
+  // policy (schema lands in FORGE-231). Scoped to the orchestrator ship path
+  // ONLY: no inheritance to/from drive.merge_policy / deliver.merge_policy —
+  // each surface owns exactly one knob.
+  ship: z
+    .object({
+      // approval (DEFAULT) = open PR, human merges — an absent ship: block can
+      // never silently enable unattended merging.
+      // auto = forge executes the platform-gated, head-bound merge once
+      // required checks are green (gh pr merge --squash --match-head-commit
+      // <reviewed_head_sha>; server-side expected-head check; NO standing
+      // gh pr merge --auto enablement — it cannot pin a SHA).
+      merge_policy: z.enum(['approval', 'auto']).default('approval'),
+    })
+    .default({}),
 });
+// Cross-field refinements (superRefine, FORGE-231): ship.merge_policy 'auto'
+// REQUIRES agents.review_host_cli != null (dual-host review — single-host +
+// auto is a validation error) AND a supported RepoHost (GitHub remote + gh
+// auth; 'auto' with a non-GitHub remote is a validation error, not a silent
+// downgrade). See ORCHESTRATOR.md §Phase 3 — SHIP + §RepoHost.
 
 export type Settings = z.infer<typeof SettingsSchema>;
 ```
@@ -519,7 +543,8 @@ type TaskState = {
     | 'awaiting_respawn'
     | 'ready_for_review'
     | 'reviewed'
-    | 'shipped'           // terminal
+    | 'merge_pending'     // PR open, merge not yet confirmed (ADR orchestrator-ship-auto-merge; ship record holds reviewed_head_sha + PR identity — see ORCHESTRATOR.md §RepoHost)
+    | 'shipped'           // terminal — PR confirmed merged to the recorded base at the reviewed head SHA
     | 'cancelled'         // terminal
     | 'failed'            // terminal
     | 'abandoned';        // recoverable — lease expired
@@ -796,7 +821,7 @@ on /forge orchestrate:
 - `"Blocked on question <q>: <summary>"` → the worker has called `forge orchestrate question`; task is `blocked_on_question`; the next loop iteration's polling step surfaces the question.
 - Subagent returns without calling `complete` or `question` (i.e., it crashed or was interrupted) → CLI detects lease still alive but no terminal event; gc on next pass marks attempt `abandoned` after lease expiry.
 
-**Single-host mode:** if `agents.review_host_cli` is `null`, REVIEW dispatch is skipped. Tasks flow IMPLEMENT → SHIP directly. A one-time warning fires from the skill on first run.
+**Single-host mode:** if `agents.review_host_cli` is `null`, REVIEW dispatch is skipped. Tasks flow IMPLEMENT → SHIP directly: on CLI-verified IMPLEMENT completion the task advances straight to `reviewed`, and the CLI records the verified worktree HEAD as `reviewed_head_sha` (the ship target — what ships is exactly what the CLI verified; see ORCHESTRATOR.md §Single-host mode). `ship.merge_policy: 'auto'` is a settings validation error single-host; only `approval` applies. A one-time warning fires from the skill on first run.
 
 ### Flow 3 — Worker subagent lifecycle (per phase)
 
@@ -818,7 +843,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
 #### Flow 3b — REVIEW phase (secondary host subagent)
 
 1. Dispatch skill detects `ready_for_review` tasks via `forge orchestrate phases --ready --phase review --run <run_id> --json` (read-only). REVIEW phase dispatch does NOT require fresh user approval per task — the original IMPLEMENT approval (Flow 2 step 2) covers the full IMPLEMENT→REVIEW→SHIP arc for that task. Skill calls `forge orchestrate dispatch <task_id> --phase review --claim <existing_claim_id>` to continue.
-2. Skill spawns a review subagent in the **secondary host** (e.g., Codex when primary is Claude). Implementation: for Codex, the skill calls `codex` with a review prompt that includes the worktree's `git diff <base>...HEAD`. For Claude as reviewer (primary is Codex), the skill uses Claude's Task tool to spawn a second subagent on the same worktree.
+2. Skill spawns a review subagent in the **secondary host** (e.g., Codex when primary is Claude). At dispatch the CLI records **`review_target_sha`** (the worktree HEAD at that moment — ADR `orchestrator-ship-auto-merge`); the review prompt pins the diff to it. Implementation: for Codex, the skill calls `codex` with a review prompt that includes the worktree's `git diff <base>...<review_target_sha>` (never a floating `HEAD`). For Claude as reviewer (primary is Codex), the skill uses Claude's Task tool to spawn a second subagent on the same worktree.
 3. Review subagent reads the diff, runs the host's `/review` skill against it, writes `review_verdict.json`:
    ```ts
    type ReviewVerdict = {
@@ -826,26 +851,27 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
      verdict: 'pass' | 'changes_requested';
      findings: { severity: 'block' | 'improvement'; path: string; line?: number; message: string }[];
      host: 'claude' | 'codex' | 'cursor' | 'gemini';
+     target_sha: string; // the exact SHA reviewed — must equal the dispatch-time review_target_sha
    };
    ```
 4. Review subagent calls `forge orchestrate complete --phase review --verdict-file review_verdict.json` and returns.
 5. CLI advances state:
-   - `pass` → `reviewed`, eligible for SHIP.
+   - `pass` → `reviewed`, eligible for SHIP. The CLI first verifies the verdict's `target_sha` equals the dispatch-time `review_target_sha` and the current worktree HEAD; that verified SHA is recorded as `reviewed_head_sha` (ADR `orchestrator-ship-auto-merge` — the review binds to an exact SHA, never a floating HEAD).
    - `changes_requested` → back to `running`; new IMPLEMENT attempt dispatched with `priorReviewFindings` injected into the worker prompt. Attempt counter increments.
 
-#### Flow 3c — SHIP phase (primary host subagent)
+#### Flow 3c — SHIP phase (rewritten 2026-07-10 per ADR `orchestrator-ship-auto-merge`)
 
 1. Dispatch skill detects `reviewed` tasks via `forge orchestrate phases --ready --phase ship --run <run_id> --json` (read-only). SHIP phase dispatch continues the IMPLEMENT→REVIEW→SHIP arc under the original IMPLEMENT approval; no fresh user approval required.
-2. **Dependency check before dispatch:** CLI filters to tasks whose `depends_on` are all in `shipped` state with their PRs merged to base. Tasks with unmerged dependencies wait. (See ORCHESTRATOR.md → "Branch / PR integration topology".)
-3. Skill spawns a primary-host subagent with a ship prompt:
-   - Rebase onto latest base.
-   - Final secrets scan.
-   - Conventional-commit verification.
-   - `gh pr create` (or tracker-equivalent).
-   - Mark tracker issue `in_review`.
-4. Subagent calls `forge orchestrate complete --phase ship --verdict-file ship_verdict.json` with the PR URL.
-5. On success: task state → `shipped`; notification `shipped` emitted with PR URL.
-6. On failure (rare; usually transient): retry with backoff. After `retry_attempts` failures: task `failed`, fatal notification.
+2. **Dependency check before dispatch:** CLI filters to tasks whose `depends_on` are all in `shipped` state — which now MEANS RepoHost-confirmed merged-to-base at each dependency's reviewed head SHA. `merge_pending` dependencies wait. (See ORCHESTRATOR.md → "Branch / PR integration topology" + "§RepoHost".)
+3. The ship operation runs (verb-driven, idempotent + crash-safe; FORGE-234), against the **ship record** (`.forge/orchestrator/tasks/<t>/ship-record.json`, write-ahead — persisted before each external side effect):
+   - Re-run `settings.verify` in the task worktree; final secrets scan; conventional-commit verification.
+   - **Final-SHA binding:** the worktree head must equal `reviewed_head_sha` (recorded by the CLI when REVIEW passed). Any post-review head change (rebase, `update-branch`, third-party push) re-enters verify + re-review first (dual-host: cross-host review; single-host: CLI re-verification — see the Single-host mode note above).
+   - Push; create-or-get the PR via the RepoHost; mark tracker issue `in_review`.
+   - Under `ship.merge_policy: 'auto'` with the honesty probe passing: on subsequent `merge_pending` ticks, when every required check is green AND the PR head still equals the reviewed SHA, forge executes the **atomic head-bound merge** (`gh pr merge --squash --match-head-commit "<reviewed_head_sha>"` — expected-head enforced server-side at merge time; `--admin`/bypass prohibited). NO standing `gh pr merge --auto` enablement is created — GitHub's persisted auto-merge cannot pin a SHA, so it cannot hold the final-SHA invariant.
+4. `forge orchestrate complete --phase ship --verdict-file ship_verdict.json` records the PR identity into the ship record.
+5. On success: task state → **`merge_pending`**; notification `merge_pending` emitted with PR URL + auto-merge status.
+6. **`merge_pending` → `shipped`** only on RepoHost confirmation that the PR merged into the recorded base at `reviewed_head_sha` (gc/reconcile or dispatch tick); notification `shipped` emitted then. Fail-closed regressions per ORCHESTRATOR.md §Phase 3 (head drift → `ready_for_review` re-entry — dual-host re-reviews, single-host CLI re-verifies; closure/probe-loss → park with question).
+7. On failure (rare; usually transient): retry with backoff. After `retry_attempts` failures: task `failed`, fatal notification.
 
 #### Phase machine diagram
 
@@ -865,14 +891,22 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
                                 ▼
                             [reviewed]
                                 │
-                                │ all deps shipped + merged
+                                │ all deps shipped (= merged to base)
                                 ▼
                           [running (ship)]
                                 │
-                                │ PR opened, tracker updated
+                                │ PR opened ('auto': head-bound
+                                │ merge executes on green)
+                                ▼
+                          [merge_pending]
+                                │
+                                │ RepoHost confirms merge-to-base
+                                │ at reviewed_head_sha
                                 ▼
                             [shipped]
 ```
+
+`merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify; dual-host also re-reviews, single-host CLI-only); PR closed unmerged / honesty-probe or policy loss → park (`blocked_on_question`).
 
 Failures at any phase enter the retry queue with exponential backoff (CLI-managed). After `agents.retry_attempts` total failures, the task is marked `failed` per `agents.on_persistent_failure`.
 
@@ -1373,7 +1407,7 @@ Each PR is decomposable and parallelizable in `phases.yaml`. PR-2 through PR-5 c
 - Web dashboard / TUI (CLI `--json` output is the machine surface)
 - Stacked-PR branch strategy (schema reserved, not implemented)
 - Direct GitHub REST/GraphQL fallback (`gh` CLI required)
-- Auto-merge of PRs (dependency-shipped check uses merged-to-base state — humans merge)
+- Unconditional auto-merge of PRs (default remains human merge — `ship.merge_policy: 'approval'`; opt-in platform-gated auto-merge via `ship.merge_policy: 'auto'` requires dual-host review + a fail-closed branch-protection honesty probe + final-SHA binding. Dependency-shipped check uses merged-to-base state. ADR `orchestrator-ship-auto-merge` 2026-07-10, FORGE-189/FORGE-230 — see ORCHESTRATOR.md §Phase 3 — SHIP)
 - Encrypted settings.yaml (secrets stay in secret manager)
 - Skill portability across host CLIs (deferred to Phase 3)
 
