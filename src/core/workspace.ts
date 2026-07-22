@@ -372,6 +372,11 @@ export interface CreateOptions {
   root: string;
   branch?: string;
   base?: string;
+  // FORGE-231: the canonical FROZEN base branch name recorded in the task
+  // marker (owner decision SB). Distinct from `base` (the checkout start
+  // point, typically `origin/<this>`). Optional — generic callers that don't
+  // participate in orchestration skip it.
+  baseBranchName?: string;
   copyMeta?: boolean;
   mainWorktree?: string;
 }
@@ -419,6 +424,7 @@ export async function create(taskId: string, opts: CreateOptions): Promise<Creat
     version: 1,
     taskId: sanitized,
     branch,
+    ...(opts.baseBranchName ? { base_branch: opts.baseBranchName } : {}),
     createdAt: new Date().toISOString(),
     createdBy: 'forge/workspace.create',
   };

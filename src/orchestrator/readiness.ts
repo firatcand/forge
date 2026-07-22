@@ -34,6 +34,9 @@ export const ACTIVE_STATES: ReadonlySet<TaskState> = new Set<TaskState>([
   'running',
   'blocked_on_question',
   'awaiting_respawn',
+  // FORGE-231: a task awaiting its platform merge is still-unmerged work — a
+  // hard overlap that must block fresh claims of overlapping scope.
+  'merge_pending',
 ]);
 
 // A phases.yaml `depends_on` entry may reference either a P<phase>-T<n> id OR a

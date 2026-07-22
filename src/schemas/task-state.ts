@@ -9,6 +9,7 @@ export const TASK_STATES = [
   'awaiting_respawn',
   'ready_for_review',
   'reviewed',
+  'merge_pending',
   'shipped',
   'abandoned',
   'cancelled',
@@ -34,6 +35,18 @@ export const TaskStateSchema = z
     state: z.enum(TASK_STATES),
     state_version: z.number().int().min(0),
     attempt_count: z.number().int().min(0),
+    // FORGE-231: single TOTAL failure budget across phases (SPEC.md §retry
+    // accounting). Increments on implement changes_needed, review
+    // changes_requested/changes_needed, and ship failure; capped by
+    // agents.retry_attempts. Initial successful dispatches consume nothing.
+    failure_count: z.number().int().min(0).default(0),
+    // Idempotency key of the last ACCOUNTED failure: "<attempt_id>:<phase>".
+    // A replayed completion with the same key must not re-increment.
+    last_failure_key: z.string().max(160).nullable().default(null),
+    // Informational per-phase attempt numbering (NO caps — the budget above is
+    // the only limiter). attempt_count keeps its existing implement meaning.
+    review_attempt_count: z.number().int().min(0).default(0),
+    ship_attempt_count: z.number().int().min(0).default(0),
     current_attempt_id: z.string().min(1).max(64).nullable(),
     failure_reason: z.enum(FAILURE_REASONS).optional(),
     last_failed_at: z.string().datetime().optional(),

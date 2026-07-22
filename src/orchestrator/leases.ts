@@ -1,23 +1,26 @@
 // Lease acquire / heartbeat / steal / release for task ownership.
 //
-// Invariants (adapters own their own classification — FORGE-78):
-// - acquire uses link(tmp, target) — never rename — so concurrent acquires
-//   have exactly one winner (EEXIST on the loser). See:
-//   docs/learnings/2026-Q2/link-vs-rename-for-never-overwrite-invariant.md
-// - heartbeat and steal overwrite an existing file via:
-//   unlink(target) → link(tmp, target) → unlink(tmp).
-//   This is gated on generation/ownership validation before any I/O, making
-//   it safe: only the validated holder (or steal-eligible caller) can overwrite.
-// - All write paths use: write tmp → fsync → link/rename → unlink tmp.
-// - TOCTOU: every fs call is wrapped in its own try/catch.
-//   See: docs/learnings/2026-Q2/toctou-between-stat-and-read-leaks-raw-fs-errors.md
+// FORGE-231: every lease.json mutation is a casGuardedWrite version transition
+// on the monotonic `lease_version` field (see core/fs-atomic.ts for the
+// marker protocol). Invariants:
+// - lease.json is NEVER deleted after its first acquisition — release writes a
+//   ReleasedLeaseTombstone instead, so `lease_version` (and via
+//   `last_generation`, the generation sequence) survives ownership cycles.
+// - An ABSENT lease file with claim history is a LEGACY state (pre-FORGE-231
+//   release, or adminReleaseLeaseByIdentity, both of which unlink) — acquire
+//   derives the next generation from claim history in that case (R8 CRIT-1);
+//   only no-file-AND-no-history starts at generation 0.
+// - steal is the two-file protocol from spec/ORCHESTRATOR.md §Leases: RESERVE
+//   the state.json transition marker first (a held marker aborts the steal —
+//   no lease publish), then commit the successor lease, then the unclaimed
+//   state under the reserved marker. Lock order is STATE before LEASE for any
+//   path taking both.
 // - task_id in payload must match task_id used for path construction.
 //   See: docs/learnings/2026-Q2/id-in-path-and-payload-must-agree.md
 //
-// OQ-6 decision: steal writes lease.json (new owner) then state.json
-// (unclaimed) before returning. If state.json write fails after lease.json
-// succeeds, gc reconciliation detects the divergence and completes the
-// transition on next sweep.
+// adminReleaseLeaseByIdentity intentionally KEEPS unlink semantics (it removes
+// duplicate/orphaned lease artifacts, identity-gated); the resulting
+// absent-with-history state is fully supported by acquire's legacy path.
 
 import {
   closeSync as _closeSync,
@@ -31,15 +34,25 @@ import {
   writeSync as _writeSync,
   linkSync as _linkSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
 import { dirname } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
-import { OrchestratorError } from '../core/errors.ts';
+import { CasError, OrchestratorError } from '../core/errors.ts';
+import {
+  acquireCasMarker,
+  casGuardedWrite,
+  type HeldCasMarker,
+  cleanupCompletedCasMarkers,
+  commitUnderCasMarker,
+  releaseCasMarker,
+} from '../core/fs-atomic.ts';
 import {
   LEASE_TTL_MS_DEFAULT,
   STEAL_GRACE_MS_DEFAULT,
+  LeaseFileSchema,
   LeaseSchema,
   type Lease,
+  type LeaseFileRecord,
+  type ReleasedLeaseTombstone,
 } from '../schemas/lease.ts';
 import {
   leaseFilePath,
@@ -92,168 +105,12 @@ function validateOrchestratorId(id: string, fieldName: string): string {
   }
 }
 
-// ---- Temp file infrastructure ----
+// ---- Read existing lease (discriminated: active | released tombstone) ----
 
-let tempCounter = 0;
-
-function tempName(targetPath: string): string {
-  tempCounter = (tempCounter + 1) >>> 0;
-  return `${targetPath}.${process.pid}.${tempCounter}.${randomBytes(8).toString('hex')}.tmp`;
-}
-
-function bestEffortUnlink(path: string): void {
-  try {
-    fs.unlinkSync(path);
-  } catch {
-    // best-effort cleanup — never throw from cleanup
-  }
-}
-
-function ensureDirectory(dir: string, taskId: string): void {
-  try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  } catch (err) {
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to create directory ${dir}`,
-      { taskId, dir, cause: err },
-    );
-  }
-}
-
-function writeTempFile(tmpPath: string, payload: string, taskId: string): void {
-  let fd: number;
-  try {
-    fd = fs.openSync(tmpPath, 'wx', 0o600);
-  } catch (err) {
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to open temp file ${tmpPath}`,
-      { taskId, path: tmpPath, cause: err },
-    );
-  }
-
-  const buf = Buffer.from(payload, 'utf8');
-  let primaryError: unknown;
-  try {
-    let offset = 0;
-    while (offset < buf.length) {
-      const written = fs.writeSync(fd, buf, offset, buf.length - offset, null);
-      if (written === 0) {
-        throw new OrchestratorError(
-          'IO_ERROR',
-          `writeSync returned 0 at offset ${offset} for ${tmpPath}`,
-          { taskId, path: tmpPath, offset },
-        );
-      }
-      offset += written;
-    }
-    try {
-      fs.fsyncSync(fd);
-    } catch (err) {
-      throw new OrchestratorError(
-        'IO_ERROR',
-        `fsync failed for ${tmpPath}`,
-        { taskId, path: tmpPath, cause: err },
-      );
-    }
-  } catch (err) {
-    primaryError = err;
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch (closeErr) {
-      if (primaryError === undefined) {
-        primaryError = new OrchestratorError(
-          'IO_ERROR',
-          `closeSync failed for ${tmpPath}`,
-          { taskId, path: tmpPath, cause: closeErr },
-        );
-      }
-    }
-  }
-  if (primaryError !== undefined) throw primaryError;
-}
-
-// Place a temp file atomically using link (never overwrites — EEXIST on collision).
-// Used only by acquire.
-function placeAtomicLink(tmpPath: string, targetPath: string, taskId: string): void {
-  try {
-    fs.linkSync(tmpPath, targetPath);
-  } catch (err) {
-    if (isNodeFsError(err) && err.code === 'EEXIST') {
-      throw new OrchestratorError(
-        'LEASE_EXISTS',
-        `Lease already exists for task ${taskId}: ${targetPath}`,
-        { taskId, path: targetPath, cause: err },
-      );
-    }
-    if (isNodeFsError(err) && (err.code === 'EPERM' || err.code === 'ENOTSUP')) {
-      throw new OrchestratorError(
-        'IO_ERROR',
-        `Filesystem does not support hard links at ${targetPath} — .forge/ must be on a local POSIX filesystem`,
-        { taskId, path: targetPath, cause: err },
-      );
-    }
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `link failed: ${tmpPath} → ${targetPath}`,
-      { taskId, path: targetPath, cause: err },
-    );
-  }
-}
-
-// Overwrite an existing file via: unlink(target) → link(tmp, target) → unlink(tmp).
-// Used by heartbeat and steal. Caller must have validated ownership before calling.
-function overwriteAtomicLink(tmpPath: string, targetPath: string, taskId: string): void {
-  try {
-    fs.unlinkSync(targetPath);
-  } catch (err) {
-    if (!(isNodeFsError(err) && err.code === 'ENOENT')) {
-      throw new OrchestratorError(
-        'IO_ERROR',
-        `Failed to unlink existing file ${targetPath}`,
-        { taskId, path: targetPath, cause: err },
-      );
-    }
-    // ENOENT here collapses two distinct situations into ONE idempotent path,
-    // on purpose:
-    //   (1) Expected absence — a well-behaved prior process already released or
-    //       cleaned up this lease, so there is simply nothing to unlink. This is
-    //       the common, benign case (e.g. a steal after a clean release).
-    //   (2) Racing deletion — a concurrent actor deleted the lease between our
-    //       (logical) check and this unlink. The same observer window means a
-    //       reader sitting between our unlink and the linkSync below momentarily
-    //       sees no lease at the target.
-    // We deliberately do NOT try to distinguish (1) from (2): the caller has
-    // already validated ownership before reaching this function, and both cases
-    // want the identical outcome — proceed to re-link the new lease. The torn
-    // window (target momentarily absent) is bounded by the immediately following
-    // linkSync and is acceptable precisely because ownership was validated first;
-    // a racing observer that misses the lease will re-read and find the freshly
-    // linked one. Treat ENOENT as success and fall through to the link.
-  }
-  try {
-    fs.linkSync(tmpPath, targetPath);
-  } catch (err) {
-    if (isNodeFsError(err) && (err.code === 'EPERM' || err.code === 'ENOTSUP')) {
-      throw new OrchestratorError(
-        'IO_ERROR',
-        `Filesystem does not support hard links at ${targetPath} — .forge/ must be on a local POSIX filesystem`,
-        { taskId, path: targetPath, cause: err },
-      );
-    }
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `link failed after unlink: ${tmpPath} → ${targetPath}`,
-      { taskId, path: targetPath, cause: err },
-    );
-  }
-}
-
-// ---- Read existing lease ----
-
-function readLeaseFile(taskId: string, leasePath: string): Lease | null {
+// FORGE-231 (R8 MAJ-2): the full read contract. Callers that mean "is this
+// task actively leased?" use readLeaseFile below, which maps a tombstone to
+// null — a tombstone is version/generation HISTORY, never an active lease.
+export function readLeaseRecord(taskId: string, leasePath: string): LeaseFileRecord | null {
   let raw: string;
   try {
     raw = fs.readFileSync(leasePath, 'utf8');
@@ -279,7 +136,7 @@ function readLeaseFile(taskId: string, leasePath: string): Lease | null {
     );
   }
 
-  const result = LeaseSchema.safeParse(parsed);
+  const result = LeaseFileSchema.safeParse(parsed);
   if (!result.success) {
     throw new OrchestratorError(
       'SCHEMA_INVALID',
@@ -287,7 +144,77 @@ function readLeaseFile(taskId: string, leasePath: string): Lease | null {
       { taskId, zodError: result.error.message },
     );
   }
-  return result.data;
+  if ('status' in result.data && result.data.status === 'released') {
+    return { kind: 'released', tombstone: result.data };
+  }
+  return { kind: 'active', lease: result.data as Lease };
+}
+
+// Active-lease view: tombstone and absence both read as null.
+function readLeaseFile(taskId: string, leasePath: string): Lease | null {
+  const record = readLeaseRecord(taskId, leasePath);
+  if (record === null || record.kind === 'released') return null;
+  return record.lease;
+}
+
+// casGuardedWrite version extractor for lease.json — both variants carry
+// lease_version (legacy active leases default to 1 via the schema).
+function leaseVersionOf(raw: string): number {
+  const parsed = LeaseFileSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    throw new OrchestratorError('SCHEMA_INVALID', 'lease.json failed schema validation during CAS read', {
+      zodError: parsed.error.message,
+    });
+  }
+  return parsed.data.lease_version;
+}
+
+// Map CasError codes to this module's typed error surface.
+function translateLeaseCasError(
+  err: unknown,
+  taskId: string,
+  operation: 'acquire' | 'heartbeat' | 'release' | 'steal',
+): never {
+  if (err instanceof OrchestratorError) throw err;
+  if (err instanceof CasError) {
+    if (err.code === 'cas_conflict') {
+      throw new OrchestratorError(
+        operation === 'acquire' ? 'LEASE_EXISTS' : 'LEASE_CONTENDED',
+        `Concurrent ${operation} on task ${taskId}: lease transition marker is held`,
+        { taskId, operation, cause: err },
+      );
+    }
+    if (err.code === 'version_conflict') {
+      // acquire: the file appeared/changed → effectively "lease exists".
+      // steal: the judged lease mutated (heartbeat renewal, another steal…) —
+      //   the caller must re-evaluate eligibility → LEASE_CONTENDED.
+      // heartbeat/release: our own lease advanced without us → stolen.
+      const code =
+        operation === 'acquire' ? 'LEASE_EXISTS' : operation === 'steal' ? 'LEASE_CONTENDED' : 'LEASE_STOLEN';
+      throw new OrchestratorError(
+        code,
+        `Lease for task ${taskId} changed concurrently during ${operation}`,
+        { taskId, operation, cause: err },
+      );
+    }
+    if (err.code === 'lease_lost') {
+      throw new OrchestratorError(
+        'LEASE_STOLEN',
+        `Lease ownership lost during ${operation} for task ${taskId}`,
+        { taskId, operation, cause: err },
+      );
+    }
+    throw new OrchestratorError('IO_ERROR', `Lease ${operation} failed for task ${taskId}: ${err.message}`, {
+      taskId,
+      operation,
+      cause: err,
+    });
+  }
+  throw new OrchestratorError('IO_ERROR', `Lease ${operation} failed for task ${taskId}`, {
+    taskId,
+    operation,
+    cause: err,
+  });
 }
 
 // ---- Read last claim-history.jsonl entry (used by acquire for generation continuity) ----
@@ -430,49 +357,59 @@ function appendClaimHistory(
   }
 }
 
-// ---- Write state.json unclaimed (used by steal — OQ-6 decision) ----
-// Writes state.json with state=unclaimed using rename (not link).
-// If this fails after lease.json was already updated, gc reconciliation
-// detects the divergence (lease=new_owner, state not yet unclaimed) and
-// completes the transition on next sweep. Document the gap explicitly.
+// ---- State-file helpers for the steal path (§C4 two-file protocol) ----
 
-function writeStateUnclaimed(
-  forgeDir: string,
-  taskId: string,
-  newLease: Lease,
-): void {
-  const statePath = stateFilePath(forgeDir, taskId);
+// Version extractor for state.json used by the steal reserve. Only the
+// monotonic state_version matters for CAS serialization; writeTaskState owns
+// full schema validation.
+function stateVersionOf(raw: string): number {
+  const parsed = JSON.parse(raw) as { state_version?: unknown };
+  if (typeof parsed?.state_version !== 'number' || !Number.isInteger(parsed.state_version)) {
+    throw new OrchestratorError('SCHEMA_INVALID', 'state.json has no integer state_version', {});
+  }
+  return parsed.state_version;
+}
 
-  // Read current state to get attempt_count; if absent, start fresh.
+// Build the unclaimed state record a successful steal commits (OQ-6). Derives
+// ONLY from the post-acquire read held by the reserved marker.
+function buildUnclaimedPayload(taskId: string, currentRaw: string | null, newLease: Lease): string {
   let currentAttemptCount = 0;
   let currentStateVersion = -1;
-  try {
-    const raw = fs.readFileSync(statePath, 'utf8');
-    let parsed: unknown;
+  // FORGE-231: the failure budget + informational counters survive a steal —
+  // a steal is an ownership transfer, not a failure.
+  let currentFailureCount = 0;
+  let currentLastFailureKey: string | null = null;
+  let currentReviewAttempts = 0;
+  let currentShipAttempts = 0;
+  if (currentRaw !== null) {
     try {
-      parsed = JSON.parse(raw);
-    } catch {
-      parsed = undefined;
-    }
-    if (parsed !== undefined) {
-      const res = TaskStateSchema.safeParse(parsed);
+      const res = TaskStateSchema.safeParse(JSON.parse(currentRaw));
       if (res.success) {
         currentAttemptCount = res.data.attempt_count;
         currentStateVersion = res.data.state_version;
+        currentFailureCount = res.data.failure_count;
+        currentLastFailureKey = res.data.last_failure_key;
+        currentReviewAttempts = res.data.review_attempt_count;
+        currentShipAttempts = res.data.ship_attempt_count;
+      } else {
+        // state_version was CAS-validated; preserve it even when the full
+        // record fails schema validation (gc reports the divergence).
+        currentStateVersion = stateVersionOf(currentRaw);
       }
+    } catch {
+      // unreadable current state — fall through to a fresh record
     }
-  } catch {
-    // ENOENT or any read error — start fresh
   }
-
-  const newStateVersion = currentStateVersion + 1;
-
   const unclaimed: TaskStateRecord = {
     version: 1,
     task_id: taskId,
     state: 'unclaimed',
-    state_version: newStateVersion,
+    state_version: currentStateVersion + 1,
     attempt_count: currentAttemptCount,
+    failure_count: currentFailureCount,
+    last_failure_key: currentLastFailureKey,
+    review_attempt_count: currentReviewAttempts,
+    ship_attempt_count: currentShipAttempts,
     current_attempt_id: null,
     updated_at: new Date().toISOString(),
     updated_by: {
@@ -481,57 +418,7 @@ function writeStateUnclaimed(
       generation: newLease.generation,
     },
   };
-
-  const payload = JSON.stringify(unclaimed);
-  const tmpPath = tempName(statePath);
-  const dir = dirname(statePath);
-
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch {
-    return; // best-effort — gc will reconcile
-  }
-
-  let fd: number;
-  try {
-    fd = fs.openSync(tmpPath, 'wx', 0o600);
-  } catch {
-    return; // best-effort
-  }
-
-  const buf = Buffer.from(payload, 'utf8');
-  let writeOk = false;
-  try {
-    let offset = 0;
-    while (offset < buf.length) {
-      const written = fs.writeSync(fd, buf, offset, buf.length - offset, null);
-      if (written === 0) break;
-      offset += written;
-    }
-    // H3: set writeOk ONLY after fsync completes without error. Setting it
-    // before fsync would allow rename to proceed on a file whose data hasn't
-    // been flushed to stable storage, defeating the durability guarantee.
-    try {
-      fs.fsyncSync(fd);
-      writeOk = true; // only set after successful fsync
-    } catch { /* best-effort — gc will reconcile */ }
-  } catch {
-    // best-effort
-  } finally {
-    try { fs.closeSync(fd); } catch { /* ignore */ }
-  }
-
-  if (!writeOk) {
-    bestEffortUnlink(tmpPath);
-    return;
-  }
-
-  try {
-    fs.renameSync(tmpPath, statePath);
-  } catch {
-    bestEffortUnlink(tmpPath);
-    // gc will reconcile
-  }
+  return JSON.stringify(unclaimed);
 }
 
 // ---- Public API ----
@@ -560,69 +447,84 @@ export function acquire(opts: AcquireOptions): Lease {
     opts.specRevision ?? computeSpecRevisionSync(repoRoot);
 
   const targetPath = leaseFilePath(forgeDir, taskId);
-  ensureDirectory(dirname(targetPath), taskId);
 
-  // Read prior lease (if any) to determine the next generation number.
-  // If a lease file exists at this point, acquire fails via EEXIST on linkSync.
-  // We read purely to get the generation for the record; the race is safe because
-  // linkSync is the atomic gate.
-  let nextGeneration = 0;
-  const priorLease = readLeaseFile(taskId, targetPath);
-  if (priorLease !== null) {
-    // A lease exists — linkSync will fail with EEXIST and we'll throw LEASE_EXISTS.
-    // Still compute generation in case a concurrent steal cleared it between read and link.
-    nextGeneration = priorLease.generation + 1;
+  // Acquisition mode from the current lease file:
+  // - ACTIVE lease present → LEASE_EXISTS (steal is the expired-lease path);
+  // - tombstone → numeric CAS on its lease_version; generation continues from
+  //   last_generation (written atomically at release — authoritative);
+  // - absent + claim history → LEGACY (pre-FORGE-231 release / admin release):
+  //   create-domain CAS; generation continues from history (R8 CRIT-1);
+  // - absent + no history → genuine first acquire; generation 0.
+  const record = readLeaseRecord(taskId, targetPath);
+  if (record?.kind === 'active') {
+    throw new OrchestratorError(
+      'LEASE_EXISTS',
+      `Lease already exists for task ${taskId}: ${targetPath}`,
+      { taskId, path: targetPath },
+    );
+  }
+
+  let expectedVersion: number | 'create';
+  let nextGeneration: number;
+  if (record?.kind === 'released') {
+    expectedVersion = record.tombstone.lease_version;
+    nextGeneration = record.tombstone.last_generation + 1;
   } else {
-    // B3: No lease file — but there may be history from a prior release.
-    // Use last history entry's generation + 1 to prevent reset to 0 after
-    // a release-then-reacquire cycle. Only use 0 if this is truly the first ever acquire.
+    expectedVersion = 'create';
     const lastHistory = readLastClaimHistoryEntry(forgeDir, taskId);
-    if (lastHistory !== null) {
-      nextGeneration = lastHistory.generation + 1;
-    }
-    // else: nextGeneration stays 0 (genuine first acquire — no history file)
+    nextGeneration = lastHistory !== null ? lastHistory.generation + 1 : 0;
   }
 
   const now = Date.now();
-  const lease: Lease = {
+  const claimId = uuidv7();
+  const makeLease = (generation: number, leaseVersion: number): Lease => ({
     version: 1,
-    claim_id: uuidv7(),
+    claim_id: claimId,
     task_id: taskId,
     attempt_id: null,
     owner_run_id: runId,
     acquired_at: new Date(now).toISOString(),
     expires_at: new Date(now + leaseTtlMs).toISOString(),
     last_heartbeat_at: new Date(now).toISOString(),
-    generation: nextGeneration,
+    generation,
     spec_revision: specRevision.revision,
-  };
+    lease_version: leaseVersion,
+  });
 
-  // id-in-path-and-payload invariant: already equal since we derived taskId from opts.taskId
-  if (lease.task_id !== taskId) {
-    throw new OrchestratorError(
-      'INVALID_ID',
-      `task_id mismatch: path=${taskId} payload=${lease.task_id}`,
-      { taskId },
-    );
-  }
-
-  const validation = LeaseSchema.safeParse(lease);
-  if (!validation.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `Lease record failed schema validation`,
-      { taskId, zodError: validation.error.message },
-    );
-  }
-
-  const payload = JSON.stringify(validation.data);
-  const tmpPath = tempName(targetPath);
-
+  let placed: Lease | undefined;
   try {
-    writeTempFile(tmpPath, payload, taskId);
-    placeAtomicLink(tmpPath, targetPath, taskId);
-  } finally {
-    bestEffortUnlink(tmpPath);
+    casGuardedWrite({
+      filePath: targetPath,
+      expectedVersion,
+      holder: { run_id: runId, claim_id: claimId, generation: nextGeneration },
+      readVersion: leaseVersionOf,
+      buildContent: (raw) => {
+        // Derive from the POST-ACQUIRE read. On the tombstone path the version
+        // pin makes the content stable, but never trust the pre-read.
+        let candidate: Lease;
+        if (raw !== null) {
+          const current = LeaseFileSchema.safeParse(JSON.parse(raw));
+          if (!current.success || !('status' in current.data && current.data.status === 'released')) {
+            throw new CasError('lease_lost', `lease.json for ${taskId} is not a release tombstone during re-acquire`);
+          }
+          candidate = makeLease(current.data.last_generation + 1, current.data.lease_version + 1);
+        } else {
+          candidate = makeLease(nextGeneration, 1);
+        }
+        const validation = LeaseSchema.safeParse(candidate);
+        if (!validation.success) {
+          throw new OrchestratorError(
+            'SCHEMA_INVALID',
+            `Lease record failed schema validation`,
+            { taskId, zodError: validation.error.message },
+          );
+        }
+        placed = validation.data;
+        return JSON.stringify(placed);
+      },
+    });
+  } catch (err) {
+    translateLeaseCasError(err, taskId, 'acquire');
   }
 
   appendClaimHistory(
@@ -631,14 +533,14 @@ export function acquire(opts: AcquireOptions): Lease {
     {
       event: 'acquired',
       ts: new Date().toISOString(),
-      claim_id: lease.claim_id,
+      claim_id: placed!.claim_id,
       run_id: runId,
-      generation: lease.generation,
+      generation: placed!.generation,
     },
     opts.logRotateMaxBytes,
   );
 
-  return validation.data;
+  return placed!;
 }
 
 export interface CallerIdentity {
@@ -709,7 +611,9 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
 
   const targetPath = leaseFilePath(forgeDir, taskId);
 
-  // 1. Read and validate current lease.
+  // 1. Fast-fail read + ownership check. The AUTHORITATIVE check happens on
+  //    the post-acquire read inside the guarded write below; this one exists
+  //    for precise typed errors on the common paths.
   const stored = readLeaseFile(taskId, targetPath);
   if (stored === null) {
     throw new OrchestratorError(
@@ -719,7 +623,6 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
     );
   }
 
-  // 2. Validate ownership — throws LEASE_STOLEN on mismatch.
   // H1: include run_id in the comparison (same logic as assertLeaseOwnership).
   if (
     stored.claim_id !== caller.claim_id ||
@@ -741,64 +644,61 @@ export function heartbeat(opts: HeartbeatOptions): Lease {
     );
   }
 
-  // 3. Build updated lease.
+  // 2. Guarded renewal: single-committer on lease_version. A concurrent steal
+  //    either holds the marker (we abort with LEASE_CONTENDED) or has already
+  //    advanced the version (version_conflict → LEASE_STOLEN via the
+  //    translator). The pre-FORGE-231 verify-after-write is subsumed by the
+  //    marker protocol.
   const now = nowOverride ?? Date.now();
-  const updated: Lease = {
-    ...stored,
-    expires_at: new Date(now + leaseTtlMs).toISOString(),
-    last_heartbeat_at: new Date(now).toISOString(),
-  };
-
-  const validation = LeaseSchema.safeParse(updated);
-  if (!validation.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `Updated lease record failed schema validation`,
-      { taskId, zodError: validation.error.message },
-    );
-  }
-
-  // 4. Write atomically: tmp → fsync → unlink(target) → link(tmp, target) → unlink(tmp).
-  //    This is the one write path that intentionally replaces an existing file.
-  //    It is gated on the ownership check above, so only the validated holder can overwrite.
-  const payload = JSON.stringify(validation.data);
-  const tmpPath = tempName(targetPath);
+  let renewed: Lease | undefined;
   try {
-    writeTempFile(tmpPath, payload, taskId);
-    overwriteAtomicLink(tmpPath, targetPath, taskId);
-  } finally {
-    bestEffortUnlink(tmpPath);
-  }
-
-  // B1 — Verify-after-write: re-read lease.json immediately after overwrite and
-  // confirm the written (claim_id, generation, owner_run_id) is still present. A concurrent
-  // steal that unlinked our file between our unlink and our link would have won
-  // and replaced the file with a new generation. If the re-read disagrees with
-  // what we wrote, surface LEASE_STOLEN so the caller can abort safely.
-  // Fix 3: include owner_run_id in the mismatch condition for consistency with
-  // the 3-field comparison used at all H1 sites (assertLeaseOwnership, heartbeat
-  // initial check, assertLeaseOwnershipFromFile).
-  const reread = readLeaseFile(taskId, targetPath);
-  if (
-    reread === null ||
-    reread.claim_id !== validation.data.claim_id ||
-    reread.generation !== validation.data.generation ||
-    reread.owner_run_id !== validation.data.owner_run_id
-  ) {
-    throw new OrchestratorError(
-      'LEASE_STOLEN',
-      `Lease was stolen concurrently during heartbeat for task ${taskId}`,
-      {
-        taskId,
-        from_generation: caller.generation,
-        stored_generation: reread?.generation ?? null,
-        stored_run_id: reread?.owner_run_id ?? null,
-        reason: 'concurrent_steal_after_heartbeat_write',
+    casGuardedWrite({
+      filePath: targetPath,
+      expectedVersion: stored.lease_version,
+      holder: { run_id: caller.run_id, claim_id: caller.claim_id, generation: caller.generation },
+      readVersion: leaseVersionOf,
+      buildContent: (raw) => {
+        if (raw === null) {
+          throw new CasError('lease_lost', `lease.json disappeared during heartbeat for ${taskId}`);
+        }
+        const current = LeaseFileSchema.safeParse(JSON.parse(raw));
+        if (!current.success) {
+          throw new CasError('io', `lease.json unparseable during heartbeat for ${taskId}`);
+        }
+        if ('status' in current.data && current.data.status === 'released') {
+          throw new CasError('lease_lost', `lease for ${taskId} was released concurrently`);
+        }
+        const active = current.data as Lease;
+        if (
+          active.claim_id !== caller.claim_id ||
+          active.generation !== caller.generation ||
+          active.owner_run_id !== caller.run_id
+        ) {
+          throw new CasError('lease_lost', `lease ownership changed during heartbeat for ${taskId}`);
+        }
+        const candidate: Lease = {
+          ...active,
+          expires_at: new Date(now + leaseTtlMs).toISOString(),
+          last_heartbeat_at: new Date(now).toISOString(),
+          lease_version: active.lease_version + 1,
+        };
+        const validation = LeaseSchema.safeParse(candidate);
+        if (!validation.success) {
+          throw new OrchestratorError(
+            'SCHEMA_INVALID',
+            `Updated lease record failed schema validation`,
+            { taskId, zodError: validation.error.message },
+          );
+        }
+        renewed = validation.data;
+        return JSON.stringify(renewed);
       },
-    );
+    });
+  } catch (err) {
+    translateLeaseCasError(err, taskId, 'heartbeat');
   }
 
-  return validation.data;
+  return renewed!;
 }
 
 export interface StealOptions {
@@ -825,30 +725,27 @@ export function steal(opts: StealOptions): Lease {
   } = opts;
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
   const targetPath = leaseFilePath(forgeDir, taskId);
+  const statePath = stateFilePath(forgeDir, taskId);
   const now = nowOverride ?? Date.now();
   const repoRoot = opts.repoRoot ?? dirname(forgeDir);
   const specRevision =
     opts.specRevision ?? computeSpecRevisionSync(repoRoot);
 
-  ensureDirectory(dirname(targetPath), taskId);
-
-  const existing = readLeaseFile(taskId, targetPath);
-
-  if (existing === null) {
-    // No existing lease — proceed as normal acquire. Forward the resolved
-    // specRevision so the steal-as-acquire path doesn't recompute (and so
-    // tests passing a sentinel via steal() see the same value on the lease).
-    return acquire({
-      forgeDir,
-      taskId,
-      runId,
-      leaseTtlMs,
-      specRevision,
-      repoRoot,
-    });
+  // 1. Observe: an ACTIVE lease must exist. Tombstone/absent → acquire is the
+  //    correct verb (the pre-FORGE-231 steal-as-acquire fall-through is gone —
+  //    with tombstones, an absent file for a once-leased task is a legacy
+  //    state that acquire handles).
+  const record = readLeaseRecord(taskId, targetPath);
+  if (record === null || record.kind === 'released') {
+    throw new OrchestratorError(
+      'LEASE_NOT_FOUND',
+      `No active lease to steal for task ${taskId} — use acquire`,
+      { taskId, path: targetPath },
+    );
   }
+  const existing = record.lease;
 
-  // Check if steal is eligible (past expiry + grace period).
+  // 2. Eligibility (past expiry + grace period).
   const expiresAt = new Date(existing.expires_at).getTime();
   if (now <= expiresAt + stealGraceMs) {
     throw new OrchestratorError(
@@ -863,81 +760,140 @@ export function steal(opts: StealOptions): Lease {
     );
   }
 
-  // Steal is eligible. Build new lease with incremented generation.
   const newGeneration = existing.generation + 1;
-  const newLease: Lease = {
-    version: 1,
-    claim_id: uuidv7(),
-    task_id: taskId,
-    attempt_id: null,
-    owner_run_id: runId,
-    acquired_at: new Date(now).toISOString(),
-    expires_at: new Date(now + leaseTtlMs).toISOString(),
-    last_heartbeat_at: new Date(now).toISOString(),
-    generation: newGeneration,
-    spec_revision: specRevision.revision,
-  };
+  const newClaimId = uuidv7();
+  const holder = { run_id: runId, claim_id: newClaimId, generation: newGeneration };
 
-  const validation = LeaseSchema.safeParse(newLease);
-  if (!validation.success) {
-    throw new OrchestratorError(
-      'SCHEMA_INVALID',
-      `New lease record failed schema validation`,
-      { taskId, zodError: validation.error.message },
-    );
+  // 3. RESERVE the state transition FIRST (lock order: STATE before LEASE).
+  //    A held state marker means some writer owns an in-flight state commit —
+  //    the steal aborts entirely, publishing nothing. Conservative: a steal
+  //    never overlaps a held commit right.
+  let stateExpected: number | 'create';
+  {
+    let raw: string | null = null;
+    try {
+      raw = fs.readFileSync(statePath, 'utf8');
+    } catch (err) {
+      if (!(isNodeFsError(err) && err.code === 'ENOENT')) {
+        throw new OrchestratorError(
+          'IO_ERROR',
+          `Failed to read state.json for steal of task ${taskId}`,
+          { taskId, path: statePath, cause: err },
+        );
+      }
+    }
+    stateExpected = raw === null ? 'create' : stateVersionOf(raw);
   }
 
-  const payload = JSON.stringify(validation.data);
-  const tmpPath = tempName(targetPath);
-
-  // Fix 1 (steal verify-before-write): re-read lease.json just before overwrite to
-  // close the race where heartbeat refreshes the lease after our eligibility check
-  // but before our write. If the lease has changed since we judged it stealable,
-  // the holder has been actively renewed and we must not silently un-renew them.
-  //
-  // Residual window: a nanosecond gap remains between this re-read and the
-  // unlink+link in overwriteAtomicLink. Closing it fully requires OS-level file
-  // locking (e.g., flock(2)) which is out of scope for local-FS use. This check
-  // closes the practically significant race (heartbeat completing between
-  // readLeaseFile and overwriteAtomicLink) and is the accepted trade-off.
-  //
-  // Defense-in-depth: even if the nanosecond race fires, every downstream state
-  // mutation (writeTaskState, appendAttemptEvent, heartbeat, release) calls
-  // assertLeaseOwnership which reads fresh from disk and throws LEASE_STOLEN if
-  // generation/claim_id/run_id have advanced. A silently-stolen holder cannot
-  // corrupt state — they fail-fast on their next mutation. Follow-up: optional
-  // flock-based hardening tracked separately as a Phase 3 ticket.
-  const preWriteLease = readLeaseFile(taskId, targetPath);
-  if (
-    preWriteLease === null ||
-    preWriteLease.claim_id !== existing.claim_id ||
-    preWriteLease.generation !== existing.generation ||
-    preWriteLease.owner_run_id !== existing.owner_run_id ||
-    preWriteLease.expires_at !== existing.expires_at
-  ) {
-    throw new OrchestratorError(
-      'LEASE_NOT_EXPIRED',
-      `Lease for task ${taskId} was refreshed between eligibility check and write — concurrent heartbeat renewed it`,
-      {
-        taskId,
-        reason: 'concurrent_heartbeat_renewed_lease',
-        detail: 'lease was refreshed after eligibility check',
-        judged_expires_at: existing.expires_at,
-        current_expires_at: preWriteLease?.expires_at ?? null,
-      },
-    );
-  }
-
+  let stateMarker: HeldCasMarker;
   try {
-    writeTempFile(tmpPath, payload, taskId);
-    overwriteAtomicLink(tmpPath, targetPath, taskId);
-  } finally {
-    bestEffortUnlink(tmpPath);
+    stateMarker = acquireCasMarker(statePath, stateExpected, holder, stateVersionOf);
+  } catch (err) {
+    if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
+      throw new OrchestratorError(
+        'LEASE_CONTENDED',
+        `Steal aborted for task ${taskId}: the state transition is reserved or moved concurrently`,
+        { taskId, cause: err },
+      );
+    }
+    translateLeaseCasError(err, taskId, 'steal');
   }
 
-  // OQ-6: write state.json = unclaimed after new lease is placed.
-  // If this write fails, gc reconciles on next sweep.
-  writeStateUnclaimed(forgeDir, taskId, validation.data);
+  // 4-5. Publish the successor lease under the lease CAS. buildContent runs on
+  //      the post-acquire read: the lease must STILL be the exact one judged
+  //      stealable, and still expired.
+  let published: Lease | undefined;
+  try {
+    casGuardedWrite({
+      filePath: targetPath,
+      expectedVersion: existing.lease_version,
+      holder,
+      readVersion: leaseVersionOf,
+      buildContent: (raw) => {
+        if (raw === null) {
+          throw new CasError('lease_lost', `lease.json disappeared during steal of ${taskId}`);
+        }
+        const current = LeaseFileSchema.safeParse(JSON.parse(raw));
+        if (!current.success) {
+          throw new CasError('io', `lease.json unparseable during steal of ${taskId}`);
+        }
+        if ('status' in current.data && current.data.status === 'released') {
+          throw new CasError('lease_lost', `lease for ${taskId} was released during steal`);
+        }
+        const active = current.data as Lease;
+        if (
+          active.claim_id !== existing.claim_id ||
+          active.generation !== existing.generation ||
+          active.owner_run_id !== existing.owner_run_id ||
+          active.expires_at !== existing.expires_at
+        ) {
+          throw new CasError('lease_lost', `lease for ${taskId} was refreshed between eligibility check and write`);
+        }
+        if (now <= new Date(active.expires_at).getTime() + stealGraceMs) {
+          throw new CasError('lease_lost', `lease for ${taskId} is no longer expired`);
+        }
+        const candidate: Lease = {
+          version: 1,
+          claim_id: newClaimId,
+          task_id: taskId,
+          attempt_id: null,
+          owner_run_id: runId,
+          acquired_at: new Date(now).toISOString(),
+          expires_at: new Date(now + leaseTtlMs).toISOString(),
+          last_heartbeat_at: new Date(now).toISOString(),
+          generation: newGeneration,
+          spec_revision: specRevision.revision,
+          lease_version: active.lease_version + 1,
+        };
+        const validation = LeaseSchema.safeParse(candidate);
+        if (!validation.success) {
+          throw new OrchestratorError(
+            'SCHEMA_INVALID',
+            `New lease record failed schema validation`,
+            { taskId, zodError: validation.error.message },
+          );
+        }
+        published = validation.data;
+        return JSON.stringify(published);
+      },
+    });
+  } catch (err) {
+    // Pre-publish abort: release the reserved state marker (its transition
+    // never began placement), then translate. Preserve the pre-FORGE-231
+    // "concurrent heartbeat renewed it" error surface.
+    releaseCasMarker(stateMarker);
+    if (err instanceof CasError && err.code === 'lease_lost') {
+      throw new OrchestratorError(
+        'LEASE_NOT_EXPIRED',
+        `Lease for task ${taskId} was refreshed between eligibility check and write — concurrent heartbeat renewed it`,
+        {
+          taskId,
+          reason: 'concurrent_heartbeat_renewed_lease',
+          detail: 'lease was refreshed after eligibility check',
+          cause: err,
+        },
+      );
+    }
+    translateLeaseCasError(err, taskId, 'steal');
+  }
+
+  // 6. Commit state.json = unclaimed under the RESERVED marker (OQ-6). Best-
+  //    effort like before FORGE-231: the lease already changed hands; a failed
+  //    state commit leaves lease(new)/state(old) divergence for gc. The marker
+  //    follows commitUnderCasMarker's policy (released on proven pre-placement
+  //    failure, retained + reported on ambiguity).
+  try {
+    commitUnderCasMarker(
+      stateMarker,
+      buildUnclaimedPayload(taskId, stateMarker.raw, published!),
+    );
+    cleanupCompletedCasMarkers(
+      statePath,
+      stateExpected === 'create' ? 0 : stateExpected + 1,
+    );
+  } catch {
+    // gc reconciles (divergence row) — see module header.
+  }
 
   appendClaimHistory(
     forgeDir,
@@ -945,7 +901,7 @@ export function steal(opts: StealOptions): Lease {
     {
       event: 'stolen',
       ts: new Date(now).toISOString(),
-      claim_id: validation.data.claim_id,
+      claim_id: published!.claim_id,
       run_id: runId,
       generation: newGeneration,
       from_generation: existing.generation,
@@ -954,7 +910,7 @@ export function steal(opts: StealOptions): Lease {
     opts.logRotateMaxBytes,
   );
 
-  return validation.data;
+  return published!;
 }
 
 export interface ReleaseOptions {
@@ -970,22 +926,61 @@ export function release(opts: ReleaseOptions): void {
   const taskId = validateOrchestratorId(opts.taskId, 'taskId');
   const { caller } = opts;
 
-  // Validate ownership before releasing.
+  // Validate ownership before releasing. Identity-only — releasing an EXPIRED
+  // but still-owned lease is legal (R8 MAJ-1). Absent file AND tombstone both
+  // read as no active lease → LEASE_NOT_FOUND (pre-FORGE-231 parity).
   assertLeaseOwnership(forgeDir, taskId, caller);
 
   const targetPath = leaseFilePath(forgeDir, taskId);
+  const stored = readLeaseFile(taskId, targetPath);
+  if (stored === null) {
+    // Raced with another releaser between the assert and here — idempotent.
+    return;
+  }
+
   try {
-    fs.unlinkSync(targetPath);
+    casGuardedWrite({
+      filePath: targetPath,
+      expectedVersion: stored.lease_version,
+      holder: { run_id: caller.run_id, claim_id: caller.claim_id, generation: caller.generation },
+      readVersion: leaseVersionOf,
+      buildContent: (raw) => {
+        if (raw === null) {
+          throw new CasError('lease_lost', `lease.json disappeared during release of ${taskId}`);
+        }
+        const current = LeaseFileSchema.safeParse(JSON.parse(raw));
+        if (!current.success) {
+          throw new CasError('io', `lease.json unparseable during release of ${taskId}`);
+        }
+        if ('status' in current.data && current.data.status === 'released') {
+          throw new CasError('lease_lost', `lease for ${taskId} was already released`);
+        }
+        const active = current.data as Lease;
+        if (
+          active.claim_id !== caller.claim_id ||
+          active.generation !== caller.generation ||
+          active.owner_run_id !== caller.run_id
+        ) {
+          throw new CasError('lease_lost', `lease ownership changed during release of ${taskId}`);
+        }
+        const tombstone: ReleasedLeaseTombstone = {
+          version: 1,
+          status: 'released',
+          task_id: taskId,
+          lease_version: active.lease_version + 1,
+          last_generation: active.generation,
+          released_at: new Date().toISOString(),
+          released_by: {
+            run_id: caller.run_id,
+            claim_id: caller.claim_id,
+            generation: caller.generation,
+          },
+        };
+        return JSON.stringify(tombstone);
+      },
+    });
   } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      // Already gone — idempotent release.
-      return;
-    }
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to unlink lease.json for task ${taskId}`,
-      { taskId, path: targetPath, cause: err },
-    );
+    translateLeaseCasError(err, taskId, 'release');
   }
 
   appendClaimHistory(
@@ -1021,7 +1016,8 @@ export function release(opts: ReleaseOptions): void {
 
 export type AdminReleaseReason =
   | 'gc:row-13:duplicate'    // older-generation duplicate lease file
-  | 'gc:row-14:terminal-state'; // canonical lease present but task state is terminal
+  | 'gc:row-14:terminal-state' // canonical lease present but task state is terminal
+  | 'gc:row-15:merge-pending-lease'; // FORGE-231: merge_pending task whose worker lease expired (no heartbeat source exists)
 
 export interface AdminReleaseByIdentityOptions {
   forgeDir: string;

@@ -303,6 +303,11 @@ export async function runOrchestrateQuestionWrite(
   }
 
   if (outcome.kind === 'block_on_existing') {
+    // FORGE-231 (R8/R6 MAJ-1 convergent repair): a durable question can exist
+    // while the state transition was lost (crash between artifact and state,
+    // or a surfaced CAS conflict). Re-running the verb must converge the task
+    // to blocked_on_question instead of returning early and wedging it.
+    ensureBlockedOnQuestion(opts.forgeDir, opts.taskId, lease);
     return {
       exitCode: emit(
         ok({
@@ -431,24 +436,7 @@ export async function runOrchestrateQuestionWrite(
   // review-phase worker that hits an architectural question parks from
   // ready_for_review (FORGE-184); no new state/trigger — both reuse
   // 'question_written' → blocked_on_question.
-  try {
-    const state = readTaskState(opts.forgeDir, opts.taskId);
-    if (state.state === 'running' || state.state === 'ready_for_review') {
-      writeTaskState(
-        opts.forgeDir,
-        {
-          ...state,
-          state: 'blocked_on_question',
-          state_version: state.state_version + 1,
-          updated_at: new Date().toISOString(),
-          updated_by: callerFromLease(lease),
-        },
-        callerFromLease(lease),
-      );
-    }
-  } catch {
-    // State transition is best-effort here; the question is the authoritative record.
-  }
+  ensureBlockedOnQuestion(opts.forgeDir, opts.taskId, lease);
 
   // Note: --drift-event-id and --routing-hint are accepted via the CLI; in the
   // v0.4 simplified pipeline (per spec note line 188-189) they are echoed in the
@@ -596,3 +584,35 @@ export const questionWriteHandler: VerbHandler = {
     );
   },
 };
+
+// FORGE-231: shared best-effort transition to blocked_on_question. Used by the
+// fresh-write path AND the block_on_existing replay path (convergent repair —
+// the durable question is the authoritative record; the state must follow it
+// even when the original transition was lost). Legal source states only:
+// running / ready_for_review; anything else (already blocked, terminal,
+// cancelled) is left untouched.
+function ensureBlockedOnQuestion(
+  forgeDir: string,
+  taskId: string,
+  lease: Lease,
+): void {
+  try {
+    const state = readTaskState(forgeDir, taskId);
+    if (state.state === 'running' || state.state === 'ready_for_review') {
+      writeTaskState(
+        forgeDir,
+        {
+          ...state,
+          state: 'blocked_on_question',
+          state_version: state.state_version + 1,
+          updated_at: new Date().toISOString(),
+          updated_by: callerFromLease(lease),
+        },
+        callerFromLease(lease),
+      );
+    }
+  } catch {
+    // Best-effort: the question is the authoritative record; the next verb
+    // invocation (or gc) converges the state.
+  }
+}

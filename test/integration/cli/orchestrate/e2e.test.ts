@@ -14,6 +14,16 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tsxBin, forgeBinEntry as entry } from '../../../helpers/spawn-tsx.ts';
 
+const assertLeaseReleased = (p: string): void => {
+  // FORGE-231: release writes a tombstone (file survives); absence only occurs
+  // on legacy/admin unlink paths. Either way there must be no ACTIVE lease.
+  if (existsSync(p)) {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { status?: string };
+    assert.equal(parsed.status, 'released', `expected a release tombstone at ${p}`);
+  }
+};
+
+
 // End-to-end test: spawn src/bin/forge.ts via tsx as a subprocess and drive the
 // full v2 orchestrate lifecycle against a 3-task fixture. Asserts on the
 // JSON envelope returned by each verb invocation, mirroring the spec
@@ -244,8 +254,8 @@ test('orchestrate e2e: 3-task fixture end-to-end via CLI verbs', () => {
 
   // ETOE-2 + ETOE-3 lease files removed; ETOE-1 lease retained until
   // separate ship/gc step (out of scope for this fixture).
-  assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/ETOE-2/lease.json')));
-  assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/ETOE-3/lease.json')));
+  assertLeaseReleased(join(forgeDir, 'orchestrator/tasks/ETOE-2/lease.json'));
+  assertLeaseReleased(join(forgeDir, 'orchestrator/tasks/ETOE-3/lease.json'));
 
   // run list shows the run.
   res = runVerb(['orchestrate', 'run', 'list', '--forge-dir', forgeDir], work);

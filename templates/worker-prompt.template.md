@@ -4,6 +4,8 @@ Run: {{RUN_ID}}
 Worktree: {{WORKTREE_PATH}}
 Phase: {{PHASE}}
 
+{{REVIEW_PINNING}}
+
 ## Task description
 
 {{TASK_DESCRIPTION}}

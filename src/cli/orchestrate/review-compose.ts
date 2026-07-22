@@ -18,12 +18,9 @@
 
 import { lstatSync, readFileSync } from 'node:fs';
 
-import { ReviewVerdictSchema, type ReviewVerdict } from '../../schemas/verdict.ts';
+import type { ReviewVerdict } from '../../schemas/verdict.ts';
 import { REVIEW_HOSTS, type ReviewHost } from '../../schemas/hosts.ts';
-import {
-  composeReviewVerdict,
-  type ComposeCtx,
-} from '../../orchestrator/review-compose.ts';
+import { composeTrustedReviewOutcome } from '../../orchestrator/review-compose.ts';
 import { fail, ok, type Envelope } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -58,6 +55,7 @@ export interface OrchestrateReviewComposeOptions {
   // and a warning is emitted (lenient/back-compat). Never sourced from a
   // worker-writable file. One of the ReviewVerdict hosts (claude|codex|gemini).
   readonly expectedPrimaryHost?: ReviewHost;
+  readonly expectedTargetSha?: string;
 }
 
 export interface OrchestrateReviewComposeResult {
@@ -134,29 +132,6 @@ function readCappedJson(
   }
 }
 
-// FORGE-187 R3: accept BOTH a raw ReviewVerdict and the second-opinion verb's
-// success envelope `{ok:true,data:{...,verdict}}`. If the parsed object looks
-// like that envelope, unwrap `data.verdict`; otherwise treat the object itself
-// as the raw ReviewVerdict. Then validate against the schema.
-function extractAndValidate(
-  value: unknown,
-  filePath: string,
-  kind: 'primary' | 'second-opinion',
-): { verdict: ReviewVerdict } | { error: Envelope } {
-  const candidate = unwrapEnvelope(value);
-  const parsed = ReviewVerdictSchema.safeParse(candidate);
-  if (!parsed.success) {
-    return {
-      error: fail(
-        'INVALID_VERDICT',
-        `${kind} verdict at ${filePath} failed ReviewVerdictSchema: ${parsed.error.message}`,
-        false,
-        { kind, path: filePath },
-      ),
-    };
-  }
-  return { verdict: parsed.data };
-}
 
 // Unwrap the second-opinion envelope shape if present; otherwise return as-is.
 function unwrapEnvelope(value: unknown): unknown {
@@ -173,9 +148,9 @@ function unwrapEnvelope(value: unknown): unknown {
   return value;
 }
 
-export function runOrchestrateReviewCompose(
+export async function runOrchestrateReviewCompose(
   opts: OrchestrateReviewComposeOptions,
-): OrchestrateReviewComposeResult {
+): Promise<OrchestrateReviewComposeResult> {
   // This verb is structured-only: the kind-tagged envelope is its sole output
   // in both --json and text invocations (a pure compose has no human-prose form
   // distinct from the envelope). `opts.json` is accepted for surface
@@ -197,42 +172,14 @@ export function runOrchestrateReviewCompose(
   if ('error' in primaryRead) {
     return { exitCode: writeEnvelope(primaryRead.error, out) };
   }
-  const primaryParsed = extractAndValidate(primaryRead.value, opts.primaryPath, 'primary');
-  if ('error' in primaryParsed) {
-    return { exitCode: writeEnvelope(primaryParsed.error, out) };
-  }
-
-  // 1b. FORGE-225: provenance check on the PRIMARY review verdict. Its `host` is
-  // self-declared (the primary review is an in-session subagent that writes the
-  // verdict file), so a forged label can fake dual lineage and slip a critical
-  // change past the gate. When the TRUSTED caller supplies the host that
-  // actually produced the review (the session host — NEVER read from a
-  // worker-writable file like worktree settings), verify the verdict matches it.
-  // When absent, fall back to the same-host check below and warn that provenance
-  // verification is inactive (lenient/back-compat — FORGE-225 decision). The
-  // second opinion is already harness-bound (parseHarnessVerdict), so it is not
-  // re-pinned here; a raw second-opinion file that bypasses the verb remains a
-  // documented residual gap (needs orchestrator-recorded attestation).
-  if (opts.expectedPrimaryHost) {
-    if (primaryParsed.verdict.host !== opts.expectedPrimaryHost) {
-      return {
-        exitCode: writeEnvelope(
-          fail(
-            'INVALID_VERDICT',
-            `primary review verdict at ${opts.primaryPath} has host:'${primaryParsed.verdict.host}' which does not match the expected primary review host '${opts.expectedPrimaryHost}' supplied by the orchestrator; the dual-lineage gate verifies provenance, not the self-declared host.`,
-            false,
-            {
-              kind: 'primary',
-              path: opts.primaryPath,
-              claimed: primaryParsed.verdict.host,
-              expected: opts.expectedPrimaryHost,
-            },
-          ),
-          out,
-        ),
-      };
-    }
-  } else {
+  // 1b-3 (FORGE-231): the ENTIRE trust pipeline — schema validation, host
+  // provenance (FORGE-225), dual-lineage same-host rejection, and composition
+  // — now runs in the shared gateway (composeTrustedReviewOutcome), the same
+  // code path the orchestrated completion gate uses. This verb only maps the
+  // gateway's typed rejection back onto its legacy envelope messages. The
+  // --critical-path flag is STRICTLY TIGHTENING (derived ∨ flag); this
+  // interactive verb has no pinned SHAs, so derivation is disabled here.
+  if (!opts.expectedPrimaryHost) {
     err.write(
       'warn: review-compose — provenance verification inactive: no --expected-primary-host supplied; ' +
         'the dual-lineage gate is trusting the self-declared primary verdict host. Pass ' +
@@ -240,61 +187,59 @@ export function runOrchestrateReviewCompose(
     );
   }
 
-  // 2. Read + validate the OPTIONAL second-opinion verdict.
-  let secondOpinion: ReviewVerdict | null = null;
+  let secondRaw: unknown | undefined;
   if (opts.secondOpinionPath) {
     const secondRead = readCappedJson(opts.secondOpinionPath, 'second-opinion');
     if ('error' in secondRead) {
       return { exitCode: writeEnvelope(secondRead.error, out) };
     }
-    const secondParsed = extractAndValidate(secondRead.value, opts.secondOpinionPath, 'second-opinion');
-    if ('error' in secondParsed) {
-      return { exitCode: writeEnvelope(secondParsed.error, out) };
-    }
-    // Dual-lineage invariant (generalized FORGE-224): a second opinion MUST
-    // come from a DIFFERENT host than the primary review. The host enum now
-    // includes 'claude' as a valid reviewer, so the gate is no longer "reject
-    // host:claude" — it is "reject same-host pairs". Accepting a same-host pair
-    // (e.g. claude+claude, codex+codex) would let a critical-path change pass
-    // with two reviews from the same lineage, defeating the adversarial gate.
-    const primaryHost = primaryParsed.verdict.host;
-    const secondHost = secondParsed.verdict.host;
-    if (secondHost === primaryHost) {
-      return {
-        exitCode: writeEnvelope(
-          fail(
-            'INVALID_VERDICT',
-            `second-opinion verdict at ${opts.secondOpinionPath} has host:'${secondHost}' which matches the primary review host; a second opinion must come from a different host than the primary review (same-host pairs, including claude+claude, are rejected).`,
-            false,
-            { kind: 'second-opinion', path: opts.secondOpinionPath, primaryHost, secondHost },
-          ),
-          out,
-        ),
-      };
-    }
-    secondOpinion = secondParsed.verdict;
+    secondRaw = unwrapEnvelope(secondRead.value);
   }
 
-  // 3. Build the ComposeCtx and run the pure policy. composeReviewVerdict
-  //    throws on an invalid ctx (empty/overlong branch or summary that would
-  //    produce a non-schema Verdict) — surface that as INVALID_ARGS.
-  const ctx: ComposeCtx = {
-    branch: opts.branch,
-    summary: opts.summary,
-    hasCriticalPath: opts.criticalPath,
-    secondOpinionAvailable: opts.secondOpinionAvailable,
-  };
-  let result;
+  let outcome;
   try {
-    result = composeReviewVerdict(primaryParsed.verdict, secondOpinion, ctx);
-  } catch (err) {
+    outcome = await composeTrustedReviewOutcome({
+      primaryRaw: unwrapEnvelope(primaryRead.value),
+      secondOpinionRaw: secondRaw,
+      expectedPrimaryHost: opts.expectedPrimaryHost as ReviewVerdict['host'] | undefined,
+      expectedTargetSha: opts.expectedTargetSha,
+      criticality: { derive: null, flag: opts.criticalPath },
+      branch: opts.branch,
+      summary: opts.summary,
+      secondOpinionAvailable: opts.secondOpinionAvailable,
+    });
+  } catch (composeErr) {
     return {
       exitCode: writeEnvelope(
-        fail('INVALID_ARGS', err instanceof Error ? err.message : String(err), false),
+        fail('INVALID_ARGS', composeErr instanceof Error ? composeErr.message : String(composeErr), false),
         out,
       ),
     };
   }
+
+  if (outcome.kind === 'invalid') {
+    const d = outcome.detail;
+    const isSecond = d.kind === 'second-opinion';
+    const path = isSecond ? opts.secondOpinionPath ?? '' : opts.primaryPath;
+    // Legacy envelope message formats (verb tests + skill docs reference them).
+    let message: string;
+    if (typeof d.zodError === 'string') {
+      message = `${String(d.kind)} verdict at ${path} failed ReviewVerdictSchema: ${d.zodError}`;
+    } else if ('primaryHost' in d) {
+      message = `second-opinion verdict at ${path} has host:'${String(d.secondHost)}' which matches the primary review host; a second opinion must come from a different host than the primary review (same-host pairs, including claude+claude, are rejected).`;
+    } else if ('expected' in d && typeof d.expected === 'string' && /^[0-9a-f]{40}$/.test(d.expected)) {
+      message = `${String(d.kind)} verdict at ${path} ${outcome.reason}`;
+    } else {
+      message = `primary review verdict at ${path} has host:'${String(d.claimed)}' which does not match the expected primary review host '${String(d.expected)}' supplied by the orchestrator; the dual-lineage gate verifies provenance, not the self-declared host.`;
+    }
+    return {
+      exitCode: writeEnvelope(
+        fail('INVALID_VERDICT', message, false, { ...d, path }),
+        out,
+      ),
+    };
+  }
+  const result = outcome.result;
 
   // 4. Emit the kind-tagged result.
   if (result.kind === 'verdict') {
@@ -321,6 +266,17 @@ export const reviewComposeHandler: VerbHandler = {
     // cursor, never a review host). A bad value is a clear INVALID_ARGS, not a
     // confusing host-mismatch downstream.
     const expectedPrimaryHostRaw = parseFlag(rest, 'expected-primary-host');
+    // FORGE-231: optional pin — when supplied, the primary witness must be
+    // pinned to this 40-hex SHA and the composed verdict carries it forward.
+    const expectedTargetSha = parseFlag(rest, 'expected-target-sha');
+    if (expectedTargetSha !== undefined && !/^[0-9a-f]{40}$/.test(expectedTargetSha)) {
+      return {
+        exitCode: writeEnvelope(
+          fail('INVALID_ARGS', '--expected-target-sha must be a 40-hex commit SHA', false),
+          process.stdout,
+        ),
+      };
+    }
     // A present-but-valueless flag (`--expected-primary-host` at end of argv →
     // parseFlag undefined) or an invalid value must FAIL, never silently disable
     // provenance verification (security footgun). hasFlag detects the token even
@@ -353,6 +309,7 @@ export const reviewComposeHandler: VerbHandler = {
       json,
       ...(secondOpinionPath ? { secondOpinionPath } : {}),
       ...(expectedPrimaryHostRaw ? { expectedPrimaryHost: expectedPrimaryHostRaw as ReviewHost } : {}),
+      expectedTargetSha,
     });
   },
 };

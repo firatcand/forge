@@ -405,6 +405,48 @@ test('AC5: a second call for an open decision_key returns outcome=blocked_on_exi
   assert.equal(readdirSync(qDir).length, 1);
 });
 
+test('FORGE-231 convergent repair: block_on_existing re-run repairs a lost blocked_on_question transition', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:repair',
+    question: 'Repair ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+
+  // Simulate the crash window: the durable question exists but the state
+  // transition was lost — the task is back in 'running'.
+  const statePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(state.state, 'blocked_on_question');
+  writeFileSync(
+    statePath,
+    JSON.stringify({ ...state, state: 'running', state_version: state.state_version + 1 }),
+    'utf8',
+  );
+
+  // Replay: same decision_key → blocked_on_existing, AND the state must be
+  // repaired to blocked_on_question instead of wedging in running.
+  const write2 = await runOrchestrateQuestionWrite({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    decisionKey: 'arch:repair',
+    question: 'Repair ask?',
+    ...REQUIRED,
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(write2.exitCode, 0);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.data.outcome, 'blocked_on_existing');
+  const repaired = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(repaired.state, 'blocked_on_question', 'replay must repair the lost transition');
+});
+
 test('DECISION_KEY_EXHAUSTED: prior closed max attempt marks task failed', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);

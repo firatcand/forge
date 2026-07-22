@@ -28,6 +28,7 @@ function mkLease(overrides: Partial<Lease> = {}): Lease {
     last_heartbeat_at: '2026-05-15T10:00:00.000Z',
     generation: 0,
     spec_revision: 'git:0000000000000000000000000000000000000000',
+    lease_version: 1,
     ...overrides,
   };
 }
@@ -52,6 +53,10 @@ function mkState(overrides: Partial<TaskStateRecord> = {}): TaskStateRecord {
     state: 'unclaimed' as TaskState,
     state_version: 0,
     attempt_count: 0,
+    failure_count: 0,
+    last_failure_key: null,
+    review_attempt_count: 0,
+    ship_attempt_count: 0,
     current_attempt_id: null,
     updated_at: '2026-05-15T10:00:00.000Z',
     updated_by: { run_id: 'run-A', claim_id: 'claim-A', generation: 0 },

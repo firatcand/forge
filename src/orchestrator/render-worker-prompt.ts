@@ -49,6 +49,9 @@ export interface WorkerPromptContext {
   readonly runId: string;
   readonly worktreePath: string;
   readonly phase: 'IMPLEMENT' | 'REVIEW' | 'SHIP';
+  // FORGE-231: review-phase pinning (both diff endpoints resolved at dispatch).
+  readonly reviewTargetSha?: string;
+  readonly reviewBaseSha?: string;
   readonly taskDescription: string;
   readonly acceptanceCriteria: readonly string[];
   readonly conventions: string;
@@ -81,6 +84,7 @@ const PLACEHOLDERS = new Set([
   'ANSWERED_QUESTIONS',
   'BUDGET_WARNING',
   'QUESTION_BUDGET_FLAGS',
+  'REVIEW_PINNING',
 ]);
 
 function renderAcceptance(criteria: readonly string[]): string {
@@ -166,7 +170,24 @@ export function renderWorkerPrompt(template: string, ctx: WorkerPromptContext): 
     ['ANSWERED_QUESTIONS', renderAnsweredQuestions(ctx.answeredQuestions)],
     ['BUDGET_WARNING', renderBudgetWarning(ctx.softCapWarning)],
     ['QUESTION_BUDGET_FLAGS', renderQuestionBudgetFlags(ctx.questionBudget)],
+    ['REVIEW_PINNING', renderReviewPinning(ctx)],
   ]);
 
   return substitutePlaceholders(stripped, values);
 }
+
+// FORGE-231: the pinned-review contract block (empty outside REVIEW). The
+// diff endpoints are IMMUTABLE SHAs pinned at dispatch time — the frozen base
+// branch name plus the reviewed head; no floating refs appear in the range.
+function renderReviewPinning(ctx: WorkerPromptContext): string {
+  if (ctx.phase !== 'REVIEW' || !ctx.reviewTargetSha || !ctx.reviewBaseSha) return '';
+  return [
+    '# Pinned review contract (FORGE-231)',
+    '',
+    `You are reviewing EXACTLY the range \`git diff ${ctx.reviewBaseSha}...${ctx.reviewTargetSha}\` — both endpoints are pinned SHAs; never review a floating ref or the working tree.`,
+    '',
+    `Your verdict file (\`review_verdict.json\` in this attempt's directory) MUST include \`"target_sha": "${ctx.reviewTargetSha}"\` — the completion gate rejects any verdict that does not speak for this exact commit.`,
+    '',
+  ].join('\n');
+}
+

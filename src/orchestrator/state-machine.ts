@@ -8,10 +8,9 @@ import {
   unlinkSync as _unlinkSync,
   writeSync as _writeSync,
 } from 'node:fs';
-import { randomBytes } from 'node:crypto';
-import { dirname } from 'node:path';
-import { OrchestratorError } from '../core/errors.ts';
-import { LeaseSchema } from '../schemas/lease.ts';
+import { CasError, OrchestratorError } from '../core/errors.ts';
+import { casGuardedWrite } from '../core/fs-atomic.ts';
+import { parseLeaseFile } from '../schemas/lease.ts';
 import { TaskStateSchema, type TaskState, type TaskStateRecord } from '../schemas/task-state.ts';
 import { stateFilePath, leaseFilePath, validateIdSegment } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
@@ -42,12 +41,24 @@ export type TransitionTrigger =
   | 'answer_recorded'
   | 'complete_ready_for_review'
   | 'review_passed'
-  | 'ship_completed'
   | 'lease_expired'
   | 'steal'
   | 'cancel'
   | 'retries_exhausted'
-  | 'changes_requested';
+  | 'changes_requested'
+  // FORGE-231 (spec/ORCHESTRATOR.md §Phase 3 + §failure accounting):
+  | 'changes_needed'                    // implement/review failure (composed vocabulary)
+  | 'blocked'                           // composed blocked outcome → question semantics
+  | 'ship_op_completed'                 // ship side effects submitted → async merge wait
+  | 'merge_confirmed'                   // RepoHost.mergeResult() proof → shipped
+  | 'head_drift'                        // PR head ≠ reviewed SHA → back to review
+  | 'pr_closed_unmerged'                // PR closed without merging → park
+  | 'probe_or_policy_loss'              // honesty probe / policy revoked → park
+  | 'implement_verified_single_host'    // single-host direct path (no review hop)
+  | 'ship_failed'                       // ship attempt failure (budget consumed)
+  | 'dispatch_implement'                // per-phase dispatch legality (owner decision PA)
+  | 'dispatch_review'                   // pointer-only self-loop (state unchanged)
+  | 'dispatch_ship';                    // pointer-only self-loop (state unchanged)
 
 type TransitionKey = `${TaskState}:${TransitionTrigger}`;
 
@@ -61,7 +72,6 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'awaiting_respawn:dispatch': 'dispatched',
   'running:complete_ready_for_review': 'ready_for_review',
   'ready_for_review:review_passed': 'reviewed',
-  'reviewed:ship_completed': 'shipped',
   'running:lease_expired': 'abandoned',
   'dispatched:lease_expired': 'abandoned',
   'blocked_on_question:lease_expired': 'abandoned',
@@ -70,8 +80,55 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'claimed:cancel': 'cancelled',
   'dispatched:cancel': 'cancelled',
   'running:retries_exhausted': 'failed',
-  'ready_for_review:changes_requested': 'running',
+  // FORGE-231 — failure lifecycle (single total budget; every failure path
+  // ends in a DISPATCHABLE or terminal state; the pre-FORGE-231
+  // ready_for_review:changes_requested → running stranded the task because
+  // dispatch is not legal from running):
+  'ready_for_review:changes_requested': 'awaiting_respawn',
+  'ready_for_review:changes_needed': 'awaiting_respawn',
+  'running:changes_needed': 'awaiting_respawn',
+  'running:blocked': 'blocked_on_question',
+  'reviewed:ship_failed': 'reviewed',
+  'awaiting_respawn:retries_exhausted': 'failed',
+  'reviewed:retries_exhausted': 'failed',
+  // FORGE-231 — merge_pending lifecycle (ADR orchestrator-ship-auto-merge):
+  // ship side effects are submitted, the PLATFORM merge is the only proof.
+  'reviewed:ship_op_completed': 'merge_pending',
+  'merge_pending:merge_confirmed': 'shipped',
+  'merge_pending:head_drift': 'ready_for_review',
+  'merge_pending:pr_closed_unmerged': 'blocked_on_question',
+  'merge_pending:probe_or_policy_loss': 'blocked_on_question',
+  'merge_pending:cancel': 'cancelled',
+  // FORGE-231 — single-host direct path (owner decision SH): CLI-verified
+  // implement head becomes the reviewed binding; no ready_for_review hop.
+  'running:implement_verified_single_host': 'reviewed',
+  'ready_for_review:implement_verified_single_host': 'reviewed',
+  // FORGE-231 — per-phase dispatch legality (owner decision PA). REVIEW/SHIP
+  // dispatches are pointer-only self-loops: the task state does not change,
+  // only current_attempt_id (committed through the same state CAS).
+  'claimed:dispatch_implement': 'dispatched',
+  'awaiting_respawn:dispatch_implement': 'dispatched',
+  'ready_for_review:dispatch_implement': 'dispatched',
+  'ready_for_review:dispatch_review': 'ready_for_review',
+  'reviewed:dispatch_ship': 'reviewed',
 } as const;
+
+// FORGE-231: table-driven transition application. Verbs that mutate task
+// state derive the TO-state from the table instead of hardcoding it, so the
+// table stops being documentation-only for every path this ticket touches.
+// Throws ILLEGAL_TRANSITION when no row exists for (from, trigger).
+export function applyTransition(from: TaskState, trigger: TransitionTrigger): TaskState {
+  const key: TransitionKey = `${from}:${trigger}`;
+  const to = TRANSITION_TABLE[key];
+  if (to === undefined) {
+    throw new OrchestratorError(
+      'ILLEGAL_TRANSITION',
+      `Illegal transition: no row for ${from} --[${trigger}]--> ?`,
+      { from, trigger, expected: null },
+    );
+  }
+  return to;
+}
 
 export function assertLegalTransition(
   from: TaskState,
@@ -86,23 +143,6 @@ export function assertLegalTransition(
       `Illegal transition: ${from} --[${trigger}]--> ${to}`,
       { from, to, trigger, expected: expected ?? null },
     );
-  }
-}
-
-// ---- Temp file helpers ----
-
-let tempCounter = 0;
-
-function tempName(targetPath: string): string {
-  tempCounter = (tempCounter + 1) >>> 0;
-  return `${targetPath}.${process.pid}.${tempCounter}.${randomBytes(8).toString('hex')}.tmp`;
-}
-
-function bestEffortUnlink(path: string): void {
-  try {
-    fs.unlinkSync(path);
-  } catch {
-    // best-effort cleanup; never throw from cleanup
   }
 }
 
@@ -182,60 +222,14 @@ export function writeTaskState(
   validateOrchestratorId(state.task_id, 'task_id');
   const taskId = state.task_id;
 
-  // 2. Read and validate lease ownership before any I/O.
-  //    Throws LEASE_STOLEN if caller's (claim_id, generation) don't match.
+  // 2. Fast-fail lease ownership check. Identity-only (no expiry) — verbs that
+  //    additionally require an UNEXPIRED lease (complete/dispatch commits)
+  //    assert that themselves; recovery writers (gc row 2) legitimately write
+  //    under an expired-but-identity-matching lease. The same check re-runs as
+  //    the CAS fence below, under marker ownership.
   assertLeaseOwnershipFromFile(forgeDir, taskId, caller);
 
-  // 3. Read current state.json to enforce state_version CAS.
-  //    Initial write (no prior state.json) expects state_version === 0.
-  //    H2: if the file exists but contains non-parseable JSON, throw SCHEMA_INVALID.
-  //    Silently treating corruption as a missing file would bypass CAS and allow
-  //    a stale writer to land a version-0 write over valid state.
-  let priorVersion: number | null = null;
-  const currentStatePath = stateFilePath(forgeDir, taskId);
-  try {
-    const currentRaw = fs.readFileSync(currentStatePath, 'utf8');
-    // H2: file exists — parse strictly. Non-empty bytes that fail JSON.parse
-    // indicate corruption; surface as SCHEMA_INVALID rather than silently
-    // falling through to initial-write path.
-    let currentParsed: unknown;
-    try {
-      currentParsed = JSON.parse(currentRaw);
-    } catch (parseErr) {
-      throw new OrchestratorError(
-        'SCHEMA_INVALID',
-        `state.json for task ${taskId} contains invalid JSON (corruption detected)`,
-        { taskId, path: currentStatePath, cause: parseErr },
-      );
-    }
-    const currentResult = TaskStateSchema.safeParse(currentParsed);
-    if (currentResult.success) {
-      priorVersion = currentResult.data.state_version;
-    }
-    // If safeParse fails (valid JSON but wrong schema shape), priorVersion stays
-    // null and the version-0 check below will gate the write.
-  } catch (err) {
-    if (err instanceof OrchestratorError) throw err; // re-throw SCHEMA_INVALID from above
-    if (!(isNodeFsError(err) && err.code === 'ENOENT')) {
-      throw new OrchestratorError(
-        'IO_ERROR',
-        `Failed to read current state.json for task ${taskId}`,
-        { taskId, cause: err },
-      );
-    }
-    // ENOENT: no prior state.json — initial write, priorVersion stays null
-  }
-
-  const expectedVersion = priorVersion === null ? 0 : priorVersion + 1;
-  if (state.state_version !== expectedVersion) {
-    throw new OrchestratorError(
-      'STATE_VERSION_CONFLICT',
-      `state_version conflict for task ${taskId}: expected ${expectedVersion}, got ${state.state_version}`,
-      { taskId, expected: expectedVersion, actual: state.state_version },
-    );
-  }
-
-  // 4. Stamp updated_by and updated_at from caller.
+  // 3. Stamp and validate the record BEFORE entering the guarded write.
   const stamped: TaskStateRecord = {
     ...state,
     updated_by: {
@@ -245,8 +239,6 @@ export function writeTaskState(
     },
     updated_at: new Date().toISOString(),
   };
-
-  // 5. Validate the final record before writing.
   const validation = TaskStateSchema.safeParse(stamped);
   if (!validation.success) {
     throw new OrchestratorError(
@@ -255,89 +247,85 @@ export function writeTaskState(
       { taskId, zodError: validation.error.message },
     );
   }
-
-  // 6. Write atomically: tmp → fsync → rename(tmp, state.json).
-  //    rename is the correct primitive here: state.json IS overwritten on each
-  //    transition (unlike lease.json / question files which use link+unlink).
-  //    The version-CAS guard above serializes correctness — only the holder
-  //    with the correct state_version can land the rename.
-  const targetPath = currentStatePath;
-  const dir = dirname(targetPath);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (err) {
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to create directory ${dir}`,
-      { taskId, dir, cause: err },
-    );
-  }
-
   const payload = JSON.stringify(validation.data);
-  const tmpPath = tempName(targetPath);
 
-  let fd: number;
-  try {
-    fd = fs.openSync(tmpPath, 'wx', 0o600);
-  } catch (err) {
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to open temp file ${tmpPath}`,
-      { taskId, path: tmpPath, cause: err },
-    );
-  }
+  // 4. FORGE-231: the write is a casGuardedWrite version transition. The
+  //    caller's record carries state_version V; V === 0 is initial creation
+  //    (the 'create' domain — distinct from the numeric 0→1 marker), V > 0
+  //    guards the (V-1)→V transition. The mandatory post-acquire re-read makes
+  //    a stale caller (whose V-1 read was overtaken) fail typed instead of
+  //    silently losing an update — the pre-FORGE-231 read-check-rename here
+  //    was not atomic (R6 CRIT-2).
+  const targetPath = stateFilePath(forgeDir, taskId);
+  const expectedVersion: number | 'create' =
+    state.state_version === 0 ? 'create' : state.state_version - 1;
 
-  const buf = Buffer.from(payload, 'utf8');
-  let primaryError: unknown;
-  try {
-    let offset = 0;
-    while (offset < buf.length) {
-      const written = fs.writeSync(fd, buf, offset, buf.length - offset, null);
-      if (written === 0) {
-        throw new OrchestratorError(
-          'IO_ERROR',
-          `writeSync returned 0 at offset ${offset}`,
-          { taskId, path: tmpPath, offset },
-        );
-      }
-      offset += written;
-    }
+  const readStateVersion = (raw: string): number => {
+    let parsed: unknown;
     try {
-      fs.fsyncSync(fd);
-    } catch (err) {
+      parsed = JSON.parse(raw);
+    } catch (parseErr) {
+      // H2: non-parseable bytes are corruption — never treated as absent.
       throw new OrchestratorError(
-        'IO_ERROR',
-        `fsync failed for ${tmpPath}`,
-        { taskId, path: tmpPath, cause: err },
+        'SCHEMA_INVALID',
+        `state.json for task ${taskId} contains invalid JSON (corruption detected)`,
+        { taskId, path: targetPath, cause: parseErr },
       );
     }
-  } catch (err) {
-    primaryError = err;
-  } finally {
-    try {
-      fs.closeSync(fd);
-    } catch (closeErr) {
-      if (primaryError === undefined) {
-        primaryError = new OrchestratorError(
-          'IO_ERROR',
-          `closeSync failed for ${tmpPath}`,
-          { taskId, path: tmpPath, cause: closeErr },
-        );
-      }
+    const v = (parsed as { state_version?: unknown }).state_version;
+    if (typeof v !== 'number' || !Number.isInteger(v)) {
+      // Fail-closed: an unversioned file cannot participate in CAS; recovery
+      // is a manual/gc concern, never a silent overwrite.
+      throw new OrchestratorError(
+        'SCHEMA_INVALID',
+        `state.json for task ${taskId} has no integer state_version`,
+        { taskId, path: targetPath },
+      );
     }
-  }
-  if (primaryError !== undefined) {
-    bestEffortUnlink(tmpPath);
-    throw primaryError;
-  }
+    return v;
+  };
 
   try {
-    fs.renameSync(tmpPath, targetPath);
+    casGuardedWrite({
+      filePath: targetPath,
+      expectedVersion,
+      holder: {
+        run_id: caller.run_id,
+        claim_id: caller.claim_id,
+        generation: caller.generation,
+      },
+      readVersion: readStateVersion,
+      fence: () => assertLeaseOwnershipFromFile(forgeDir, taskId, caller),
+      buildContent: () => payload,
+    });
   } catch (err) {
-    bestEffortUnlink(tmpPath);
+    // Unwrap OrchestratorErrors thrown by the reader/fence inside the guard.
+    if (err instanceof OrchestratorError) throw err;
+    if (err instanceof CasError) {
+      if (err.cause instanceof OrchestratorError) throw err.cause;
+      if (err.code === 'cas_conflict' || err.code === 'version_conflict') {
+        throw new OrchestratorError(
+          'STATE_VERSION_CONFLICT',
+          `state_version conflict for task ${taskId}: transition to ${state.state_version} is ${err.code === 'cas_conflict' ? 'reserved by another writer' : 'stale'}`,
+          { taskId, actual: state.state_version, cause: err },
+        );
+      }
+      if (err.code === 'lease_lost') {
+        throw new OrchestratorError(
+          'LEASE_STOLEN',
+          `Lease ownership lost while writing state for task ${taskId}`,
+          { taskId, cause: err },
+        );
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to write state.json for task ${taskId}: ${err.message}`,
+        { taskId, cause: err },
+      );
+    }
     throw new OrchestratorError(
       'IO_ERROR',
-      `rename failed: ${tmpPath} → ${targetPath}`,
+      `Failed to write state.json for task ${taskId}`,
       { taskId, cause: err },
     );
   }
@@ -388,16 +376,25 @@ export function assertLeaseOwnershipFromFile(
     );
   }
 
-  const result = LeaseSchema.safeParse(parsed);
-  if (!result.success) {
+  const record = parseLeaseFile(parsed);
+  if (record.kind === 'released') {
+    // FORGE-231: a release tombstone is not an active lease — same outcome as
+    // an absent file (mirrors leases.ts assertLeaseOwnership via readLeaseFile).
+    throw new OrchestratorError(
+      'LEASE_NOT_FOUND',
+      `lease for task ${taskId} is released (tombstone) — task is not claimed`,
+      { taskId, path: leasePath },
+    );
+  }
+  if (record.kind === 'invalid') {
     throw new OrchestratorError(
       'SCHEMA_INVALID',
       `Schema validation failed for lease.json of task ${taskId}`,
-      { taskId, zodError: result.error.message },
+      { taskId, zodError: record.error },
     );
   }
 
-  const stored = result.data;
+  const stored = record.lease;
   if (
     stored.claim_id !== caller.claim_id ||
     stored.generation !== caller.generation ||

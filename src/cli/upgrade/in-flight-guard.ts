@@ -24,7 +24,7 @@ import { execaSync } from 'execa';
 
 import { tasksRootDir } from '../../orchestrator/questions/paths.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
-import { LeaseSchema } from '../../schemas/lease.ts';
+import { parseLeaseFile } from '../../schemas/lease.ts';
 
 // A lease is ~400 bytes; anything larger is corrupt/hostile → fail-closed.
 const MAX_LEASE_BYTES = 64 * 1024;
@@ -430,14 +430,17 @@ function leaseBlocks(leasePath: string, dirTaskId: string, now: Date): boolean {
     return true; // corrupt JSON → fail-closed
   }
 
-  const result = LeaseSchema.safeParse(parsed);
-  if (!result.success) return true; // schema-invalid → fail-closed
+  const result = parseLeaseFile(parsed);
+  // FORGE-231: a release tombstone is a definitive "not in flight" — it is the
+  // durable record of a completed release, never a malformed lease.
+  if (result.kind === 'released') return false;
+  if (result.kind === 'invalid') return true; // schema-invalid → fail-closed
 
   // Orchestrator invariant: a lease's payload task_id matches its directory. A
   // mismatch is a corrupt/tampered lease → fail-closed (don't trust expires_at).
-  if (result.data.task_id !== dirTaskId) return true;
+  if (result.lease.task_id !== dirTaskId) return true;
 
-  return classifyLeaseHealth(result.data.expires_at, now) === 'alive';
+  return classifyLeaseHealth(result.lease.expires_at, now) === 'alive';
 }
 
 // Sanitize a task-dir name before echoing it into the refusal message (readdir

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 
 import { OrchestratorError } from '../../core/errors.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import { parseLeaseFile, type Lease } from '../../schemas/lease.ts';
 import { leaseFilePath } from '../../orchestrator/questions/paths.ts';
 import type { StateCaller } from '../../orchestrator/state-machine.ts';
 
@@ -17,15 +17,24 @@ export function readLease(forgeDir: string, taskId: string): Lease {
       { taskId, path },
     );
   }
-  const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-  if (!parsed.success) {
+  const parsed = parseLeaseFile(JSON.parse(raw));
+  if (parsed.kind === 'released') {
+    // FORGE-231: the verbs served here require an ACTIVE lease; a tombstone
+    // means the task is not claimed.
+    throw new OrchestratorError(
+      'LEASE_NOT_FOUND',
+      `lease for task ${taskId} is released (tombstone) — task is not claimed`,
+      { taskId },
+    );
+  }
+  if (parsed.kind === 'invalid') {
     throw new OrchestratorError(
       'SCHEMA_INVALID',
       `lease.json schema invalid for task ${taskId}`,
-      { taskId, zodError: parsed.error.message },
+      { taskId, zodError: parsed.error },
     );
   }
-  return parsed.data;
+  return parsed.lease;
 }
 
 export function callerFromLease(lease: Lease): StateCaller {

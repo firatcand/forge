@@ -190,3 +190,23 @@ test('renderer: placeholder INSIDE a stripped host block does not throw on unkno
   const out = renderWorkerPrompt(tmpl, baseCtx({ host: 'codex' }));
   assert.match(out, /safe text/);
 });
+
+test('renderer: REVIEW phase with pinned SHAs renders the pinned-review contract', () => {
+  const template = 'Phase: {{PHASE}}\n{{REVIEW_PINNING}}';
+  const target = 'a'.repeat(40);
+  const base = 'b'.repeat(40);
+  const out = renderWorkerPrompt(template, {
+    ...baseCtx(),
+    phase: 'REVIEW',
+    reviewTargetSha: target,
+    reviewBaseSha: base,
+  });
+  assert.match(out, new RegExp(`git diff ${base}\\.\\.\\.${target}`));
+  assert.match(out, new RegExp(`"target_sha": "${target}"`));
+});
+
+test('renderer: non-review phases render an empty pinning block', () => {
+  const out = renderWorkerPrompt('X{{REVIEW_PINNING}}Y', { ...baseCtx(), phase: 'IMPLEMENT' });
+  assert.equal(out, 'XY');
+});
+

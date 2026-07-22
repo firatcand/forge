@@ -110,3 +110,37 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
 ]);
 
 export type AttemptEvent = z.infer<typeof AttemptEventSchema>;
+
+// FORGE-231: the dispatch-time attempt manifest (attempts/<id>/manifest.json).
+// Previously written untyped by dispatch and hand-parsed by its readers
+// (complete's resolveWorktreePath, render-worker-prompt). REVIEW/SHIP are
+// first-class phase attempts (owner decision PA): `phase` discriminates them,
+// and a review attempt carries BOTH pinned diff endpoints — review_base_sha is
+// resolved at DISPATCH time so the reviewed range can never float.
+export const ATTEMPT_PHASES = ['implement', 'review', 'ship'] as const;
+export type AttemptPhase = (typeof ATTEMPT_PHASES)[number];
+
+export const AttemptManifestSchema = z
+  .object({
+    version: z.literal(1),
+    attempt_id: Id,
+    task_id: Id,
+    run_id: Id,
+    claim_id: Id,
+    generation: z.number().int().min(0),
+    // default preserves legacy manifests written before FORGE-231.
+    phase: z.enum(ATTEMPT_PHASES).default('implement'),
+    worktree_path: z.string().min(1).max(4096),
+    dispatched_at: Ts,
+    review_target_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    review_base_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  })
+  .refine(
+    (m) => m.phase !== 'review' || (m.review_target_sha !== undefined && m.review_base_sha !== undefined),
+    {
+      message: 'review-phase manifests require review_target_sha and review_base_sha',
+      path: ['review_target_sha'],
+    },
+  );
+
+export type AttemptManifest = z.infer<typeof AttemptManifestSchema>;

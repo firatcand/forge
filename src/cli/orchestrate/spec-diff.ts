@@ -15,7 +15,7 @@ import {
   stateFilePath,
   tasksRootDir,
 } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../schemas/lease.ts';
+import { parseLeaseFile } from '../../schemas/lease.ts';
 import { TaskStateSchema } from '../../schemas/task-state.ts';
 import {
   computeSpecDiffSinceClaim,
@@ -156,15 +156,23 @@ export async function runOrchestrateSpecDiff(
     return { exitCode: 1 };
   }
 
-  const validation = LeaseSchema.safeParse(parsedJson);
-  if (!validation.success) {
-    const msg = `lease schema validation failed: ${validation.error.message}`;
+  const validation = parseLeaseFile(parsedJson);
+  if (validation.kind === 'released') {
+    // FORGE-231: tombstone — the task is not claimed; there is no
+    // claim-time spec revision to diff against.
+    const msg = `lease for this task is released (tombstone) — task is not claimed`;
+    if (json) writeJson(err, { ok: false, error: { code: 'LEASE_NOT_FOUND', message: msg } });
+    else err.write(`forge orchestrate spec-diff: ${msg}\n`);
+    return { exitCode: 1 };
+  }
+  if (validation.kind === 'invalid') {
+    const msg = `lease schema validation failed: ${validation.error}`;
     if (json) writeJson(err, { ok: false, error: { code: 'SCHEMA_INVALID', message: msg } });
     else err.write(`forge orchestrate spec-diff: ${msg}\n`);
     return { exitCode: 1 };
   }
 
-  const lease = validation.data;
+  const lease = validation.lease;
   const result = await computeSpecDiffSinceClaim(repoRoot, lease.spec_revision);
 
   if (json) {
@@ -257,12 +265,17 @@ async function runAllActive(args: {
       err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (lease.json is not valid JSON)\n`);
       continue;
     }
-    const leaseValidation = LeaseSchema.safeParse(leaseParsed);
-    if (!leaseValidation.success) {
+    const leaseValidation = parseLeaseFile(leaseParsed);
+    if (leaseValidation.kind === 'released') {
+      // FORGE-231: tombstone — active state but no active lease; report as such.
+      err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (active state but lease is released)\n`);
+      continue;
+    }
+    if (leaseValidation.kind === 'invalid') {
       err.write(`forge orchestrate spec-diff --all-active: skipping ${taskId} (lease.json failed schema validation)\n`);
       continue;
     }
-    const lease = leaseValidation.data;
+    const lease = leaseValidation.lease;
     const leaseExpired = Date.parse(lease.expires_at) < now;
 
     // ── compute the diff since the stamped claim revision ──

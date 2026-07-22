@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
+import { execaSync } from 'execa';
 
 import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
@@ -17,7 +18,11 @@ function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
   process.stdout.write = ((chunk: unknown) => {
-    buf.push(String(chunk));
+    // Keep only envelope-shaped lines: the test runner's own spec-reporter
+    // output (ANSI + ✔ glyphs) can land in this capture asynchronously and
+    // must never be mistaken for the last envelope.
+    const s = String(chunk);
+    if (s.trimStart().startsWith('{')) buf.push(s);
     return true;
   }) as typeof process.stdout.write;
   t.after(() => {
@@ -111,6 +116,105 @@ function writeWorktreeMarker(worktreePath: string, taskId: string): void {
   );
 }
 
+// FORGE-231: a REAL git worktree with the frozen-base marker — the pinned
+// review flow resolves SHAs and derives criticality against actual git.
+function makeGitWorktree(repoRoot: string, taskId: string): { worktree: string; headSha: string; baseSha: string } {
+  const worktree = join(repoRoot, 'git-wt');
+  mkdirSync(worktree, { recursive: true });
+  const git = (...args: string[]): string =>
+    String(execaSync('git', args, { cwd: worktree, env: { LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' } }).stdout ?? '').trim();
+  git('init', '-q');
+  writeFileSync(join(worktree, 'a.txt'), 'base\n');
+  git('add', '-A');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'base');
+  const baseSha = git('rev-parse', 'HEAD');
+  git('update-ref', 'refs/remotes/origin/main', baseSha);
+  writeFileSync(join(worktree, 'a.txt'), 'work\n');
+  git('add', '-A');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'work');
+  const headSha = git('rev-parse', 'HEAD');
+  mkdirSync(join(worktree, '.forge'), { recursive: true });
+  writeFileSync(
+    join(worktree, '.forge', 'worktree-task.json'),
+    JSON.stringify({ version: 1, taskId, branch: `feat/${taskId}`, base_branch: 'main' }) + '\n',
+    'utf8',
+  );
+  return { worktree, headSha, baseSha };
+}
+
+function writePinnedVerdict(repoRoot: string, verdict: string, targetSha: string): string {
+  const p = join(repoRoot, 'pinned-verdict.json');
+  writeFileSync(
+    p,
+    JSON.stringify({
+      version: 1,
+      verdict,
+      summary: 'Task done',
+      tests: { ran: false, passed: 0, failed: 0, skipped: 0, duration_ms: 0, output_excerpt: '' },
+      lint: { ran: false, clean: true, violations: 0, output_excerpt: '' },
+      branch: 'feat/foo',
+      save_point: '',
+      target_sha: targetSha,
+    }),
+    'utf8',
+  );
+  return p;
+}
+
+function writeRawWitness(
+  forgeDir: string,
+  attemptId: string,
+  opts: { verdict?: string; host?: string; targetSha: string },
+): void {
+  const dir = join(forgeDir, 'orchestrator/tasks/FORGE-1/attempts', attemptId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'review_verdict.json'),
+    JSON.stringify({
+      version: 1,
+      verdict: opts.verdict ?? 'pass',
+      findings: [],
+      host: opts.host ?? 'codex',
+      target_sha: opts.targetSha,
+    }),
+    'utf8',
+  );
+}
+
+// Drive a task through implement-pass then dispatch a first-class REVIEW
+// attempt against a real worktree. Returns the review attempt id + SHAs.
+async function advanceToReviewAttempt(
+  stdout: string[],
+  ctx: { forgeDir: string; repoRoot: string; attemptId: string },
+): Promise<{ reviewAttemptId: string; worktree: string; headSha: string; baseSha: string }> {
+  const implVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const r = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: implVerdict,
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(r.exitCode, 0, 'implement complete should succeed');
+  const wt = makeGitWorktree(ctx.repoRoot, 'FORGE-1');
+  const claim = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'), 'utf8'));
+  stdout.length = 0;
+  const d = await runOrchestrateDispatch({
+    taskId: 'FORGE-1',
+    claimId: claim.claim_id,
+    runId: claim.owner_run_id,
+    worktreePath: wt.worktree,
+    phase: 'review',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(d.exitCode, 0, 'review dispatch should succeed');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  stdout.length = 0;
+  return { reviewAttemptId: env.data.attempt_id, ...wt };
+}
+
 function writeVerdict(repoRoot: string, verdict: string): string {
   const path = join(repoRoot, 'verdict.json');
   writeFileSync(
@@ -153,127 +257,206 @@ test('complete with verdict=ready_for_review + phase=implement → state ready_f
   assert.ok(vv.verified_by);
 });
 
-test('FORGE-187 R1: complete --phase review on the SAME attempt → reviewed, writes verdict.review.json', async (t) => {
+test('FORGE-231: pinned review flow — witness + gateway + ship-record write-ahead → reviewed', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
-  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  const rv = await advanceToReviewAttempt(stdout, ctx);
 
-  // 1. implement → ready_for_review (writes verdict.json on this attempt).
-  const implVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
-  let result = await runOrchestrateComplete({
+  writeRawWitness(ctx.forgeDir, rv.reviewAttemptId, { targetSha: rv.headSha });
+  const composed = writePinnedVerdict(ctx.repoRoot, 'ready_for_review', rv.headSha);
+  const result = await runOrchestrateComplete({
     taskId: 'FORGE-1',
-    attemptId: ctx.attemptId,
-    verdictFile: implVerdict,
-    phase: 'implement',
-    forgeDir: ctx.forgeDir,
-    json: true,
-  });
-  assert.equal(result.exitCode, 0, 'implement complete should succeed');
-  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json present');
-
-  // 2. review → reviewed on the SAME attempt. Before R1 this collided on the
-  //    `flag:'wx'` write to verdict.json and the ready_for_review→reviewed path
-  //    never actually worked. The phase-scoped filename fixes it.
-  const reviewVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
-  result = await runOrchestrateComplete({
-    taskId: 'FORGE-1',
-    attemptId: ctx.attemptId,
-    verdictFile: reviewVerdict,
+    attemptId: rv.reviewAttemptId,
+    verdictFile: composed,
     phase: 'review',
     forgeDir: ctx.forgeDir,
     json: true,
   });
-  assert.equal(result.exitCode, 0, 'review complete should succeed on the same attempt');
+  assert.equal(result.exitCode, 0, 'review complete should succeed');
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.data.next_state, 'reviewed');
   assert.match(env.data.verdict_path, /verdict\.review\.json$/);
-
-  // Phase-scoped files written; the implement verdict.json is untouched.
-  assert.ok(existsSync(join(dir, 'verdict.review.json')), 'verdict.review.json present');
-  assert.ok(existsSync(join(dir, 'verdict.review.verified.json')), 'verdict.review.verified.json present');
-  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json still present');
 
   const state = JSON.parse(
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
   assert.equal(state.state, 'reviewed');
+
+  // §C3 write-ahead: the ship record carries the reviewed binding.
+  const record = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/ship-record.json'), 'utf8'),
+  );
+  assert.equal(record.reviewed_head_sha, rv.headSha);
+  assert.equal(record.review_attempt_id, rv.reviewAttemptId);
+  assert.equal(record.merge_attempt, 'not_started');
+  assert.equal(record.base, null);
+  assert.equal(record.pr, null);
 });
 
-test('FORGE-187 R1: complete --phase ship on the SAME attempt → shipped, writes verdict.ship.json', async (t) => {
+test('FORGE-231: pinned review gate rejects a substituted composed carrier (witness says changes_requested)', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
-  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  const rv = await advanceToReviewAttempt(stdout, ctx);
 
-  for (const phase of ['implement', 'review', 'ship'] as const) {
-    const vf = writeVerdict(ctx.repoRoot, 'ready_for_review');
-    const result = await runOrchestrateComplete({
-      taskId: 'FORGE-1',
-      attemptId: ctx.attemptId,
-      verdictFile: vf,
-      phase,
-      forgeDir: ctx.forgeDir,
-      json: true,
-    });
-    assert.equal(result.exitCode, 0, `${phase} complete should succeed`);
-  }
+  // Raw witness FAILS the review; a forged ready_for_review carrier must die.
+  writeRawWitness(ctx.forgeDir, rv.reviewAttemptId, { verdict: 'changes_requested', targetSha: rv.headSha });
+  const forged = writePinnedVerdict(ctx.repoRoot, 'ready_for_review', rv.headSha);
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: rv.reviewAttemptId,
+    verdictFile: forged,
+    phase: 'review',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.data.next_state, 'shipped');
-  assert.match(env.data.verdict_path, /verdict\.ship\.json$/);
-
-  assert.ok(existsSync(join(dir, 'verdict.json')), 'implement verdict.json present');
-  assert.ok(existsSync(join(dir, 'verdict.review.json')), 'verdict.review.json present');
-  assert.ok(existsSync(join(dir, 'verdict.ship.json')), 'verdict.ship.json present');
-
+  assert.equal(env.error.code, 'INVALID_VERDICT');
+  assert.match(env.error.message, /does not match the trusted recomposition/);
+  // Nothing advanced.
   const state = JSON.parse(
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
-  assert.equal(state.state, 'shipped');
+  assert.equal(state.state, 'ready_for_review');
 });
-
-test('complete with verdict=changes_needed records last_failed_at and loops to running', async (t) => {
+test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship record', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
-  const verdictFile = writeVerdict(ctx.repoRoot, 'changes_needed');
+  const rv = await advanceToReviewAttempt(stdout, ctx);
+  writeRawWitness(ctx.forgeDir, rv.reviewAttemptId, { targetSha: rv.headSha });
+  const composed = writePinnedVerdict(ctx.repoRoot, 'ready_for_review', rv.headSha);
+  let result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: rv.reviewAttemptId,
+    verdictFile: composed,
+    phase: 'review',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  stdout.length = 0;
+
+  // Dispatch a first-class SHIP attempt from reviewed.
+  const claim = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'), 'utf8'));
+  const d = await runOrchestrateDispatch({
+    taskId: 'FORGE-1',
+    claimId: claim.claim_id,
+    runId: claim.owner_run_id,
+    worktreePath: rv.worktree,
+    phase: 'ship',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(d.exitCode, 0);
+  const shipAttempt = JSON.parse(stdout[stdout.length - 1] ?? '').data.attempt_id;
+  stdout.length = 0;
+
+  // Incomplete record (base/pr null) → refused.
+  const shipVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: shipAttempt,
+    verdictFile: shipVerdict,
+    phase: 'ship',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  let env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'SHIP_RECORD_INCOMPLETE');
+  stdout.length = 0;
+
+  // Populate base + pr (the FORGE-234 write-ahead stages, hand-rolled here)…
+  const recordPath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/ship-record.json');
+  const record = JSON.parse(readFileSync(recordPath, 'utf8'));
+  writeFileSync(
+    recordPath,
+    JSON.stringify({
+      ...record,
+      revision: record.revision + 1,
+      base: { repo: 'o/r', branch: 'main', push_remote: 'origin' },
+      pr: { repo: 'o/r', number: 7, url: 'https://example.test/pr/7' },
+      merge_attempt: 'submitted',
+    }),
+    'utf8',
+  );
+
+  // …then the ship completion enters the ASYNC merge wait — merge_pending,
+  // never shipped (the platform merge is the only proof).
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: shipAttempt,
+    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
+    phase: 'ship',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'merge_pending');
+  const state = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(state.state, 'merge_pending');
+});
+test('FORGE-231: changes_needed → awaiting_respawn with ONE budget increment + failure key', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const vf = writeVerdict(ctx.repoRoot, 'changes_needed');
   const result = await runOrchestrateComplete({
     taskId: 'FORGE-1',
     attemptId: ctx.attemptId,
-    verdictFile,
+    verdictFile: vf,
     phase: 'implement',
     forgeDir: ctx.forgeDir,
     json: true,
   });
   assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'awaiting_respawn');
   const state = JSON.parse(
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
-  assert.equal(state.state, 'running');
-  assert.equal(typeof state.last_failed_at, 'string');
-  assert.equal(state.failure_reason, undefined);
-});
+  assert.equal(state.state, 'awaiting_respawn');
+  assert.equal(state.failure_count, 1);
+  assert.equal(state.last_failure_key, `${ctx.attemptId}:implement`);
+  assert.ok(state.last_failed_at, 'last_failed_at recorded');
 
-test('complete --phase ship from running refuses with INVALID_STATE_FOR_PHASE', async (t) => {
+  // Crash-replay: the SAME completion short-circuits BEFORE any transition —
+  // no double-count, no illegal transition.
+  stdout.length = 0;
+  const replay = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(replay.exitCode, 0);
+  const replayEnv = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(replayEnv.data.replayed, true);
+  const after = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
+  );
+  assert.equal(after.failure_count, 1, 'replay must not re-increment the budget');
+});
+test('complete --phase ship against an implement attempt refuses with PHASE_MISMATCH', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
-  const verdictFile = writeVerdict(ctx.repoRoot, 'ready_for_review');
+  const vf = writeVerdict(ctx.repoRoot, 'ready_for_review');
   const result = await runOrchestrateComplete({
     taskId: 'FORGE-1',
     attemptId: ctx.attemptId,
-    verdictFile,
+    verdictFile: vf,
     phase: 'ship',
     forgeDir: ctx.forgeDir,
     json: true,
   });
-  // Codex 2nd-pass: ship from 'running' is illegal per state machine; the
-  // verb now refuses upfront rather than letting writeTaskState throw a
-  // cryptic ILLEGAL_TRANSITION.
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.ok, false);
-  assert.equal(env.error.code, 'INVALID_STATE_FOR_PHASE');
-  assert.equal(env.error.details.current_state, 'running');
-  assert.equal(env.error.details.required_state, 'reviewed');
+  assert.equal(env.error.code, 'PHASE_MISMATCH');
 });
-
 test('complete with malformed verdict file fails INVALID_VERDICT', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
@@ -466,7 +649,7 @@ test('FORGE-188: changes_needed + settings.verify present → verify NOT run (on
   assert.equal(result.exitCode, 0);
   assert.equal(invoked, false, 'verify must not run on the failure path');
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
-  assert.equal(state.state, 'running');
+  assert.equal(state.state, 'awaiting_respawn');
 });
 
 // ── FORGE-188 hardening: adversarial bypass-surface tests (F1–F4) ────────────
@@ -551,7 +734,7 @@ test("FORGE-188 (F2): manifest worktree_path points at ANOTHER task's marked wor
   assert.equal(state.state, 'running');
 });
 
-test('FORGE-188 (F3): malformed manifest.json (present, unparseable) + verify required → VERIFICATION_FAILED manifest_invalid', async (t) => {
+test('FORGE-188 (F3): malformed manifest.json (present, unparseable) → SCHEMA_INVALID at the phase-binding gate', async (t) => {
   const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
   const stdout = captureStdout(t);
   const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
@@ -577,8 +760,9 @@ test('FORGE-188 (F3): malformed manifest.json (present, unparseable) + verify re
   assert.equal(invoked, false, 'verify must not run with a corrupt dispatch manifest');
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.ok, false);
-  assert.equal(env.error.code, 'VERIFICATION_FAILED');
-  assert.equal(env.error.details.reason, 'manifest_invalid');
+  // FORGE-231: an unparseable/shape-invalid manifest dies at the phase-binding
+  // gate (SCHEMA_INVALID), before verification is even considered.
+  assert.equal(env.error.code, 'SCHEMA_INVALID');
 
   const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
   assert.equal(existsSync(join(dir, 'verdict.json')), false);
@@ -659,7 +843,7 @@ test('FORGE-188 (3rd-pass): manifest ABSENT (ENOENT) for a dispatched attempt �
   assert.equal(state.state, 'running');
 });
 
-test('FORGE-188 (3rd-pass): manifest present but {} (no worktree_path) → manifest_invalid, NO canonical fallback', async (t) => {
+test('FORGE-188 (3rd-pass): manifest present but {} → SCHEMA_INVALID at the phase-binding gate', async (t) => {
   const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
   const stdout = captureStdout(t);
   const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
@@ -683,8 +867,8 @@ test('FORGE-188 (3rd-pass): manifest present but {} (no worktree_path) → manif
   assert.equal(result.exitCode, 1);
   assert.equal(invoked, false, 'verify must NOT run against a canonical fallback when worktree_path is missing');
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.error.code, 'VERIFICATION_FAILED');
-  assert.equal(env.error.details.reason, 'manifest_invalid');
+  // FORGE-231: a shape-invalid manifest dies at the phase-binding gate.
+  assert.equal(env.error.code, 'SCHEMA_INVALID');
   const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
   assert.equal(existsSync(join(dir, 'verdict.json')), false);
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));

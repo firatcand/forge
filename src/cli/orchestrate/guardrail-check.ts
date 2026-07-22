@@ -30,7 +30,7 @@ import {
 } from '../../orchestrator/preflight.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import { leaseFilePath, validateIdSegment } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema, type Lease } from '../../schemas/lease.ts';
+import { parseLeaseFile, type Lease } from '../../schemas/lease.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
@@ -163,9 +163,10 @@ function appendGuardrailEvent(args: {
   let lease: Lease;
   try {
     const raw = readFileSync(leasePath, 'utf8');
-    const parsed = LeaseSchema.safeParse(JSON.parse(raw));
-    if (!parsed.success) return;
-    lease = parsed.data;
+    const parsed = parseLeaseFile(JSON.parse(raw));
+    // FORGE-231: tombstone (released) or invalid → no active lease to record.
+    if (parsed.kind !== 'active') return;
+    lease = parsed.lease;
   } catch {
     return;
   }

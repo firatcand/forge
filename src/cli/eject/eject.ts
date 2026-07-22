@@ -63,6 +63,8 @@ const BLOCKING_TASK_STATES = new Set([
   'awaiting_respawn',
   'ready_for_review',
   'reviewed',
+  // FORGE-231: awaiting the platform merge — still live.
+  'merge_pending',
 ]);
 
 const BACKUP_MARKER = '.forge-eject-backup.json';

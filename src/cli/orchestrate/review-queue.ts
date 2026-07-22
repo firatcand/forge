@@ -16,7 +16,7 @@ import { PhasesError } from '../../core/errors.ts';
 import type { Task } from '../../schemas/phases.ts';
 import { collectTasksByState } from '../../orchestrator/readiness.ts';
 import { leaseFilePath } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../schemas/lease.ts';
+import { parseLeaseFile } from '../../schemas/lease.ts';
 import { ok, fail, type Envelope } from '../envelope.ts';
 import { hasFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -83,7 +83,8 @@ function indexTasks(
 
 function leasePresent(forgeDir: string, taskId: string): boolean {
   try {
-    return LeaseSchema.safeParse(readJsonCapped(leaseFilePath(forgeDir, taskId))).success;
+    // FORGE-231: a release tombstone is NOT an active lease.
+    return parseLeaseFile(readJsonCapped(leaseFilePath(forgeDir, taskId))).kind === 'active';
   } catch {
     // A bad lease path / read must never crash the queue (R4).
     return false;

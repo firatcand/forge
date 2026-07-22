@@ -11,6 +11,10 @@ import {
 } from '../../schemas/cli-args.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { create, sanitizeIssueId, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
+import { normalizeBranchRef, resolveDefaultBranch } from '../../core/default-branch.ts';
+import { resolveBaseRef } from '../../orchestrator/worktree-base.ts';
+import { writeAtomic } from '../../core/fs-atomic.ts';
+import { OrchestratorError } from '../../core/errors.ts';
 import { WorkspaceError } from '../../core/errors.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import type { VerbHandler } from './index.ts';
@@ -80,19 +84,51 @@ export async function runOrchestrateEnsureWorktree(
   const worktreePath = path.join(worktreeRoot, sanitized);
   const markerPath = path.join(worktreePath, TASK_MARKER_RELPATH);
 
+  // FORGE-231 (owner decision SB): resolve the FROZEN per-task base BEFORE the
+  // idempotent early-return so existing worktrees get backfilled. Explicit
+  // --base always wins (normalized); otherwise the host-independent default
+  // resolver (ls-remote-first, fingerprint-cached at the MAIN repo root).
+  let frozenBase: string;
+  try {
+    frozenBase = opts.base
+      ? await normalizeBranchRef(repoRoot, opts.base)
+      : (await resolveDefaultBranch(repoRoot)).default_branch;
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          false,
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
   // Idempotence check — same task_id marker means we already created this
-  // worktree (probably a previous round of /forge orchestrate). No-op.
+  // worktree (probably a previous round of /forge orchestrate). No-op, except
+  // for the FORGE-231 base backfill: a marker without base_branch (pre-231)
+  // gains the resolved value; an explicit --base overwrites (it always wins).
   if (existsSync(markerPath)) {
     try {
       const raw = readFileSync(markerPath, 'utf8');
-      const parsedMarker = JSON.parse(raw) as { taskId?: unknown };
+      const parsedMarker = JSON.parse(raw) as { taskId?: unknown; base_branch?: unknown };
       if (parsedMarker.taskId === sanitized) {
+        const hasBase = typeof parsedMarker.base_branch === 'string' && parsedMarker.base_branch.length > 0;
+        if (!hasBase || (opts.base && parsedMarker.base_branch !== frozenBase)) {
+          writeAtomic(
+            markerPath,
+            `${JSON.stringify({ ...parsedMarker, base_branch: frozenBase }, null, 2)}\n`,
+          );
+        }
         return {
           exitCode: emit(
             ok({
               worktree_path: worktreePath,
               created: false,
               hydrated: [],
+              base_branch: hasBase && !opts.base ? parsedMarker.base_branch : frozenBase,
             }),
             { json: opts.json },
           ),
@@ -163,10 +199,29 @@ export async function runOrchestrateEnsureWorktree(
   // base=origin/main, copyMeta=true (hydrates spec/, plans/, learnings/, etc.).
   let createResult;
   try {
+    // The frozen base NAME feeds the marker; the start point prefers the
+    // remote-tracking ref and falls back to the local branch (remoteless
+    // repos / hermetic fixtures).
+    let startPoint: string;
+    try {
+      startPoint = await resolveBaseRef(repoRoot, frozenBase);
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+            err instanceof Error ? err.message : String(err),
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
     createResult = await create(sanitized, {
       root: worktreeRoot,
       ...(opts.branch ? { branch: opts.branch } : {}),
-      ...(opts.base ? { base: opts.base } : {}),
+      base: startPoint,
+      baseBranchName: frozenBase,
       copyMeta: true,
       mainWorktree: repoRoot,
     });
@@ -193,6 +248,7 @@ export async function runOrchestrateEnsureWorktree(
         created: true,
         hydrated: createResult.copiedFiles,
         marker_path: createResult.taskMarkerPath,
+        base_branch: frozenBase,
       }),
       { json: opts.json },
     ),

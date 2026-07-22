@@ -45,7 +45,7 @@ import {
   tasksRootDir,
   validateIdSegment,
 } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../schemas/lease.ts';
+import { parseLeaseFile } from '../../schemas/lease.ts';
 import {
   TaskStateSchema,
   type TaskState,
@@ -55,7 +55,8 @@ import type { Phases } from '../../schemas/phases.ts';
 import { VerdictSchema } from '../../schemas/verdict.ts';
 import type { Issue } from '../../trackers/types.ts';
 import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
-import { WorkspaceError } from '../../core/errors.ts';
+import { OrchestratorError, WorkspaceError } from '../../core/errors.ts';
+import { listCasMarkers } from '../../core/fs-atomic.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
@@ -534,11 +535,14 @@ function checkLeaseGate(
   } catch {
     return { ok: false, reason: 'lease.json is malformed JSON; refusing (never treated as absent)' };
   }
-  const parsed = LeaseSchema.safeParse(json);
-  if (!parsed.success) {
+  const parsed = parseLeaseFile(json);
+  if (parsed.kind === 'invalid') {
     return { ok: false, reason: 'lease.json failed schema validation; refusing (never treated as absent)' };
   }
-  const health = classifyLeaseHealth(parsed.data.expires_at, now);
+  // FORGE-231: a release tombstone means the lease was definitively released —
+  // same as absent for worktree-removal purposes.
+  if (parsed.kind === 'released') return { ok: true };
+  const health = classifyLeaseHealth(parsed.lease.expires_at, now);
   if (health === 'alive' || health === 'expiring_soon') {
     return { ok: false, reason: `lease is ${health}; refusing to remove an actively-leased worktree` };
   }
@@ -948,9 +952,40 @@ function scanTasksDir(forgeDir: string): Map<string, TaskSnapshot> {
       state: readStateSafe(taskDir),
       leases: readLeasesSafe(forgeDir, taskId, taskDir),
       attempts: readAttemptsSafe(forgeDir, taskId),
+      stuckCasMarkers: collectStuckCasMarkers(taskDir),
     });
   }
   return result;
+}
+
+// FORGE-231 (row 16): incomplete CAS transition markers on this task's
+// guarded files. listCasMarkers classifies completed vs incomplete against
+// each file's CURRENT version; only incomplete markers are surfaced (report-
+// only — gc never removes them).
+function collectStuckCasMarkers(
+  taskDir: string,
+): { guardedFile: string; markerPath: string; domain: string }[] {
+  const out: { guardedFile: string; markerPath: string; domain: string }[] = [];
+  for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
+    const guarded = join(taskDir, name);
+    let version: number | null = null;
+    try {
+      const parsed = JSON.parse(readFileSync(guarded, 'utf8')) as Record<string, unknown>;
+      const v = name === 'state.json' ? parsed.state_version : name === 'lease.json' ? parsed.lease_version : parsed.revision;
+      version = typeof v === 'number' && Number.isInteger(v) ? v : null;
+    } catch {
+      version = null; // absent/unreadable — create-domain markers classify on null
+    }
+    try {
+      for (const info of listCasMarkers(guarded, version)) {
+        if (info.completed) continue;
+        out.push({ guardedFile: guarded, markerPath: info.markerPath, domain: String(info.domain) });
+      }
+    } catch {
+      // best-effort scan
+    }
+  }
+  return out;
 }
 
 function readStateSafe(taskDir: string): TaskStateRecord | null {
@@ -987,8 +1022,11 @@ function readLeasesSafe(
     try {
       const raw = readFileSync(path, 'utf8');
       const parsed = JSON.parse(raw);
-      const validated = LeaseSchema.safeParse(parsed);
-      if (!validated.success) continue;
+      const validated0 = parseLeaseFile(parsed);
+      // FORGE-231: tombstones are version history, not lease artifacts —
+      // they never participate in duplicate/terminal reconciliation rows.
+      if (validated0.kind !== 'active') continue;
+      const validated = { data: validated0.lease };
       out.push({
         lease: validated.data,
         path,
@@ -1151,6 +1189,7 @@ function executeRow(
       const reasonMap = {
         'gc:row-13:duplicate': 'gc:row-13:duplicate' as AdminReleaseReason,
         'gc:row-14:terminal-state': 'gc:row-14:terminal-state' as AdminReleaseReason,
+        'gc:row-15:merge-pending-lease': 'gc:row-15:merge-pending-lease' as AdminReleaseReason,
       };
       adminReleaseLeaseByIdentity({
         forgeDir,
@@ -1223,21 +1262,35 @@ function writeStateForGc(
   caller: StateCaller,
   extra: Partial<TaskStateRecord> = {},
 ): void {
-  const current = readTaskState(forgeDir, taskId);
-  const next: TaskStateRecord = {
-    ...current,
-    ...extra,
-    state,
-    state_version: current.state_version + 1,
-    updated_at: new Date().toISOString(),
-    updated_by: {
-      run_id: caller.run_id,
-      claim_id: caller.claim_id,
-      generation: caller.generation,
-    },
+  // FORGE-231: gc's mutation is state-DERIVED (re-read + re-derive), so a
+  // typed CAS conflict from a concurrent writer is retried exactly once with
+  // a fresh read; a second conflict propagates (the next gc sweep converges).
+  const attempt = (): void => {
+    const current = readTaskState(forgeDir, taskId);
+    const next: TaskStateRecord = {
+      ...current,
+      ...extra,
+      state,
+      state_version: current.state_version + 1,
+      updated_at: new Date().toISOString(),
+      updated_by: {
+        run_id: caller.run_id,
+        claim_id: caller.claim_id,
+        generation: caller.generation,
+      },
+    };
+    if (state !== 'failed') delete next.failure_reason;
+    writeTaskState(forgeDir, next, caller);
   };
-  if (state !== 'failed') delete next.failure_reason;
-  writeTaskState(forgeDir, next, caller);
+  try {
+    attempt();
+  } catch (err) {
+    if (err instanceof OrchestratorError && err.code === 'STATE_VERSION_CONFLICT') {
+      attempt();
+      return;
+    }
+    throw err;
+  }
 }
 
 function executeMarkTerminal(

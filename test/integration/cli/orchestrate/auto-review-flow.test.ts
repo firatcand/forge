@@ -176,37 +176,86 @@ function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   return lines;
 }
 
-test('auto-review PASS path: ready_for_review → review-compose verdict → complete --phase review → reviewed', () => {
+test('auto-review PASS path: first-class review attempt → witness + pinned compose → complete --phase review → reviewed', () => {
   const { work, forgeDir, runId } = setupProject();
-  const attemptId = driveToReadyForReview(work, forgeDir, runId, 'ETOE-1');
+  driveToReadyForReview(work, forgeDir, runId, 'ETOE-1');
   assert.equal(taskState(forgeDir, 'ETOE-1'), 'ready_for_review');
 
-  // Primary review (host:claude — FORGE-187 R2) passes; non-critical path.
-  const primary = writeReviewVerdict(work, 'primary-1.json', {
+  // FORGE-231: REVIEW is a first-class attempt against a REAL worktree whose
+  // marker freezes the base branch; dispatch pins BOTH diff endpoints.
+  const wt = join(work, 'review-wt');
+  mkdirSync(wt, { recursive: true });
+  const git = (...args: string[]): string => {
+    const r = spawnSync('git', args, { cwd: wt, encoding: 'utf8', env: { ...process.env, LC_ALL: 'C' } });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return String(r.stdout ?? '').trim();
+  };
+  git('init', '-q');
+  writeFileSync(join(wt, 'a.txt'), 'base\n');
+  git('add', '-A');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'base');
+  const baseSha = git('rev-parse', 'HEAD');
+  git('update-ref', 'refs/remotes/origin/main', baseSha);
+  writeFileSync(join(wt, 'a.txt'), 'work\n');
+  git('add', '-A');
+  git('-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-q', '-m', 'work');
+  const headSha = git('rev-parse', 'HEAD');
+  mkdirSync(join(wt, '.forge'), { recursive: true });
+  writeFileSync(
+    join(wt, '.forge', 'worktree-task.json'),
+    JSON.stringify({ version: 1, taskId: 'ETOE-1', branch: 'feat/ETOE-1', base_branch: 'main' }) + '\n',
+    'utf8',
+  );
+
+  const lease = JSON.parse(readFileSync(join(forgeDir, 'orchestrator/tasks/ETOE-1/lease.json'), 'utf8'));
+  let res = runVerb(
+    ['orchestrate', 'dispatch', 'ETOE-1', '--claim', lease.claim_id, '--run', runId, '--worktree', wt, '--phase', 'review', '--forge-dir', forgeDir],
+    work,
+  );
+  assert.equal(res.status, 0, `review dispatch failed: ${res.stderr}`);
+  const reviewAttempt = (res.envelope.data as { attempt_id: string }).attempt_id;
+
+  // The RAW witness (the review host's verdict, pinned to the reviewed SHA)
+  // lands in the attempt dir — settings review_host_cli is codex here.
+  const witness = {
     version: 1,
     verdict: 'pass',
     findings: [],
-    host: 'claude',
-  });
+    host: 'codex',
+    target_sha: headSha,
+  };
+  const attemptDirPath = join(forgeDir, 'orchestrator/tasks/ETOE-1/attempts', reviewAttempt);
+  mkdirSync(attemptDirPath, { recursive: true });
+  writeFileSync(join(attemptDirPath, 'review_verdict.json'), JSON.stringify(witness), 'utf8');
+  const primary = writeReviewVerdict(work, 'primary-1.json', witness);
 
-  let res = runVerb(
-    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-1', '--summary', 'Review passed.', '--expected-primary-host', 'claude', '--forge-dir', forgeDir],
+  // Pinned composition: --expected-target-sha carries the pin onto the
+  // composed carrier the completion gate verifies.
+  res = runVerb(
+    ['orchestrate', 'review-compose', '--primary', primary, '--branch', 'feat/ETOE-1', '--summary', 'Review passed.', '--expected-primary-host', 'codex', '--expected-target-sha', headSha, '--forge-dir', forgeDir],
     work,
   );
   assert.equal(res.status, 0, `review-compose failed: ${res.stderr}`);
   const composed = res.envelope.data as { kind: string; verdict: Record<string, unknown> };
   assert.equal(composed.kind, 'verdict');
   assert.equal(composed.verdict.verdict, 'ready_for_review');
+  assert.equal(composed.verdict.target_sha, headSha, 'composed carrier must carry the pin');
 
-  // Write the composed Verdict and complete the review phase.
   const verdictFile = writeReviewVerdict(work, 'composed-1.json', composed.verdict);
   res = runVerb(
-    ['orchestrate', 'complete', 'ETOE-1', '--attempt', attemptId, '--verdict-file', verdictFile, '--phase', 'review', '--forge-dir', forgeDir],
+    ['orchestrate', 'complete', 'ETOE-1', '--attempt', reviewAttempt, '--verdict-file', verdictFile, '--phase', 'review', '--forge-dir', forgeDir],
     work,
   );
   assert.equal(res.status, 0, `complete --phase review failed: ${res.stderr}`);
   assert.equal((res.envelope.data as { next_state: string }).next_state, 'reviewed');
   assert.equal(taskState(forgeDir, 'ETOE-1'), 'reviewed');
+
+  // §C3 write-ahead: the ship record was minted with the reviewed binding.
+  const record = JSON.parse(
+    readFileSync(join(forgeDir, 'orchestrator/tasks/ETOE-1/ship-record.json'), 'utf8'),
+  );
+  assert.equal(record.reviewed_head_sha, headSha);
+  assert.equal(record.review_attempt_id, reviewAttempt);
 });
 
 test('auto-review ESCALATE path: critical block → review-compose escalate → question → blocked_on_question', () => {

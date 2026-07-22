@@ -237,7 +237,7 @@ A `/forge orchestrate` skill that runs in the user's interactive Claude Code or 
 - [ ] Subagent cap respected per main (default `agents.subagent_cap_per_main: 3`); multiple mains coexist via lease-backed coordination
 - [ ] Tasks with unmerged dependencies are **never** dispatched to SHIP (`shipped` = RepoHost-confirmed merged-to-base at the reviewed head SHA; `merge_pending` does not count)
 - [ ] `ship.merge_policy` defaults to `approval` (human merges); an absent `ship:` block never enables unattended merging
-- [ ] **Static settings validation** rejects `ship.merge_policy: 'auto'` when dual-host review is not configured (single-host) or the repo has no supported RepoHost (non-GitHub remote); **at runtime**, an honesty-probe failure parks the task with a question (fail-closed — never warn-and-merge, never silent downgrade)
+- [ ] **Static settings validation** rejects `ship.merge_policy: 'auto'` when dual-host review is not configured (single-host); the supported-RepoHost requirement (non-GitHub remote) is enforced **at runtime** — the honesty probe detects it and parks the task with a question, exactly like any other probe failure (fail-closed — never warn-and-merge, never silent downgrade)
 - [ ] The merge call is head-bound to the reviewed SHA (`--match-head-commit`, expected-head enforced server-side at merge time; no standing auto-merge enablement)
 - [ ] Each task gets a deterministic worktree path; collision-safe sanitization
 - [ ] Failures retry with exponential backoff (1s base, capped at `agents.retry_backoff_ms_max`, default 5min — Symphony pattern)
