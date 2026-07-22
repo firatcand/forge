@@ -422,3 +422,21 @@ test('applyTransition: throws ILLEGAL_TRANSITION for a missing row', () => {
     (err) => err instanceof OrchestratorError && err.code === 'ILLEGAL_TRANSITION',
   );
 });
+
+// ---- FORGE-231 (impl R2 MAJ-2): commit-time active-lease requirement ----
+
+test('writeTaskState with requireActiveLease refuses an EXPIRED (but identity-matching) lease', () => {
+  const fd = forgeDir('sm-expired-commit');
+  makeLease(fd, 'TASK-EXPC', { expires_at: new Date(Date.now() - 60_000).toISOString() });
+  writeTaskState(fd, baseState('TASK-EXPC'), defaultCaller); // identity-only path still works (gc recovery)
+  assert.throws(
+    () =>
+      writeTaskState(
+        fd,
+        baseState('TASK-EXPC', { state: 'claimed', state_version: 1 }),
+        defaultCaller,
+        { requireActiveLease: true },
+      ),
+    (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+  );
+});

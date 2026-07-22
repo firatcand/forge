@@ -18,9 +18,11 @@
 // - task_id in payload must match task_id used for path construction.
 //   See: docs/learnings/2026-Q2/id-in-path-and-payload-must-agree.md
 //
-// adminReleaseLeaseByIdentity intentionally KEEPS unlink semantics (it removes
-// duplicate/orphaned lease artifacts, identity-gated); the resulting
-// absent-with-history state is fully supported by acquire's legacy path.
+// adminReleaseLeaseByIdentity releases the CANONICAL lease by writing a CAS-
+// guarded tombstone (impl R1 CRIT-2 — same single-committer protocol as every
+// other lease mutation); only NON-canonical duplicate artifacts (e.g.
+// `lease.json.bak`) are unlinked. The absent-with-history state remains fully
+// supported by acquire's legacy path (pre-FORGE-231 releases unlinked).
 
 import {
   closeSync as _closeSync,

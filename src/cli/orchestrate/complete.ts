@@ -264,6 +264,51 @@ export async function runOrchestrateComplete(
     };
   }
 
+  // 2b1a. FORGE-231 (impl R2 CRIT-1): bind the completion to the ATTEMPT's
+  //       dispatched lease identity. In the documented steal crash window
+  //       (successor lease published, best-effort state reset failed) the
+  //       stale attempt is still current_attempt_id while the CANONICAL lease
+  //       belongs to the successor — a completion must never borrow that
+  //       authority. The manifest records the identity the attempt was
+  //       dispatched under; the current lease must BE that identity.
+  if (manifest !== null) {
+    if (manifest.task_id !== opts.taskId) {
+      return {
+        exitCode: emit(
+          fail(
+            'STALE_ATTEMPT',
+            `attempt manifest belongs to task '${manifest.task_id}', not '${opts.taskId}'`,
+            false,
+            { manifest_task_id: manifest.task_id },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (
+      lease.claim_id !== manifest.claim_id ||
+      lease.owner_run_id !== manifest.run_id ||
+      lease.generation !== manifest.generation
+    ) {
+      return {
+        exitCode: emit(
+          fail(
+            'LEASE_STOLEN',
+            `the current lease (run=${lease.owner_run_id} gen=${lease.generation}) is not the identity attempt '${opts.attemptId}' was dispatched under (run=${manifest.run_id} gen=${manifest.generation}) — the lease changed hands; a stale attempt must never complete under a successor's authority`,
+            false,
+            {
+              lease_run_id: lease.owner_run_id,
+              lease_generation: lease.generation,
+              manifest_run_id: manifest.run_id,
+              manifest_generation: manifest.generation,
+            },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
   // 2b1b. FORGE-231 (impl R1 MAJ-3): completion is a state-advancing commit —
   //       it requires an ACTIVE lease. Identity alone is not enough: a stale
   //       worker whose lease expired hours ago must not advance state or
@@ -861,6 +906,25 @@ export async function runOrchestrateComplete(
         stateNow.state === 'failed' ||
         (opts.phase === 'ship' ? stateNow.state === 'reviewed' : stateNow.state === 'awaiting_respawn' || stateNow.state === 'blocked_on_question');
       if (stateNow.last_failure_key === failureKey && reflectsFailure) {
+        // impl R2 MAJ-4: the fatal notification keeps DURABLE semantics — a
+        // replay of a terminal exhaustion RE-ATTEMPTS the append (its id is a
+        // deterministic natural key, so readers dedup; a crash between the
+        // state CAS and the original append is repaired here).
+        if (stateNow.state === 'failed' && stateNow.failure_reason === 'retries_exhausted') {
+          try {
+            appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+              type: 'fatal',
+              ts: new Date().toISOString(),
+              run_id: lease.owner_run_id,
+              reason: `task ${opts.taskId} failed: retry budget exhausted (${stateNow.failure_count}/${retryAttempts})`,
+              details: { task_id: opts.taskId, failure_count: stateNow.failure_count, failure_key: failureKey },
+            });
+          } catch (fatalErr) {
+            process.stderr.write(
+              `warn: complete — replay could not repair the fatal notification: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+            );
+          }
+        }
         return {
           exitCode: emit(
             ok({
@@ -923,6 +987,7 @@ export async function runOrchestrateComplete(
           },
         },
         callerFromLease(lease),
+        { requireActiveLease: true },
       );
     } catch (err) {
       return {
@@ -1002,7 +1067,12 @@ export async function runOrchestrateComplete(
           ts: new Date().toISOString(),
           run_id: lease.owner_run_id,
           reason: `task ${opts.taskId} failed: retry budget exhausted (${stateNow.failure_count + budgetDelta}/${retryAttempts})`,
-          details: { task_id: opts.taskId, failure_count: stateNow.failure_count + budgetDelta },
+          details: {
+            task_id: opts.taskId,
+            failure_count: stateNow.failure_count + budgetDelta,
+            // natural key → deterministic event id → replay-safe re-emission
+            failure_key: failureKey ?? `${opts.attemptId}:${opts.phase}`,
+          },
         });
       } catch (fatalErr) {
         process.stderr.write(

@@ -737,3 +737,35 @@ test('gc row 16: stuck marker report includes the owner tuple + PID hint', () =>
     assert.match(row.payload.description, /gc never removes/);
   }
 });
+
+test('gc row 13: a HIGHER-generation non-canonical artifact is reported, never auto-resolved (impl R2 MAJ-3)', () => {
+  const canonical = mkLeaseAtPath({ task_id: 'TASK-D13', generation: 1, claim_id: 'c-1' }, '/p/lease.json', true);
+  const rogue = mkLeaseAtPath({ task_id: 'TASK-D13', generation: 2, claim_id: 'c-2' }, '/p/lease.json.bak', false);
+  const tasks = new Map([
+    ['TASK-D13', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D13', state: 'running' }), leases: [canonical, rogue] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.action, 'report_orphan', 'corrupted duplicate topology must be reported, not auto-released');
+  if (row.action === 'report_orphan') {
+    assert.match(row.payload.description, /resolve manually/);
+  }
+});
+
+test('gc row 13: normal duplicates release ONLY non-canonical artifacts', () => {
+  const canonical = mkLeaseAtPath({ task_id: 'TASK-D14', generation: 3, claim_id: 'c-3' }, '/p/lease.json', true);
+  const stale = mkLeaseAtPath({ task_id: 'TASK-D14', generation: 1, claim_id: 'c-old' }, '/p/lease.json.bak', false);
+  const tasks = new Map([
+    ['TASK-D14', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D14', state: 'running' }), leases: [canonical, stale] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.action, 'release_lease_admin');
+  if (row.action === 'release_lease_admin') {
+    assert.equal(row.payload.expectedPath, '/p/lease.json.bak', 'canonical must never be a row-13 release target');
+  }
+});

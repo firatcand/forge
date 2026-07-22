@@ -217,6 +217,11 @@ export function writeTaskState(
   forgeDir: string,
   state: TaskStateRecord,
   caller: StateCaller,
+  // FORGE-231 (impl R2 MAJ-2): verbs whose commits require an ACTIVE lease
+  // (complete, dispatch) pass requireActiveLease so expiry is re-checked
+  // UNDER the state marker — an entry-time check alone is TOCTOU-prone when
+  // verification runs for minutes. Recovery writers (gc) keep identity-only.
+  opts: { requireActiveLease?: boolean } = {},
 ): void {
   // 1. Validate path/payload task_id agreement (id-in-path-and-payload learning).
   validateOrchestratorId(state.task_id, 'task_id');
@@ -295,7 +300,12 @@ export function writeTaskState(
         generation: caller.generation,
       },
       readVersion: readStateVersion,
-      fence: () => assertLeaseOwnershipFromFile(forgeDir, taskId, caller),
+      fence: () => {
+        assertLeaseOwnershipFromFile(forgeDir, taskId, caller);
+        if (opts.requireActiveLease) {
+          assertLeaseUnexpiredFromFile(forgeDir, taskId);
+        }
+      },
       buildContent: () => payload,
     });
   } catch (err) {
@@ -340,6 +350,33 @@ export function writeTaskState(
 // TWIN: assertLeaseOwnership in leases.ts is an intentional duplicate (avoids
 // circular dependency). Any change to the comparison logic here MUST be mirrored
 // there. Search for "TWIN" to locate it.
+
+// FORGE-231 (impl R2 MAJ-2): expiry companion to the identity TWIN below —
+// reads the CANONICAL lease and requires expires_at to be in the future.
+// Tombstone/absent surfaces through assertLeaseOwnershipFromFile first.
+export function assertLeaseUnexpiredFromFile(forgeDir: string, taskId: string): void {
+  const leasePath = leaseFilePath(forgeDir, taskId);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(leasePath, 'utf8'));
+  } catch (err) {
+    throw new OrchestratorError('LEASE_NOT_FOUND', `lease.json unreadable for task ${taskId}`, {
+      taskId,
+      cause: err,
+    });
+  }
+  const record = parseLeaseFile(parsed);
+  if (record.kind !== 'active') {
+    throw new OrchestratorError('LEASE_NOT_FOUND', `no active lease for task ${taskId}`, { taskId });
+  }
+  if (Date.parse(record.lease.expires_at) <= Date.now()) {
+    throw new OrchestratorError(
+      'LEASE_STOLEN',
+      `lease for task ${taskId} expired at ${record.lease.expires_at} — a commit requires an ACTIVE lease`,
+      { taskId, expires_at: record.lease.expires_at },
+    );
+  }
+}
 
 export function assertLeaseOwnershipFromFile(
   forgeDir: string,

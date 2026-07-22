@@ -959,3 +959,80 @@ test('FORGE-188 (F4): invalid settings.yaml (schema fail, non-FILE_NOT_FOUND Set
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
   assert.equal(state.state, 'running');
 });
+
+test('FORGE-231: completion refuses when the lease is not the identity the attempt was dispatched under (impl R2 CRIT-1)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Simulate the steal crash window: the successor published a new-generation
+  // lease but the state reset never landed — current_attempt_id still points
+  // at the stale attempt.
+  const leasePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
+  const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
+  writeFileSync(
+    leasePath,
+    JSON.stringify({
+      ...lease,
+      claim_id: 'successor-claim',
+      owner_run_id: 'successor-run',
+      generation: lease.generation + 1,
+      lease_version: (lease.lease_version ?? 1) + 1,
+    }),
+    'utf8',
+  );
+
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'LEASE_STOLEN');
+  assert.match(env.error.message, /never complete under a successor/);
+  // Nothing advanced.
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running');
+});
+
+test('FORGE-231: exhaustion-fatal replay repairs a lost notification (impl R2 MAJ-4)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const statePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json');
+  const cur = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(statePath, JSON.stringify({ ...cur, failure_count: 9, state_version: cur.state_version + 1 }), 'utf8');
+
+  let result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const lease = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'), 'utf8'));
+  const runId = lease.owner_run_id ?? lease.released_by?.run_id;
+  const notifPath = join(ctx.forgeDir, 'orchestrator/runs', runId, 'notifications.jsonl');
+  // Simulate the crash window: the fatal append was lost after the state CAS.
+  writeFileSync(notifPath, '', 'utf8');
+
+  stdout.length = 0;
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.replayed, true);
+  const events = readFileSync(notifPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const fatal = events.find((e) => e.type === 'fatal');
+  assert.ok(fatal, 'replay must repair the lost fatal notification');
+  assert.equal(fatal.id, `FORGE-1:${ctx.attemptId}:implement:fatal`);
+});

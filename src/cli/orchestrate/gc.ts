@@ -364,14 +364,6 @@ export async function runOrchestrateGc(
     return { exitCode: 0, migrated: migratedReport, reconcilerRows: plan.rows };
   }
 
-  if (plan.rows.length === 0) {
-    if (moves.length === 0) {
-      // No legacy moves AND no divergences — clean tree.
-      out.write('gc: no divergences found.\n');
-    }
-    return { exitCode: 0, migrated: migratedReport, reconcilerRows: [] };
-  }
-
   // FORGE-231 (impl R1 MAJ-7): the APPLY phase sweeps COMPLETED CAS markers
   // (transition provably finished — file version advanced past the marker /
   // create marker with the file present). This is the automated half of the
@@ -400,6 +392,14 @@ export async function runOrchestrateGc(
     }
   } catch {
     // tasks root absent — nothing to sweep
+  }
+
+  if (plan.rows.length === 0) {
+    if (moves.length === 0) {
+      // No legacy moves AND no divergences — clean tree.
+      out.write('gc: no divergences found.\n');
+    }
+    return { exitCode: 0, migrated: migratedReport, reconcilerRows: [] };
   }
 
   // Execute the plan. Per-row failures (real errors — thrown exceptions) are
@@ -1000,6 +1000,8 @@ function collectStuckCasMarkers(
   domain: string;
   owner: { run_id?: string; claim_id?: string; generation?: number; pid?: number; created_at?: string } | null;
   pidAlive: boolean | null;
+  holderLeaseState: string | null;
+  runManifestPresent: boolean | null;
 }[] {
   const out: ReturnType<typeof collectStuckCasMarkers> = [];
   for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
@@ -1028,6 +1030,31 @@ function collectStuckCasMarkers(
             pidAlive = (e as NodeJS.ErrnoException).code === 'EPERM' ? true : false;
           }
         }
+        // Holder-lease expiry: read the task's canonical lease and report its
+        // expires_at (or released status) — the operator's remediation is
+        // keyed on run identity + lease state, never pid alone.
+        let holderLeaseState: string | null = null;
+        try {
+          const leaseRaw = JSON.parse(readFileSync(join(taskDir, 'lease.json'), 'utf8')) as {
+            status?: unknown;
+            expires_at?: unknown;
+          };
+          holderLeaseState =
+            leaseRaw.status === 'released'
+              ? 'released'
+              : typeof leaseRaw.expires_at === 'string'
+                ? `expires ${leaseRaw.expires_at}`
+                : null;
+        } catch {
+          holderLeaseState = null;
+        }
+        // Run-manifest liveness for the marker's owning run.
+        let runManifestPresent: boolean | null = null;
+        if (typeof info.content?.run_id === 'string') {
+          runManifestPresent = existsSync(
+            join(taskDir, '..', '..', 'runs', info.content.run_id, 'manifest.json'),
+          );
+        }
         out.push({
           guardedFile: guarded,
           markerPath: info.markerPath,
@@ -1042,6 +1069,8 @@ function collectStuckCasMarkers(
               }
             : null,
           pidAlive,
+          holderLeaseState,
+          runManifestPresent,
         });
       }
     } catch {

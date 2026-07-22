@@ -98,7 +98,7 @@ Workers, skills, and the CLI have different write authority. The contract:
 | `.forge/worktrees/<sanitized-task>/**` | ✅ (this is the worker's working directory) | ❌ (use `forge orchestrate ensure-worktree` instead — FORGE-98) | ✅ create via `ensure-worktree`, remove via `gc` |
 
 **Principles:**
-- All writes go through atomic helpers (tmp+link+unlink, never `rename`) regardless of writer.
+- All writes go through atomic helpers regardless of writer: never-overwritten files use tmp+link+unlink (`link` fails `EEXIST` — OS-level never-overwrite); CAS-guarded files (`state.json`, `lease.json`, `ship-record.json` — FORGE-231) use the version-marker protocol with a DURABLE rename (the marker, not `link`, is the single-committer guarantee). See §File semantics → Atomicity.
 - Worker direct-writes to advisory paths (verdict.json, save-point.md) are explicitly OK because the CLI verifies them on `complete`. The CLI rejects writes whose verification fails.
 - Skill never writes anything under `.forge/orchestrator/` directly. Every skill state change goes through a CLI verb.
 - `state.json` and `lease.json` are CLI-only — even workers cannot touch them. This is what makes the state machine enforceable.

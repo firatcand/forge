@@ -77,7 +77,11 @@ export function upsertReviewedBinding(
       current.review_attempt_id === opts.reviewAttemptId &&
       current.reviewed_head_sha === opts.reviewedHeadSha
     ) {
-      return current; // replay — the write-ahead already committed
+      // Replay — the write-ahead already committed. The fence still runs
+      // (impl R2 MAJ-2): a caller whose lease died since the original write
+      // must not treat the replay as its own success.
+      opts.fence?.();
+      return current;
     }
     const next: ShipRecord = current === null
       ? {
@@ -129,6 +133,7 @@ export function upsertReviewedBinding(
         current.review_attempt_id === opts.reviewAttemptId &&
         current.reviewed_head_sha === opts.reviewedHeadSha
       ) {
+        opts.fence?.(); // replay success still requires a live caller
         return current;
       }
       throw new OrchestratorError(

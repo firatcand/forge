@@ -170,6 +170,8 @@ export interface TaskSnapshot {
       readonly created_at?: string;
     } | null;
     readonly pidAlive: boolean | null;
+    readonly holderLeaseState?: string | null;
+    readonly runManifestPresent?: boolean | null;
   }[];
 }
 
@@ -625,7 +627,7 @@ function detectRow16(s: OrchestratorSnapshot): GcPlanRow[] {
   for (const [taskId, task] of s.tasks) {
     for (const marker of task.stuckCasMarkers ?? []) {
       const owner = marker.owner
-        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}`
+        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}; holder lease: ${marker.holderLeaseState ?? 'unknown'}; run manifest ${marker.runManifestPresent === null ? 'unknown' : marker.runManifestPresent ? 'PRESENT' : 'absent'}`
         : 'owner tuple unreadable — treat as ALIVE and investigate before touching';
       rows.push({
         rowId: 16,
@@ -660,8 +662,29 @@ function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
       // unlinking the wrong file under all-same-generation pathologies.
       return a.path.localeCompare(b.path);
     });
-    const [, ...older] = sorted;
-    for (const stale of older) {
+    // FORGE-231 (impl R2 MAJ-3): the CANONICAL path is the only lease normal
+    // readers consume — row 13 must NEVER release it in favor of a
+    // non-canonical artifact. Duplicate cleanup releases NON-canonical
+    // artifacts only; a non-canonical artifact carrying a HIGHER generation
+    // than the canonical lease is corruption a human must resolve — report,
+    // never auto-pick a winner that readers cannot see.
+    const canonical = task.leases.find((l) => l.isCanonical);
+    const highest = sorted[0];
+    if (highest && !highest.isCanonical && canonical && highest.lease.generation > canonical.lease.generation) {
+      rows.push({
+        rowId: 13,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claimed_no_local',
+          description: `non-canonical lease artifact ${highest.path} carries generation ${highest.lease.generation} ABOVE the canonical lease (generation ${canonical.lease.generation}) — corrupted duplicate topology; resolve manually (gc never promotes or releases the canonical lease over an invisible artifact)`,
+        },
+      });
+      continue;
+    }
+    for (const stale of sorted) {
+      if (stale.isCanonical) continue; // canonical is released only by rows 14/15 with full identity gates
       rows.push({
         rowId: 13,
         taskId,

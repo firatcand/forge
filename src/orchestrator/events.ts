@@ -210,6 +210,13 @@ export function computeNotificationId(event: NotificationEvent): string {
     case 'question_resolved':
       return `${event.task_id}:${event.question_id}:question_resolved`;
     case 'fatal': {
+      // A fatal carrying a natural key in details (task_id + failure_key) gets
+      // a TIME-FREE deterministic id so a crash-replayed producer re-emitting
+      // the same terminal failure dedups instead of duplicating (impl R2 MAJ-4).
+      const d = event.details as { task_id?: unknown; failure_key?: unknown } | undefined;
+      if (typeof d?.task_id === 'string' && typeof d?.failure_key === 'string') {
+        return `${d.task_id}:${d.failure_key}:fatal`;
+      }
       const anchor = 'task_id' in event && typeof (event as { task_id?: unknown }).task_id === 'string'
         ? String((event as { task_id?: unknown }).task_id)
         : event.run_id;

@@ -385,6 +385,7 @@ export async function runOrchestrateDispatch(
         claim_id: opts.claimId,
         generation: lease.generation,
       },
+      { requireActiveLease: true },
     );
   } catch (err) {
     return {
