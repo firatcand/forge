@@ -101,7 +101,19 @@ export function writeAtomicDurable(absPath: string, contents: string): void {
   let fd: number | undefined;
   try {
     fd = openSync(tmpPath, 'w', 0o600);
-    writeSync(fd, contents, null, 'utf8');
+    // impl R4 MAJ-2: writeSync may write FEWER bytes than requested (quota
+    // pressure, network filesystems, interrupts). Loop until every byte is
+    // placed; zero progress is an error — a truncated temp file must never
+    // be renamed over valid coordination state.
+    const buf = Buffer.from(contents, 'utf8');
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = writeSync(fd, buf, offset, buf.length - offset, null);
+      if (written === 0) {
+        throw new Error(`writeSync made no progress at offset ${offset} of ${buf.length}`);
+      }
+      offset += written;
+    }
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;

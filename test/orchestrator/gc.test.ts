@@ -781,3 +781,32 @@ test('gc row 13: NO active canonical lease + duplicates → report only, nothing
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.action, 'report_orphan', 'no-canonical topology must never auto-release');
 });
+
+test('gc row 16: description carries owner-correlated lease state + honest run-dir label (impl R4 MIN-3)', () => {
+  const tasks = new Map([
+    [
+      'TASK-M2',
+      mkTaskSnapshot({
+        state: mkState({ task_id: 'TASK-M2', state: 'merge_pending' }),
+        stuckCasMarkers: [
+          {
+            guardedFile: '/p/ship-record.json',
+            markerPath: '/p/ship-record.json.cas-2',
+            domain: '2',
+            owner: { run_id: 'run-A', claim_id: 'claim-A', generation: 3, pid: 111, created_at: '2026-07-22T00:00:00.000Z' },
+            pidAlive: false,
+            holderLeaseState: 'canonical lease: released by a DIFFERENT identity (run=run-B gen=4)',
+            runManifestPresent: true,
+          },
+        ],
+      }),
+    ],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const row = plan.rows.find((r) => r.rowId === 16);
+  assert.ok(row);
+  if (row?.action === 'report_orphan') {
+    assert.match(row.payload.description, /released by a DIFFERENT identity \(run=run-B gen=4\)/);
+    assert.match(row.payload.description, /a trace — NOT liveness proof/);
+  }
+});

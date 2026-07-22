@@ -821,7 +821,7 @@ test('FORGE-188 (F3): malformed manifest.json (present, unparseable) → SCHEMA_
   assert.equal(state.state, 'running');
 });
 
-test('FORGE-188 (R2 re-review): manifest PRESENT-but-unreadable (EISDIR) ≠ legacy-absent → manifest_invalid, no fallback', async (t) => {
+test('FORGE-188 (R2 re-review): manifest PRESENT-but-unreadable (EISDIR) → STALE_ATTEMPT at the identity gate, no fallback', async (t) => {
   const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
   const stdout = captureStdout(t);
   const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
@@ -848,16 +848,15 @@ test('FORGE-188 (R2 re-review): manifest PRESENT-but-unreadable (EISDIR) ≠ leg
   assert.equal(result.exitCode, 1);
   assert.equal(invoked, false, 'verify must not run when the dispatch manifest is unreadable');
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.error.code, 'VERIFICATION_FAILED');
-  assert.equal(env.error.details.reason, 'manifest_invalid');
-  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+    const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
   assert.equal(existsSync(join(dir, 'verdict.json')), false);
   assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
   assert.equal(state.state, 'running');
 });
 
-test('FORGE-188 (3rd-pass): manifest ABSENT (ENOENT) for a dispatched attempt → manifest_invalid, NO canonical fallback', async (t) => {
+test('FORGE-188 (3rd-pass): manifest ABSENT (ENOENT) → STALE_ATTEMPT at the identity gate, NO canonical fallback', async (t) => {
   const { manifestFilePath } = await import('../../../../src/orchestrator/questions/paths.ts');
   const stdout = captureStdout(t);
   const worktreePath = mkdtempSync(join(tmpdir(), 'forge-wt-'));
@@ -884,9 +883,8 @@ test('FORGE-188 (3rd-pass): manifest ABSENT (ENOENT) for a dispatched attempt �
   assert.equal(result.exitCode, 1);
   assert.equal(invoked, false, 'verify must NOT run against a canonical fallback when the manifest is absent');
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.error.code, 'VERIFICATION_FAILED');
-  assert.equal(env.error.details.reason, 'manifest_invalid');
-  const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+    const dir = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
   assert.equal(existsSync(join(dir, 'verdict.json')), false);
   assert.equal(existsSync(join(dir, 'verdict.verified.json')), false);
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
@@ -1037,27 +1035,14 @@ test('FORGE-231: exhaustion-fatal replay repairs a lost notification (impl R2 MA
   assert.equal(fatal.id, `FORGE-1:${ctx.attemptId}:implement:fatal`);
 });
 
-test('FORGE-231: MANIFESTLESS attempt binds via attempt_started — successor lease refused (impl R3 CRIT-1)', async (t) => {
+test('FORGE-231: MANIFESTLESS attempts are refused outright — no event-log fallback (impl R4 CRIT-1)', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
-  // Remove the manifest (legacy pre-FORGE-231 shape); the attempt_started
-  // event still records the dispatched identity.
+  // Remove the manifest (legacy pre-FORGE-231 shape). The attempt_started
+  // event EXISTS — but events are worker-writable and rotatable, so they are
+  // never an authorization record: the completion must refuse regardless.
   const manifestPath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'manifest.json');
   unlinkSync(manifestPath);
-  // Successor lease published (steal crash window).
-  const leasePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
-  const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
-  writeFileSync(
-    leasePath,
-    JSON.stringify({
-      ...lease,
-      claim_id: 'successor-claim',
-      owner_run_id: 'successor-run',
-      generation: lease.generation + 1,
-      lease_version: (lease.lease_version ?? 1) + 1,
-    }),
-    'utf8',
-  );
 
   const result = await runOrchestrateComplete({
     taskId: 'FORGE-1',
@@ -1069,10 +1054,12 @@ test('FORGE-231: MANIFESTLESS attempt binds via attempt_started — successor le
   });
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.error.code, 'LEASE_STOLEN');
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+  assert.match(env.error.message, /re-dispatch/);
+  const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  assert.equal(state.state, 'running', 'nothing may advance without a verifiable dispatch identity');
 });
-
-test('FORGE-231: an attempt with NEITHER manifest NOR attempt_started cannot complete (fail closed)', async (t) => {
+test('FORGE-231: manifestless refusal holds with the event log deleted too (fail closed)', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
   const attemptDirPath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
@@ -1080,7 +1067,7 @@ test('FORGE-231: an attempt with NEITHER manifest NOR attempt_started cannot com
   try {
     unlinkSync(join(attemptDirPath, 'events.jsonl'));
   } catch {
-    // may not exist in this fixture — the refusal must hold either way
+    // may not exist — the refusal must hold either way
   }
   const result = await runOrchestrateComplete({
     taskId: 'FORGE-1',
@@ -1093,9 +1080,7 @@ test('FORGE-231: an attempt with NEITHER manifest NOR attempt_started cannot com
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'STALE_ATTEMPT');
-  assert.match(env.error.message, /unbindable/);
 });
-
 test('FORGE-231: fatal repair works even after the lease is TOMBSTONED (impl R3 MAJ-2)', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);

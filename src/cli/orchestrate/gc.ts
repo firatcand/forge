@@ -1044,7 +1044,19 @@ function collectStuckCasMarkers(
             generation?: unknown;
           };
           if (leaseRaw.status === 'released') {
-            holderLeaseState = 'canonical lease: released (tombstone)';
+            // Attribute the tombstone (impl R4 MIN-3): the releaser identity
+            // tells the operator whether the OWNER released cleanly or a
+            // successor closed it out afterwards.
+            const rb = (leaseRaw as { released_by?: { run_id?: unknown; claim_id?: unknown; generation?: unknown } }).released_by;
+            const ownerReleased =
+              info.content &&
+              rb &&
+              rb.claim_id === info.content.claim_id &&
+              rb.run_id === info.content.run_id &&
+              rb.generation === info.content.generation;
+            holderLeaseState = ownerReleased
+              ? 'canonical lease: released BY THE MARKER OWNER (clean handoff)'
+              : `canonical lease: released by a DIFFERENT identity (run=${String(rb?.run_id ?? '?')} gen=${String(rb?.generation ?? '?')})`;
           } else if (
             info.content &&
             leaseRaw.claim_id === info.content.claim_id &&
