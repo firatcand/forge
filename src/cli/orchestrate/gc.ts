@@ -45,7 +45,7 @@ import {
   tasksRootDir,
   validateIdSegment,
 } from '../../orchestrator/questions/paths.ts';
-import { LeaseSchema } from '../../schemas/lease.ts';
+import { parseLeaseFile } from '../../schemas/lease.ts';
 import {
   TaskStateSchema,
   type TaskState,
@@ -55,7 +55,8 @@ import type { Phases } from '../../schemas/phases.ts';
 import { VerdictSchema } from '../../schemas/verdict.ts';
 import type { Issue } from '../../trackers/types.ts';
 import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
-import { WorkspaceError } from '../../core/errors.ts';
+import { OrchestratorError, WorkspaceError } from '../../core/errors.ts';
+import { cleanupCompletedCasMarkers, listCasMarkers } from '../../core/fs-atomic.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
@@ -363,6 +364,36 @@ export async function runOrchestrateGc(
     return { exitCode: 0, migrated: migratedReport, reconcilerRows: plan.rows };
   }
 
+  // FORGE-231 (impl R1 MAJ-7): the APPLY phase sweeps COMPLETED CAS markers
+  // (transition provably finished — file version advanced past the marker /
+  // create marker with the file present). This is the automated half of the
+  // marker lifecycle; incomplete markers are NEVER touched (row 16 reports
+  // them). Best-effort per task.
+  try {
+    const tasksRoot = join(opts.forgeDir, 'orchestrator', 'tasks');
+    for (const ent of readdirSync(tasksRoot, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
+        const guarded = join(tasksRoot, ent.name, name);
+        let version: number | null = null;
+        try {
+          const parsed = JSON.parse(readFileSync(guarded, 'utf8')) as Record<string, unknown>;
+          const v = name === 'state.json' ? parsed.state_version : name === 'lease.json' ? parsed.lease_version : parsed.revision;
+          version = typeof v === 'number' && Number.isInteger(v) ? v : null;
+        } catch {
+          version = null;
+        }
+        try {
+          cleanupCompletedCasMarkers(guarded, version);
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  } catch {
+    // tasks root absent — nothing to sweep
+  }
+
   if (plan.rows.length === 0) {
     if (moves.length === 0) {
       // No legacy moves AND no divergences — clean tree.
@@ -534,11 +565,14 @@ function checkLeaseGate(
   } catch {
     return { ok: false, reason: 'lease.json is malformed JSON; refusing (never treated as absent)' };
   }
-  const parsed = LeaseSchema.safeParse(json);
-  if (!parsed.success) {
+  const parsed = parseLeaseFile(json);
+  if (parsed.kind === 'invalid') {
     return { ok: false, reason: 'lease.json failed schema validation; refusing (never treated as absent)' };
   }
-  const health = classifyLeaseHealth(parsed.data.expires_at, now);
+  // FORGE-231: a release tombstone means the lease was definitively released —
+  // same as absent for worktree-removal purposes.
+  if (parsed.kind === 'released') return { ok: true };
+  const health = classifyLeaseHealth(parsed.lease.expires_at, now);
   if (health === 'alive' || health === 'expiring_soon') {
     return { ok: false, reason: `lease is ${health}; refusing to remove an actively-leased worktree` };
   }
@@ -948,9 +982,126 @@ function scanTasksDir(forgeDir: string): Map<string, TaskSnapshot> {
       state: readStateSafe(taskDir),
       leases: readLeasesSafe(forgeDir, taskId, taskDir),
       attempts: readAttemptsSafe(forgeDir, taskId),
+      stuckCasMarkers: collectStuckCasMarkers(taskDir),
     });
   }
   return result;
+}
+
+// FORGE-231 (row 16): incomplete CAS transition markers on this task's
+// guarded files. listCasMarkers classifies completed vs incomplete against
+// each file's CURRENT version; only incomplete markers are surfaced (report-
+// only — gc never removes them).
+function collectStuckCasMarkers(
+  taskDir: string,
+): {
+  guardedFile: string;
+  markerPath: string;
+  domain: string;
+  owner: { run_id?: string; claim_id?: string; generation?: number; pid?: number; created_at?: string } | null;
+  pidAlive: boolean | null;
+  holderLeaseState: string | null;
+  runManifestPresent: boolean | null;
+}[] {
+  const out: ReturnType<typeof collectStuckCasMarkers> = [];
+  for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
+    const guarded = join(taskDir, name);
+    let version: number | null = null;
+    try {
+      const parsed = JSON.parse(readFileSync(guarded, 'utf8')) as Record<string, unknown>;
+      const v = name === 'state.json' ? parsed.state_version : name === 'lease.json' ? parsed.lease_version : parsed.revision;
+      version = typeof v === 'number' && Number.isInteger(v) ? v : null;
+    } catch {
+      version = null; // absent/unreadable — create-domain markers classify on null
+    }
+    try {
+      for (const info of listCasMarkers(guarded, version)) {
+        if (info.completed) continue;
+        // FORGE-231 (impl R1 MAJ-7): the report must carry the OWNER tuple —
+        // the conservative manual remediation is keyed on run identity. PID
+        // liveness is a HINT only (reuse is possible; single-machine per the
+        // no-cross-machine non-goal).
+        let pidAlive: boolean | null = null;
+        if (typeof info.content?.pid === 'number') {
+          try {
+            process.kill(info.content.pid, 0);
+            pidAlive = true;
+          } catch (e) {
+            pidAlive = (e as NodeJS.ErrnoException).code === 'EPERM' ? true : false;
+          }
+        }
+        // OWNER-CORRELATED holder-lease evidence (impl R3 MAJ-4): the lease
+        // state is only "the holder's" when the canonical lease identity
+        // matches the MARKER OWNER — a successor's lease must never be
+        // presented as the stuck writer's.
+        let holderLeaseState: string | null = null;
+        try {
+          const leaseRaw = JSON.parse(readFileSync(join(taskDir, 'lease.json'), 'utf8')) as {
+            status?: unknown;
+            expires_at?: unknown;
+            claim_id?: unknown;
+            owner_run_id?: unknown;
+            generation?: unknown;
+          };
+          if (leaseRaw.status === 'released') {
+            // Attribute the tombstone (impl R4 MIN-3): the releaser identity
+            // tells the operator whether the OWNER released cleanly or a
+            // successor closed it out afterwards.
+            const rb = (leaseRaw as { released_by?: { run_id?: unknown; claim_id?: unknown; generation?: unknown } }).released_by;
+            const ownerReleased =
+              info.content &&
+              rb &&
+              rb.claim_id === info.content.claim_id &&
+              rb.run_id === info.content.run_id &&
+              rb.generation === info.content.generation;
+            holderLeaseState = ownerReleased
+              ? 'canonical lease: released BY THE MARKER OWNER (clean handoff)'
+              : `canonical lease: released by a DIFFERENT identity (run=${String(rb?.run_id ?? '?')} gen=${String(rb?.generation ?? '?')})`;
+          } else if (
+            info.content &&
+            leaseRaw.claim_id === info.content.claim_id &&
+            leaseRaw.owner_run_id === info.content.run_id &&
+            leaseRaw.generation === info.content.generation
+          ) {
+            holderLeaseState = `owner's lease expires ${String(leaseRaw.expires_at ?? '?')}`;
+          } else {
+            holderLeaseState = 'canonical lease belongs to a DIFFERENT identity (successor?) — the owner lost it';
+          }
+        } catch {
+          holderLeaseState = null;
+        }
+        // Run-DIR presence for the owning run. HONEST label: run manifests
+        // persist after creation and carry no liveness field — presence is a
+        // trace, never proof the run is alive or dead.
+        let runManifestPresent: boolean | null = null;
+        if (typeof info.content?.run_id === 'string') {
+          runManifestPresent = existsSync(
+            join(taskDir, '..', '..', 'runs', info.content.run_id, 'manifest.json'),
+          );
+        }
+        out.push({
+          guardedFile: guarded,
+          markerPath: info.markerPath,
+          domain: String(info.domain),
+          owner: info.content
+            ? {
+                run_id: info.content.run_id,
+                claim_id: info.content.claim_id,
+                generation: info.content.generation,
+                pid: info.content.pid,
+                created_at: info.content.created_at,
+              }
+            : null,
+          pidAlive,
+          holderLeaseState,
+          runManifestPresent,
+        });
+      }
+    } catch {
+      // best-effort scan
+    }
+  }
+  return out;
 }
 
 function readStateSafe(taskDir: string): TaskStateRecord | null {
@@ -987,8 +1138,11 @@ function readLeasesSafe(
     try {
       const raw = readFileSync(path, 'utf8');
       const parsed = JSON.parse(raw);
-      const validated = LeaseSchema.safeParse(parsed);
-      if (!validated.success) continue;
+      const validated0 = parseLeaseFile(parsed);
+      // FORGE-231: tombstones are version history, not lease artifacts —
+      // they never participate in duplicate/terminal reconciliation rows.
+      if (validated0.kind !== 'active') continue;
+      const validated = { data: validated0.lease };
       out.push({
         lease: validated.data,
         path,
@@ -1151,6 +1305,7 @@ function executeRow(
       const reasonMap = {
         'gc:row-13:duplicate': 'gc:row-13:duplicate' as AdminReleaseReason,
         'gc:row-14:terminal-state': 'gc:row-14:terminal-state' as AdminReleaseReason,
+        'gc:row-15:merge-pending-lease': 'gc:row-15:merge-pending-lease' as AdminReleaseReason,
       };
       adminReleaseLeaseByIdentity({
         forgeDir,
@@ -1223,21 +1378,35 @@ function writeStateForGc(
   caller: StateCaller,
   extra: Partial<TaskStateRecord> = {},
 ): void {
-  const current = readTaskState(forgeDir, taskId);
-  const next: TaskStateRecord = {
-    ...current,
-    ...extra,
-    state,
-    state_version: current.state_version + 1,
-    updated_at: new Date().toISOString(),
-    updated_by: {
-      run_id: caller.run_id,
-      claim_id: caller.claim_id,
-      generation: caller.generation,
-    },
+  // FORGE-231: gc's mutation is state-DERIVED (re-read + re-derive), so a
+  // typed CAS conflict from a concurrent writer is retried exactly once with
+  // a fresh read; a second conflict propagates (the next gc sweep converges).
+  const attempt = (): void => {
+    const current = readTaskState(forgeDir, taskId);
+    const next: TaskStateRecord = {
+      ...current,
+      ...extra,
+      state,
+      state_version: current.state_version + 1,
+      updated_at: new Date().toISOString(),
+      updated_by: {
+        run_id: caller.run_id,
+        claim_id: caller.claim_id,
+        generation: caller.generation,
+      },
+    };
+    if (state !== 'failed') delete next.failure_reason;
+    writeTaskState(forgeDir, next, caller);
   };
-  if (state !== 'failed') delete next.failure_reason;
-  writeTaskState(forgeDir, next, caller);
+  try {
+    attempt();
+  } catch (err) {
+    if (err instanceof OrchestratorError && err.code === 'STATE_VERSION_CONFLICT') {
+      attempt();
+      return;
+    }
+    throw err;
+  }
 }
 
 function executeMarkTerminal(

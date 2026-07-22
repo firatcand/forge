@@ -39,6 +39,8 @@ export type GcRowId =
   | 11
   | 12
   | 13
+  | 15
+  | 16
   | 14;
 
 export interface LeaseIdentity {
@@ -103,7 +105,7 @@ export type GcPlanRow =
         readonly expectedExpiresAt: string;
         readonly expectedPath: string;
         readonly requireTerminalState: boolean;
-        readonly reason: 'gc:row-13:duplicate' | 'gc:row-14:terminal-state';
+        readonly reason: 'gc:row-13:duplicate' | 'gc:row-14:terminal-state' | 'gc:row-15:merge-pending-lease';
       };
     })
   | (GcPlanRowBase & {
@@ -120,7 +122,11 @@ export type GcPlanRow =
           | 'worktree'
           | 'tracker_claimed_no_local'
           | 'answer_no_question'
-          | 'shipped_not_closed';
+          | 'shipped_not_closed'
+          // FORGE-231: tracker-done divergence (row 6 — never auto-shipped)
+          // and stuck CAS transition markers (report + manual remediation).
+          | 'tracker_done_not_shipped'
+          | 'stuck_cas_marker';
         readonly description: string;
       };
     });
@@ -149,6 +155,24 @@ export interface TaskSnapshot {
   readonly leases: readonly LeaseAtPath[];
   // attempts known via directory scan; populated only if row 5/8/11/12 may fire.
   readonly attempts: readonly AttemptSnapshot[];
+  // FORGE-231: incomplete CAS transition markers found next to this task's
+  // guarded files (state.json / lease.json / ship-record.json). Collected by
+  // the CLI snapshot builder; row 16 reports them (never removes).
+  readonly stuckCasMarkers?: readonly {
+    readonly guardedFile: string;
+    readonly markerPath: string;
+    readonly domain: string;
+    readonly owner: {
+      readonly run_id?: string;
+      readonly claim_id?: string;
+      readonly generation?: number;
+      readonly pid?: number;
+      readonly created_at?: string;
+    } | null;
+    readonly pidAlive: boolean | null;
+    readonly holderLeaseState?: string | null;
+    readonly runManifestPresent?: boolean | null;
+  }[];
 }
 
 export interface LeaseAtPath {
@@ -366,7 +390,11 @@ function detectRow5(s: OrchestratorSnapshot): GcPlanRow[] {
   return rows;
 }
 
-// Row 6: ready_for_review (local) | done (tracker) — trust tracker, mark shipped
+// Row 6: ready_for_review (local) | done (tracker) — REPORT ONLY (FORGE-231).
+// The spec forbids inferring shipping from tracker state (ORCHESTRATOR §gc:
+// nothing merges — or is recorded as merged — without the orchestrator's own
+// RepoHost merge proof). A tracker marked Done while the task never shipped is
+// a divergence for a HUMAN to resolve, never an automatic mark_terminal.
 function detectRow6(s: OrchestratorSnapshot): GcPlanRow[] {
   if (s.mode === 'cheap') return [];
   const rows: GcPlanRow[] = [];
@@ -375,16 +403,14 @@ function detectRow6(s: OrchestratorSnapshot): GcPlanRow[] {
     const issue = findTrackerIssueForTask(s, taskId, task.state);
     if (!issue) continue;
     if (!issue.state.toLowerCase().includes('done')) continue;
-    const lease = task.leases.find((l) => l.isCanonical);
     rows.push({
       rowId: 6,
       taskId,
-      severity: 'info',
-      action: 'mark_terminal',
+      severity: 'warn',
+      action: 'report_orphan',
       payload: {
-        targetState: 'shipped',
-        leaseIdentity: lease ? leaseIdentityFrom(lease.lease) : { claimId: '', generation: 0, ownerRunId: '' },
-        trackerState: issue.state,
+        kind: 'tracker_done_not_shipped',
+        description: `tracker says '${issue.state}' but the task is ready_for_review locally — the tracker cannot prove a merge; resolve manually (never auto-shipped)`,
       },
     });
   }
@@ -557,6 +583,69 @@ function detectRow12(s: OrchestratorSnapshot): GcPlanRow[] {
 // happen given the monotonic-generation claim flow), prefer the CANONICAL file
 // as authoritative. Without this, readdirSync's order could put the canonical
 // lease in the "to release" set. (Codex 3rd-pass BLOCK 2.)
+// Row 15 (FORGE-231): merge_pending + canonical lease expired-beyond-grace →
+// identity-checked lease release. complete releases the worker lease right
+// after entering merge_pending; a crash in that window leaves a lease with no
+// heartbeat source. The task STATE is untouched (merge_pending is legitimate
+// until the platform merge is confirmed — FORGE-234's probing rows own that).
+function detectRow15(s: OrchestratorSnapshot): GcPlanRow[] {
+  const rows: GcPlanRow[] = [];
+  const graceMs = s.stealGraceMs ?? STEAL_GRACE_MS_DEFAULT;
+  for (const [taskId, task] of s.tasks) {
+    if (task.state?.state !== 'merge_pending') continue;
+    const lease = task.leases.find((l) => l.isCanonical);
+    if (!lease) continue;
+    const expiresAt = Date.parse(lease.lease.expires_at);
+    if (Number.isNaN(expiresAt) || s.now.getTime() <= expiresAt + graceMs) continue;
+    rows.push({
+      rowId: 15,
+      taskId,
+      severity: 'warn',
+      action: 'release_lease_admin',
+      payload: {
+        expectedClaimId: lease.lease.claim_id,
+        expectedGeneration: lease.lease.generation,
+        expectedOwnerRunId: lease.lease.owner_run_id,
+        expectedExpiresAt: lease.lease.expires_at,
+        expectedPath: lease.path,
+        requireTerminalState: false,
+        reason: 'gc:row-15:merge-pending-lease',
+      },
+    });
+  }
+  return rows;
+}
+
+// Row 16 (FORGE-231): stuck CAS transition markers — REPORT ONLY. Conservative
+// no-takeover recovery: gc NEVER removes an incomplete marker; the report
+// carries the manual remediation contract (operator confirms the owning run/
+// process is dead — PID liveness is a HINT, PID reuse is possible — then
+// removes the marker file by hand).
+function detectRow16(s: OrchestratorSnapshot): GcPlanRow[] {
+  if (s.mode === 'cheap') return [];
+  const rows: GcPlanRow[] = [];
+  for (const [taskId, task] of s.tasks) {
+    for (const marker of task.stuckCasMarkers ?? []) {
+      const owner = marker.owner
+        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}; ${marker.holderLeaseState ?? 'holder lease: unknown'}; owner run dir ${marker.runManifestPresent === null ? 'unknown' : marker.runManifestPresent ? 'present (a trace — NOT liveness proof)' : 'absent'}`
+        : 'owner tuple unreadable — treat as ALIVE and investigate before touching';
+      rows.push({
+        rowId: 16,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'stuck_cas_marker',
+          description:
+            `incomplete CAS marker ${marker.markerPath} (transition ${marker.domain} on ${marker.guardedFile}); ${owner}. ` +
+            'A writer crashed mid-commit or is paused; confirm the owning RUN is dead, then remove the marker file manually. gc never removes an incomplete marker.',
+        },
+      });
+    }
+  }
+  return rows;
+}
+
 function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
   const rows: GcPlanRow[] = [];
   for (const [taskId, task] of s.tasks) {
@@ -573,8 +662,45 @@ function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
       // unlinking the wrong file under all-same-generation pathologies.
       return a.path.localeCompare(b.path);
     });
-    const [, ...older] = sorted;
-    for (const stale of older) {
+    // FORGE-231 (impl R2 MAJ-3): the CANONICAL path is the only lease normal
+    // readers consume — row 13 must NEVER release it in favor of a
+    // non-canonical artifact. Duplicate cleanup releases NON-canonical
+    // artifacts only; a non-canonical artifact carrying a HIGHER generation
+    // than the canonical lease is corruption a human must resolve — report,
+    // never auto-pick a winner that readers cannot see.
+    const canonical = task.leases.find((l) => l.isCanonical);
+    // impl R3 MAJ-3: with NO active canonical lease (absent or tombstoned),
+    // nothing can be verified authoritative — releasing the artifacts would
+    // destroy the only remaining ownership evidence. Report for a human.
+    if (!canonical) {
+      rows.push({
+        rowId: 13,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claimed_no_local',
+          description: `${task.leases.length} non-canonical lease artifact(s) exist with NO active canonical lease — cannot determine the authoritative owner; resolve manually (gc never deletes ownership evidence in this topology)`,
+        },
+      });
+      continue;
+    }
+    const highest = sorted[0];
+    if (highest && !highest.isCanonical && highest.lease.generation > canonical.lease.generation) {
+      rows.push({
+        rowId: 13,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claimed_no_local',
+          description: `non-canonical lease artifact ${highest.path} carries generation ${highest.lease.generation} ABOVE the canonical lease (generation ${canonical.lease.generation}) — corrupted duplicate topology; resolve manually (gc never promotes or releases the canonical lease over an invisible artifact)`,
+        },
+      });
+      continue;
+    }
+    for (const stale of sorted) {
+      if (stale.isCanonical) continue; // canonical is released only by rows 14/15 with full identity gates
       rows.push({
         rowId: 13,
         taskId,
@@ -662,6 +788,8 @@ const ROW_DETECTORS: readonly ((s: OrchestratorSnapshot) => GcPlanRow[])[] = [
   detectRow10,
   detectRow11,
   detectRow12,
+  detectRow15,
+  detectRow16,
   detectRow13,
   detectRow14,
 ];

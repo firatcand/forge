@@ -12,6 +12,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import { runOrchestrateGc } from '../../../src/cli/orchestrate/gc.ts';
+
+const assertLeaseReleased = (p: string): void => {
+  // FORGE-231: release writes a tombstone (file survives); absence only occurs
+  // on legacy/admin unlink paths. Either way there must be no ACTIVE lease.
+  if (existsSync(p)) {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { status?: string };
+    assert.equal(parsed.status, 'released', `expected a release tombstone at ${p}`);
+  }
+};
+
 import {
   leaseFilePath,
   stateFilePath,
@@ -148,7 +158,7 @@ test('orchestrate gc --dry-run: reconciler plan formatted but not applied (row 1
 
 // ── Apply mode: row 14 ──
 
-test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked + admin_released history event', async () => {
+test('orchestrate gc apply: row 14 (lease + terminal state) → lease tombstoned + admin_released history event', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -167,7 +177,7 @@ test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked +
     assert.equal(result.reconcilerErrors?.length ?? 0, 0);
 
     // Lease file removed.
-    assert.equal(existsSync(leaseFilePath(fd, 'TASK-X')), false);
+    assertLeaseReleased(leaseFilePath(fd, 'TASK-X'));
     // claim-history.jsonl has the admin_released event with the right reason.
     const history = readFileSync(claimHistoryFilePath(fd, 'TASK-X'), 'utf8');
     const events = history.trim().split('\n').map((l) => JSON.parse(l));
@@ -227,7 +237,7 @@ test('orchestrate gc apply: row 2 (expired running lease) → abandoned + lease 
     const result = await runOrchestrateGc({ forgeDir: fd, stdout, stderr, now: fixedNow });
     assert.equal(result.exitCode, 0);
     assert.ok(result.reconcilerRows?.some((r) => r.rowId === 2 && r.action === 'mark_abandoned'));
-    assert.equal(existsSync(leaseFilePath(fd, 'TASK-EXP')), false);
+    assertLeaseReleased(leaseFilePath(fd, 'TASK-EXP'));
     const state = JSON.parse(readFileSync(stateFilePath(fd, 'TASK-EXP'), 'utf8'));
     assert.equal(state.state, 'abandoned');
     assert.match(out(), /marked abandoned/);

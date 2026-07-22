@@ -18,6 +18,7 @@ import {
 } from '../../orchestrator/overlap.ts';
 import {
   collectActiveAttempts,
+  collectTasksByState,
   isTrackerIdDone,
 } from '../../orchestrator/readiness.ts';
 import { PhasesArgsSchema, type PhasesArgs } from '../../schemas/cli-args.ts';
@@ -200,11 +201,18 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
     if (task.status && task.status !== 'active') continue; // skip deferred/dropped/done/paused
     if (phaseStatus === 'blocked') continue;
     if (opts.blockedBy && !task.depends_on.includes(opts.blockedBy)) continue;
-    if (opts.phase) {
-      // Phase filter currently only meaningful for tasks that have not been
-      // dispatched: we surface them under 'implement' by default. The dispatch
-      // skill decides whether the candidate is review-ready or ship-ready.
-      if (opts.phase !== 'implement') continue;
+    if (opts.phase && opts.phase !== 'implement') {
+      // FORGE-231: --phase review lists tasks whose ORCHESTRATOR state is
+      // ready_for_review (dual-host review dispatch candidates); --phase ship
+      // lists reviewed (ship dispatch candidates). Both are read-only listings
+      // over the capped state scanner; phases.yaml supplies the metadata.
+      const wanted = opts.phase === 'review' ? 'ready_for_review' : 'reviewed';
+      const inState = collectTasksByState(opts.forgeDir, (s) => s === wanted);
+      const ids = new Set(inState.map((t) => t.taskId));
+      const candidateId = task.tracker_issue_id ?? task.id;
+      if (!ids.has(candidateId) && !ids.has(task.id)) continue;
+      candidates.push({ task, phaseId });
+      continue;
     }
     // Are all deps satisfied?
     const allDepsDone = task.depends_on.every(

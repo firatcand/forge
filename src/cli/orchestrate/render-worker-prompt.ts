@@ -55,6 +55,9 @@ interface ManifestShape {
   readonly run_id: string;
   readonly phase: 'implement' | 'review' | 'ship';
   readonly worktree_path: string;
+  // FORGE-231: pinned review endpoints (present on review-phase manifests).
+  readonly review_target_sha?: string;
+  readonly review_base_sha?: string;
 }
 
 function readManifest(forgeDir: string, taskId: string, attemptId: string): ManifestShape {
@@ -315,6 +318,8 @@ export async function runOrchestrateRenderWorkerPrompt(
       runId: manifest.run_id,
       worktreePath: manifest.worktree_path,
       phase: manifest.phase.toUpperCase() as 'IMPLEMENT' | 'REVIEW' | 'SHIP',
+      ...(manifest.review_target_sha ? { reviewTargetSha: manifest.review_target_sha } : {}),
+      ...(manifest.review_base_sha ? { reviewBaseSha: manifest.review_base_sha } : {}),
       taskDescription: description,
       acceptanceCriteria: acceptance,
       conventions,

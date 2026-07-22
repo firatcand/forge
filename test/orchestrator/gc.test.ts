@@ -28,6 +28,7 @@ function mkLease(overrides: Partial<Lease> = {}): Lease {
     last_heartbeat_at: '2026-05-15T10:00:00.000Z',
     generation: 0,
     spec_revision: 'git:0000000000000000000000000000000000000000',
+    lease_version: 1,
     ...overrides,
   };
 }
@@ -52,6 +53,10 @@ function mkState(overrides: Partial<TaskStateRecord> = {}): TaskStateRecord {
     state: 'unclaimed' as TaskState,
     state_version: 0,
     attempt_count: 0,
+    failure_count: 0,
+    last_failure_key: null,
+    review_attempt_count: 0,
+    ship_attempt_count: 0,
     current_attempt_id: null,
     updated_at: '2026-05-15T10:00:00.000Z',
     updated_by: { run_id: 'run-A', claim_id: 'claim-A', generation: 0 },
@@ -699,4 +704,109 @@ test('gc: GcPlanRow union is exhaustively handled by a switch (compile-time chec
     },
   };
   assert.equal(handle(row), 'rla');
+});
+
+// ---- Row 16 (FORGE-231): stuck CAS marker report carries the owner tuple ----
+
+test('gc row 16: stuck marker report includes the owner tuple + PID hint', () => {
+  const tasks = new Map([
+    [
+      'TASK-M',
+      mkTaskSnapshot({
+        state: mkState({ task_id: 'TASK-M', state: 'running' }),
+        stuckCasMarkers: [
+          {
+            guardedFile: '/p/state.json',
+            markerPath: '/p/state.json.cas-3',
+            domain: '3',
+            owner: { run_id: 'run-9', claim_id: 'claim-9', generation: 4, pid: 12345, created_at: '2026-07-22T00:00:00.000Z' },
+            pidAlive: false,
+          },
+        ],
+      }),
+    ],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const row = plan.rows.find((r) => r.rowId === 16);
+  assert.ok(row, 'row 16 fires');
+  if (row?.action === 'report_orphan') {
+    assert.equal(row.payload.kind, 'stuck_cas_marker');
+    assert.match(row.payload.description, /run=run-9/);
+    assert.match(row.payload.description, /claim=claim-9/);
+    assert.match(row.payload.description, /pid appears dead; reuse possible/);
+    assert.match(row.payload.description, /gc never removes/);
+  }
+});
+
+test('gc row 13: a HIGHER-generation non-canonical artifact is reported, never auto-resolved (impl R2 MAJ-3)', () => {
+  const canonical = mkLeaseAtPath({ task_id: 'TASK-D13', generation: 1, claim_id: 'c-1' }, '/p/lease.json', true);
+  const rogue = mkLeaseAtPath({ task_id: 'TASK-D13', generation: 2, claim_id: 'c-2' }, '/p/lease.json.bak', false);
+  const tasks = new Map([
+    ['TASK-D13', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D13', state: 'running' }), leases: [canonical, rogue] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.action, 'report_orphan', 'corrupted duplicate topology must be reported, not auto-released');
+  if (row.action === 'report_orphan') {
+    assert.match(row.payload.description, /resolve manually/);
+  }
+});
+
+test('gc row 13: normal duplicates release ONLY non-canonical artifacts', () => {
+  const canonical = mkLeaseAtPath({ task_id: 'TASK-D14', generation: 3, claim_id: 'c-3' }, '/p/lease.json', true);
+  const stale = mkLeaseAtPath({ task_id: 'TASK-D14', generation: 1, claim_id: 'c-old' }, '/p/lease.json.bak', false);
+  const tasks = new Map([
+    ['TASK-D14', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D14', state: 'running' }), leases: [canonical, stale] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  const row = rows[0]!;
+  assert.equal(row.action, 'release_lease_admin');
+  if (row.action === 'release_lease_admin') {
+    assert.equal(row.payload.expectedPath, '/p/lease.json.bak', 'canonical must never be a row-13 release target');
+  }
+});
+
+test('gc row 13: NO active canonical lease + duplicates → report only, nothing released (impl R3 MAJ-3)', () => {
+  const g2 = mkLeaseAtPath({ task_id: 'TASK-D15', generation: 2, claim_id: 'c-2' }, '/p/lease.json.bak', false);
+  const g1 = mkLeaseAtPath({ task_id: 'TASK-D15', generation: 1, claim_id: 'c-1' }, '/p/lease.json.old', false);
+  const tasks = new Map([
+    ['TASK-D15', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D15', state: 'running' }), leases: [g2, g1] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.action, 'report_orphan', 'no-canonical topology must never auto-release');
+});
+
+test('gc row 16: description carries owner-correlated lease state + honest run-dir label (impl R4 MIN-3)', () => {
+  const tasks = new Map([
+    [
+      'TASK-M2',
+      mkTaskSnapshot({
+        state: mkState({ task_id: 'TASK-M2', state: 'merge_pending' }),
+        stuckCasMarkers: [
+          {
+            guardedFile: '/p/ship-record.json',
+            markerPath: '/p/ship-record.json.cas-2',
+            domain: '2',
+            owner: { run_id: 'run-A', claim_id: 'claim-A', generation: 3, pid: 111, created_at: '2026-07-22T00:00:00.000Z' },
+            pidAlive: false,
+            holderLeaseState: 'canonical lease: released by a DIFFERENT identity (run=run-B gen=4)',
+            runManifestPresent: true,
+          },
+        ],
+      }),
+    ],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const row = plan.rows.find((r) => r.rowId === 16);
+  assert.ok(row);
+  if (row?.action === 'report_orphan') {
+    assert.match(row.payload.description, /released by a DIFFERENT identity \(run=run-B gen=4\)/);
+    assert.match(row.payload.description, /a trace — NOT liveness proof/);
+  }
 });

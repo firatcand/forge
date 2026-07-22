@@ -86,8 +86,12 @@ export async function runOrchestrateHeartbeat(
   // First-heartbeat state hop: dispatched → running.
   let firstHeartbeat = false;
   try {
-    const state = readTaskState(opts.forgeDir, opts.taskId);
-    if (state.state === 'dispatched') {
+    // FORGE-231: state-derived hop — on a typed CAS conflict, re-read and
+    // retry exactly once (a concurrent writer may have advanced the version;
+    // if it already performed the hop, the re-read simply finds 'running').
+    const hop = (): void => {
+      const state = readTaskState(opts.forgeDir, opts.taskId);
+      if (state.state !== 'dispatched') return;
       writeTaskState(
         opts.forgeDir,
         {
@@ -104,6 +108,15 @@ export async function runOrchestrateHeartbeat(
         callerFromLease(renewed),
       );
       firstHeartbeat = true;
+    };
+    try {
+      hop();
+    } catch (hopErr) {
+      if (hopErr instanceof OrchestratorError && hopErr.code === 'STATE_VERSION_CONFLICT') {
+        hop();
+      } else {
+        throw hopErr;
+      }
     }
   } catch (err) {
     // State read/write failures don't undo the lease renewal — gc reconciles.

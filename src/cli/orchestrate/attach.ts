@@ -62,6 +62,16 @@ function formatEvent(e: NotificationEvent): string {
   if (isFatalEvent(e)) {
     return `[${e.ts}] FATAL     ${e.reason}`;
   }
+  // FORGE-231 progress events (advisory).
+  if (e.type === 'ready_for_review') {
+    return `[${e.ts}] review    ${e.task_id} ready for review (v${e.state_version})`;
+  }
+  if (e.type === 'merge_pending') {
+    return `[${e.ts}] merging   ${e.task_id} awaiting platform merge ${e.pr_url}${e.auto_merge ? ' (auto)' : ''}`;
+  }
+  if (e.type === 'shipped') {
+    return `[${e.ts}] shipped   ${e.task_id} ${e.pr_url}`;
+  }
   return `[unknown event type]`;
 }
 
@@ -81,6 +91,26 @@ function defaultIsPidAlive(pid: number): boolean {
 interface TailState {
   offset: number; // byte offset into the file we've already emitted
   buf: string; // partial trailing line carry-over
+  // FORGE-231: bounded LRU of seen event ids. A crash-replayed producer can
+  // legally append the same event twice (ids are deterministic natural keys);
+  // the supervisor should see it once.
+  seenIds: Set<string>;
+}
+
+const SEEN_IDS_MAX = 1_000;
+
+function dedupSeen(state: TailState, id: string | undefined): boolean {
+  if (id === undefined) return false; // legacy events have no id — never drop
+  if (state.seenIds.has(id)) return true;
+  state.seenIds.add(id);
+  if (state.seenIds.size > SEEN_IDS_MAX) {
+    // Drop the oldest entries (Set iteration order = insertion order).
+    for (const old of state.seenIds) {
+      state.seenIds.delete(old);
+      if (state.seenIds.size <= SEEN_IDS_MAX) break;
+    }
+  }
+  return false;
 }
 
 function tailNewBytes(
@@ -119,6 +149,7 @@ function tailNewBytes(
       continue;
     }
     if (r.event === null) continue;
+    if (dedupSeen(state, r.event.id)) continue;
     out.write(formatEvent(r.event) + '\n');
   }
 }
@@ -171,7 +202,7 @@ export function runOrchestrateAttach(
     return { exitCode: 1 };
   }
 
-  const state: TailState = { offset: 0, buf: '' };
+  const state: TailState = { offset: 0, buf: '', seenIds: new Set() };
   tailNewBytes(jsonlPath, state, out, err);
 
   if (!opts.follow) {

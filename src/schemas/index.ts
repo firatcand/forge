@@ -15,19 +15,25 @@ export type {
   AttemptStateRecord,
 } from './task-state.ts';
 
-export { AttemptEventSchema } from './attempt.ts';
-export type { AttemptEvent } from './attempt.ts';
+export { AttemptEventSchema, AttemptManifestSchema, ATTEMPT_PHASES } from './attempt.ts';
+export type { AttemptEvent, AttemptManifest, AttemptPhase } from './attempt.ts';
 
 export {
   LeaseSchema,
+  LeaseFileSchema,
+  ReleasedLeaseTombstoneSchema,
+  parseLeaseFile,
   LEASE_TTL_MS_DEFAULT,
   HEARTBEAT_INTERVAL_MS_DEFAULT,
   STEAL_GRACE_MS_DEFAULT,
 } from './lease.ts';
-export type { Lease } from './lease.ts';
+export type { Lease, LeaseFileRecord, ReleasedLeaseTombstone } from './lease.ts';
 
-export { VerdictSchema, ReviewVerdictSchema } from './verdict.ts';
-export type { Verdict, ReviewVerdict } from './verdict.ts';
+export { VerdictSchema, ReviewVerdictSchema, PinnedReviewVerdictSchema } from './verdict.ts';
+export type { Verdict, ReviewVerdict, PinnedReviewVerdict } from './verdict.ts';
+
+export { ShipRecordSchema, PullRequestRefSchema } from './ship-record.ts';
+export type { ShipRecord, PullRequestRef } from './ship-record.ts';
 
 export { ForgeManifestSchema, MANIFEST_VERSION } from './manifest.ts';
 export type {

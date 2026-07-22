@@ -20,6 +20,15 @@ export function parseCriticalGlobs(repoRoot: string): readonly string[] {
   } catch {
     return [];
   }
+  return parseCriticalGlobsFromContent(raw);
+}
+
+// FORGE-231: content-level parser for TRUSTED sources (git show <sha>:CRITICAL.md).
+// The file-reading wrapper above stays lenient (missing → []) for its existing
+// audit/docs-coverage consumers; the review gateway must NOT use that lenient
+// path — it feeds this parser with revision-pinned content and fails closed on
+// read errors itself.
+export function parseCriticalGlobsFromContent(raw: string): readonly string[] {
   const globs: string[] = [];
   for (const line of raw.split('\n')) {
     let t = line.trim();

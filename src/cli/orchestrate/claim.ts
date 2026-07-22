@@ -220,6 +220,10 @@ async function runClaimWithTracker(
     state: 'claimed',
     state_version: 0,
     attempt_count: 0,
+    failure_count: 0,
+    last_failure_key: null,
+    review_attempt_count: 0,
+    ship_attempt_count: 0,
     current_attempt_id: null,
     updated_at: new Date().toISOString(),
     updated_by: {

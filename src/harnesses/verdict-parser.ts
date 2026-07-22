@@ -1,4 +1,4 @@
-import { ReviewVerdictSchema, type ReviewVerdict } from '../schemas/verdict.ts';
+import { PinnedReviewVerdictSchema, ReviewVerdictSchema, type ReviewVerdict } from '../schemas/verdict.ts';
 import { truncateUtf8 } from '../schemas/byte-bounded.ts';
 import { HarnessError, type HarnessHost } from './base.ts';
 
@@ -71,4 +71,34 @@ export function synthesizeVerdict(host: ReviewableHost, stdout: string): ReviewV
     ],
     host,
   });
+}
+
+// FORGE-231: pinned variant for the ORCHESTRATED review path. On top of the
+// existing parse + host-equality checks, requires target_sha (Pinned schema)
+// and verifies it equals the SHA the dispatch manifest pinned. A verdict for
+// a different commit — or an unpinned one — must never satisfy the gate.
+export function parsePinnedReviewVerdict(
+  host: ReviewableHost,
+  stdout: string,
+  expectedTargetSha: string,
+): ReviewVerdict {
+  const verdict = parseHarnessVerdict({ host, stdout });
+  const pinned = PinnedReviewVerdictSchema.safeParse(verdict);
+  if (!pinned.success) {
+    throw new HarnessError(
+      'INVALID_STDOUT',
+      host,
+      `${host} emitted a verdict without the required pinned target_sha`,
+      { issues: pinned.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`) },
+    );
+  }
+  if (pinned.data.target_sha !== expectedTargetSha) {
+    throw new HarnessError(
+      'INVALID_STDOUT',
+      host,
+      `${host} emitted a verdict pinned to ${pinned.data.target_sha}, expected ${expectedTargetSha}`,
+      { expected: expectedTargetSha, actual: pinned.data.target_sha },
+    );
+  }
+  return pinned.data;
 }

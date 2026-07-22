@@ -57,6 +57,62 @@ export class FsWriteError extends Error {
   }
 }
 
+// FORGE-231: writeAtomicDurable distinguishes WHERE a durable write failed so
+// casGuardedWrite can decide whether its exclusivity marker may be removed.
+// 'pre_placement' = the failure happened before rename(2) was attempted (temp
+// open / write / fsync / close) — the target provably did not advance, so the
+// caller's CAS marker is safe to release and the operation is retriable.
+// 'placement_ambiguous' = rename or directory-fsync failed — the content may
+// or may not have landed (or landed without proven durability), so the marker
+// must be retained and surfaced for recovery.
+export type DurableWritePhase = 'pre_placement' | 'placement_ambiguous';
+
+export class DurableWriteError extends Error {
+  readonly phase: DurableWritePhase;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    phase: DurableWritePhase,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'DurableWriteError';
+    this.phase = phase;
+    this.details = details;
+  }
+}
+
+// FORGE-231: typed failures of the casGuardedWrite commit protocol.
+// 'cas_conflict'     — another writer holds (or held) the marker for this
+//                      transition; re-read and retry or fail.
+// 'version_conflict' — the guarded file is not at the expected version (pre-
+//                      check or post-acquire revalidation); the transition
+//                      already happened or the caller's read is stale.
+// 'lease_lost'       — the operation-specific fence predicate rejected the
+//                      caller (e.g. its task lease expired or changed hands).
+// 'io'               — read/parse/write failure. `retriable: true` in details
+//                      marks proven pre-placement failures (marker released).
+export type CasErrorCode = 'cas_conflict' | 'version_conflict' | 'lease_lost' | 'io';
+
+export class CasError extends Error {
+  readonly code: CasErrorCode;
+  readonly details: Record<string, unknown>;
+
+  constructor(
+    code: CasErrorCode,
+    message: string,
+    details: Record<string, unknown> = {},
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'CasError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 export type SettingsErrorCode =
   | 'FILE_NOT_FOUND'
   | 'YAML_PARSE_ERROR'
@@ -144,11 +200,13 @@ export type OrchestratorErrorCode =
   | 'LEASE_STOLEN'          // caller's (claim_id, generation) does not match stored lease
   | 'LEASE_NOT_EXPIRED'     // steal attempted before expiry + grace period elapsed
   | 'LEASE_NOT_FOUND'       // lease.json absent when expected (e.g. heartbeat with no prior acquire)
+  | 'LEASE_CONTENDED'       // FORGE-231: a CAS transition marker is held by another writer — retry later
   | 'LEASE_IDENTITY_MISMATCH'   // adminReleaseLeaseByIdentity: on-disk lease differs from expected identity
   | 'LEASE_STATE_NOT_TERMINAL'  // adminReleaseLeaseByIdentity row-14 guard: task state was not terminal at unlink time
   | 'ILLEGAL_TRANSITION'    // state machine rejected the requested (from, trigger, to) triple
   | 'STATE_NOT_FOUND'       // state.json absent for a given task_id
   | 'STATE_VERSION_CONFLICT' // new state_version !== current state_version + 1
+  | 'STALE_ATTEMPT'          // FORGE-231: the attempt pointer moved on before this commit landed
   | 'SCHEMA_INVALID'        // zod parse failed or JSON is malformed
   | 'INVALID_ID'            // task_id / attempt_id failed segment validation
   | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries

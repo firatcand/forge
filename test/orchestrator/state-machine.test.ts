@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  applyTransition,
   assertLegalTransition,
   readTaskState,
   writeTaskState,
@@ -64,6 +65,10 @@ function baseState(
     state: 'unclaimed',
     state_version: 0,
     attempt_count: 0,
+    failure_count: 0,
+    last_failure_key: null,
+    review_attempt_count: 0,
+    ship_attempt_count: 0,
     current_attempt_id: null,
     updated_at: new Date().toISOString(),
     updated_by: { run_id: 'run-001', claim_id: 'claim-001', generation: 0 },
@@ -84,7 +89,14 @@ const legalTransitions: Array<{ from: TaskState; trigger: TransitionTrigger; to:
   { from: 'awaiting_respawn', trigger: 'dispatch', to: 'dispatched' },
   { from: 'running', trigger: 'complete_ready_for_review', to: 'ready_for_review' },
   { from: 'ready_for_review', trigger: 'review_passed', to: 'reviewed' },
-  { from: 'reviewed', trigger: 'ship_completed', to: 'shipped' },
+  // FORGE-231: ship submits side effects; the platform merge is the only
+  // proof — reviewed now enters merge_pending, and merge_confirmed ships.
+  { from: 'reviewed', trigger: 'ship_op_completed', to: 'merge_pending' },
+  { from: 'merge_pending', trigger: 'merge_confirmed', to: 'shipped' },
+  { from: 'merge_pending', trigger: 'head_drift', to: 'ready_for_review' },
+  { from: 'merge_pending', trigger: 'pr_closed_unmerged', to: 'blocked_on_question' },
+  { from: 'merge_pending', trigger: 'probe_or_policy_loss', to: 'blocked_on_question' },
+  { from: 'merge_pending', trigger: 'cancel', to: 'cancelled' },
   { from: 'running', trigger: 'lease_expired', to: 'abandoned' },
   { from: 'dispatched', trigger: 'lease_expired', to: 'abandoned' },
   { from: 'blocked_on_question', trigger: 'lease_expired', to: 'abandoned' },
@@ -93,7 +105,22 @@ const legalTransitions: Array<{ from: TaskState; trigger: TransitionTrigger; to:
   { from: 'claimed', trigger: 'cancel', to: 'cancelled' },
   { from: 'dispatched', trigger: 'cancel', to: 'cancelled' },
   { from: 'running', trigger: 'retries_exhausted', to: 'failed' },
-  { from: 'ready_for_review', trigger: 'changes_requested', to: 'running' },
+  // FORGE-231: review failure regresses to the DISPATCHABLE awaiting_respawn
+  // (running stranded the task — dispatch is not legal from running).
+  { from: 'ready_for_review', trigger: 'changes_requested', to: 'awaiting_respawn' },
+  { from: 'ready_for_review', trigger: 'changes_needed', to: 'awaiting_respawn' },
+  { from: 'running', trigger: 'changes_needed', to: 'awaiting_respawn' },
+  { from: 'running', trigger: 'blocked', to: 'blocked_on_question' },
+  { from: 'reviewed', trigger: 'ship_failed', to: 'reviewed' },
+  { from: 'awaiting_respawn', trigger: 'retries_exhausted', to: 'failed' },
+  { from: 'reviewed', trigger: 'retries_exhausted', to: 'failed' },
+  { from: 'running', trigger: 'implement_verified_single_host', to: 'reviewed' },
+  { from: 'ready_for_review', trigger: 'implement_verified_single_host', to: 'reviewed' },
+  { from: 'claimed', trigger: 'dispatch_implement', to: 'dispatched' },
+  { from: 'awaiting_respawn', trigger: 'dispatch_implement', to: 'dispatched' },
+  { from: 'ready_for_review', trigger: 'dispatch_implement', to: 'dispatched' },
+  { from: 'ready_for_review', trigger: 'dispatch_review', to: 'ready_for_review' },
+  { from: 'reviewed', trigger: 'dispatch_ship', to: 'reviewed' },
 ];
 
 for (const { from, trigger, to } of legalTransitions) {
@@ -378,4 +405,79 @@ test('state-machine: writeTaskState throws SCHEMA_INVALID when state.json contai
     () => writeTaskState(fd, state, defaultCaller),
     (err) => err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID',
   );
+});
+
+// ---- applyTransition (FORGE-231) ----
+
+test('applyTransition: derives the to-state from the table', () => {
+  assert.equal(applyTransition('reviewed', 'ship_op_completed'), 'merge_pending');
+  assert.equal(applyTransition('merge_pending', 'merge_confirmed'), 'shipped');
+  assert.equal(applyTransition('ready_for_review', 'changes_requested'), 'awaiting_respawn');
+  assert.equal(applyTransition('ready_for_review', 'dispatch_review'), 'ready_for_review');
+});
+
+test('applyTransition: throws ILLEGAL_TRANSITION for a missing row', () => {
+  assert.throws(
+    () => applyTransition('shipped', 'claim'),
+    (err) => err instanceof OrchestratorError && err.code === 'ILLEGAL_TRANSITION',
+  );
+});
+
+// ---- FORGE-231 (impl R2 MAJ-2): commit-time active-lease requirement ----
+
+test('writeTaskState with requireActiveLease refuses an EXPIRED (but identity-matching) lease', () => {
+  const fd = forgeDir('sm-expired-commit');
+  makeLease(fd, 'TASK-EXPC', { expires_at: new Date(Date.now() - 60_000).toISOString() });
+  writeTaskState(fd, baseState('TASK-EXPC'), defaultCaller); // identity-only path still works (gc recovery)
+  assert.throws(
+    () =>
+      writeTaskState(
+        fd,
+        baseState('TASK-EXPC', { state: 'claimed', state_version: 1 }),
+        defaultCaller,
+        { requireActiveLease: true },
+      ),
+    (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
+  );
+});
+
+test('writeTaskState with expectedCurrentAttemptId fences a superseded phase attempt (impl R5)', () => {
+  const fd = forgeDir('sm-superseded-attempt');
+  makeLease(fd, 'TASK-SUP');
+  // State currently points at the superseding attempt B.
+  writeTaskState(
+    fd,
+    baseState('TASK-SUP', { state: 'ready_for_review', state_version: 0, current_attempt_id: 'attempt-B' }),
+    defaultCaller,
+  );
+  // Attempt A tries to commit but names itself as the expected current attempt.
+  assert.throws(
+    () =>
+      writeTaskState(
+        fd,
+        baseState('TASK-SUP', { state: 'reviewed', state_version: 1, current_attempt_id: 'attempt-A' }),
+        defaultCaller,
+        { expectedCurrentAttemptId: 'attempt-A' },
+      ),
+    (err) => err instanceof OrchestratorError && err.code === 'STALE_ATTEMPT',
+  );
+  // The state is untouched — B still owns it.
+  assert.equal(readTaskState(fd, 'TASK-SUP').current_attempt_id, 'attempt-B');
+});
+
+test('writeTaskState with a MATCHING expectedCurrentAttemptId commits normally (impl R5)', () => {
+  const fd = forgeDir('sm-matching-attempt');
+  makeLease(fd, 'TASK-MAT');
+  writeTaskState(
+    fd,
+    baseState('TASK-MAT', { state: 'ready_for_review', state_version: 0, current_attempt_id: 'attempt-A' }),
+    defaultCaller,
+  );
+  writeTaskState(
+    fd,
+    baseState('TASK-MAT', { state: 'reviewed', state_version: 1, current_attempt_id: 'attempt-A' }),
+    defaultCaller,
+    { expectedCurrentAttemptId: 'attempt-A' },
+  );
+  assert.equal(readTaskState(fd, 'TASK-MAT').state, 'reviewed');
 });

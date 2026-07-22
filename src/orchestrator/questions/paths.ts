@@ -123,6 +123,11 @@ export function claimHistoryFilePath(forgeDir: string, taskId: string): string {
   return join(taskDir(forgeDir, taskId), 'claim-history.jsonl');
 }
 
+// FORGE-231: the durable ship record (write-ahead for push/PR/merge effects).
+export function shipRecordFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'ship-record.json');
+}
+
 export function manifestFilePath(
   forgeDir: string,
   taskId: string,

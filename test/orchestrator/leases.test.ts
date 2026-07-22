@@ -1,8 +1,8 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, existsSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import {
   acquire,
   heartbeat,
@@ -10,6 +10,7 @@ import {
   release,
   assertLeaseOwnership,
   adminReleaseLeaseByIdentity,
+  readLeaseRecord,
   __leasesFsForTesting,
 } from '../../src/orchestrator/leases.ts';
 import { OrchestratorError } from '../../src/core/errors.ts';
@@ -230,17 +231,20 @@ test('leases: original holder heartbeat after steal throws LEASE_STOLEN', () => 
 
 // ---- steal when no lease exists — falls through to acquire ----
 
-test('leases: steal with no existing lease succeeds as a fresh acquire', () => {
+test('leases: steal with no active lease throws LEASE_NOT_FOUND (fall-through removed, FORGE-231)', () => {
   const fd = forgeDir('steal-no-lease');
   mkdirSync(join(fd, 'orchestrator', 'tasks', 'TASK-SNL'), { recursive: true });
-  const lease = steal({
-    forgeDir: fd,
-    taskId: 'TASK-SNL',
-    runId: 'run-001',
-    now: Date.now(),
-  });
-  assert.equal(lease.generation, 0);
-  assert.equal(lease.owner_run_id, 'run-001');
+  assert.throws(
+    () =>
+      steal({
+        forgeDir: fd,
+        taskId: 'TASK-SNL',
+        runId: 'run-001',
+        now: Date.now(),
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_NOT_FOUND',
+  );
 });
 
 // ---- assertLeaseOwnership ----
@@ -287,7 +291,7 @@ test('leases: assertLeaseOwnership throws LEASE_NOT_FOUND when no lease exists',
 
 // ---- release ----
 
-test('leases: release removes lease.json', () => {
+test('leases: release writes a tombstone (file survives; generation continues on re-acquire)', () => {
   const fd = forgeDir('rel-happy');
   const lease = acquire({ forgeDir: fd, taskId: 'TASK-REL1', runId: 'run-001' });
   const path = leaseFilePath(fd, 'TASK-REL1');
@@ -297,7 +301,18 @@ test('leases: release removes lease.json', () => {
     taskId: 'TASK-REL1',
     caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
   });
-  assert.equal(existsSync(path), false, 'lease.json should be removed after release');
+  // FORGE-231: lease.json is never deleted after first acquisition — release
+  // writes a tombstone carrying the version/generation history.
+  assert.equal(existsSync(path), true, 'lease.json must survive release as a tombstone');
+  const record = readLeaseRecord('TASK-REL1', path);
+  assert.equal(record?.kind, 'released');
+  if (record?.kind !== 'released') throw new Error('unreachable');
+  assert.equal(record.tombstone.last_generation, lease.generation);
+  assert.equal(record.tombstone.lease_version, lease.lease_version + 1);
+  // Re-acquire continues the generation sequence from the tombstone.
+  const second = acquire({ forgeDir: fd, taskId: 'TASK-REL1', runId: 'run-002' });
+  assert.equal(second.generation, lease.generation + 1);
+  assert.equal(second.lease_version, record.tombstone.lease_version + 1);
 });
 
 test('leases: release appends to claim-history.jsonl', () => {
@@ -414,12 +429,7 @@ test('leases: empty current + populated .1 → generation read from .1 (no reset
   assert.equal(second.generation, first.generation + 1, 'no RESET; .1 consulted');
 });
 
-test('leases: rotation BETWEEN current and .1 read still yields a generation (no RESET)', () => {
-  // A perfect snapshot is impossible without cross-file locking. We assert the
-  // invariant the plan requires: the resolved generation is never a RESET to 0
-  // when prior history exists somewhere. Here the last generation lives in .1
-  // while current carries a LATER entry — the walk-current-first path returns
-  // the current entry; either way it is >= the rotated generation, never 0.
+test('leases: tombstone is authoritative for generation; claim history covers the LEGACY absent-file path (no RESET)', () => {
   const fd = forgeDir('rotate-race');
   const first = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-001' });
   release({
@@ -427,17 +437,30 @@ test('leases: rotation BETWEEN current and .1 read still yields a generation (no
     taskId: 'TASK-ROT3',
     caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
   });
+  // With a tombstone present, re-acquire continues from last_generation —
+  // claim history is not consulted (it cannot legitimately diverge: every
+  // mutation goes through the lease-file CAS).
+  const next = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-002' });
+  assert.equal(next.generation, first.generation + 1);
+
+  // LEGACY path (R8 CRIT-1): pre-FORGE-231 releases UNLINKED lease.json. An
+  // absent file with claim history must continue from history — never reset.
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-ROT3',
+    caller: { run_id: 'run-002', claim_id: next.claim_id, generation: next.generation },
+  });
+  unlinkSync(leaseFilePath(fd, 'TASK-ROT3')); // simulate the legacy unlink
   const histPath = claimHistoryFilePath(fd, 'TASK-ROT3');
   renameSync(histPath, `${histPath}.1`);
-  // A newer entry lands in the current file (e.g. another process appended).
   writeFileSync(
     histPath,
     JSON.stringify({ event: 'acquired', generation: 5 }) + '\n',
     'utf8',
   );
-  const next = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-002' });
-  assert.ok(next.generation >= 1, 'never a RESET to 0');
-  assert.equal(next.generation, 6, 'current entry (gen 5) + 1 wins when present');
+  const legacy = acquire({ forgeDir: fd, taskId: 'TASK-ROT3', runId: 'run-003' });
+  assert.ok(legacy.generation >= 1, 'never a RESET to 0');
+  assert.equal(legacy.generation, 6, 'current history entry (gen 5) + 1 wins when present');
 });
 
 // ---- steal writes state.json = unclaimed (OQ-6) + updated_by from new owner ----
@@ -488,7 +511,7 @@ test('leases: steal writes state.json with updated_by from the new owner identit
 
 // ---- Fix 1: steal verify-before-write — concurrent heartbeat race ----
 
-test('leases: steal throws LEASE_NOT_EXPIRED if heartbeat refreshed the lease after eligibility check (verify-before-write)', () => {
+test('leases: steal aborts (LEASE_CONTENDED, nothing published) when the lease mutated after eligibility check', () => {
   const fd = forgeDir('steal-vbw-race');
 
   // Acquire an expiring lease (holder A, gen=0).
@@ -499,35 +522,27 @@ test('leases: steal throws LEASE_NOT_EXPIRED if heartbeat refreshed the lease af
     leaseTtlMs: 1, // expires immediately
   });
 
-  // Advance clock past expiry + grace so steal's eligibility check would pass.
   const futureNow = Date.now() + 10_000_000;
-
-  // Simulate a concurrent heartbeat that refreshes the lease AFTER steal has
-  // judged it stealable but BEFORE steal writes. We inject a custom readFileSync
-  // into the seam: the first call (steal's pre-write verify-read) returns a
-  // refreshed lease (new expires_at), causing the verify-before-write to abort.
-  //
-  // Mechanism: steal calls readLeaseFile once during eligibility (using the real
-  // readFileSync), then again immediately before overwrite (the verify-read).
-  // We wrap readFileSync so that the second call to the lease path returns a
-  // lease with a different expires_at — as if heartbeat ran in between.
   const leasePath = leaseFilePath(fd, 'TASK-VBW');
-  const refreshedLease = {
+
+  // Simulate a heartbeat renewal landing AFTER steal judges the lease
+  // stealable: the seam read (steal's eligibility check) returns the STALE
+  // expired lease, while the REAL file on disk has been renewed (version
+  // bumped). Every lease write bumps lease_version, so the stale judgment is
+  // caught by the CAS version pin — the steal aborts having published nothing.
+  const renewed = {
     ...original,
     expires_at: new Date(futureNow + 30_000).toISOString(),
     last_heartbeat_at: new Date(futureNow).toISOString(),
+    lease_version: original.lease_version + 1,
   };
+  writeFileSync(leasePath, JSON.stringify(renewed), 'utf8');
 
-  let readCallCount = 0;
+  const staleRaw = JSON.stringify(original);
   const realReadFileSync = __leasesFsForTesting.readFileSync;
   __leasesFsForTesting.readFileSync = (path: unknown, ...args: unknown[]) => {
     if (path === leasePath) {
-      readCallCount++;
-      // First read: eligibility check — return original expired lease.
-      // Second read: verify-before-write — return refreshed lease (race injected).
-      if (readCallCount >= 2) {
-        return JSON.stringify(refreshedLease);
-      }
+      return staleRaw; // steal's observation read sees the stale expired lease
     }
     return (realReadFileSync as Function)(path, ...args);
   };
@@ -543,33 +558,41 @@ test('leases: steal throws LEASE_NOT_EXPIRED if heartbeat refreshed the lease af
           stealGraceMs: 0,
         }),
       (err: unknown) =>
-        err instanceof OrchestratorError &&
-        err.code === 'LEASE_NOT_EXPIRED' &&
-        (err.details as Record<string, unknown>)?.reason === 'concurrent_heartbeat_renewed_lease',
+        err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
     );
   } finally {
     __leasesFsForTesting.readFileSync = realReadFileSync;
   }
+
+  // Nothing was published: the renewed lease is intact and no CAS markers
+  // remain (the reserved state marker was released on abort).
+  const after = JSON.parse(readFileSync(leasePath, 'utf8'));
+  assert.equal(after.lease_version, renewed.lease_version);
+  assert.equal(after.expires_at, renewed.expires_at);
+  const taskDir = dirname(leasePath);
+  const leftovers = readdirSync(taskDir).filter((f) => f.includes('.cas-'));
+  assert.deepEqual(leftovers, [], 'steal abort must leave no CAS markers');
 });
 
 // ---- Fix 2: history corruption throw ----
 
-test('leases: acquire throws CLAIM_HISTORY_CORRUPT when history file is non-empty but fully malformed', () => {
+test('leases: acquire throws CLAIM_HISTORY_CORRUPT on the legacy path (absent file, malformed history)', () => {
   const fd = forgeDir('history-corrupt');
 
-  // Acquire and release to create the directory structure.
+  // Acquire and release, then UNLINK the tombstone to simulate a legacy
+  // (pre-FORGE-231) release — the shape where claim history is authoritative.
   const first = acquire({ forgeDir: fd, taskId: 'TASK-CORRUPT', runId: 'run-001' });
   release({
     forgeDir: fd,
     taskId: 'TASK-CORRUPT',
     caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
   });
+  unlinkSync(leaseFilePath(fd, 'TASK-CORRUPT'));
 
-  // Overwrite claim-history.jsonl with 3 lines of non-JSON to corrupt it.
   const histPath = claimHistoryFilePath(fd, 'TASK-CORRUPT');
   writeFileSync(histPath, 'not-json\nalso-not-json\nstill-not-json\n', 'utf8');
 
-  // acquire should throw CLAIM_HISTORY_CORRUPT, not silently reset generation to 0.
+  // acquire must throw CLAIM_HISTORY_CORRUPT, not silently reset generation to 0.
   assert.throws(
     () => acquire({ forgeDir: fd, taskId: 'TASK-CORRUPT', runId: 'run-002' }),
     (err: unknown) =>
@@ -577,10 +600,9 @@ test('leases: acquire throws CLAIM_HISTORY_CORRUPT when history file is non-empt
   );
 });
 
-test('leases: acquire with empty claim-history.jsonl still succeeds (generation 0)', () => {
+test('leases: acquire with empty claim history — tombstone wins; legacy absent-file path starts at 0', () => {
   const fd = forgeDir('history-empty');
 
-  // Acquire and release to create directory + history file.
   const first = acquire({ forgeDir: fd, taskId: 'TASK-HEMPTY', runId: 'run-001' });
   release({
     forgeDir: fd,
@@ -588,54 +610,45 @@ test('leases: acquire with empty claim-history.jsonl still succeeds (generation 
     caller: { run_id: 'run-001', claim_id: first.claim_id, generation: first.generation },
   });
 
-  // Truncate history to 0 bytes (legitimate edge case).
+  // Truncate history to 0 bytes. The tombstone (not history) carries the
+  // generation now, so continuity survives even an emptied history file —
+  // strictly better than the pre-FORGE-231 reset.
   const histPath = claimHistoryFilePath(fd, 'TASK-HEMPTY');
   writeFileSync(histPath, '', 'utf8');
-
-  // Should not throw — empty file is treated as "no history".
   const second = acquire({ forgeDir: fd, taskId: 'TASK-HEMPTY', runId: 'run-002' });
-  assert.equal(second.generation, 0, 'empty history file treated as no history — generation resets to 0');
+  assert.equal(second.generation, first.generation + 1, 'tombstone preserves generation despite empty history');
+
+  // LEGACY shape: absent lease file + empty history → genuine generation 0.
+  release({
+    forgeDir: fd,
+    taskId: 'TASK-HEMPTY',
+    caller: { run_id: 'run-002', claim_id: second.claim_id, generation: second.generation },
+  });
+  unlinkSync(leaseFilePath(fd, 'TASK-HEMPTY'));
+  writeFileSync(histPath, '', 'utf8');
+  try { unlinkSync(`${histPath}.1`); } catch { /* may not exist */ }
+  const legacy = acquire({ forgeDir: fd, taskId: 'TASK-HEMPTY', runId: 'run-003' });
+  assert.equal(legacy.generation, 0, 'empty history + absent file is a genuine first acquire');
 });
 
 // ---- Fix 3: run_id included in heartbeat verify-after-write ----
 
-test('leases: heartbeat verify-after-write detects mismatched run_id and throws LEASE_STOLEN (Fix 3)', () => {
+test('leases: heartbeat post-acquire read detects mismatched run_id and throws LEASE_STOLEN (FORGE-231)', () => {
   const fd = forgeDir('hb-verify-run-id');
   const lease = acquire({ forgeDir: fd, taskId: 'TASK-HBVR', runId: 'run-real' });
 
-  // Inject a fake re-read result that has the correct claim_id + generation
-  // but a different owner_run_id. This simulates the (defense-in-depth) case
-  // where the file on disk shows a different run_id than what we wrote.
+  // The REAL file on disk carries an impostor run_id at the SAME lease_version;
+  // the seam read (heartbeat's fast-fail precheck) still sees the caller's own
+  // lease. The mandatory post-acquire re-read (real fs) parses the impostor —
+  // the identity check inside the guarded mutation must reject it.
   const leasePath = leaseFilePath(fd, 'TASK-HBVR');
+  writeFileSync(leasePath, JSON.stringify({ ...lease, owner_run_id: 'run-impostor' }), 'utf8');
+
+  const ownRaw = JSON.stringify(lease);
   const realReadFileSync = __leasesFsForTesting.readFileSync;
-  let writeHappened = false;
-
   __leasesFsForTesting.readFileSync = (path: unknown, ...args: unknown[]) => {
-    if (path === leasePath && writeHappened) {
-      // Return a lease with the correct claim_id + generation but a different run_id.
-      const spoofed = {
-        ...lease,
-        owner_run_id: 'run-impostor',
-      };
-      return JSON.stringify(spoofed);
-    }
+    if (path === leasePath) return ownRaw;
     return (realReadFileSync as Function)(path, ...args);
-  };
-
-  // Intercept overwriteAtomicLink completion by wrapping unlinkSync: after the
-  // overwrite sequence runs we flip writeHappened so the verify-read returns the
-  // spoofed lease.
-  const realUnlinkSync = __leasesFsForTesting.unlinkSync;
-  let unlinkCount = 0;
-  __leasesFsForTesting.unlinkSync = (path: unknown) => {
-    (realUnlinkSync as Function)(path);
-    // The overwrite path calls unlinkSync twice (unlink target + unlink tmp).
-    // After the first unlink (target removed), the link hasn't happened yet.
-    // After the second unlink (tmp cleanup), the write is done.
-    unlinkCount++;
-    if (unlinkCount >= 2) {
-      writeHappened = true;
-    }
   };
 
   try {
@@ -651,8 +664,74 @@ test('leases: heartbeat verify-after-write detects mismatched run_id and throws 
     );
   } finally {
     __leasesFsForTesting.readFileSync = realReadFileSync;
-    __leasesFsForTesting.unlinkSync = realUnlinkSync;
   }
+
+  // The impostor lease was not modified and no markers were leaked.
+  const after = JSON.parse(readFileSync(leasePath, 'utf8'));
+  assert.equal(after.owner_run_id, 'run-impostor');
+  assert.equal(after.lease_version, lease.lease_version);
+  const leftovers = readdirSync(dirname(leasePath)).filter((f) => f.includes('.cas-'));
+  assert.deepEqual(leftovers, [], 'heartbeat abort must leave no CAS markers');
+});
+
+// ---- FORGE-231 §C4: steal reserve-then-publish protocol ----
+
+test('leases: steal aborts entirely (no lease publish) when the state transition marker is held', () => {
+  const fd = forgeDir('steal-state-reserved');
+  const original = acquire({
+    forgeDir: fd,
+    taskId: 'TASK-SRSV',
+    runId: 'run-holder',
+    leaseTtlMs: 1,
+  });
+  const futureNow = Date.now() + 10_000_000;
+
+  // A paused writer holds the state transition marker (state.json absent →
+  // the create-domain marker). The steal must conflict on its RESERVE step —
+  // before any lease mutation — and publish nothing.
+  const statePath = stateFilePath(fd, 'TASK-SRSV');
+  mkdirSync(dirname(statePath), { recursive: true });
+  writeFileSync(`${statePath}.cas-create`, JSON.stringify({ pid: 1, token: 'held' }), 'utf8');
+
+  assert.throws(
+    () =>
+      steal({
+        forgeDir: fd,
+        taskId: 'TASK-SRSV',
+        runId: 'run-thief',
+        now: futureNow,
+        stealGraceMs: 0,
+      }),
+    (err: unknown) =>
+      err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
+  );
+
+  // The lease is untouched — same holder, same version, no successor.
+  const after = readLeaseRecord('TASK-SRSV', leaseFilePath(fd, 'TASK-SRSV'));
+  assert.equal(after?.kind, 'active');
+  if (after?.kind !== 'active') throw new Error('unreachable');
+  assert.equal(after.lease.claim_id, original.claim_id);
+  assert.equal(after.lease.generation, original.generation);
+  assert.equal(after.lease.lease_version, original.lease_version);
+  // The held marker is still there (the steal must not remove it).
+  assert.equal(existsSync(`${statePath}.cas-create`), true);
+});
+
+test('leases: legacy lease file without lease_version defaults to 1 and heartbeats to 2', () => {
+  const fd = forgeDir('legacy-lease-version');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-LEGACY', runId: 'run-001' });
+  const leasePath = leaseFilePath(fd, 'TASK-LEGACY');
+  // Strip lease_version — the shape every pre-FORGE-231 lease file has.
+  const legacy = JSON.parse(readFileSync(leasePath, 'utf8'));
+  delete legacy.lease_version;
+  writeFileSync(leasePath, JSON.stringify(legacy), 'utf8');
+
+  const renewed = heartbeat({
+    forgeDir: fd,
+    taskId: 'TASK-LEGACY',
+    caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+  });
+  assert.equal(renewed.lease_version, 2, 'legacy default 1 → first guarded mutation writes 2');
 });
 
 // ---- spec_revision stamping (FORGE-114 / P2.5-T18) ----
@@ -755,7 +834,7 @@ function writeStateJson(
   writeFileSync(stateFilePath(fd, taskId), JSON.stringify(base));
 }
 
-test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + terminal state → unlink + history event', () => {
+test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + terminal state → tombstone + history event', () => {
   const fd = forgeDir('admin-release-r14');
   const lease = acquire({ forgeDir: fd, taskId: 'TASK-R14', runId: 'run-orig' });
   writeStateJson(fd, 'TASK-R14', { state: 'shipped' });
@@ -772,7 +851,10 @@ test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + ter
     reason: 'gc:row-14:terminal-state',
   });
 
-  assert.equal(existsSync(leaseFilePath(fd, 'TASK-R14')), false, 'lease should be unlinked');
+  // FORGE-231: canonical admin release writes a TOMBSTONE through the CAS
+  // protocol (never a delete-with-race); the file survives as version history.
+  const record14 = readLeaseRecord('TASK-R14', leaseFilePath(fd, 'TASK-R14'));
+  assert.equal(record14?.kind, 'released', 'canonical admin release must tombstone, not unlink');
   const history = readFileSync(claimHistoryFilePath(fd, 'TASK-R14'), 'utf8');
   const lines = history.trim().split('\n').filter(Boolean);
   const lastEvent = JSON.parse(lines[lines.length - 1]);
@@ -1035,4 +1117,67 @@ test('adminReleaseLeaseByIdentity: row-13 with requireTerminalState=false skips 
   });
   assert.equal(existsSync(dupPath), false);
   assert.equal(existsSync(leaseFilePath(fd, 'TASK-R13-NS')), true, 'canonical untouched');
+});
+
+test('leases: a held lease marker blocks heartbeat AND release with LEASE_CONTENDED (single-committer pin)', () => {
+  const fd = forgeDir('lease-marker-contention');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-CONT', runId: 'run-001' });
+  const leasePath = leaseFilePath(fd, 'TASK-CONT');
+  const marker = `${leasePath}.cas-${lease.lease_version}`;
+  writeFileSync(marker, JSON.stringify({ pid: process.pid, run_id: 'other', token: 'held' }), 'utf8');
+  try {
+    assert.throws(
+      () =>
+        heartbeat({
+          forgeDir: fd,
+          taskId: 'TASK-CONT',
+          caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
+    );
+    assert.throws(
+      () =>
+        release({
+          forgeDir: fd,
+          taskId: 'TASK-CONT',
+          caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
+    );
+    // The lease itself is untouched by either loser.
+    const after = readLeaseRecord('TASK-CONT', leasePath);
+    assert.equal(after?.kind, 'active');
+    if (after?.kind === 'active') assert.equal(after.lease.lease_version, lease.lease_version);
+  } finally {
+    unlinkSync(marker);
+  }
+});
+
+test('adminReleaseLeaseByIdentity: canonical release refuses while a lease marker is held (impl R1 CRIT-2 regression)', () => {
+  const fd = forgeDir('admin-release-contention');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-ARC', runId: 'run-001' });
+  const leasePath = leaseFilePath(fd, 'TASK-ARC');
+  const marker = `${leasePath}.cas-${lease.lease_version}`;
+  writeFileSync(marker, JSON.stringify({ pid: process.pid, run_id: 'other', token: 'held' }), 'utf8');
+  try {
+    assert.throws(
+      () =>
+        adminReleaseLeaseByIdentity({
+          forgeDir: fd,
+          taskId: 'TASK-ARC',
+          expectedClaimId: lease.claim_id,
+          expectedGeneration: lease.generation,
+          expectedOwnerRunId: lease.owner_run_id,
+          expectedExpiresAt: lease.expires_at,
+          expectedPath: leasePath,
+          requireTerminalState: false,
+          reason: 'gc:row-15:merge-pending-lease',
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+    );
+    const after = readLeaseRecord('TASK-ARC', leasePath);
+    assert.equal(after?.kind, 'active', 'a held marker must abort the admin release');
+  } finally {
+    unlinkSync(marker);
+  }
 });

@@ -280,6 +280,19 @@ const DriveSchema = z
   })
   .default({});
 
+// FORGE-231 (ADR orchestrator-ship-auto-merge): orchestrator SHIP policy.
+// Deliberately DIFFERENT enum order + default from Drive/Deliver above —
+// 'approval' (open PR, human merges) is the security-relevant default per
+// SPEC §merge policy; 'auto' is the opt-in forge-executed atomic merge on
+// green and additionally requires dual-host review (superRefine below) plus a
+// RUNTIME supported-RepoHost + honesty-probe gate (owner-locked: the schema
+// stays pure — enforcement lands with GitHubRepoHost in FORGE-232/234).
+const ShipSchema = z
+  .object({
+    merge_policy: z.enum(['approval', 'auto']).default('approval'),
+  })
+  .default({});
+
 // FORGE-215: cross-phase /deliver knobs. The themed-batching POLICY is a
 // pure-skill heuristic (it lives in skills/deliver/SKILL.md, NOT a verb) — this
 // block exposes only the configurable CAPS so the heuristic references real
@@ -546,11 +559,26 @@ export const SettingsSchema = z.object({
   // FORGE-155: `forge upgrade` in-flight guard (exit-2). Nested `.default({})` →
   // absent block resolves to guard_in_flight: true.
   upgrade: UpgradeSchema,
-});
+  // FORGE-231: orchestrator ship policy (see ShipSchema above).
+  ship: ShipSchema,
+})
+  // FIRST top-level refinement on SettingsSchema: 'auto' merge policy demands
+  // dual-host review — single-host mode can only ever ship under 'approval'
+  // (the human PR gate is the backstop for self-attested work).
+  .superRefine((s, ctx) => {
+    if (s.ship.merge_policy === 'auto' && s.agents.review_host_cli === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ship', 'merge_policy'],
+        message: "ship.merge_policy 'auto' requires dual-host review (agents.review_host_cli must not be null)",
+      });
+    }
+  });
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type Verify = z.infer<typeof VerifySchema>;
 export type Drive = z.infer<typeof DriveSchema>;
+export type Ship = z.infer<typeof ShipSchema>;
 export type Deliver = z.infer<typeof DeliverSchema>;
 export type Audit = z.infer<typeof AuditSchema>;
 export type DocsCoverage = z.infer<typeof DocsCoverageSchema>;

@@ -61,12 +61,12 @@ const BASE = {
   json: true,
 };
 
-test('review-compose: both pass → kind=verdict ready_for_review', () => {
+test('review-compose: both pass → kind=verdict ready_for_review', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -81,11 +81,11 @@ test('review-compose: both pass → kind=verdict ready_for_review', () => {
   assert.equal((env.data!.verdict as { verdict: string }).verdict, 'ready_for_review');
 });
 
-test('review-compose: changes_requested → kind=verdict changes_needed', () => {
+test('review-compose: changes_requested → kind=verdict changes_needed', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'changes_requested' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     criticalPath: false,
@@ -98,7 +98,7 @@ test('review-compose: changes_requested → kind=verdict changes_needed', () => 
   assert.equal((env.data!.verdict as { verdict: string }).verdict, 'changes_needed');
 });
 
-test('review-compose: critical path + block finding → kind=escalate', () => {
+test('review-compose: critical path + block finding → kind=escalate', async () => {
   const dir = tmpDir();
   const primary = writeJson(
     dir,
@@ -109,7 +109,7 @@ test('review-compose: critical path + block finding → kind=escalate', () => {
     }),
   );
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     criticalPath: true,
@@ -122,11 +122,11 @@ test('review-compose: critical path + block finding → kind=escalate', () => {
   assert.equal(typeof env.data!.reason, 'string');
 });
 
-test('review-compose: critical path + no second opinion → kind=park', () => {
+test('review-compose: critical path + no second opinion → kind=park', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     criticalPath: true,
@@ -138,7 +138,7 @@ test('review-compose: critical path + no second opinion → kind=park', () => {
   assert.equal(env.data!.kind, 'park');
 });
 
-test('review-compose: accepts the second-opinion envelope shape for --primary (R3)', () => {
+test('review-compose: accepts the second-opinion envelope shape for --primary (R3)', async () => {
   const dir = tmpDir();
   // The second-opinion verb emits { ok:true, data:{ host, task_id, attempt_id, verdict } }.
   const envelope = {
@@ -152,7 +152,7 @@ test('review-compose: accepts the second-opinion envelope shape for --primary (R
   };
   const primary = writeJson(dir, 'primary-envelope.json', envelope);
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     criticalPath: false,
@@ -165,7 +165,7 @@ test('review-compose: accepts the second-opinion envelope shape for --primary (R
   assert.equal((env.data!.verdict as { verdict: string }).verdict, 'ready_for_review');
 });
 
-test('review-compose: accepts the second-opinion envelope shape for --second-opinion (R3)', () => {
+test('review-compose: accepts the second-opinion envelope shape for --second-opinion (R3)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass' }));
   const secondEnvelope = {
@@ -174,7 +174,7 @@ test('review-compose: accepts the second-opinion envelope shape for --second-opi
   };
   const second = writeJson(dir, 'second-envelope.json', secondEnvelope);
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -188,9 +188,9 @@ test('review-compose: accepts the second-opinion envelope shape for --second-opi
   assert.equal((env.data!.verdict as { verdict: string }).verdict, 'ready_for_review');
 });
 
-test('review-compose: missing --primary → MISSING_INPUT', () => {
+test('review-compose: missing --primary → MISSING_INPUT', async () => {
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: '',
     criticalPath: false,
@@ -203,9 +203,9 @@ test('review-compose: missing --primary → MISSING_INPUT', () => {
   assert.equal(env.error!.code, 'MISSING_INPUT');
 });
 
-test('review-compose: nonexistent --primary file → MISSING_INPUT', () => {
+test('review-compose: nonexistent --primary file → MISSING_INPUT', async () => {
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: join(tmpDir(), 'does-not-exist.json'),
     criticalPath: false,
@@ -216,12 +216,12 @@ test('review-compose: nonexistent --primary file → MISSING_INPUT', () => {
   assert.equal(lastEnvelope(cap.lines()).error!.code, 'MISSING_INPUT');
 });
 
-test('review-compose: malformed primary JSON → INVALID_VERDICT', () => {
+test('review-compose: malformed primary JSON → INVALID_VERDICT', async () => {
   const dir = tmpDir();
   const p = join(dir, 'bad.json');
   writeFileSync(p, '{ not valid json', 'utf8');
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: p,
     criticalPath: false,
@@ -232,11 +232,11 @@ test('review-compose: malformed primary JSON → INVALID_VERDICT', () => {
   assert.equal(lastEnvelope(cap.lines()).error!.code, 'INVALID_VERDICT');
 });
 
-test('review-compose: primary not matching ReviewVerdictSchema → INVALID_VERDICT', () => {
+test('review-compose: primary not matching ReviewVerdictSchema → INVALID_VERDICT', async () => {
   const dir = tmpDir();
   const p = writeJson(dir, 'wrong.json', { version: 1, verdict: 'approved', findings: [], host: 'codex' });
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: p,
     criticalPath: false,
@@ -247,13 +247,13 @@ test('review-compose: primary not matching ReviewVerdictSchema → INVALID_VERDI
   assert.equal(lastEnvelope(cap.lines()).error!.code, 'INVALID_VERDICT');
 });
 
-test('review-compose: malformed second-opinion file → INVALID_VERDICT', () => {
+test('review-compose: malformed second-opinion file → INVALID_VERDICT', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass' }));
   const bad = join(dir, 'second-bad.json');
   writeFileSync(bad, 'nope', 'utf8');
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: bad,
@@ -265,11 +265,11 @@ test('review-compose: malformed second-opinion file → INVALID_VERDICT', () => 
   assert.equal(lastEnvelope(cap.lines()).error!.code, 'INVALID_VERDICT');
 });
 
-test('review-compose: invalid ctx (empty branch) → INVALID_ARGS', () => {
+test('review-compose: invalid ctx (empty branch) → INVALID_ARGS', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     branch: '', // empty branch makes composeReviewVerdict throw (non-schema Verdict)
     primaryPath: primary,
@@ -285,12 +285,12 @@ test('review-compose: invalid ctx (empty branch) → INVALID_ARGS', () => {
 // DIFFERENT host than the primary review. The gate is now a SAME-HOST check, so
 // claude+claude (and codex+codex, gemini+gemini) are rejected — a critical-path
 // change must not pass with two reviews from the same lineage.
-test('review-compose: claude(primary)+claude(second) → INVALID_VERDICT (same host)', () => {
+test('review-compose: claude(primary)+claude(second) → INVALID_VERDICT (same host)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -306,12 +306,12 @@ test('review-compose: claude(primary)+claude(second) → INVALID_VERDICT (same h
   assert.match(env.error!.message, /claude\+claude/);
 });
 
-test('review-compose: codex(primary)+codex(second) → INVALID_VERDICT (same host)', () => {
+test('review-compose: codex(primary)+codex(second) → INVALID_VERDICT (same host)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -325,12 +325,12 @@ test('review-compose: codex(primary)+codex(second) → INVALID_VERDICT (same hos
   assert.match(env.error!.message, /matches the primary review host/);
 });
 
-test('review-compose: gemini(primary)+gemini(second) → INVALID_VERDICT (same host)', () => {
+test('review-compose: gemini(primary)+gemini(second) → INVALID_VERDICT (same host)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'gemini' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'gemini' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -344,12 +344,12 @@ test('review-compose: gemini(primary)+gemini(second) → INVALID_VERDICT (same h
   assert.match(env.error!.message, /matches the primary review host/);
 });
 
-test('review-compose: codex(primary)+claude(second) → accepted (different hosts)', () => {
+test('review-compose: codex(primary)+claude(second) → accepted (different hosts)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -361,12 +361,12 @@ test('review-compose: codex(primary)+claude(second) → accepted (different host
   assert.equal(lastEnvelope(cap.lines()).data!.kind, 'verdict');
 });
 
-test('review-compose: claude(primary)+codex(second) is accepted (different hosts)', () => {
+test('review-compose: claude(primary)+codex(second) is accepted (different hosts)', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -381,10 +381,10 @@ test('review-compose: claude(primary)+codex(second) is accepted (different hosts
 // Review-fix #2: the size cap must require a regular file. A directory (lstat
 // isFile() === false) stands in for a non-regular path (FIFO/char device) and
 // must be rejected before any read.
-test('review-compose: a non-regular --primary path → INVALID_VERDICT', () => {
+test('review-compose: a non-regular --primary path → INVALID_VERDICT', async () => {
   const dir = tmpDir(); // the dir itself is not a regular file
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: dir,
     criticalPath: false,
@@ -399,12 +399,12 @@ test('review-compose: a non-regular --primary path → INVALID_VERDICT', () => {
 
 // ── FORGE-225: primary-review provenance check (--expected-primary-host) ──────
 
-test('review-compose: expectedPrimaryHost matches primary → composes normally', () => {
+test('review-compose: expectedPrimaryHost matches primary → composes normally', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -417,7 +417,7 @@ test('review-compose: expectedPrimaryHost matches primary → composes normally'
   assert.equal(lastEnvelope(cap.lines()).data!.kind, 'verdict');
 });
 
-test('review-compose: FORGED primary host (expected claude, verdict codex) → INVALID_VERDICT (provenance)', () => {
+test('review-compose: FORGED primary host (expected claude, verdict codex) → INVALID_VERDICT (provenance)', async () => {
   // The ticket's spoof scenario: a forged primary verdict claims host:codex to
   // fake a different lineage from the real claude second opinion. With the
   // trusted expected host, the provenance check rejects it.
@@ -425,7 +425,7 @@ test('review-compose: FORGED primary host (expected claude, verdict codex) → I
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const cap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -441,13 +441,13 @@ test('review-compose: FORGED primary host (expected claude, verdict codex) → I
   assert.match(env.error!.message, /verifies provenance/);
 });
 
-test('review-compose: expectedPrimaryHost absent → warns on stderr, stdout stays one JSON envelope', () => {
+test('review-compose: expectedPrimaryHost absent → warns on stderr, stdout stays one JSON envelope', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const second = writeJson(dir, 'second.json', reviewVerdict({ verdict: 'pass', host: 'codex' }));
   const cap = capture();
   const errCap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     secondOpinionPath: second,
@@ -544,12 +544,12 @@ test('review-compose handler: --expected-primary-host immediately followed by an
   assert.equal(JSON.parse(out.trim().split('\n').pop()!).error.code, 'INVALID_ARGS');
 });
 
-test('review-compose: expectedPrimaryHost set + matching → NO warning on stderr', () => {
+test('review-compose: expectedPrimaryHost set + matching → NO warning on stderr', async () => {
   const dir = tmpDir();
   const primary = writeJson(dir, 'primary.json', reviewVerdict({ verdict: 'pass', host: 'claude' }));
   const cap = capture();
   const errCap = capture();
-  const r = runOrchestrateReviewCompose({
+  const r = await runOrchestrateReviewCompose({
     ...BASE,
     primaryPath: primary,
     criticalPath: false,

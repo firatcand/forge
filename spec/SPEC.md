@@ -362,11 +362,13 @@ export const SettingsSchema = z.object({
     })
     .default({}),
 });
-// Cross-field refinements (superRefine, FORGE-231): ship.merge_policy 'auto'
+// Cross-field refinement (superRefine, FORGE-231): ship.merge_policy 'auto'
 // REQUIRES agents.review_host_cli != null (dual-host review — single-host +
-// auto is a validation error) AND a supported RepoHost (GitHub remote + gh
-// auth; 'auto' with a non-GitHub remote is a validation error, not a silent
-// downgrade). See ORCHESTRATOR.md §Phase 3 — SHIP + §RepoHost.
+// auto is a validation error). The supported-RepoHost requirement (GitHub
+// remote + gh auth) is a RUNTIME gate, not a schema refinement — the schema
+// cannot see the git remote; the ship path probes and parks fail-closed on an
+// unsupported host (never a silent downgrade). See ORCHESTRATOR.md §Phase 3 —
+// SHIP + §RepoHost.
 
 export type Settings = z.infer<typeof SettingsSchema>;
 ```
@@ -857,7 +859,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
 4. Review subagent calls `forge orchestrate complete --phase review --verdict-file review_verdict.json` and returns.
 5. CLI advances state:
    - `pass` → `reviewed`, eligible for SHIP. The CLI first verifies the verdict's `target_sha` equals the dispatch-time `review_target_sha` and the current worktree HEAD; that verified SHA is recorded as `reviewed_head_sha` (ADR `orchestrator-ship-auto-merge` — the review binds to an exact SHA, never a floating HEAD).
-   - `changes_requested` → back to `running`; new IMPLEMENT attempt dispatched with `priorReviewFindings` injected into the worker prompt. Attempt counter increments.
+   - `changes_requested` → `awaiting_respawn` (the dispatchable respawn state — dispatch is not legal from `running`); a new IMPLEMENT attempt is dispatched with `priorReviewFindings` injected into the worker prompt. The failure consumes one unit of the single total `failure_count` budget.
 
 #### Flow 3c — SHIP phase (rewritten 2026-07-10 per ADR `orchestrator-ship-auto-merge`)
 
@@ -885,16 +887,17 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
                                 ▼                   │
                           [ready_for_review]        │
                                 │                   │
-                          [running (review)]────────┘
-                                │
+                                │ REVIEW attempt ───┘
+                                │ (attempt-scoped phase; task state
+                                │  stays ready_for_review while the
+                                │  review attempt runs)
                                 │ pass
                                 ▼
                             [reviewed]
                                 │
                                 │ all deps shipped (= merged to base)
-                                ▼
-                          [running (ship)]
-                                │
+                                │ SHIP attempt (attempt-scoped phase;
+                                │  task state stays reviewed)
                                 │ PR opened ('auto': head-bound
                                 │ merge executes on green)
                                 ▼
@@ -908,7 +911,7 @@ Workers are host-native subagents. The dispatch skill spawns them via the host's
 
 `merge_pending` regressions (fail-closed): head drift → `[ready_for_review]` (re-verify; dual-host also re-reviews, single-host CLI-only); PR closed unmerged / honesty-probe or policy loss → park (`blocked_on_question`).
 
-Failures at any phase enter the retry queue with exponential backoff (CLI-managed). After `agents.retry_attempts` total failures, the task is marked `failed` per `agents.on_persistent_failure`.
+Failures at any phase enter the retry queue with exponential backoff (CLI-managed). `agents.retry_attempts` caps ONE total failure budget across phases (`failure_count` on the task state; implement `changes_needed`, review `changes_requested`, and ship failures all consume it; initial successful dispatches are free; per-phase attempt counters are informational only). Accounting is replay-idempotent: each accounted failure records `last_failure_key = "<attempt_id>:<phase>"`, and a crash-replayed completion with the same key short-circuits BEFORE any transition — no double-count, no illegal re-application. When the post-increment count reaches the budget, `complete` chains the `retries_exhausted` transition and commits the terminal `failed` state in the SAME state write, per `agents.on_persistent_failure`.
 
 **Backoff formula:**
 ```

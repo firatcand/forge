@@ -10,6 +10,16 @@ import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-f
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
 import type { ClaimFenceData } from '../../../../src/trackers/claim-fence.ts';
 
+const assertLeaseReleased = (p: string): void => {
+  // FORGE-231: release writes a tombstone (file survives); absence only occurs
+  // on legacy/admin unlink paths. Either way there must be no ACTIVE lease.
+  if (existsSync(p)) {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { status?: string };
+    assert.equal(parsed.status, 'released', `expected a release tombstone at ${p}`);
+  }
+};
+
+
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
@@ -118,7 +128,7 @@ test('claim fails ALREADY_CLAIMED when tracker refuses', async (t) => {
   assert.equal(env.ok, false);
   assert.equal(env.error.code, 'ALREADY_CLAIMED');
   // No lease written.
-  assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')));
+  assertLeaseReleased(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'));
 });
 
 test('claim refuses if state is not unclaimed', async (t) => {
@@ -204,9 +214,8 @@ test('claim rolls back tracker + lease when writeTaskState fails (Codex 2nd-pass
   // Rollback executed: tracker.claim followed by tracker.releaseClaim.
   assert.equal(tracker.claims.length, 1);
   assert.equal(tracker.releases.length, 1);
-  // Lease file removed (rollback succeeded).
-  const { existsSync } = await import('node:fs');
-  assert.ok(!existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')));
+  // Lease released (rollback succeeded — tombstone or absent).
+  assertLeaseReleased(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'));
   assert.equal(env.error.details.rolled_back, true);
   // forge:claim is stamped only AFTER a committed state write, so the
   // rollback path never stamped it — nothing to un-stamp (plan Decision 3).

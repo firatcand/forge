@@ -1,26 +1,44 @@
 // `forge orchestrate complete` — finalize an attempt.
 //
-// Reads --verdict-file, validates against VerdictSchema, writes both
-// verdict.json (worker-reported) and verdict.verified.json (CLI-recomputed
-// is deferred to a follow-up; v0.4 stores the verified copy = the reported
-// copy plus a `verified_by: 'cli'` envelope). Transitions task state per
-// (verdict, phase):
-//   implement + ready_for_review → ready_for_review
-//   review    + ready_for_review → reviewed
-//   ship      + ready_for_review → shipped (terminal)
-//   _         + changes_needed   → running (loop back)
-//   _         + blocked          → running (then worker writes a question)
+// Reads --verdict-file, validates against VerdictSchema, writes phase-scoped
+// verdict + verified files, and transitions task state through the table
+// (applyTransition). FORGE-231 semantics:
+//   implement + ready_for_review → ready_for_review (dual-host)
+//                                → reviewed          (single-host direct path;
+//                                  CLI-verified HEAD becomes the reviewed
+//                                  binding — ship-record write-ahead first)
+//   review    + ready_for_review → reviewed (the PINNED-REVIEW GATE: the raw
+//                                  witness at attempts/<id>/review_verdict.json
+//                                  is re-composed through the trusted gateway;
+//                                  the supplied composed artifact must EQUAL
+//                                  the recomputation; ship-record write-ahead)
+//   ship      + ready_for_review → merge_pending (ONLY with a complete ship
+//                                  record: reviewed binding + base + pr — the
+//                                  platform merge is the only proof of shipped)
+//   changes_needed               → awaiting_respawn (budget), or failed on
+//                                  exhaustion (chained in the same CAS)
+//   blocked                      → blocked_on_question from running; budgeted
+//                                  failure from review/ship states
+// Failure accounting: ONE total budget (failure_count vs agents.retry_attempts)
+// with last_failure_key = "<attempt_id>:<phase>" replay idempotency — a
+// crash-replayed completion short-circuits BEFORE any transition.
 
 import { existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 
 import { CompleteArgsSchema, type CompleteArgs } from '../../schemas/cli-args.ts';
 import { VerdictSchema } from '../../schemas/verdict.ts';
-import { readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
+import { AttemptManifestSchema, type AttemptManifest } from '../../schemas/attempt.ts';
+import { applyTransition, readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
+import { composeTrustedReviewOutcome } from '../../orchestrator/review-compose.ts';
+import { upsertReviewedBinding, readShipRecord } from '../../orchestrator/ship-record.ts';
+import { release as releaseLease } from '../../orchestrator/leases.ts';
+import { appendNotificationEvent } from '../../orchestrator/events.ts';
+import { resolveShaChecked } from '../../orchestrator/worktree-base.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import { attemptDir, manifestFilePath } from '../../orchestrator/questions/paths.ts';
-import { OrchestratorError, SettingsError } from '../../core/errors.ts';
+import { CasError, OrchestratorError, SettingsError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { sanitizeIssueId, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
@@ -30,11 +48,6 @@ import {
   type RunCommand,
   type VerifyResult,
 } from '../../orchestrator/verify-runner.ts';
-import {
-  DEFAULT_RETRY_POLICY,
-  nextRetryState,
-  type RetryPolicy,
-} from '../../orchestrator/retry.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
@@ -125,6 +138,77 @@ export async function runOrchestrateComplete(
     };
   }
 
+  // 1c. FORGE-231: bind the completion to the attempt's dispatched PHASE. A
+  //     review/ship completion against an implement attempt (or vice versa)
+  //     is a phase-confusion attack surface — refuse for ALL phases. A
+  //     manifest that is absent is a legacy pre-FORGE-231 record: legal only
+  //     for implement.
+  let manifest: AttemptManifest | null = null;
+  {
+    const manifestPath = manifestFilePath(opts.forgeDir, opts.taskId, opts.attemptId);
+    let manifestRaw: string | null = null;
+    try {
+      manifestRaw = readFileSync(manifestPath, 'utf8');
+    } catch {
+      manifestRaw = null; // legacy-absent — gated below
+    }
+    if (manifestRaw !== null) {
+      let parsedManifest: unknown;
+      try {
+        parsedManifest = JSON.parse(manifestRaw);
+      } catch {
+        return {
+          exitCode: emit(
+            fail('SCHEMA_INVALID', `attempt manifest at ${manifestPath} is unparseable`, false),
+            { json: opts.json },
+          ),
+        };
+      }
+      const validated = AttemptManifestSchema.safeParse(parsedManifest);
+      if (!validated.success) {
+        return {
+          exitCode: emit(
+            fail('SCHEMA_INVALID', `attempt manifest failed schema validation: ${validated.error.message}`, false),
+            { json: opts.json },
+          ),
+        };
+      }
+      manifest = validated.data;
+    }
+    const manifestPhase = manifest?.phase ?? 'implement';
+    if (manifestPhase !== opts.phase) {
+      return {
+        exitCode: emit(
+          fail(
+            'PHASE_MISMATCH',
+            `attempt '${opts.attemptId}' was dispatched for phase '${manifestPhase}' but completion claims phase '${opts.phase}'`,
+            false,
+            { manifest_phase: manifestPhase, supplied_phase: opts.phase },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (manifest === null) {
+      // impl R4 CRIT-1: NO manifestless completions at all. The only fallback
+      // identity source (the attempt_started event) is worker-writable via
+      // the generic `event` verb and can age out under soft rotation — it is
+      // not an authorization record. A pre-FORGE-231 in-flight attempt must
+      // be re-dispatched after upgrade (documented in the release notes).
+      return {
+        exitCode: emit(
+          fail(
+            'STALE_ATTEMPT',
+            `attempt '${opts.attemptId}' has no dispatch manifest — its dispatched identity cannot be verified; re-dispatch the attempt (pre-FORGE-231 in-flight attempts are not completable after upgrade)`,
+            false,
+            { supplied_phase: opts.phase },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
   // 2a. Pre-check: each phase has a required prior state. Refuse loudly here
   //     with INVALID_STATE_FOR_PHASE rather than letting writeTaskState throw
   //     a generic ILLEGAL_TRANSITION later (Codex 2nd-pass). The state
@@ -168,6 +252,42 @@ export async function runOrchestrateComplete(
     }
   }
 
+  // 2a2. FORGE-231 (impl R3 MAJ-2): DURABLE-fatal repair must survive lease
+  //      expiry and gc's terminal-lease release. A completion replayed against
+  //      an ALREADY-terminal exhaustion is a pure notification-repair — it
+  //      must not require an active lease (there may never be one again).
+  //      Runs BEFORE every lease-gated check; touches no state.
+  if (
+    preState.state === 'failed' &&
+    preState.failure_reason === 'retries_exhausted' &&
+    preState.last_failure_key === `${opts.attemptId}:${opts.phase}` &&
+    (verdict.data.verdict === 'changes_needed' || verdict.data.verdict === 'blocked')
+  ) {
+    try {
+      appendNotificationEvent(opts.forgeDir, preState.updated_by.run_id, {
+        type: 'fatal',
+        ts: new Date().toISOString(),
+        run_id: preState.updated_by.run_id,
+        reason: `task ${opts.taskId} failed: retry budget exhausted (${preState.failure_count})`,
+        details: {
+          task_id: opts.taskId,
+          failure_count: preState.failure_count,
+          failure_key: preState.last_failure_key,
+        },
+      });
+    } catch (fatalErr) {
+      process.stderr.write(
+        `warn: complete — terminal replay could not repair the fatal notification: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+      );
+    }
+    return {
+      exitCode: emit(
+        ok({ verdict: verdict.data.verdict, next_state: preState.state, replayed: true }),
+        { json: opts.json },
+      ),
+    };
+  }
+
   // 2b. Read lease for caller identity.
   let lease: Lease;
   try {
@@ -185,6 +305,285 @@ export async function runOrchestrateComplete(
     };
   }
 
+  // 2b1a. FORGE-231 (impl R2 CRIT-1): bind the completion to the ATTEMPT's
+  //       dispatched lease identity. In the documented steal crash window
+  //       (successor lease published, best-effort state reset failed) the
+  //       stale attempt is still current_attempt_id while the CANONICAL lease
+  //       belongs to the successor — a completion must never borrow that
+  //       authority. The manifest records the identity the attempt was
+  //       dispatched under; the current lease must BE that identity.
+  if (manifest !== null) {
+    if (manifest.task_id !== opts.taskId) {
+      return {
+        exitCode: emit(
+          fail(
+            'STALE_ATTEMPT',
+            `attempt manifest belongs to task '${manifest.task_id}', not '${opts.taskId}'`,
+            false,
+            { manifest_task_id: manifest.task_id },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (
+      lease.claim_id !== manifest.claim_id ||
+      lease.owner_run_id !== manifest.run_id ||
+      lease.generation !== manifest.generation
+    ) {
+      return {
+        exitCode: emit(
+          fail(
+            'LEASE_STOLEN',
+            `the current lease (run=${lease.owner_run_id} gen=${lease.generation}) is not the identity attempt '${opts.attemptId}' was dispatched under (run=${manifest.run_id} gen=${manifest.generation}) — the lease changed hands; a stale attempt must never complete under a successor's authority`,
+            false,
+            {
+              lease_run_id: lease.owner_run_id,
+              lease_generation: lease.generation,
+              manifest_run_id: manifest.run_id,
+              manifest_generation: manifest.generation,
+            },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
+  // 2b1b. FORGE-231 (impl R1 MAJ-3): completion is a state-advancing commit —
+  //       it requires an ACTIVE lease. Identity alone is not enough: a stale
+  //       worker whose lease expired hours ago must not advance state or
+  //       overwrite the ship-record write-ahead ahead of a successor.
+  if (Date.parse(lease.expires_at) <= Date.now()) {
+    return {
+      exitCode: emit(
+        fail(
+          'LEASE_EXPIRED',
+          `lease for task ${opts.taskId} expired at ${lease.expires_at} — the attempt is stale; a successor may own the task`,
+          false,
+          { expires_at: lease.expires_at },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // 2b2. FORGE-231: one settings load feeds the verification block, the
+  //      review gate (trusted review host) and the failure budget.
+  let verify;
+  let reviewHostCli: string | null;
+  let retryAttempts: number;
+  let mergePolicy: 'approval' | 'auto';
+  try {
+    const settings = loadSettings(path.join(opts.forgeDir, 'settings.yaml'));
+    verify = settings.verify;
+    reviewHostCli = settings.agents.review_host_cli;
+    retryAttempts = settings.agents.retry_attempts;
+    mergePolicy = settings.ship.merge_policy;
+  } catch (err) {
+    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
+      verify = undefined; // unconfigured → schema defaults
+      reviewHostCli = 'codex';
+      retryAttempts = 10;
+      mergePolicy = 'approval';
+    } else if (err instanceof SettingsError) {
+      return { exitCode: emit(fail(err.code, err.message, false), { json: opts.json }) };
+    } else {
+      return {
+        exitCode: emit(
+          fail('IO_ERROR', err instanceof Error ? err.message : String(err), false),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
+  // 2b3. FORGE-231 — THE PINNED-REVIEW GATE (--phase review only). The
+  //      supplied --verdict-file is only the composed OUTCOME CARRIER; the
+  //      RAW witness at attempts/<id>/review_verdict.json is the provenance +
+  //      pin evidence. complete re-composes through the trusted gateway
+  //      (host provenance, dual lineage, DERIVED criticality over the pinned
+  //      SHAs) and requires the supplied artifact to EQUAL the recomputation.
+  if (opts.phase === 'review') {
+    if (reviewHostCli === null) {
+      return {
+        exitCode: emit(
+          fail(
+            'INVALID_STATE_FOR_PHASE',
+            'review completions are unreachable in single-host mode (agents.review_host_cli is null); the single-host direct path verifies at implement.',
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    // The schema refinement guarantees both SHAs on a review manifest.
+    const reviewTargetSha = manifest?.review_target_sha;
+    const reviewBaseSha = manifest?.review_base_sha;
+    if (!manifest || !reviewTargetSha || !reviewBaseSha) {
+      return {
+        exitCode: emit(
+          fail('SCHEMA_INVALID', 'review completion requires a manifest with pinned review SHAs', false),
+          { json: opts.json },
+        ),
+      };
+    }
+
+    // FORGE-231 (impl R1 MAJ-4): prove the manifest's worktree is bound to
+    // THIS task (marker + symlink-escape gates — the same F2 proof implement
+    // verification uses) BEFORE trusting its HEAD or deriving criticality in it.
+    const reviewBindingFailure = proveWorktreeBinding(manifest.worktree_path, opts.taskId);
+    if (reviewBindingFailure) {
+      return {
+        exitCode: emit(
+          fail(
+            'VERIFICATION_FAILED',
+            `cannot complete review: worktree at ${manifest.worktree_path} is not provably bound to task ${opts.taskId} (${reviewBindingFailure})`,
+            false,
+            { reason: reviewBindingFailure, path: manifest.worktree_path },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+
+    // Live-head equality: the worktree must still BE the reviewed commit.
+    let liveHead: string;
+    try {
+      liveHead = await resolveShaChecked(manifest.worktree_path, 'HEAD');
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            'VERIFICATION_FAILED',
+            `cannot resolve the live worktree HEAD: ${err instanceof Error ? err.message : String(err)}`,
+            false,
+            { reason: 'head_unresolvable' },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (liveHead !== reviewTargetSha) {
+      return {
+        exitCode: emit(
+          fail(
+            'VERIFICATION_FAILED',
+            `worktree HEAD ${liveHead} no longer matches the reviewed commit ${reviewTargetSha} (head drift)`,
+            false,
+            { reason: 'head_drift', live_head: liveHead, review_target_sha: reviewTargetSha },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+
+    // Raw witness (REQUIRED) + optional raw second opinion.
+    const attemptDirPath = attemptDir(opts.forgeDir, opts.taskId, opts.attemptId);
+    const witnessPath = path.join(attemptDirPath, 'review_verdict.json');
+    let witnessRaw: unknown;
+    try {
+      witnessRaw = JSON.parse(readFileSync(witnessPath, 'utf8'));
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            'REVIEW_WITNESS_MISSING',
+            `the raw review witness at ${witnessPath} is required for a review completion: ${err instanceof Error ? err.message : String(err)}`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    let secondRaw: unknown | undefined;
+    try {
+      secondRaw = JSON.parse(readFileSync(path.join(attemptDirPath, 'second_opinion_verdict.json'), 'utf8'));
+    } catch {
+      secondRaw = undefined; // optional
+    }
+
+    let recomputed;
+    try {
+      recomputed = await composeTrustedReviewOutcome({
+        primaryRaw: witnessRaw,
+        secondOpinionRaw: secondRaw,
+        expectedPrimaryHost: reviewHostCli as 'codex' | 'gemini' | 'claude',
+        expectedTargetSha: reviewTargetSha,
+        criticality: {
+          derive: { gitDir: manifest.worktree_path, baseSha: reviewBaseSha, targetSha: reviewTargetSha },
+          flag: false,
+        },
+        branch: verdict.data.branch,
+        summary: verdict.data.summary,
+        secondOpinionAvailable: secondRaw !== undefined,
+      });
+    } catch (err) {
+      // Fail-closed derivation/composition failure.
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+            err instanceof Error ? err.message : String(err),
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (recomputed.kind === 'invalid') {
+      return {
+        exitCode: emit(
+          fail('INVALID_VERDICT', `pinned-review gate rejected the raw witness: ${recomputed.reason}`, false, recomputed.detail),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (recomputed.kind !== 'verdict' || recomputed.result.kind !== 'verdict') {
+      const reason = recomputed.result.kind === 'verdict' ? '' : recomputed.result.reason;
+      return {
+        exitCode: emit(
+          fail(
+            'REVIEW_NOT_COMPOSABLE',
+            `the trusted gateway did not produce a machine verdict (${recomputed.kind}): ${reason} — a composed artifact cannot stand in for a human decision`,
+            false,
+            { gateway_kind: recomputed.kind },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    // The supplied composed artifact must EQUAL the recomputation on its
+    // identity fields — outcome and pin. A substituted carrier (e.g. a
+    // ready_for_review wrapper over a changes_requested witness) dies here.
+    if (verdict.data.verdict !== recomputed.result.verdict.verdict) {
+      return {
+        exitCode: emit(
+          fail(
+            'INVALID_VERDICT',
+            `supplied composed verdict '${verdict.data.verdict}' does not match the trusted recomposition '${recomputed.result.verdict.verdict}'`,
+            false,
+            { supplied: verdict.data.verdict, recomputed: recomputed.result.verdict.verdict },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (verdict.data.target_sha !== reviewTargetSha) {
+      return {
+        exitCode: emit(
+          fail(
+            'INVALID_VERDICT',
+            `supplied composed verdict is pinned to '${verdict.data.target_sha ?? '<none>'}' but the manifest pins ${reviewTargetSha}`,
+            false,
+            { supplied: verdict.data.target_sha ?? null, expected: reviewTargetSha },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
   // 2c. FORGE-188: INDEPENDENT CLI re-verification. The implement-phase
   //     "ready_for_review" claim is the only one that produces code to re-run;
   //     for it we re-run `settings.verify` OURSELVES in the task worktree rather
@@ -199,30 +598,7 @@ export async function runOrchestrateComplete(
   //     / settings.yaml absent).
   let vr: VerifyResult = { ran: false, passed: false, results: [], skippedReason: 'verification not applicable' };
   if (verdict.data.verdict === 'ready_for_review' && opts.phase === 'implement') {
-    // Load settings. Mirror loadRetryPolicy's SettingsError handling, but per R2
-    // ONLY FILE_NOT_FOUND means "verify unconfigured → skip"; any other
-    // SettingsError (YAML_PARSE_ERROR / VALIDATION_ERROR / IO_ERROR) is a real
-    // configuration fault and must fail cleanly here, before any write.
-    let verify;
-    try {
-      verify = loadSettings(path.join(opts.forgeDir, 'settings.yaml')).verify;
-    } catch (err) {
-      if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
-        verify = undefined; // unconfigured → legitimate skip
-      } else if (err instanceof SettingsError) {
-        return {
-          exitCode: emit(fail(err.code, err.message, false), { json: opts.json }),
-        };
-      } else {
-        return {
-          exitCode: emit(
-            fail('IO_ERROR', err instanceof Error ? err.message : String(err), false),
-            { json: opts.json },
-          ),
-        };
-      }
-    }
-
+    // Settings were loaded once in 2b2; `verify` carries the hoisted value.
     if (!verify) {
       // Nothing configured to verify — record the skip, advance as before.
       vr = { ran: false, passed: false, results: [], skippedReason: 'no settings.verify configured' };
@@ -316,12 +692,36 @@ export async function runOrchestrateComplete(
   const { verdictFile, verifiedFile } = verdictFileNames(opts.phase);
   const verdictPath = path.join(dir, verdictFile);
   const verifiedPath = path.join(dir, verifiedFile);
-  try {
-    writeFileSync(verdictPath, `${JSON.stringify(verdict.data, null, 2)}\n`, { flag: 'wx' });
-  } catch (err) {
+  // FORGE-231 (§C3 semantic replay): wx EEXIST is legal when the existing
+  // artifact is SEMANTICALLY identical (verdict value + pin; timestamps and
+  // captured output excluded) — a crash-replayed completion reuses the
+  // existing canonical file instead of failing. Different content is a real
+  // collision and still fails.
+  const verdictIdentity = (v: unknown): string =>
+    JSON.stringify({
+      verdict: (v as { verdict?: unknown }).verdict ?? null,
+      target_sha: (v as { target_sha?: unknown }).target_sha ?? null,
+    });
+  const writeIdempotent = (filePath: string, content: string): 'written' | 'replayed' | Error => {
+    try {
+      writeFileSync(filePath, content, { flag: 'wx' });
+      return 'written';
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') return err as Error;
+      try {
+        const existing = JSON.parse(readFileSync(filePath, 'utf8'));
+        if (verdictIdentity(existing) === verdictIdentity(JSON.parse(content))) return 'replayed';
+      } catch {
+        // unreadable existing file — fall through to the collision error
+      }
+      return new Error(`${filePath} already exists with DIFFERENT content (real collision)`);
+    }
+  };
+  const verdictWrite = writeIdempotent(verdictPath, `${JSON.stringify(verdict.data, null, 2)}\n`);
+  if (verdictWrite instanceof Error) {
     return {
       exitCode: emit(
-        fail('IO_ERROR', `${verdictFile} write failed: ${err instanceof Error ? err.message : String(err)}`, false),
+        fail('IO_ERROR', `${verdictFile} write failed: ${verdictWrite.message}`, false),
         { json: opts.json },
       ),
     };
@@ -344,20 +744,20 @@ export async function runOrchestrateComplete(
       ...(vr.skippedReason ? { skipped_reason: vr.skippedReason } : {}),
     },
   };
-  try {
-    writeFileSync(verifiedPath, `${JSON.stringify(verified, null, 2)}\n`, { flag: 'wx' });
-  } catch (err) {
-    // The verdict file was just created with `wx`; if the verified-file write
-    // fails we'd leave an orphan verdict that collides (wx) on every retry of
-    // this phase. Roll it back so the phase can be re-attempted cleanly.
-    try {
-      rmSync(verdictPath, { force: true });
-    } catch {
-      // best-effort cleanup; the original IO_ERROR is the authoritative failure.
+  const verifiedWrite = writeIdempotent(verifiedPath, `${JSON.stringify(verified, null, 2)}\n`);
+  if (verifiedWrite instanceof Error) {
+    // The verdict file was just created with `wx` (unless this is itself a
+    // replay); roll back a FRESH orphan so the phase can be re-attempted.
+    if (verdictWrite === 'written') {
+      try {
+        rmSync(verdictPath, { force: true });
+      } catch {
+        // best-effort cleanup; the original IO_ERROR is the authoritative failure.
+      }
     }
     return {
       exitCode: emit(
-        fail('IO_ERROR', `${verifiedFile} write failed: ${err instanceof Error ? err.message : String(err)}`, false),
+        fail('IO_ERROR', `${verifiedFile} write failed: ${verifiedWrite.message}`, false),
         { json: opts.json },
       ),
     };
@@ -383,54 +783,263 @@ export async function runOrchestrateComplete(
     // best-effort
   }
 
-  // 5. State transition.
+  // 5. State transition (FORGE-231): table-driven, budget-accounted, replay-
+  //    idempotent, with the ship-record write-ahead ordering (§C3).
   let nextState: TaskState | null = null;
   let failureReason: 'decision_key_budget' | 'retries_exhausted' | 'fatal' | undefined;
   let lastFailedAt: string | undefined;
+  let budgetDelta = 0;
+  let failureKey: string | null = null;
+  const singleHost = reviewHostCli === null;
+
+  let stateNow;
+  try {
+    stateNow = readTaskState(opts.forgeDir, opts.taskId);
+  } catch (err) {
+    return {
+      exitCode: emit(
+        fail(
+          err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+          err instanceof Error ? err.message : String(err),
+          true,
+          { hint: 'verdict written; state read failed — run forge orchestrate gc' },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
+  // impl R6: a concurrent state change (e.g. a supervisor cancel committing
+  // between the stateNow read and here) makes applyTransition throw
+  // ILLEGAL_TRANSITION. Convert it to a typed envelope so `complete` never
+  // rejects unhandled at the CLI top level; state is untouched (nothing was
+  // written yet).
+  try {
   if (verdict.data.verdict === 'ready_for_review') {
-    if (opts.phase === 'implement') nextState = 'ready_for_review';
-    else if (opts.phase === 'review') nextState = 'reviewed';
-    else if (opts.phase === 'ship') nextState = 'shipped';
-  } else if (verdict.data.verdict === 'changes_needed' || verdict.data.verdict === 'blocked') {
-    // Failed attempt. Use the retry policy to decide whether to loop back or
-    // mark terminal failure; phases --ready enforces the backoff via last_failed_at.
-    lastFailedAt = new Date().toISOString();
-    try {
-      const state = readTaskState(opts.forgeDir, opts.taskId);
-      const decision = nextRetryState(
-        state.attempt_count,
-        'transient',
-        loadRetryPolicy(opts.forgeDir),
-      );
-      if (decision.state === 'retry') {
-        nextState = 'running';
+    if (opts.phase === 'implement') {
+      if (singleHost) {
+        // Single-host DIRECT PATH (owner decision SH): the CLI-verified
+        // implement head becomes the reviewed binding — no review hop, no
+        // ready_for_review notification. Ship-record write-ahead runs BEFORE
+        // the state CAS.
+        const resolved = resolveWorktreePath(opts.forgeDir, opts.taskId, opts.attemptId);
+        if (resolved.kind === 'invalid') {
+          return {
+            exitCode: emit(
+              fail('VERIFICATION_FAILED', 'single-host direct path: dispatch manifest is missing or corrupt', false, {
+                reason: 'manifest_invalid',
+              }),
+              { json: opts.json },
+            ),
+          };
+        }
+        let reviewedHeadSha: string;
+        try {
+          reviewedHeadSha = await resolveShaChecked(resolved.path, 'HEAD');
+        } catch (err) {
+          return {
+            exitCode: emit(
+              fail(
+                'VERIFICATION_FAILED',
+                `single-host direct path: cannot resolve the worktree HEAD: ${err instanceof Error ? err.message : String(err)}`,
+                false,
+                { reason: 'head_unresolvable' },
+              ),
+              { json: opts.json },
+            ),
+          };
+        }
+        try {
+          upsertReviewedBinding(opts.forgeDir, opts.taskId, {
+            reviewedHeadSha,
+            reviewAttemptId: opts.attemptId,
+            holder: callerFromLease(lease),
+            fence: shipRecordFence(opts.forgeDir, opts.taskId, lease, opts.attemptId),
+          });
+        } catch (err) {
+          return {
+            exitCode: emit(
+              fail(
+                err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+                err instanceof Error ? err.message : String(err),
+                true,
+                { hint: 'verdict written; ship-record write-ahead failed — retry complete' },
+              ),
+              { json: opts.json },
+            ),
+          };
+        }
+        nextState = applyTransition(stateNow.state, 'implement_verified_single_host');
       } else {
-        nextState = 'failed';
-        failureReason = decision.failure_reason;
+        nextState = applyTransition(stateNow.state, 'complete_ready_for_review');
       }
-    } catch (err) {
+    } else if (opts.phase === 'review') {
+      // Ship-record write-ahead: mint the reviewed binding from the PINNED
+      // manifest SHA (already proven equal to the live HEAD in 2b3), THEN the
+      // state CAS. Crash between the two replays idempotently.
+      try {
+        upsertReviewedBinding(opts.forgeDir, opts.taskId, {
+          // The 2b3 gate guarantees manifest + review_target_sha for review.
+          reviewedHeadSha: manifest!.review_target_sha!,
+          reviewAttemptId: opts.attemptId,
+          holder: callerFromLease(lease),
+          fence: shipRecordFence(opts.forgeDir, opts.taskId, lease, opts.attemptId),
+        });
+      } catch (err) {
+        return {
+          exitCode: emit(
+            fail(
+              err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+              err instanceof Error ? err.message : String(err),
+              true,
+              { hint: 'verdict written; ship-record write-ahead failed — retry complete' },
+            ),
+            { json: opts.json },
+          ),
+        };
+      }
+      nextState = applyTransition(stateNow.state, 'review_passed');
+    } else {
+      // ship: merge_pending is legal ONLY behind a COMPLETE ship record —
+      // reviewed binding + base + pr (the write-ahead proves the external
+      // side effects were recorded before the state advertises them).
+      let record;
+      try {
+        record = readShipRecord(opts.forgeDir, opts.taskId);
+      } catch (err) {
+        return {
+          exitCode: emit(
+            fail(
+              err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+              err instanceof Error ? err.message : String(err),
+              false,
+            ),
+            { json: opts.json },
+          ),
+        };
+      }
+      if (record === null || record.base === null || record.pr === null) {
+        return {
+          exitCode: emit(
+            fail(
+              'SHIP_RECORD_INCOMPLETE',
+              `cannot enter merge_pending for task ${opts.taskId}: the ship record must carry the reviewed binding, base, and pr before completion (write-ahead ordering)`,
+              false,
+              {
+                record_present: record !== null,
+                base_present: record?.base !== null && record !== null,
+                pr_present: record?.pr !== null && record !== null,
+              },
+            ),
+            { json: opts.json },
+          ),
+        };
+      }
+      nextState = applyTransition(stateNow.state, 'ship_op_completed');
+    }
+  } else {
+    // changes_needed | blocked. `blocked` from running keeps its question
+    // semantics (no budget); every other failure consumes the SINGLE total
+    // budget with last_failure_key replay idempotency.
+    lastFailedAt = new Date().toISOString();
+    const isQuestionBlock = verdict.data.verdict === 'blocked' && stateNow.state === 'running' && opts.phase === 'implement';
+    if (isQuestionBlock) {
+      nextState = applyTransition(stateNow.state, 'blocked');
+    } else {
+      failureKey = `${opts.attemptId}:${opts.phase}`;
+      // REPLAY SHORT-CIRCUIT (runs BEFORE any transition application): the
+      // same failure was already accounted and the state already reflects it.
+      const reflectsFailure =
+        stateNow.state === 'failed' ||
+        (opts.phase === 'ship' ? stateNow.state === 'reviewed' : stateNow.state === 'awaiting_respawn' || stateNow.state === 'blocked_on_question');
+      if (stateNow.last_failure_key === failureKey && reflectsFailure) {
+        // impl R2 MAJ-4: the fatal notification keeps DURABLE semantics — a
+        // replay of a terminal exhaustion RE-ATTEMPTS the append (its id is a
+        // deterministic natural key, so readers dedup; a crash between the
+        // state CAS and the original append is repaired here).
+        if (stateNow.state === 'failed' && stateNow.failure_reason === 'retries_exhausted') {
+          try {
+            appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+              type: 'fatal',
+              ts: new Date().toISOString(),
+              run_id: lease.owner_run_id,
+              reason: `task ${opts.taskId} failed: retry budget exhausted (${stateNow.failure_count}/${retryAttempts})`,
+              details: { task_id: opts.taskId, failure_count: stateNow.failure_count, failure_key: failureKey },
+            });
+          } catch (fatalErr) {
+            process.stderr.write(
+              `warn: complete — replay could not repair the fatal notification: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+            );
+          }
+        }
+        return {
+          exitCode: emit(
+            ok({
+              verdict: verdict.data.verdict,
+              next_state: stateNow.state,
+              verdict_path: verdictPath,
+              replayed: true,
+            }),
+            { json: opts.json },
+          ),
+        };
+      }
+      const failTrigger =
+        opts.phase === 'ship' ? 'ship_failed' : verdict.data.verdict === 'blocked' ? 'changes_needed' : 'changes_needed';
+      let failState: TaskState;
+      try {
+        failState = applyTransition(stateNow.state, failTrigger);
+      } catch (err) {
+        return {
+          exitCode: emit(
+            fail(
+              err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+              err instanceof Error ? err.message : String(err),
+              false,
+            ),
+            { json: opts.json },
+          ),
+        };
+      }
+      budgetDelta = 1;
+      const newCount = stateNow.failure_count + 1;
+      if (newCount >= retryAttempts) {
+        // Exhaustion is CHAINED by complete and committed in the SAME CAS —
+        // no dangling dispatchable state past the budget.
+        nextState = applyTransition(failState, 'retries_exhausted');
+        failureReason = 'retries_exhausted';
+      } else {
+        nextState = failState;
+      }
+    }
+  }
+
+  } catch (transitionErr) {
+    if (transitionErr instanceof OrchestratorError && transitionErr.code === 'ILLEGAL_TRANSITION') {
       return {
         exitCode: emit(
           fail(
-            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
-            err instanceof Error ? err.message : String(err),
-            true,
-            { hint: 'verdict written; retry classification failed — run forge orchestrate gc' },
+            'STALE_ATTEMPT',
+            `task ${opts.taskId} changed state concurrently (${transitionErr.message}); re-derive the current state and retry`,
+            false,
           ),
           { json: opts.json },
         ),
       };
     }
+    throw transitionErr;
   }
+
   if (nextState) {
     try {
-      const state = readTaskState(opts.forgeDir, opts.taskId);
       writeTaskState(
         opts.forgeDir,
         {
-          ...state,
+          ...stateNow,
           state: nextState,
-          state_version: state.state_version + 1,
+          state_version: stateNow.state_version + 1,
+          failure_count: stateNow.failure_count + budgetDelta,
+          ...(failureKey !== null ? { last_failure_key: failureKey } : {}),
           ...(failureReason ? { failure_reason: failureReason } : {}),
           ...(lastFailedAt ? { last_failed_at: lastFailedAt } : {}),
           updated_at: new Date().toISOString(),
@@ -441,6 +1050,10 @@ export async function runOrchestrateComplete(
           },
         },
         callerFromLease(lease),
+        // impl R5: re-verify the attempt pointer UNDER the marker — a phase
+        // completion that ran while a superseding attempt dispatched (a
+        // review/ship pointer self-loop) must not advance the task.
+        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
       );
     } catch (err) {
       return {
@@ -454,6 +1067,84 @@ export async function runOrchestrateComplete(
           { json: opts.json },
         ),
       };
+    }
+
+    // FORGE-231 (owner decision NL): the ready_for_review PROGRESS event is
+    // ADVISORY — emitted strictly AFTER the state CAS, best-effort (a crash in
+    // this window loses it; review-queue's state-derived listing is the
+    // authoritative discovery). Dual-host implement-pass only: the single-host
+    // direct path goes straight to reviewed with no review hop to announce.
+    if (nextState === 'ready_for_review' && opts.phase === 'implement' && !singleHost) {
+      try {
+        appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+          type: 'ready_for_review',
+          ts: new Date().toISOString(),
+          run_id: lease.owner_run_id,
+          task_id: opts.taskId,
+          state_version: stateNow.state_version + 1,
+        });
+      } catch {
+        // advisory — never fail the completion over a lost announcement
+      }
+    }
+
+    // FORGE-231 (impl R1 MAJ-5/MAJ-6): on entering merge_pending —
+    //   1. emit the ADVISORY merge_pending event (after the state CAS);
+    //   2. RELEASE the worker lease (state-before-release per §D5: the worker
+    //      is done; no heartbeat source exists while the platform merges).
+    //      Best-effort with a loud hint — gc row 15 is the recovery.
+    if (nextState === 'merge_pending') {
+      try {
+        const recordNow = readShipRecord(opts.forgeDir, opts.taskId);
+        if (recordNow?.pr) {
+          appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+            type: 'merge_pending',
+            ts: new Date().toISOString(),
+            run_id: lease.owner_run_id,
+            task_id: opts.taskId,
+            state_version: stateNow.state_version + 1,
+            pr_url: recordNow.pr.url,
+            auto_merge: mergePolicy === 'auto',
+          });
+        }
+      } catch {
+        // advisory
+      }
+      try {
+        releaseLease({
+          forgeDir: opts.forgeDir,
+          taskId: opts.taskId,
+          caller: callerFromLease(lease),
+        });
+      } catch (releaseErr) {
+        process.stderr.write(
+          `warn: complete — merge_pending entered but the worker lease release failed (${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}); forge orchestrate gc row 15 will reconcile\n`,
+        );
+      }
+    }
+
+    // FORGE-231 (impl R1 MAJ-6): terminal failure via retries_exhausted keeps
+    // the DURABLE fatal-notification obligation — surface loudly on append
+    // failure instead of swallowing.
+    if (nextState === 'failed' && failureReason === 'retries_exhausted') {
+      try {
+        appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+          type: 'fatal',
+          ts: new Date().toISOString(),
+          run_id: lease.owner_run_id,
+          reason: `task ${opts.taskId} failed: retry budget exhausted (${stateNow.failure_count + budgetDelta}/${retryAttempts})`,
+          details: {
+            task_id: opts.taskId,
+            failure_count: stateNow.failure_count + budgetDelta,
+            // natural key → deterministic event id → replay-safe re-emission
+            failure_key: failureKey ?? `${opts.attemptId}:${opts.phase}`,
+          },
+        });
+      } catch (fatalErr) {
+        process.stderr.write(
+          `warn: complete — task ${opts.taskId} marked failed but the fatal notification append failed: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+        );
+      }
     }
   }
 
@@ -614,20 +1305,6 @@ function proveWorktreeBinding(
   return null;
 }
 
-function loadRetryPolicy(forgeDir: string): RetryPolicy {
-  try {
-    const settings = loadSettings(path.join(forgeDir, 'settings.yaml'));
-    return {
-      retry_attempts: settings.agents.retry_attempts,
-      retry_backoff_ms_max: settings.agents.retry_backoff_ms_max,
-    };
-  } catch (err) {
-    if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
-      return DEFAULT_RETRY_POLICY;
-    }
-    throw err;
-  }
-}
 
 export const completeHandler: VerbHandler = {
   band: 'mutate',
@@ -645,3 +1322,43 @@ export const completeHandler: VerbHandler = {
     return runOrchestrateComplete({ taskId, attemptId, verdictFile, phase, forgeDir, json });
   },
 };
+
+// FORGE-231 (impl R1 MAJ-3): the ship-record write-ahead fence — re-read the
+// lease UNDER the record's CAS marker and require the caller's exact identity
+// AND an unexpired lease. A stale completion that lost its lease to a steal
+// between reading state and committing the record dies here instead of
+// leaving a stale write-ahead for the successor.
+function shipRecordFence(
+  forgeDir: string,
+  taskId: string,
+  lease: Lease,
+  attemptId: string,
+): () => void {
+  return () => {
+    let current: Lease;
+    try {
+      current = readLease(forgeDir, taskId);
+    } catch (err) {
+      throw new CasError('lease_lost', `lease unreadable during ship-record write for ${taskId}`, {}, { cause: err });
+    }
+    if (
+      current.claim_id !== lease.claim_id ||
+      current.generation !== lease.generation ||
+      current.owner_run_id !== lease.owner_run_id ||
+      Date.parse(current.expires_at) <= Date.now()
+    ) {
+      throw new CasError('lease_lost', `lease for ${taskId} changed hands or expired during ship-record write`);
+    }
+    // impl R5: also fence the attempt pointer — a superseded phase attempt
+    // must not write its reviewed binding into the write-ahead record.
+    let ptr: string | null | undefined;
+    try {
+      ptr = readTaskState(forgeDir, taskId).current_attempt_id;
+    } catch (err) {
+      throw new CasError('lease_lost', `state unreadable during ship-record write for ${taskId}`, {}, { cause: err });
+    }
+    if (ptr !== attemptId) {
+      throw new CasError('lease_lost', `attempt ${attemptId} was superseded by ${ptr ?? 'none'} during ship-record write`);
+    }
+  };
+}

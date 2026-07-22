@@ -12,6 +12,16 @@ import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-f
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
 import type { ClaimFenceData } from '../../../../src/trackers/claim-fence.ts';
 
+const assertLeaseReleased = (p: string): void => {
+  // FORGE-231: release writes a tombstone (file survives); absence only occurs
+  // on legacy/admin unlink paths. Either way there must be no ACTIVE lease.
+  if (existsSync(p)) {
+    const parsed = JSON.parse(readFileSync(p, 'utf8')) as { status?: string };
+    assert.equal(parsed.status, 'released', `expected a release tombstone at ${p}`);
+  }
+};
+
+
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
@@ -82,7 +92,7 @@ test('cancel transitions state → cancelled and releases lease', async (t) => {
   assert.equal(state.state, 'cancelled');
   // Lease released.
   const leasePath = join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
-  assert.ok(!existsSync(leasePath), 'lease.json should be unlinked');
+  assertLeaseReleased(leasePath);
   // forge:claim footer stripped (data=null) exactly once on cancel.
   assert.equal(cancelTracker.fences.length, 1);
   assert.equal(cancelTracker.fences[0]?.issueId, 'FORGE-1');
@@ -132,8 +142,6 @@ test('cancel succeeds even when setClaimFence(null) throws (best-effort strip)',
   assert.equal(result.exitCode, 0);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.data.state, 'cancelled');
-  assert.ok(
-    !existsSync(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json')),
-    'lease still released despite fence failure',
-  );
+  // FORGE-231: release writes a tombstone — assert no ACTIVE lease remains.
+  assertLeaseReleased(join(forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'));
 });

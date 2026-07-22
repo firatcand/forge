@@ -22,6 +22,11 @@ export const VerdictSchema = z.object({
   }),
   branch: z.string().min(1).max(200),
   save_point: byteBoundedString(8_000),
+  // FORGE-231: the pinned SHA a composed machine verdict speaks for. Optional
+  // on the generic carrier (interactive flows are unpinned); the orchestrated
+  // REVIEW gate requires it and verifies the full equality chain — see
+  // complete's pinned-review gate.
+  target_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 });
 
 export type Verdict = z.infer<typeof VerdictSchema>;
@@ -47,6 +52,20 @@ export const ReviewVerdictSchema = z.object({
   // second host must differ from the primary review host). cursor was never
   // wired up for review.
   host: z.enum(['codex', 'gemini', 'claude']),
+  // FORGE-231: the exact commit the review looked at. OPTIONAL here so the
+  // globally-shared schema keeps working for interactive second-opinion /
+  // harness flows; the ORCHESTRATED review path parses with
+  // PinnedReviewVerdictSchema below, where it is REQUIRED.
+  target_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 });
 
 export type ReviewVerdict = z.infer<typeof ReviewVerdictSchema>;
+
+// FORGE-231: orchestrated REVIEW verdicts must be PINNED — the raw file is the
+// provenance + pin witness the completion gate verifies (host + target_sha
+// against the dispatch-time manifest and the live worktree HEAD).
+export const PinnedReviewVerdictSchema = ReviewVerdictSchema.extend({
+  target_sha: z.string().regex(/^[0-9a-f]{40}$/),
+});
+
+export type PinnedReviewVerdict = z.infer<typeof PinnedReviewVerdictSchema>;

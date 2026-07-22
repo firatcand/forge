@@ -254,9 +254,25 @@ endpoints are already-constrained symbol names) and are not walked by recall.
   drift regresses the task into verify + cross-review (`auto` mandates
   dual-host review, so a cross reviewer always exists here); a PR merged externally
   at any other SHA is a **tainted merge** — parked with a fatal notification,
-  never marked shipped. **Residual accepted risk:**
+  never marked shipped. Merge-queue-enabled base branches are UNSUPPORTED for
+  `auto` (owner decision MQ, FORGE-231): a queue can merge with no
+  orchestrator running, so the honesty probe reports `merge_queue_enabled`
+  and the ship path parks fail-closed. **Residual accepted risk:**
   with `auto` opted in, code reaches `main` without a human click while
   Tripwire remains report-only — explicitly accepted by the owner in the ADR.
+- **Raw review-artifact authorship (FORGE-231, stated explicitly).** The
+  pinned-review completion gate guarantees that the review OUTCOME is derived
+  from the raw witness file, that the witness names the trusted review host,
+  that a second opinion carries a different host lineage, that critical-path
+  status is DERIVED from immutable revision-pinned inputs (never a caller
+  flag; any change touching `CRITICAL.md` itself — including a rename away —
+  is intrinsically critical; read errors fail closed), and that the reviewed
+  SHA is pinned end-to-end. What it does NOT guarantee: the raw witness file's
+  authorship is not cryptographically attested — a writer inside the local
+  filesystem trust domain could author one wholesale. Consistent with the
+  existing worker-content posture (question/answer file contents are already
+  treated as untrusted); attestation would need an orchestrator-recorded
+  signing seam and is out of scope.
 - **Unicode-normalization / homoglyph bypasses (I1 limitation).** The I1 rules
   match on the raw string without NFKC normalization, so a full-width or
   homoglyph rendering of an injection phrase (e.g. `Ｉｇｎｏｒｅ all previous
