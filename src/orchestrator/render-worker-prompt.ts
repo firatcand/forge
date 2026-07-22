@@ -190,4 +190,3 @@ function renderReviewPinning(ctx: WorkerPromptContext): string {
     '',
   ].join('\n');
 }
-

@@ -206,3 +206,19 @@ test('gateway: clean dual-host pinned pass composes ready_for_review', async () 
     assert.equal(outcome.hasCriticalPath, true);
   }
 });
+
+test('gateway: pinned mode rejects an UNPINNED second opinion (impl R1 CRIT-1 regression)', async () => {
+  const outcome = await composeTrustedReviewOutcome({
+    primaryRaw: { ...PASS_REVIEW, target_sha: SHA },
+    // No target_sha — an old unrelated artifact must never satisfy the
+    // critical-path second-opinion requirement.
+    secondOpinionRaw: { ...PASS_REVIEW, host: 'claude' },
+    expectedPrimaryHost: 'codex',
+    expectedTargetSha: SHA,
+    criticality: { derive: null, flag: true },
+    branch: 'b',
+    summary: 's',
+    secondOpinionAvailable: true,
+  });
+  assert.equal(outcome.kind, 'invalid');
+});

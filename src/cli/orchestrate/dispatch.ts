@@ -29,7 +29,8 @@ import { OrchestratorError, SettingsError } from '../../core/errors.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { AttemptManifestSchema } from '../../schemas/attempt.ts';
 import { applyTransition } from '../../orchestrator/state-machine.ts';
-import { readFrozenBaseBranch, resolveBaseRef, resolveShaChecked } from '../../orchestrator/worktree-base.ts';
+import { readFrozenBaseBranch, readMarkerTaskId, resolveBaseRef, resolveShaChecked } from '../../orchestrator/worktree-base.ts';
+import { sanitizeIssueId } from '../../core/workspace.ts';
 import {
   readTaskState,
   writeTaskState,
@@ -182,6 +183,23 @@ export async function runOrchestrateDispatch(
     };
   }
 
+  // FORGE-231 (impl R1 MAJ-3): dispatch is a state-advancing commit — it
+  // requires an ACTIVE lease, not merely a matching identity. An hours-expired
+  // worker must steal/re-acquire, never advance state on a dead claim.
+  if (Date.parse(lease.expires_at) <= Date.now()) {
+    return {
+      exitCode: emit(
+        fail(
+          'LEASE_EXPIRED',
+          `lease for task ${opts.taskId} expired at ${lease.expires_at} — re-acquire before dispatching`,
+          false,
+          { expires_at: lease.expires_at },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
   // 3. For a REVIEW attempt, pin BOTH diff endpoints NOW (dispatch time) so
   //    the reviewed range can never float (R6/R8): target = the worktree
   //    HEAD under review; base = origin/<frozen-base> from the worktree
@@ -190,6 +208,29 @@ export async function runOrchestrateDispatch(
   let reviewTargetSha: string | undefined;
   let reviewBaseSha: string | undefined;
   if (phase === 'review') {
+    // FORGE-231 (impl R1 MAJ-4): the pinned SHAs are only meaningful if the
+    // worktree provably belongs to THIS task — otherwise a caller could pin a
+    // review of task B's tree onto task A. The marker's taskId is the binding.
+    let expectedMarkerId: string;
+    try {
+      expectedMarkerId = sanitizeIssueId(opts.taskId);
+    } catch {
+      expectedMarkerId = opts.taskId;
+    }
+    const markerTaskId = readMarkerTaskId(opts.worktreePath);
+    if (markerTaskId !== expectedMarkerId) {
+      return {
+        exitCode: emit(
+          fail(
+            'INVALID_STATE',
+            `cannot dispatch review for task ${opts.taskId}: worktree at ${opts.worktreePath} is bound to '${markerTaskId ?? '(no marker)'}' — the reviewed tree must be this task's own worktree`,
+            false,
+            { worktree_path: opts.worktreePath, marker_task_id: markerTaskId },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
     const baseBranch = readFrozenBaseBranch(opts.worktreePath);
     if (baseBranch === null) {
       return {

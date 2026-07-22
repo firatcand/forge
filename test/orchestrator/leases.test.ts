@@ -834,7 +834,7 @@ function writeStateJson(
   writeFileSync(stateFilePath(fd, taskId), JSON.stringify(base));
 }
 
-test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + terminal state → unlink + history event', () => {
+test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + terminal state → tombstone + history event', () => {
   const fd = forgeDir('admin-release-r14');
   const lease = acquire({ forgeDir: fd, taskId: 'TASK-R14', runId: 'run-orig' });
   writeStateJson(fd, 'TASK-R14', { state: 'shipped' });
@@ -851,7 +851,10 @@ test('adminReleaseLeaseByIdentity: row-14 happy path — matching identity + ter
     reason: 'gc:row-14:terminal-state',
   });
 
-  assert.equal(existsSync(leaseFilePath(fd, 'TASK-R14')), false, 'lease should be unlinked');
+  // FORGE-231: canonical admin release writes a TOMBSTONE through the CAS
+  // protocol (never a delete-with-race); the file survives as version history.
+  const record14 = readLeaseRecord('TASK-R14', leaseFilePath(fd, 'TASK-R14'));
+  assert.equal(record14?.kind, 'released', 'canonical admin release must tombstone, not unlink');
   const history = readFileSync(claimHistoryFilePath(fd, 'TASK-R14'), 'utf8');
   const lines = history.trim().split('\n').filter(Boolean);
   const lastEvent = JSON.parse(lines[lines.length - 1]);
@@ -1114,4 +1117,67 @@ test('adminReleaseLeaseByIdentity: row-13 with requireTerminalState=false skips 
   });
   assert.equal(existsSync(dupPath), false);
   assert.equal(existsSync(leaseFilePath(fd, 'TASK-R13-NS')), true, 'canonical untouched');
+});
+
+test('leases: a held lease marker blocks heartbeat AND release with LEASE_CONTENDED (single-committer pin)', () => {
+  const fd = forgeDir('lease-marker-contention');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-CONT', runId: 'run-001' });
+  const leasePath = leaseFilePath(fd, 'TASK-CONT');
+  const marker = `${leasePath}.cas-${lease.lease_version}`;
+  writeFileSync(marker, JSON.stringify({ pid: process.pid, run_id: 'other', token: 'held' }), 'utf8');
+  try {
+    assert.throws(
+      () =>
+        heartbeat({
+          forgeDir: fd,
+          taskId: 'TASK-CONT',
+          caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
+    );
+    assert.throws(
+      () =>
+        release({
+          forgeDir: fd,
+          taskId: 'TASK-CONT',
+          caller: { run_id: 'run-001', claim_id: lease.claim_id, generation: lease.generation },
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_CONTENDED',
+    );
+    // The lease itself is untouched by either loser.
+    const after = readLeaseRecord('TASK-CONT', leasePath);
+    assert.equal(after?.kind, 'active');
+    if (after?.kind === 'active') assert.equal(after.lease.lease_version, lease.lease_version);
+  } finally {
+    unlinkSync(marker);
+  }
+});
+
+test('adminReleaseLeaseByIdentity: canonical release refuses while a lease marker is held (impl R1 CRIT-2 regression)', () => {
+  const fd = forgeDir('admin-release-contention');
+  const lease = acquire({ forgeDir: fd, taskId: 'TASK-ARC', runId: 'run-001' });
+  const leasePath = leaseFilePath(fd, 'TASK-ARC');
+  const marker = `${leasePath}.cas-${lease.lease_version}`;
+  writeFileSync(marker, JSON.stringify({ pid: process.pid, run_id: 'other', token: 'held' }), 'utf8');
+  try {
+    assert.throws(
+      () =>
+        adminReleaseLeaseByIdentity({
+          forgeDir: fd,
+          taskId: 'TASK-ARC',
+          expectedClaimId: lease.claim_id,
+          expectedGeneration: lease.generation,
+          expectedOwnerRunId: lease.owner_run_id,
+          expectedExpiresAt: lease.expires_at,
+          expectedPath: leasePath,
+          requireTerminalState: false,
+          reason: 'gc:row-15:merge-pending-lease',
+        }),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'LEASE_IDENTITY_MISMATCH',
+    );
+    const after = readLeaseRecord('TASK-ARC', leasePath);
+    assert.equal(after?.kind, 'active', 'a held marker must abort the admin release');
+  } finally {
+    unlinkSync(marker);
+  }
 });

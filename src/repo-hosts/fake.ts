@@ -90,4 +90,3 @@ export class FakeRepoHost implements RepoHost {
     return this.scripted('headSha', this.script.headSha, HeadShaResultSchema);
   }
 }
-

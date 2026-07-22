@@ -162,6 +162,14 @@ export interface TaskSnapshot {
     readonly guardedFile: string;
     readonly markerPath: string;
     readonly domain: string;
+    readonly owner: {
+      readonly run_id?: string;
+      readonly claim_id?: string;
+      readonly generation?: number;
+      readonly pid?: number;
+      readonly created_at?: string;
+    } | null;
+    readonly pidAlive: boolean | null;
   }[];
 }
 
@@ -616,6 +624,9 @@ function detectRow16(s: OrchestratorSnapshot): GcPlanRow[] {
   const rows: GcPlanRow[] = [];
   for (const [taskId, task] of s.tasks) {
     for (const marker of task.stuckCasMarkers ?? []) {
+      const owner = marker.owner
+        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}`
+        : 'owner tuple unreadable — treat as ALIVE and investigate before touching';
       rows.push({
         rowId: 16,
         taskId,
@@ -624,8 +635,8 @@ function detectRow16(s: OrchestratorSnapshot): GcPlanRow[] {
         payload: {
           kind: 'stuck_cas_marker',
           description:
-            `incomplete CAS marker ${marker.markerPath} (transition ${marker.domain} on ${marker.guardedFile}) — ` +
-            'a writer crashed mid-commit or is paused; verify the owning run is dead (PID liveness is a hint only, reuse is possible), then remove the marker manually. gc never removes it.',
+            `incomplete CAS marker ${marker.markerPath} (transition ${marker.domain} on ${marker.guardedFile}); ${owner}. ` +
+            'A writer crashed mid-commit or is paused; confirm the owning RUN is dead, then remove the marker file manually. gc never removes an incomplete marker.',
         },
       });
     }

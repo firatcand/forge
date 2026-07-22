@@ -12,6 +12,20 @@ import { TASK_MARKER_RELPATH } from '../core/workspace.ts';
 const MARKER_MAX_BYTES = 64 * 1024;
 const GIT_ENV = { LC_ALL: 'C', GIT_TERMINAL_PROMPT: '0' } as const;
 
+// Read the worktree marker's bound task id (sanitized form, as written by
+// workspace.create). null when the marker is absent/unreadable.
+export function readMarkerTaskId(worktreePath: string): string | null {
+  const markerPath = path.join(worktreePath, TASK_MARKER_RELPATH);
+  try {
+    const st = lstatSync(markerPath);
+    if (!st.isFile() || st.size > MARKER_MAX_BYTES) return null;
+    const parsed = JSON.parse(readFileSync(markerPath, 'utf8')) as { taskId?: unknown };
+    return typeof parsed.taskId === 'string' && parsed.taskId.length > 0 ? parsed.taskId : null;
+  } catch {
+    return null;
+  }
+}
+
 // Returns the frozen base branch name, or null when the marker is absent or
 // predates FORGE-231 (no base_branch field — ensure-worktree backfills it).
 export function readFrozenBaseBranch(worktreePath: string): string | null {
@@ -75,4 +89,3 @@ export async function resolveBaseRef(cwd: string, name: string): Promise<string>
     name,
   });
 }
-

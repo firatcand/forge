@@ -398,6 +398,56 @@ test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship r
     readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'),
   );
   assert.equal(state.state, 'merge_pending');
+
+  // impl R1 MAJ-5: the worker lease is RELEASED (tombstoned) after entering
+  // merge_pending — no heartbeat source exists while the platform merges.
+  const leaseAfter = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'), 'utf8'),
+  );
+  assert.equal(leaseAfter.status, 'released', 'ship completion must release the worker lease');
+
+  // impl R1 MAJ-6: the ADVISORY merge_pending event was appended.
+  const notifPath = join(ctx.forgeDir, 'orchestrator/runs', claim.owner_run_id, 'notifications.jsonl');
+  const events = readFileSync(notifPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const mp = events.find((e) => e.type === 'merge_pending');
+  assert.ok(mp, 'merge_pending event emitted');
+  assert.equal(mp.pr_url, 'https://example.test/pr/7');
+});
+
+test('FORGE-231: retry exhaustion commits failed AND appends the fatal notification (impl R1 MAJ-6)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // One failure away from the default budget (10).
+  const statePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json');
+  const cur = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(
+    statePath,
+    JSON.stringify({ ...cur, failure_count: 9, state_version: cur.state_version + 1 }),
+    'utf8',
+  );
+
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.next_state, 'failed');
+  const after = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(after.state, 'failed');
+  assert.equal(after.failure_reason, 'retries_exhausted');
+  assert.equal(after.failure_count, 10);
+
+  const lease = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json'), 'utf8'));
+  const notifPath = join(ctx.forgeDir, 'orchestrator/runs', lease.owner_run_id ?? lease.released_by?.run_id, 'notifications.jsonl');
+  const events = readFileSync(notifPath, 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  const fatal = events.find((e) => e.type === 'fatal');
+  assert.ok(fatal, 'fatal notification appended on exhaustion');
+  assert.match(fatal.reason, /retry budget exhausted/);
 });
 test('FORGE-231: changes_needed → awaiting_respawn with ONE budget increment + failure key', async (t) => {
   const stdout = captureStdout(t);

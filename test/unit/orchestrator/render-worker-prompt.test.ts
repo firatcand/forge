@@ -209,4 +209,3 @@ test('renderer: non-review phases render an empty pinning block', () => {
   const out = renderWorkerPrompt('X{{REVIEW_PINNING}}Y', { ...baseCtx(), phase: 'IMPLEMENT' });
   assert.equal(out, 'XY');
 });
-

@@ -342,11 +342,15 @@ export async function composeTrustedReviewOutcome(
 
   let secondOpinion: ReviewVerdict | null = null;
   if (inputs.secondOpinionRaw !== undefined && inputs.secondOpinionRaw !== null) {
-    const secondParsed = ReviewVerdictSchema.safeParse(inputs.secondOpinionRaw);
+    // In PINNED mode the second opinion must be pinned too (R1 CRIT-1): an
+    // unpinned artifact from another host could satisfy the critical-path
+    // second-opinion requirement while vouching for an unknown commit.
+    const secondSchema = inputs.expectedTargetSha ? PinnedReviewVerdictSchema : ReviewVerdictSchema;
+    const secondParsed = secondSchema.safeParse(inputs.secondOpinionRaw);
     if (!secondParsed.success) {
       return {
         kind: 'invalid',
-        reason: 'second-opinion verdict failed schema validation',
+        reason: `second-opinion verdict failed ${inputs.expectedTargetSha ? 'pinned ' : ''}schema validation`,
         detail: { kind: 'second-opinion', zodError: secondParsed.error.message },
       };
     }
@@ -399,4 +403,3 @@ export async function composeTrustedReviewOutcome(
   }
   return { kind: result.kind, result, primary, secondOpinion, hasCriticalPath };
 }
-

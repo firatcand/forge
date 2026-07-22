@@ -705,3 +705,35 @@ test('gc: GcPlanRow union is exhaustively handled by a switch (compile-time chec
   };
   assert.equal(handle(row), 'rla');
 });
+
+// ---- Row 16 (FORGE-231): stuck CAS marker report carries the owner tuple ----
+
+test('gc row 16: stuck marker report includes the owner tuple + PID hint', () => {
+  const tasks = new Map([
+    [
+      'TASK-M',
+      mkTaskSnapshot({
+        state: mkState({ task_id: 'TASK-M', state: 'running' }),
+        stuckCasMarkers: [
+          {
+            guardedFile: '/p/state.json',
+            markerPath: '/p/state.json.cas-3',
+            domain: '3',
+            owner: { run_id: 'run-9', claim_id: 'claim-9', generation: 4, pid: 12345, created_at: '2026-07-22T00:00:00.000Z' },
+            pidAlive: false,
+          },
+        ],
+      }),
+    ],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const row = plan.rows.find((r) => r.rowId === 16);
+  assert.ok(row, 'row 16 fires');
+  if (row?.action === 'report_orphan') {
+    assert.equal(row.payload.kind, 'stuck_cas_marker');
+    assert.match(row.payload.description, /run=run-9/);
+    assert.match(row.payload.description, /claim=claim-9/);
+    assert.match(row.payload.description, /pid appears dead; reuse possible/);
+    assert.match(row.payload.description, /gc never removes/);
+  }
+});

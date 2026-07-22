@@ -128,7 +128,7 @@ test('dispatch --phase review: pointer self-loop with BOTH diff endpoints pinned
   assert.equal(state.attempt_count, 0, 'implement counter must not move on a review dispatch');
 });
 
-test('dispatch --phase review without a frozen base marker refuses with a backfill hint', async (t) => {
+test('dispatch --phase review against an unbound worktree refuses (binding gate before base resolution)', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupClaimed(stdout);
   forceState(ctx, 'ready_for_review');
@@ -147,7 +147,7 @@ test('dispatch --phase review without a frozen base marker refuses with a backfi
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.ok, false);
-  assert.match(env.error.message, /base_branch/);
+  assert.match(env.error.message, /bound to|base_branch/);
 });
 
 test('dispatch --phase ship: legal only from reviewed; pointer self-loop', async (t) => {
@@ -255,4 +255,54 @@ test('dispatch implement from ready_for_review is dual-host-illegal (single-host
   const state = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
   assert.equal(state.state, 'dispatched');
   assert.equal(state.attempt_count, 1);
+});
+
+test("dispatch --phase review against ANOTHER task's worktree refuses (impl R1 MAJ-4 regression)", async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  forceState(ctx, 'ready_for_review');
+  const { worktree } = makeReviewWorktree(ctx);
+  // Rebind the marker to a different task.
+  writeFileSync(
+    join(worktree, TASK_MARKER_RELPATH),
+    JSON.stringify({ version: 1, taskId: 'FORGE-999', branch: 'feat/FORGE-999', base_branch: 'main' }),
+    'utf8',
+  );
+  const result = await runOrchestrateDispatch({
+    taskId: 'FORGE-1',
+    claimId: ctx.claimId,
+    runId: ctx.runId,
+    worktreePath: worktree,
+    phase: 'review',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.match(env.error.message, /bound to 'FORGE-999'/);
+});
+
+test('dispatch refuses an EXPIRED lease even with matching identity (impl R1 MAJ-3 regression)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  // Expire the lease in place (identity preserved).
+  const leasePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
+  const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
+  writeFileSync(
+    leasePath,
+    JSON.stringify({ ...lease, expires_at: new Date(Date.now() - 60_000).toISOString() }),
+    'utf8',
+  );
+  const result = await runOrchestrateDispatch({
+    taskId: 'FORGE-1',
+    claimId: ctx.claimId,
+    runId: ctx.runId,
+    worktreePath: join(ctx.repoRoot, 'wt'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'LEASE_EXPIRED');
 });

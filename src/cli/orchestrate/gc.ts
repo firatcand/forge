@@ -56,7 +56,7 @@ import { VerdictSchema } from '../../schemas/verdict.ts';
 import type { Issue } from '../../trackers/types.ts';
 import { cleanup, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
 import { OrchestratorError, WorkspaceError } from '../../core/errors.ts';
-import { listCasMarkers } from '../../core/fs-atomic.ts';
+import { cleanupCompletedCasMarkers, listCasMarkers } from '../../core/fs-atomic.ts';
 import { classifyLeaseHealth } from '../../orchestrator/leases.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { ACTIVE_STATES } from '../../orchestrator/readiness.ts';
@@ -370,6 +370,36 @@ export async function runOrchestrateGc(
       out.write('gc: no divergences found.\n');
     }
     return { exitCode: 0, migrated: migratedReport, reconcilerRows: [] };
+  }
+
+  // FORGE-231 (impl R1 MAJ-7): the APPLY phase sweeps COMPLETED CAS markers
+  // (transition provably finished — file version advanced past the marker /
+  // create marker with the file present). This is the automated half of the
+  // marker lifecycle; incomplete markers are NEVER touched (row 16 reports
+  // them). Best-effort per task.
+  try {
+    const tasksRoot = join(opts.forgeDir, 'orchestrator', 'tasks');
+    for (const ent of readdirSync(tasksRoot, { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue;
+      for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
+        const guarded = join(tasksRoot, ent.name, name);
+        let version: number | null = null;
+        try {
+          const parsed = JSON.parse(readFileSync(guarded, 'utf8')) as Record<string, unknown>;
+          const v = name === 'state.json' ? parsed.state_version : name === 'lease.json' ? parsed.lease_version : parsed.revision;
+          version = typeof v === 'number' && Number.isInteger(v) ? v : null;
+        } catch {
+          version = null;
+        }
+        try {
+          cleanupCompletedCasMarkers(guarded, version);
+        } catch {
+          // best-effort
+        }
+      }
+    }
+  } catch {
+    // tasks root absent — nothing to sweep
   }
 
   // Execute the plan. Per-row failures (real errors — thrown exceptions) are
@@ -964,8 +994,14 @@ function scanTasksDir(forgeDir: string): Map<string, TaskSnapshot> {
 // only — gc never removes them).
 function collectStuckCasMarkers(
   taskDir: string,
-): { guardedFile: string; markerPath: string; domain: string }[] {
-  const out: { guardedFile: string; markerPath: string; domain: string }[] = [];
+): {
+  guardedFile: string;
+  markerPath: string;
+  domain: string;
+  owner: { run_id?: string; claim_id?: string; generation?: number; pid?: number; created_at?: string } | null;
+  pidAlive: boolean | null;
+}[] {
+  const out: ReturnType<typeof collectStuckCasMarkers> = [];
   for (const name of ['state.json', 'lease.json', 'ship-record.json']) {
     const guarded = join(taskDir, name);
     let version: number | null = null;
@@ -979,7 +1015,34 @@ function collectStuckCasMarkers(
     try {
       for (const info of listCasMarkers(guarded, version)) {
         if (info.completed) continue;
-        out.push({ guardedFile: guarded, markerPath: info.markerPath, domain: String(info.domain) });
+        // FORGE-231 (impl R1 MAJ-7): the report must carry the OWNER tuple —
+        // the conservative manual remediation is keyed on run identity. PID
+        // liveness is a HINT only (reuse is possible; single-machine per the
+        // no-cross-machine non-goal).
+        let pidAlive: boolean | null = null;
+        if (typeof info.content?.pid === 'number') {
+          try {
+            process.kill(info.content.pid, 0);
+            pidAlive = true;
+          } catch (e) {
+            pidAlive = (e as NodeJS.ErrnoException).code === 'EPERM' ? true : false;
+          }
+        }
+        out.push({
+          guardedFile: guarded,
+          markerPath: info.markerPath,
+          domain: String(info.domain),
+          owner: info.content
+            ? {
+                run_id: info.content.run_id,
+                claim_id: info.content.claim_id,
+                generation: info.content.generation,
+                pid: info.content.pid,
+                created_at: info.content.created_at,
+              }
+            : null,
+          pidAlive,
+        });
       }
     } catch {
       // best-effort scan

@@ -238,4 +238,3 @@ export function appendNotificationEvent(
     _closeSync(fd);
   }
 }
-

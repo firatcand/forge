@@ -1226,18 +1226,104 @@ export function adminReleaseLeaseByIdentity(
     }
   }
 
-  // 5. Unlink. ENOENT is benign (idempotent re-run after partial failure).
-  try {
-    fs.unlinkSync(expectedPath);
-  } catch (err) {
-    if (isNodeFsError(err) && err.code === 'ENOENT') {
-      return; // already gone — idempotent
+  // 5. Release. FORGE-231 (impl R1 CRIT-2): the CANONICAL lease file is a
+  //    CAS-guarded, never-deleted file — its admin release writes a TOMBSTONE
+  //    through the same single-committer protocol every other lease mutation
+  //    uses, so a paused gc can never unlink a concurrently-renewed lease and
+  //    a paused heartbeat can never resurrect one over gc's release.
+  //    NON-canonical duplicate artifacts (row 13 — e.g. `lease.json.bak`) are
+  //    not CAS-guarded files; they keep the identity-gated unlink.
+  const canonicalPath = leaseFilePath(forgeDir, taskId);
+  if (expectedPath === canonicalPath) {
+    try {
+      casGuardedWrite({
+        filePath: canonicalPath,
+        expectedVersion: finalLease.lease_version,
+        holder: {
+          run_id: opts.expectedOwnerRunId,
+          claim_id: opts.expectedClaimId,
+          generation: opts.expectedGeneration,
+        },
+        readVersion: leaseVersionOf,
+        buildContent: (raw) => {
+          if (raw === null) {
+            throw new CasError('lease_lost', `lease.json disappeared during admin release of ${taskId}`);
+          }
+          const current = LeaseFileSchema.safeParse(JSON.parse(raw));
+          if (!current.success) {
+            throw new CasError('io', `lease.json unparseable during admin release of ${taskId}`);
+          }
+          if ('status' in current.data && current.data.status === 'released') {
+            throw new CasError('lease_lost', `lease for ${taskId} was already released`);
+          }
+          const active = current.data as Lease;
+          // Post-acquire identity re-verification — ALL FOUR fields, so a
+          // heartbeat renewal (which preserves identity but changes
+          // expires_at AND bumps lease_version) can never be released.
+          if (
+            active.claim_id !== opts.expectedClaimId ||
+            active.generation !== opts.expectedGeneration ||
+            active.owner_run_id !== opts.expectedOwnerRunId ||
+            active.expires_at !== opts.expectedExpiresAt
+          ) {
+            throw new CasError('lease_lost', `lease for ${taskId} changed identity during admin release`);
+          }
+          const tombstone: ReleasedLeaseTombstone = {
+            version: 1,
+            status: 'released',
+            task_id: taskId,
+            lease_version: active.lease_version + 1,
+            last_generation: active.generation,
+            released_at: new Date().toISOString(),
+            released_by: {
+              run_id: opts.expectedOwnerRunId,
+              claim_id: opts.expectedClaimId,
+              generation: opts.expectedGeneration,
+            },
+          };
+          return JSON.stringify(tombstone);
+        },
+      });
+    } catch (err) {
+      if (err instanceof CasError && err.code === 'lease_lost') {
+        // Already released (idempotent) or mutated under us — the mutated
+        // case is exactly the concurrent-heartbeat detection this row exists
+        // to respect.
+        const now = readLeaseRecord(taskId, canonicalPath);
+        if (now?.kind === 'released') return; // idempotent
+        throw new OrchestratorError(
+          'LEASE_IDENTITY_MISMATCH',
+          `Lease at ${expectedPath} for task ${taskId} changed during admin release (concurrent mutation)`,
+          { taskId, path: expectedPath, reason, cause: err },
+        );
+      }
+      if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
+        throw new OrchestratorError(
+          'LEASE_IDENTITY_MISMATCH',
+          `Lease at ${expectedPath} for task ${taskId} is being mutated concurrently — refusing admin release`,
+          { taskId, path: expectedPath, reason, cause: err },
+        );
+      }
+      if (err instanceof OrchestratorError) throw err;
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to release canonical lease for task ${taskId}`,
+        { taskId, path: expectedPath, reason, cause: err },
+      );
     }
-    throw new OrchestratorError(
-      'IO_ERROR',
-      `Failed to unlink lease at ${expectedPath} for task ${taskId}`,
-      { taskId, path: expectedPath, cause: err, reason },
-    );
+  } else {
+    try {
+      fs.unlinkSync(expectedPath);
+    } catch (err) {
+      if (isNodeFsError(err) && err.code === 'ENOENT') {
+        return; // already gone — idempotent
+      }
+      throw new OrchestratorError(
+        'IO_ERROR',
+        `Failed to unlink lease at ${expectedPath} for task ${taskId}`,
+        { taskId, path: expectedPath, cause: err, reason },
+      );
+    }
   }
 
   // 6. Record the admin release in claim-history.jsonl with the reason. This

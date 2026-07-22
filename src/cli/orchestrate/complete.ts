@@ -32,12 +32,13 @@ import { AttemptManifestSchema, type AttemptManifest } from '../../schemas/attem
 import { applyTransition, readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { composeTrustedReviewOutcome } from '../../orchestrator/review-compose.ts';
 import { upsertReviewedBinding, readShipRecord } from '../../orchestrator/ship-record.ts';
+import { release as releaseLease } from '../../orchestrator/leases.ts';
 import { appendNotificationEvent } from '../../orchestrator/events.ts';
 import { resolveShaChecked } from '../../orchestrator/worktree-base.ts';
 import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import { attemptDir, manifestFilePath } from '../../orchestrator/questions/paths.ts';
-import { OrchestratorError, SettingsError } from '../../core/errors.ts';
+import { CasError, OrchestratorError, SettingsError } from '../../core/errors.ts';
 import type { TaskState } from '../../schemas/task-state.ts';
 import { loadSettings } from '../../core/settings.ts';
 import { sanitizeIssueId, TASK_MARKER_RELPATH } from '../../core/workspace.ts';
@@ -263,21 +264,42 @@ export async function runOrchestrateComplete(
     };
   }
 
+  // 2b1b. FORGE-231 (impl R1 MAJ-3): completion is a state-advancing commit —
+  //       it requires an ACTIVE lease. Identity alone is not enough: a stale
+  //       worker whose lease expired hours ago must not advance state or
+  //       overwrite the ship-record write-ahead ahead of a successor.
+  if (Date.parse(lease.expires_at) <= Date.now()) {
+    return {
+      exitCode: emit(
+        fail(
+          'LEASE_EXPIRED',
+          `lease for task ${opts.taskId} expired at ${lease.expires_at} — the attempt is stale; a successor may own the task`,
+          false,
+          { expires_at: lease.expires_at },
+        ),
+        { json: opts.json },
+      ),
+    };
+  }
+
   // 2b2. FORGE-231: one settings load feeds the verification block, the
   //      review gate (trusted review host) and the failure budget.
   let verify;
   let reviewHostCli: string | null;
   let retryAttempts: number;
+  let mergePolicy: 'approval' | 'auto';
   try {
     const settings = loadSettings(path.join(opts.forgeDir, 'settings.yaml'));
     verify = settings.verify;
     reviewHostCli = settings.agents.review_host_cli;
     retryAttempts = settings.agents.retry_attempts;
+    mergePolicy = settings.ship.merge_policy;
   } catch (err) {
     if (err instanceof SettingsError && err.code === 'FILE_NOT_FOUND') {
       verify = undefined; // unconfigured → schema defaults
       reviewHostCli = 'codex';
       retryAttempts = 10;
+      mergePolicy = 'approval';
     } else if (err instanceof SettingsError) {
       return { exitCode: emit(fail(err.code, err.message, false), { json: opts.json }) };
     } else {
@@ -316,6 +338,24 @@ export async function runOrchestrateComplete(
       return {
         exitCode: emit(
           fail('SCHEMA_INVALID', 'review completion requires a manifest with pinned review SHAs', false),
+          { json: opts.json },
+        ),
+      };
+    }
+
+    // FORGE-231 (impl R1 MAJ-4): prove the manifest's worktree is bound to
+    // THIS task (marker + symlink-escape gates — the same F2 proof implement
+    // verification uses) BEFORE trusting its HEAD or deriving criticality in it.
+    const reviewBindingFailure = proveWorktreeBinding(manifest.worktree_path, opts.taskId);
+    if (reviewBindingFailure) {
+      return {
+        exitCode: emit(
+          fail(
+            'VERIFICATION_FAILED',
+            `cannot complete review: worktree at ${manifest.worktree_path} is not provably bound to task ${opts.taskId} (${reviewBindingFailure})`,
+            false,
+            { reason: reviewBindingFailure, path: manifest.worktree_path },
+          ),
           { json: opts.json },
         ),
       };
@@ -722,6 +762,7 @@ export async function runOrchestrateComplete(
             reviewedHeadSha,
             reviewAttemptId: opts.attemptId,
             holder: callerFromLease(lease),
+            fence: shipRecordFence(opts.forgeDir, opts.taskId, lease),
           });
         } catch (err) {
           return {
@@ -750,6 +791,7 @@ export async function runOrchestrateComplete(
           reviewedHeadSha: manifest!.review_target_sha!,
           reviewAttemptId: opts.attemptId,
           holder: callerFromLease(lease),
+          fence: shipRecordFence(opts.forgeDir, opts.taskId, lease),
         });
       } catch (err) {
         return {
@@ -912,6 +954,60 @@ export async function runOrchestrateComplete(
         });
       } catch {
         // advisory — never fail the completion over a lost announcement
+      }
+    }
+
+    // FORGE-231 (impl R1 MAJ-5/MAJ-6): on entering merge_pending —
+    //   1. emit the ADVISORY merge_pending event (after the state CAS);
+    //   2. RELEASE the worker lease (state-before-release per §D5: the worker
+    //      is done; no heartbeat source exists while the platform merges).
+    //      Best-effort with a loud hint — gc row 15 is the recovery.
+    if (nextState === 'merge_pending') {
+      try {
+        const recordNow = readShipRecord(opts.forgeDir, opts.taskId);
+        if (recordNow?.pr) {
+          appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+            type: 'merge_pending',
+            ts: new Date().toISOString(),
+            run_id: lease.owner_run_id,
+            task_id: opts.taskId,
+            state_version: stateNow.state_version + 1,
+            pr_url: recordNow.pr.url,
+            auto_merge: mergePolicy === 'auto',
+          });
+        }
+      } catch {
+        // advisory
+      }
+      try {
+        releaseLease({
+          forgeDir: opts.forgeDir,
+          taskId: opts.taskId,
+          caller: callerFromLease(lease),
+        });
+      } catch (releaseErr) {
+        process.stderr.write(
+          `warn: complete — merge_pending entered but the worker lease release failed (${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}); forge orchestrate gc row 15 will reconcile\n`,
+        );
+      }
+    }
+
+    // FORGE-231 (impl R1 MAJ-6): terminal failure via retries_exhausted keeps
+    // the DURABLE fatal-notification obligation — surface loudly on append
+    // failure instead of swallowing.
+    if (nextState === 'failed' && failureReason === 'retries_exhausted') {
+      try {
+        appendNotificationEvent(opts.forgeDir, lease.owner_run_id, {
+          type: 'fatal',
+          ts: new Date().toISOString(),
+          run_id: lease.owner_run_id,
+          reason: `task ${opts.taskId} failed: retry budget exhausted (${stateNow.failure_count + budgetDelta}/${retryAttempts})`,
+          details: { task_id: opts.taskId, failure_count: stateNow.failure_count + budgetDelta },
+        });
+      } catch (fatalErr) {
+        process.stderr.write(
+          `warn: complete — task ${opts.taskId} marked failed but the fatal notification append failed: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+        );
       }
     }
   }
@@ -1090,3 +1186,27 @@ export const completeHandler: VerbHandler = {
     return runOrchestrateComplete({ taskId, attemptId, verdictFile, phase, forgeDir, json });
   },
 };
+
+// FORGE-231 (impl R1 MAJ-3): the ship-record write-ahead fence — re-read the
+// lease UNDER the record's CAS marker and require the caller's exact identity
+// AND an unexpired lease. A stale completion that lost its lease to a steal
+// between reading state and committing the record dies here instead of
+// leaving a stale write-ahead for the successor.
+function shipRecordFence(forgeDir: string, taskId: string, lease: Lease): () => void {
+  return () => {
+    let current: Lease;
+    try {
+      current = readLease(forgeDir, taskId);
+    } catch (err) {
+      throw new CasError('lease_lost', `lease unreadable during ship-record write for ${taskId}`, {}, { cause: err });
+    }
+    if (
+      current.claim_id !== lease.claim_id ||
+      current.generation !== lease.generation ||
+      current.owner_run_id !== lease.owner_run_id ||
+      Date.parse(current.expires_at) <= Date.now()
+    ) {
+      throw new CasError('lease_lost', `lease for ${taskId} changed hands or expired during ship-record write`);
+    }
+  };
+}

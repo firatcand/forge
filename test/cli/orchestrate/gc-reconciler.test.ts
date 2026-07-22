@@ -158,7 +158,7 @@ test('orchestrate gc --dry-run: reconciler plan formatted but not applied (row 1
 
 // ── Apply mode: row 14 ──
 
-test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked + admin_released history event', async () => {
+test('orchestrate gc apply: row 14 (lease + terminal state) → lease tombstoned + admin_released history event', async () => {
   const fd = freshForgeDir();
   const { stdout, stderr, out } = capture();
   try {
@@ -177,7 +177,7 @@ test('orchestrate gc apply: row 14 (lease + terminal state) → lease unlinked +
     assert.equal(result.reconcilerErrors?.length ?? 0, 0);
 
     // Lease file removed.
-    assert.equal(existsSync(leaseFilePath(fd, 'TASK-X')), false);
+    assertLeaseReleased(leaseFilePath(fd, 'TASK-X'));
     // claim-history.jsonl has the admin_released event with the right reason.
     const history = readFileSync(claimHistoryFilePath(fd, 'TASK-X'), 'utf8');
     const events = history.trim().split('\n').map((l) => JSON.parse(l));

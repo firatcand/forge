@@ -102,4 +102,3 @@ export function parsePinnedReviewVerdict(
   }
   return pinned.data;
 }
-
