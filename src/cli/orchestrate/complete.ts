@@ -848,7 +848,7 @@ export async function runOrchestrateComplete(
             reviewedHeadSha,
             reviewAttemptId: opts.attemptId,
             holder: callerFromLease(lease),
-            fence: shipRecordFence(opts.forgeDir, opts.taskId, lease),
+            fence: shipRecordFence(opts.forgeDir, opts.taskId, lease, opts.attemptId),
           });
         } catch (err) {
           return {
@@ -877,7 +877,7 @@ export async function runOrchestrateComplete(
           reviewedHeadSha: manifest!.review_target_sha!,
           reviewAttemptId: opts.attemptId,
           holder: callerFromLease(lease),
-          fence: shipRecordFence(opts.forgeDir, opts.taskId, lease),
+          fence: shipRecordFence(opts.forgeDir, opts.taskId, lease, opts.attemptId),
         });
       } catch (err) {
         return {
@@ -1028,7 +1028,10 @@ export async function runOrchestrateComplete(
           },
         },
         callerFromLease(lease),
-        { requireActiveLease: true },
+        // impl R5: re-verify the attempt pointer UNDER the marker — a phase
+        // completion that ran while a superseding attempt dispatched (a
+        // review/ship pointer self-loop) must not advance the task.
+        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
       );
     } catch (err) {
       return {
@@ -1303,7 +1306,12 @@ export const completeHandler: VerbHandler = {
 // AND an unexpired lease. A stale completion that lost its lease to a steal
 // between reading state and committing the record dies here instead of
 // leaving a stale write-ahead for the successor.
-function shipRecordFence(forgeDir: string, taskId: string, lease: Lease): () => void {
+function shipRecordFence(
+  forgeDir: string,
+  taskId: string,
+  lease: Lease,
+  attemptId: string,
+): () => void {
   return () => {
     let current: Lease;
     try {
@@ -1318,6 +1326,17 @@ function shipRecordFence(forgeDir: string, taskId: string, lease: Lease): () => 
       Date.parse(current.expires_at) <= Date.now()
     ) {
       throw new CasError('lease_lost', `lease for ${taskId} changed hands or expired during ship-record write`);
+    }
+    // impl R5: also fence the attempt pointer — a superseded phase attempt
+    // must not write its reviewed binding into the write-ahead record.
+    let ptr: string | null | undefined;
+    try {
+      ptr = readTaskState(forgeDir, taskId).current_attempt_id;
+    } catch (err) {
+      throw new CasError('lease_lost', `state unreadable during ship-record write for ${taskId}`, {}, { cause: err });
+    }
+    if (ptr !== attemptId) {
+      throw new CasError('lease_lost', `attempt ${attemptId} was superseded by ${ptr ?? 'none'} during ship-record write`);
     }
   };
 }

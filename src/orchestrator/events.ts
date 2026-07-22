@@ -243,7 +243,18 @@ export function appendNotificationEvent(
   _mkdirSync(dir, { recursive: true, mode: 0o700 });
   const fd = _openSync(path.join(dir, 'notifications.jsonl'), 'a', 0o600);
   try {
-    _writeSync(fd, `${JSON.stringify(withId)}\n`, null, 'utf8');
+    // impl R5: writeSync may make partial progress (quota / NFS / interrupt).
+    // A torn JSONL line makes this advisory line — and the NEXT append — read
+    // as corrupt, so a durable fatal must be written whole or fail loudly.
+    const buf = Buffer.from(`${JSON.stringify(withId)}\n`, 'utf8');
+    let offset = 0;
+    while (offset < buf.length) {
+      const written = _writeSync(fd, buf, offset, buf.length - offset, null);
+      if (written === 0) {
+        throw new Error(`notification append made no progress at offset ${offset} of ${buf.length}`);
+      }
+      offset += written;
+    }
   } finally {
     _closeSync(fd);
   }

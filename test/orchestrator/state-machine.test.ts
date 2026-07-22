@@ -440,3 +440,44 @@ test('writeTaskState with requireActiveLease refuses an EXPIRED (but identity-ma
     (err) => err instanceof OrchestratorError && err.code === 'LEASE_STOLEN',
   );
 });
+
+test('writeTaskState with expectedCurrentAttemptId fences a superseded phase attempt (impl R5)', () => {
+  const fd = forgeDir('sm-superseded-attempt');
+  makeLease(fd, 'TASK-SUP');
+  // State currently points at the superseding attempt B.
+  writeTaskState(
+    fd,
+    baseState('TASK-SUP', { state: 'ready_for_review', state_version: 0, current_attempt_id: 'attempt-B' }),
+    defaultCaller,
+  );
+  // Attempt A tries to commit but names itself as the expected current attempt.
+  assert.throws(
+    () =>
+      writeTaskState(
+        fd,
+        baseState('TASK-SUP', { state: 'reviewed', state_version: 1, current_attempt_id: 'attempt-A' }),
+        defaultCaller,
+        { expectedCurrentAttemptId: 'attempt-A' },
+      ),
+    (err) => err instanceof OrchestratorError && err.code === 'STALE_ATTEMPT',
+  );
+  // The state is untouched — B still owns it.
+  assert.equal(readTaskState(fd, 'TASK-SUP').current_attempt_id, 'attempt-B');
+});
+
+test('writeTaskState with a MATCHING expectedCurrentAttemptId commits normally (impl R5)', () => {
+  const fd = forgeDir('sm-matching-attempt');
+  makeLease(fd, 'TASK-MAT');
+  writeTaskState(
+    fd,
+    baseState('TASK-MAT', { state: 'ready_for_review', state_version: 0, current_attempt_id: 'attempt-A' }),
+    defaultCaller,
+  );
+  writeTaskState(
+    fd,
+    baseState('TASK-MAT', { state: 'reviewed', state_version: 1, current_attempt_id: 'attempt-A' }),
+    defaultCaller,
+    { expectedCurrentAttemptId: 'attempt-A' },
+  );
+  assert.equal(readTaskState(fd, 'TASK-MAT').state, 'reviewed');
+});

@@ -206,6 +206,7 @@ export type OrchestratorErrorCode =
   | 'ILLEGAL_TRANSITION'    // state machine rejected the requested (from, trigger, to) triple
   | 'STATE_NOT_FOUND'       // state.json absent for a given task_id
   | 'STATE_VERSION_CONFLICT' // new state_version !== current state_version + 1
+  | 'STALE_ATTEMPT'          // FORGE-231: the attempt pointer moved on before this commit landed
   | 'SCHEMA_INVALID'        // zod parse failed or JSON is malformed
   | 'INVALID_ID'            // task_id / attempt_id failed segment validation
   | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries

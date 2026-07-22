@@ -221,7 +221,12 @@ export function writeTaskState(
   // (complete, dispatch) pass requireActiveLease so expiry is re-checked
   // UNDER the state marker — an entry-time check alone is TOCTOU-prone when
   // verification runs for minutes. Recovery writers (gc) keep identity-only.
-  opts: { requireActiveLease?: boolean } = {},
+  //
+  // FORGE-231 (impl R5): expectedCurrentAttemptId fences the commit against
+  // the CURRENT state's current_attempt_id UNDER the marker. A phase
+  // completion (review/ship) that ran while a superseding attempt dispatched
+  // must not advance the task on behalf of a pointer that has moved on.
+  opts: { requireActiveLease?: boolean; expectedCurrentAttemptId?: string } = {},
 ): void {
   // 1. Validate path/payload task_id agreement (id-in-path-and-payload learning).
   validateOrchestratorId(state.task_id, 'task_id');
@@ -304,6 +309,28 @@ export function writeTaskState(
         assertLeaseOwnershipFromFile(forgeDir, taskId, caller);
         if (opts.requireActiveLease) {
           assertLeaseUnexpiredFromFile(forgeDir, taskId);
+        }
+        if (opts.expectedCurrentAttemptId !== undefined) {
+          // Re-read the CURRENT state under marker ownership and require the
+          // attempt pointer to still be ours. buildContent runs on the same
+          // post-acquire read, so a superseding dispatch cannot slip between.
+          let currentPtr: string | null | undefined;
+          try {
+            currentPtr = readTaskState(forgeDir, taskId).current_attempt_id;
+          } catch (err) {
+            throw new OrchestratorError(
+              'STATE_NOT_FOUND',
+              `cannot verify current attempt for task ${taskId}`,
+              { taskId, cause: err },
+            );
+          }
+          if (currentPtr !== opts.expectedCurrentAttemptId) {
+            throw new OrchestratorError(
+              'STALE_ATTEMPT',
+              `attempt '${opts.expectedCurrentAttemptId}' was superseded by '${currentPtr ?? 'none'}' before its commit landed — a superseded phase attempt must not advance the task`,
+              { taskId, expected: opts.expectedCurrentAttemptId, actual: currentPtr ?? null },
+            );
+          }
         }
       },
       buildContent: () => payload,
