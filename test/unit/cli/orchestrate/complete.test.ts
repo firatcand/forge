@@ -1132,3 +1132,33 @@ test('FORGE-231: fatal repair works even after the lease is TOMBSTONED (impl R3 
   const events = readFileSync(notifPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
   assert.ok(events.find((e) => e.type === 'fatal'), 'fatal repaired without a lease');
 });
+
+test('FORGE-231: a concurrent state change returns a typed envelope, never an unhandled throw (impl R6)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Supervisor cancelled the task between dispatch and this completion: the
+  // state is now terminal, so the implement transition is illegal.
+  const statePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json');
+  const state = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(
+    statePath,
+    JSON.stringify({ ...state, state: 'cancelled', state_version: state.state_version + 1 }),
+    'utf8',
+  );
+
+  // Must RESOLVE with a typed failure envelope, not reject.
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.ok, false);
+  // A concurrent terminal state trips the current-attempt guard first (also a
+  // typed refusal) or the transition guard — either way, NEVER an unhandled throw.
+  assert.ok(['STALE_ATTEMPT', 'INVALID_STATE_FOR_PHASE'].includes(env.error.code), `unexpected code ${env.error.code}`);
+});

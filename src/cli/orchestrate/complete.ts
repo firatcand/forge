@@ -809,6 +809,12 @@ export async function runOrchestrateComplete(
     };
   }
 
+  // impl R6: a concurrent state change (e.g. a supervisor cancel committing
+  // between the stateNow read and here) makes applyTransition throw
+  // ILLEGAL_TRANSITION. Convert it to a typed envelope so `complete` never
+  // rejects unhandled at the CLI top level; state is untouched (nothing was
+  // written yet).
+  try {
   if (verdict.data.verdict === 'ready_for_review') {
     if (opts.phase === 'implement') {
       if (singleHost) {
@@ -1006,6 +1012,22 @@ export async function runOrchestrateComplete(
         nextState = failState;
       }
     }
+  }
+
+  } catch (transitionErr) {
+    if (transitionErr instanceof OrchestratorError && transitionErr.code === 'ILLEGAL_TRANSITION') {
+      return {
+        exitCode: emit(
+          fail(
+            'STALE_ATTEMPT',
+            `task ${opts.taskId} changed state concurrently (${transitionErr.message}); re-derive the current state and retry`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    throw transitionErr;
   }
 
   if (nextState) {
