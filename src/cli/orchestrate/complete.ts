@@ -35,7 +35,7 @@ import { upsertReviewedBinding, readShipRecord } from '../../orchestrator/ship-r
 import { release as releaseLease } from '../../orchestrator/leases.ts';
 import { appendNotificationEvent } from '../../orchestrator/events.ts';
 import { resolveShaChecked } from '../../orchestrator/worktree-base.ts';
-import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
+import { appendAttemptEvent, readAttemptEvents } from '../../orchestrator/attempt-events.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import { attemptDir, manifestFilePath } from '../../orchestrator/questions/paths.ts';
 import { CasError, OrchestratorError, SettingsError } from '../../core/errors.ts';
@@ -247,6 +247,42 @@ export async function runOrchestrateComplete(
     }
   }
 
+  // 2a2. FORGE-231 (impl R3 MAJ-2): DURABLE-fatal repair must survive lease
+  //      expiry and gc's terminal-lease release. A completion replayed against
+  //      an ALREADY-terminal exhaustion is a pure notification-repair — it
+  //      must not require an active lease (there may never be one again).
+  //      Runs BEFORE every lease-gated check; touches no state.
+  if (
+    preState.state === 'failed' &&
+    preState.failure_reason === 'retries_exhausted' &&
+    preState.last_failure_key === `${opts.attemptId}:${opts.phase}` &&
+    (verdict.data.verdict === 'changes_needed' || verdict.data.verdict === 'blocked')
+  ) {
+    try {
+      appendNotificationEvent(opts.forgeDir, preState.updated_by.run_id, {
+        type: 'fatal',
+        ts: new Date().toISOString(),
+        run_id: preState.updated_by.run_id,
+        reason: `task ${opts.taskId} failed: retry budget exhausted (${preState.failure_count})`,
+        details: {
+          task_id: opts.taskId,
+          failure_count: preState.failure_count,
+          failure_key: preState.last_failure_key,
+        },
+      });
+    } catch (fatalErr) {
+      process.stderr.write(
+        `warn: complete — terminal replay could not repair the fatal notification: ${fatalErr instanceof Error ? fatalErr.message : String(fatalErr)}\n`,
+      );
+    }
+    return {
+      exitCode: emit(
+        ok({ verdict: verdict.data.verdict, next_state: preState.state, replayed: true }),
+        { json: opts.json },
+      ),
+    };
+  }
+
   // 2b. Read lease for caller identity.
   let lease: Lease;
   try {
@@ -271,6 +307,68 @@ export async function runOrchestrateComplete(
   //       belongs to the successor — a completion must never borrow that
   //       authority. The manifest records the identity the attempt was
   //       dispatched under; the current lease must BE that identity.
+  // impl R3 CRIT-1: a LEGACY manifestless attempt (pre-FORGE-231 dispatch)
+  // binds through its attempt_started event instead — dispatch has always
+  // recorded the identity there. An attempt with NEITHER manifest nor a
+  // parseable attempt_started event cannot be bound and must not complete
+  // (fail closed — an untraceable attempt never advances state).
+  if (manifest === null) {
+    let started: { run_id: string; claim_id: string; generation: number } | null = null;
+    try {
+      const events = readAttemptEvents({
+        forgeDir: opts.forgeDir,
+        taskId: opts.taskId,
+        attemptId: opts.attemptId,
+      });
+      for (const line of events) {
+        if (line.ok && line.event.type === 'attempt_started') {
+          started = {
+            run_id: line.event.run_id,
+            claim_id: line.event.claim_id,
+            generation: line.event.generation,
+          };
+          break;
+        }
+      }
+    } catch {
+      started = null;
+    }
+    if (started === null) {
+      return {
+        exitCode: emit(
+          fail(
+            'STALE_ATTEMPT',
+            `attempt '${opts.attemptId}' has neither a dispatch manifest nor an attempt_started event — its dispatched identity cannot be verified; refusing to complete an unbindable attempt`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (
+      lease.claim_id !== started.claim_id ||
+      lease.owner_run_id !== started.run_id ||
+      lease.generation !== started.generation
+    ) {
+      return {
+        exitCode: emit(
+          fail(
+            'LEASE_STOLEN',
+            `the current lease (run=${lease.owner_run_id} gen=${lease.generation}) is not the identity attempt '${opts.attemptId}' was dispatched under (run=${started.run_id} gen=${started.generation}) — a stale attempt must never complete under a successor's authority`,
+            false,
+            {
+              lease_run_id: lease.owner_run_id,
+              lease_generation: lease.generation,
+              started_run_id: started.run_id,
+              started_generation: started.generation,
+            },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+  }
+
   if (manifest !== null) {
     if (manifest.task_id !== opts.taskId) {
       return {

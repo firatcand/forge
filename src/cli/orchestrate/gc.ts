@@ -1030,25 +1030,37 @@ function collectStuckCasMarkers(
             pidAlive = (e as NodeJS.ErrnoException).code === 'EPERM' ? true : false;
           }
         }
-        // Holder-lease expiry: read the task's canonical lease and report its
-        // expires_at (or released status) — the operator's remediation is
-        // keyed on run identity + lease state, never pid alone.
+        // OWNER-CORRELATED holder-lease evidence (impl R3 MAJ-4): the lease
+        // state is only "the holder's" when the canonical lease identity
+        // matches the MARKER OWNER — a successor's lease must never be
+        // presented as the stuck writer's.
         let holderLeaseState: string | null = null;
         try {
           const leaseRaw = JSON.parse(readFileSync(join(taskDir, 'lease.json'), 'utf8')) as {
             status?: unknown;
             expires_at?: unknown;
+            claim_id?: unknown;
+            owner_run_id?: unknown;
+            generation?: unknown;
           };
-          holderLeaseState =
-            leaseRaw.status === 'released'
-              ? 'released'
-              : typeof leaseRaw.expires_at === 'string'
-                ? `expires ${leaseRaw.expires_at}`
-                : null;
+          if (leaseRaw.status === 'released') {
+            holderLeaseState = 'canonical lease: released (tombstone)';
+          } else if (
+            info.content &&
+            leaseRaw.claim_id === info.content.claim_id &&
+            leaseRaw.owner_run_id === info.content.run_id &&
+            leaseRaw.generation === info.content.generation
+          ) {
+            holderLeaseState = `owner's lease expires ${String(leaseRaw.expires_at ?? '?')}`;
+          } else {
+            holderLeaseState = 'canonical lease belongs to a DIFFERENT identity (successor?) — the owner lost it';
+          }
         } catch {
           holderLeaseState = null;
         }
-        // Run-manifest liveness for the marker's owning run.
+        // Run-DIR presence for the owning run. HONEST label: run manifests
+        // persist after creation and carry no liveness field — presence is a
+        // trace, never proof the run is alive or dead.
         let runManifestPresent: boolean | null = null;
         if (typeof info.content?.run_id === 'string') {
           runManifestPresent = existsSync(

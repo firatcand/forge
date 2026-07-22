@@ -769,3 +769,15 @@ test('gc row 13: normal duplicates release ONLY non-canonical artifacts', () => 
     assert.equal(row.payload.expectedPath, '/p/lease.json.bak', 'canonical must never be a row-13 release target');
   }
 });
+
+test('gc row 13: NO active canonical lease + duplicates → report only, nothing released (impl R3 MAJ-3)', () => {
+  const g2 = mkLeaseAtPath({ task_id: 'TASK-D15', generation: 2, claim_id: 'c-2' }, '/p/lease.json.bak', false);
+  const g1 = mkLeaseAtPath({ task_id: 'TASK-D15', generation: 1, claim_id: 'c-1' }, '/p/lease.json.old', false);
+  const tasks = new Map([
+    ['TASK-D15', mkTaskSnapshot({ state: mkState({ task_id: 'TASK-D15', state: 'running' }), leases: [g2, g1] })],
+  ]);
+  const plan = planGc(mkSnapshot({ tasks, mode: 'full' }));
+  const rows = plan.rows.filter((r) => r.rowId === 13);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.action, 'report_orphan', 'no-canonical topology must never auto-release');
+});

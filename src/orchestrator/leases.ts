@@ -6,10 +6,10 @@
 // - lease.json is NEVER deleted after its first acquisition — release writes a
 //   ReleasedLeaseTombstone instead, so `lease_version` (and via
 //   `last_generation`, the generation sequence) survives ownership cycles.
-// - An ABSENT lease file with claim history is a LEGACY state (pre-FORGE-231
-//   release, or adminReleaseLeaseByIdentity, both of which unlink) — acquire
-//   derives the next generation from claim history in that case (R8 CRIT-1);
-//   only no-file-AND-no-history starts at generation 0.
+// - An ABSENT lease file with claim history is a LEGACY state (a pre-FORGE-231
+//   release unlinked; today only non-canonical duplicate artifacts are ever
+//   unlinked) — acquire derives the next generation from claim history in
+//   that case (R8 CRIT-1); only no-file-AND-no-history starts at generation 0.
 // - steal is the two-file protocol from spec/ORCHESTRATOR.md §Leases: RESERVE
 //   the state.json transition marker first (a held marker aborts the steal —
 //   no lease publish), then commit the successor lease, then the unclaimed

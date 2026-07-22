@@ -197,8 +197,11 @@ import path from 'node:path';
 //                        state_version unique per transition)
 // - question:           <task_id>:<question_id>:question
 // - question_resolved:  <task_id>:<question_id>:question_resolved
-// - fatal:              <task_id ?? run_id>:<occurred_at_ms>:fatal (no natural
-//                        key exists; ts is part of the event)
+// - fatal:              <task_id ?? run_id>:<occurred_at_ms>:fatal when no
+//                        natural key exists; a KEYED fatal (details.task_id +
+//                        details.failure_key — retry exhaustion) gets the
+//                        time-free <task_id>:<failure_key>:fatal instead so
+//                        replayed re-emissions dedup
 export function computeNotificationId(event: NotificationEvent): string {
   switch (event.type) {
     case 'ready_for_review':

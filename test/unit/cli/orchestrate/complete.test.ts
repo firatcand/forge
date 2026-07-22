@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { unlinkSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
@@ -1035,4 +1035,115 @@ test('FORGE-231: exhaustion-fatal replay repairs a lost notification (impl R2 MA
   const fatal = events.find((e) => e.type === 'fatal');
   assert.ok(fatal, 'replay must repair the lost fatal notification');
   assert.equal(fatal.id, `FORGE-1:${ctx.attemptId}:implement:fatal`);
+});
+
+test('FORGE-231: MANIFESTLESS attempt binds via attempt_started — successor lease refused (impl R3 CRIT-1)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  // Remove the manifest (legacy pre-FORGE-231 shape); the attempt_started
+  // event still records the dispatched identity.
+  const manifestPath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId, 'manifest.json');
+  unlinkSync(manifestPath);
+  // Successor lease published (steal crash window).
+  const leasePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
+  const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
+  writeFileSync(
+    leasePath,
+    JSON.stringify({
+      ...lease,
+      claim_id: 'successor-claim',
+      owner_run_id: 'successor-run',
+      generation: lease.generation + 1,
+      lease_version: (lease.lease_version ?? 1) + 1,
+    }),
+    'utf8',
+  );
+
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'LEASE_STOLEN');
+});
+
+test('FORGE-231: an attempt with NEITHER manifest NOR attempt_started cannot complete (fail closed)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const attemptDirPath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', ctx.attemptId);
+  unlinkSync(join(attemptDirPath, 'manifest.json'));
+  try {
+    unlinkSync(join(attemptDirPath, 'events.jsonl'));
+  } catch {
+    // may not exist in this fixture — the refusal must hold either way
+  }
+  const result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+  assert.match(env.error.message, /unbindable/);
+});
+
+test('FORGE-231: fatal repair works even after the lease is TOMBSTONED (impl R3 MAJ-2)', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupRunning(stdout);
+  const statePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json');
+  const cur = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(statePath, JSON.stringify({ ...cur, failure_count: 9, state_version: cur.state_version + 1 }), 'utf8');
+  let result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0);
+
+  // gc released the terminal task's lease (tombstone) AND the fatal was lost.
+  const leasePath = join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/lease.json');
+  const lease = JSON.parse(readFileSync(leasePath, 'utf8'));
+  const runId = lease.owner_run_id;
+  writeFileSync(
+    leasePath,
+    JSON.stringify({
+      version: 1,
+      status: 'released',
+      task_id: 'FORGE-1',
+      lease_version: (lease.lease_version ?? 1) + 1,
+      last_generation: lease.generation,
+      released_at: new Date().toISOString(),
+      released_by: { run_id: runId, claim_id: lease.claim_id, generation: lease.generation },
+    }),
+    'utf8',
+  );
+  const notifPath = join(ctx.forgeDir, 'orchestrator/runs', runId, 'notifications.jsonl');
+  writeFileSync(notifPath, '', 'utf8');
+
+  stdout.length = 0;
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: ctx.attemptId,
+    verdictFile: writeVerdict(ctx.repoRoot, 'changes_needed'),
+    phase: 'implement',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 0, 'terminal replay must succeed WITHOUT an active lease');
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.data.replayed, true);
+  const events = readFileSync(notifPath, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  assert.ok(events.find((e) => e.type === 'fatal'), 'fatal repaired without a lease');
 });

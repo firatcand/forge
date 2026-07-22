@@ -627,7 +627,7 @@ function detectRow16(s: OrchestratorSnapshot): GcPlanRow[] {
   for (const [taskId, task] of s.tasks) {
     for (const marker of task.stuckCasMarkers ?? []) {
       const owner = marker.owner
-        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}; holder lease: ${marker.holderLeaseState ?? 'unknown'}; run manifest ${marker.runManifestPresent === null ? 'unknown' : marker.runManifestPresent ? 'PRESENT' : 'absent'}`
+        ? `owner run=${marker.owner.run_id ?? '?'} claim=${marker.owner.claim_id ?? '?'} gen=${marker.owner.generation ?? '?'} pid=${marker.owner.pid ?? '?'}${marker.pidAlive === null ? '' : marker.pidAlive ? ' (pid APPEARS ALIVE — do not remove)' : ' (pid appears dead; reuse possible — confirm via the run, not the pid)'} created=${marker.owner.created_at ?? '?'}; ${marker.holderLeaseState ?? 'holder lease: unknown'}; owner run dir ${marker.runManifestPresent === null ? 'unknown' : marker.runManifestPresent ? 'present (a trace — NOT liveness proof)' : 'absent'}`
         : 'owner tuple unreadable — treat as ALIVE and investigate before touching';
       rows.push({
         rowId: 16,
@@ -669,8 +669,24 @@ function detectRow13(s: OrchestratorSnapshot): GcPlanRow[] {
     // than the canonical lease is corruption a human must resolve — report,
     // never auto-pick a winner that readers cannot see.
     const canonical = task.leases.find((l) => l.isCanonical);
+    // impl R3 MAJ-3: with NO active canonical lease (absent or tombstoned),
+    // nothing can be verified authoritative — releasing the artifacts would
+    // destroy the only remaining ownership evidence. Report for a human.
+    if (!canonical) {
+      rows.push({
+        rowId: 13,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claimed_no_local',
+          description: `${task.leases.length} non-canonical lease artifact(s) exist with NO active canonical lease — cannot determine the authoritative owner; resolve manually (gc never deletes ownership evidence in this topology)`,
+        },
+      });
+      continue;
+    }
     const highest = sorted[0];
-    if (highest && !highest.isCanonical && canonical && highest.lease.generation > canonical.lease.generation) {
+    if (highest && !highest.isCanonical && highest.lease.generation > canonical.lease.generation) {
       rows.push({
         rowId: 13,
         taskId,
