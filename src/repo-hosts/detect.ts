@@ -5,6 +5,7 @@
 // GitHub PR. Remote sniffing happens ONLY when no base is persisted. OD2:
 // github.com only; anything else → null (consumer parks; ship unavailable).
 
+import { OrchestratorError } from '../core/errors.ts';
 import { readShipRecord } from '../orchestrator/ship-record.ts';
 import { RepoHostError } from './errors.ts';
 import {
@@ -34,21 +35,23 @@ async function ghAuthOk(gh: Exec): Promise<boolean> {
 export async function createGitHubRepoHost(
   opts: CreateGitHubRepoHostOptions,
 ): Promise<GitHubRepoHost | null> {
-  if (!(await ghAuthOk(opts.gh))) return null;
-
+  // Record FIRST (impl-R3 MIN): broken durable state must surface even when
+  // authentication is down — auth-null must never mask a corrupt record.
   let record;
   try {
     record = readShipRecord(opts.forgeDir, opts.taskId);
   } catch (err) {
-    // A corrupt/truncated record is a LOUD typed failure (impl-R2 MAJ #3) —
-    // returning null would misread broken state as "no repo host".
+    const schema = (err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID') || err instanceof SyntaxError;
     throw new RepoHostError(
-      'schema',
+      schema ? 'schema' : 'transport',
       `ship record unreadable for task ${opts.taskId}`,
       { taskId: opts.taskId },
       { cause: err },
     );
   }
+
+  if (!(await ghAuthOk(opts.gh))) return null;
+
   if (record?.base) {
     // Durable identity established under OD2 — construct without re-sniffing.
     return new GitHubRepoHost(opts);

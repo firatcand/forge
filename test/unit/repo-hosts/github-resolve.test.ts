@@ -3,7 +3,7 @@
 // upsertBaseResolution fencing (R2 #3), structural billing invariant.
 
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { OrchestratorError } from '../../../src/core/errors.ts';
@@ -484,4 +484,50 @@ test('verified create read naming a DIFFERENT number cannot substitute the PR (i
   ]);
   const ref = await host.createOrGetPullRequest(HEAD, 'main');
   assert.equal(ref.number, 50, 'the URL-derived identity wins; the mismatched payload is ignored');
+});
+
+// ─── impl-R3 fix-round additions ─────────────────────────────────────────────
+
+test('EXPLICITLY EMPTY pushRemote (exit 0, empty value) fails closed — never falls to origin (impl-R3 MAJ)', async () => {
+  const gitEmpty = scriptedExec([
+    { match: (a) => a[0] === 'config' && a[2] === `branch.${HEAD}.pushRemote`, result: { exitCode: 0, stdout: '\n' } },
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } },
+  ]);
+  const { host } = makeHost({ gh: scriptedExec([repoViewRoute()]), git: gitEmpty });
+  await assert.rejects(
+    () => host.resolveBase(),
+    (err) => err instanceof RepoHostError && err.code === 'unsupported_host',
+  );
+
+  const fd = forgeDirWithRecord();
+  const gh = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  const gitEmpty2 = scriptedExec([
+    { match: (a) => a[0] === 'config' && a[2] === `branch.${HEAD}.pushRemote`, result: { exitCode: 0, stdout: '' } },
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } },
+  ]);
+  assert.equal(await createGitHubRepoHost(factoryBase(gh, gitEmpty2, fd)), null);
+});
+
+test('factory surfaces a corrupt record even when auth is DOWN; IO-ish read errors map to transport (impl-R3 MIN)', async () => {
+  const fd1 = forgeDirWithRecord();
+  writeFileSync(join(fd1, 'orchestrator', 'tasks', TASK, 'ship-record.json'), 'corrupt{', 'utf8');
+  const ghDown = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 1, stderr: 'not logged in' } }]);
+  await assert.rejects(
+    () => createGitHubRepoHost(factoryBase(ghDown, scriptedExec([]), fd1)),
+    (err) => err instanceof RepoHostError,
+    'auth-null must never mask broken durable state',
+  );
+
+  // Non-regular file at the record path → IO_ERROR → transport (not schema).
+  const fd2 = forgeDirWithRecord();
+  const rp = join(fd2, 'orchestrator', 'tasks', TASK, 'ship-record.json');
+  rmSync(rp);
+  mkdirSync(rp);
+  const ghUp = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  await assert.rejects(
+    () => createGitHubRepoHost(factoryBase(ghUp, scriptedExec([]), fd2)),
+    (err) => err instanceof RepoHostError && err.code === 'transport',
+  );
 });

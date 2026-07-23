@@ -121,7 +121,11 @@ export async function resolveEffectivePushTopology(
     }
     if (res.exitCode === 0) {
       const v = res.stdout.trim();
-      return { ok: true, value: v.length > 0 ? v : null };
+      // impl-R3 MAJ: an EXPLICITLY EMPTY configured value (exit 0, empty
+      // stdout — `git config branch.<b>.pushRemote ''`) disables pushing for
+      // git itself; it must fail closed, never advance precedence to origin.
+      if (v.length === 0) return { ok: false };
+      return { ok: true, value: v };
     }
     if (res.exitCode === 1) return { ok: true, value: null }; // documented: key unset
     return { ok: false };
@@ -208,7 +212,7 @@ export class GitHubRepoHost implements RepoHost {
     try {
       return readShipRecord(this.o.forgeDir, this.o.taskId);
     } catch (err) {
-      if (err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID') {
+      if ((err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID') || err instanceof SyntaxError) {
         throw new RepoHostError('schema', err.message, { taskId: this.o.taskId }, { cause: err });
       }
       throw new RepoHostError(
