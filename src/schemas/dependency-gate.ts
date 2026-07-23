@@ -53,6 +53,13 @@ const ShaPair = z.object({
   reviewed_head_sha: z.string().optional(),
 });
 
+// A satisfied entry MUST carry the live proof (impl-R1 MAJ #2): the observed
+// base and merged head are required — `observed: {}` can never validate.
+const ObservedProof = z.object({
+  base_ref: z.string().min(1),
+  merged_head_sha: z.string().min(1),
+});
+
 const DepSatisfiedSchema = z.object({
   declared_id: z.string(),
   resolved_task_id: z.string(),
@@ -61,7 +68,7 @@ const DepSatisfiedSchema = z.object({
   satisfied: z.literal(true),
   vector: z.literal('live_merge_proof'),
   disposition: z.literal('satisfied'),
-  observed: ShaPair,
+  observed: ObservedProof,
 });
 
 // NOTE: discriminated-union members must be plain ZodObjects, so the fixed
@@ -89,7 +96,7 @@ const SubjectResolvedSchema = z.object({
 });
 const SubjectUnresolvedSchema = z.object({
   resolved: z.literal(false),
-  reason: z.enum(['subject_unresolved', 'subject_ambiguous']),
+  reason: z.enum(['subject_unresolved', 'subject_ambiguous', 'subject_invalid_identity']),
   detail: z.string().max(2000).optional(),
 });
 

@@ -403,3 +403,37 @@ test('buildAliasIndex marks cross-claimed identifiers ambiguous', () => {
   assert.equal(index.get('B')!.ambiguous, true);
   assert.equal(index.get('A')!.ambiguous, false);
 });
+
+// ─── impl-R1 fix-round additions ─────────────────────────────────────────────
+
+test('subject with path-contract-violating canonical id → subject_invalid_identity, never vacuous satisfy (impl-R1 MAJ #1)', async () => {
+  const fd = forgeDir();
+  const s = mkTask({ id: 'SUBJ-1', tracker_issue_id: 'gh#42' });
+  const report = await gate({ fd, tasks: [s] });
+  assert.equal(report.satisfied, false);
+  assert.equal(report.subject.resolved, false);
+  if (!report.subject.resolved) assert.equal(report.subject.reason, 'subject_invalid_identity');
+  assert.equal(gateRetriable(report), false);
+});
+
+test('oversized state.json → state_invalid (impl-R1 MAJ #3)', async () => {
+  const fd = forgeDir();
+  const dir = join(fd, 'orchestrator', 'tasks', 'DEP-1');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'state.json'), '{"pad":"' + 'x'.repeat(300 * 1024) + '"}', 'utf8');
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })] });
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'state_invalid');
+});
+
+test('satisfied entries REQUIRE observed proof fields — schema rejects observed:{} (impl-R1 MAJ #2)', async () => {
+  const { DependencyGateReportSchema } = await import('../../../src/schemas/dependency-gate.ts');
+  const bad = {
+    version: 1, task_id: 'T', subject: { resolved: true, task_id: 'T' }, satisfied: true,
+    deps: [{
+      declared_id: 'D', resolved_task_id: 'D', state_id: 'D', observed_state: 'merge_pending',
+      satisfied: true, vector: 'live_merge_proof', disposition: 'satisfied', observed: {},
+    }],
+    duplicate_declared_ids: [],
+  };
+  assert.equal(DependencyGateReportSchema.safeParse(bad).success, false);
+});

@@ -507,3 +507,76 @@ test('FORGE-233: phases --phase ship filters unmet-dep candidates into blocked_o
   assert.equal(env2.data.tasks.length, 1, 'live merge proof admits the candidate');
   assert.equal(env2.data.blocked_on_deps.length, 0);
 });
+
+test('FORGE-233 impl-R1 CRIT: the gate NEVER reads a phases.yaml outside the target repository', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  // NO plans/phases.yaml in ctx.repoRoot. The process cwd (the forge repo)
+  // HAS one containing dependency-free tasks — it must not be consulted.
+  forceState(ctx, 'reviewed');
+  const result = await runOrchestrateDispatch({
+    taskId: 'FORGE-1', claimId: ctx.claimId, runId: ctx.runId,
+    worktreePath: join(ctx.repoRoot, 'wt'), phase: 'ship', forgeDir: ctx.forgeDir, json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'DEPS_NOT_MERGED');
+  assert.equal(env.error.details.dependency_gate.subject.resolved, false, 'foreign graph must never admit the task');
+  assert.match(env.error.details.dependency_gate.subject.detail, /not found/);
+});
+
+test('FORGE-233 impl-R1 MIN: DEEP-EQUAL exact DEPS_NOT_MERGED envelope', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  mkdirSync(join(ctx.repoRoot, 'plans'), { recursive: true });
+  writeFileSync(
+    join(ctx.repoRoot, 'plans', 'phases.yaml'),
+    [
+      'project: "fixture"', 'phases:', '  - id: phase-1', '    name: "P"', '    status: active',
+      '    goal: "G."', '    gate_criteria: ["g"]', '    tasks:',
+      '      - id: P1-T01', '        title: "Subject"', '        description: "s"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev',
+      '        tracker_issue_id: FORGE-1', '        acceptance: ["ok"]', '        depends_on: [P1-T00]',
+      '      - id: P1-T00', '        title: "Dep"', '        description: "d"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev', '        acceptance: ["ok"]', '',
+    ].join('\n'),
+    'utf8',
+  );
+  forceState(ctx, 'reviewed');
+  stdout.length = 0;
+  const result = await runOrchestrateDispatch({
+    taskId: 'FORGE-1', claimId: ctx.claimId, runId: ctx.runId,
+    worktreePath: join(ctx.repoRoot, 'wt'), phase: 'ship', forgeDir: ctx.forgeDir, json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.deepEqual(env, {
+    ok: false,
+    error: {
+      code: 'DEPS_NOT_MERGED',
+      message: 'cannot ship FORGE-1: dependency merge gate unsatisfied (P1-T00:legacy_dependency_unproven)',
+      retriable: false,
+      details: {
+        taskId: 'FORGE-1',
+        dependency_gate: {
+          version: 1,
+          task_id: 'FORGE-1',
+          subject: { resolved: true, task_id: 'P1-T01' },
+          satisfied: false,
+          deps: [{
+            declared_id: 'P1-T00',
+            resolved_task_id: 'P1-T00',
+            state_id: 'P1-T00',
+            observed_state: null,
+            satisfied: false,
+            reason: 'legacy_dependency_unproven',
+            disposition: 'operator_action',
+            observed: null,
+            expected: null,
+          }],
+          duplicate_declared_ids: [],
+        },
+      },
+    },
+  });
+});

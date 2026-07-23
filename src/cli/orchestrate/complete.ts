@@ -673,6 +673,17 @@ export async function runOrchestrateComplete(
     }
   }
 
+  // 2c. FORGE-233 (impl-R1 MAJ #4): the SHIP dependency gate runs BEFORE any
+  //     artifact publication — a refused completion must leave NO verdict
+  //     files and NO attempt_completed event behind (a later legitimate
+  //     completion would collide with prematurely published identity).
+  if (opts.phase === 'ship' && verdict.data.verdict === 'ready_for_review') {
+    const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
+    if (!gate.ok) {
+      return { exitCode: emit(gate.failure, { json: opts.json }) };
+    }
+  }
+
   // 3. Write the verdict + verified files atomically. FORGE-187 (R1): the
   //    filenames are phase-scoped so implement, review, and ship can each write
   //    a verdict on the SAME attempt without colliding (the `flag:'wx'` write
@@ -902,13 +913,6 @@ export async function runOrchestrateComplete(
       }
       nextState = applyTransition(stateNow.state, 'review_passed');
     } else {
-      // FORGE-233: defense-in-depth — re-run the dependency-merge gate at
-      // completion (a dependency edge added after dispatch, or a dep whose
-      // proof degraded, must refuse BEFORE merge_pending commits).
-      const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
-      if (!gate.ok) {
-        return { exitCode: emit(gate.failure, { json: opts.json }) };
-      }
       // ship: merge_pending is legal ONLY behind a COMPLETE ship record —
       // reviewed binding + base + pr (the write-ahead proves the external
       // side effects were recorded before the state advertises them).

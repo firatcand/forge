@@ -164,7 +164,9 @@ test('gc row 1: tracker done NEVER writes shipped (FORGE-233 — tracker status 
   ]);
   const plan = planGc(mkSnapshot({ tasks, trackerIssues, mode: 'full' }));
   const row = plan.rows.find((r) => r.rowId === 1);
-  assert.equal(row, undefined, 'tracker done must not produce a mark_terminal row — promotion needs RepoHost proof (FORGE-235)');
+  assert.ok(row, 'the divergence must still SURFACE (report-only)');
+  assert.equal(row.action, 'report_orphan');
+  if (row.action === 'report_orphan') assert.equal(row.payload.kind, 'tracker_claims_shipped');
 });
 
 test('gc row 1: running locally + tracker cancelled → mark_terminal:cancelled', () => {

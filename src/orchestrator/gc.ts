@@ -126,6 +126,8 @@ export type GcPlanRow =
           // FORGE-231: tracker-done divergence (row 6 — never auto-shipped)
           // and stuck CAS transition markers (report + manual remediation).
           | 'tracker_done_not_shipped'
+          // FORGE-233: row-1 report-only replacement for tracker done/closed
+          | 'tracker_claims_shipped'
           | 'stuck_cas_marker';
         readonly description: string;
       };
@@ -250,6 +252,23 @@ function detectRow1(s: OrchestratorSnapshot): GcPlanRow[] {
     if (task.state?.state !== 'running') continue;
     const issue = findTrackerIssueForTask(s, taskId, task.state);
     if (!issue) continue;
+    const lower = issue.state.toLowerCase();
+    // FORGE-233: tracker done/closed is NEVER merge proof — the divergence is
+    // REPORT-ONLY (surfaced for the operator; proof-backed promotion is
+    // FORGE-235). Only cancellation remains an actionable terminal mapping.
+    if (lower.includes('done') || lower.includes('closed')) {
+      rows.push({
+        rowId: 1,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claims_shipped',
+          description: `tracker says '${issue.state}' while the task is running locally — tracker status is not merge proof; resolve manually (never auto-shipped)`,
+        },
+      });
+      continue;
+    }
     const targetState = mapTrackerToTerminal(issue.state);
     if (!targetState) continue;
     const lease = task.leases.find((l) => l.isCanonical);

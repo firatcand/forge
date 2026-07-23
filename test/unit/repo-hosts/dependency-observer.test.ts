@@ -16,7 +16,7 @@ import {
   scriptedExec,
   tempForgeDir,
 } from './helpers.ts';
-import { upsertBaseResolution, upsertReviewedBinding } from '../../../src/orchestrator/ship-record.ts';
+import { upsertBaseResolution } from '../../../src/orchestrator/ship-record.ts';
 
 const SHA_M = 'd'.repeat(40);
 

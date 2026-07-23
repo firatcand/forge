@@ -466,28 +466,35 @@ export async function runShipDependencyGate(
   observerFor?: (depStateId: string) => Promise<DependencyObserver | null>,
 ): Promise<GateRun> {
   // phases.yaml is REQUIRED for ship admission: without the declared edges the
-  // gate cannot know the dependency set — fail closed, never assume [].
+  // gate cannot know the dependency set — fail closed, never assume []. The
+  // graph is resolved EXCLUSIVELY from the repository containing forgeDir
+  // (impl-R1 CRIT: a cwd fallback let repository B's graph admit repository
+  // A's task). Every refusal carries the versioned report so DEPS_NOT_MERGED
+  // consumers always find details.dependency_gate (impl-R1 MAJ #2).
   const repoRoot = path.dirname(path.resolve(forgeDir));
-  const phasesPath = resolvePhasesYaml(repoRoot) ?? resolvePhasesYaml(process.cwd());
+  const phasesUnavailable = (detail: string): GateRun => ({
+    ok: false,
+    failure: fail('DEPS_NOT_MERGED', `cannot evaluate ship dependencies for ${taskId}: ${detail}`, false, {
+      taskId,
+      dependency_gate: {
+        version: 1,
+        task_id: taskId,
+        subject: { resolved: false, reason: 'subject_unresolved', detail },
+        satisfied: false,
+        deps: [],
+        duplicate_declared_ids: [],
+      },
+    }),
+  });
+  const phasesPath = resolvePhasesYaml(repoRoot);
   if (phasesPath === undefined) {
-    return {
-      ok: false,
-      failure: fail('DEPS_NOT_MERGED', `cannot evaluate ship dependencies for ${taskId}: phases.yaml not found`, false, {
-        taskId,
-      }),
-    };
+    return phasesUnavailable('phases.yaml not found in the target repository');
   }
   let tasks: PhasesTask[];
   try {
     tasks = loadPhases(phasesPath).phases.phases.flatMap((ph) => ph.tasks);
   } catch (err) {
-    return {
-      ok: false,
-      failure: fail('DEPS_NOT_MERGED', `cannot evaluate ship dependencies for ${taskId}: phases.yaml unreadable`, false, {
-        taskId,
-        detail: err instanceof Error ? err.message : String(err),
-      }),
-    };
+    return phasesUnavailable(`phases.yaml unreadable: ${err instanceof Error ? err.message : String(err)}`);
   }
   const report = await evaluateShipDependencyGate({
     forgeDir,

@@ -88,6 +88,7 @@ function readDependencyState(forgeDir: string, stateId: string): StateRead {
     return { kind: 'invalid', detail: `state unreadable: ${err instanceof Error ? err.message : String(err)}` };
   }
   if (!st.isFile()) return { kind: 'invalid', detail: 'state.json is not a regular file' };
+  if (st.size > RECORD_MAX_BYTES) return { kind: 'invalid', detail: 'state.json exceeds the size cap' };
   try {
     const record = readTaskState(forgeDir, stateId);
     if (record.task_id !== stateId) {
@@ -390,6 +391,22 @@ export async function evaluateShipDependencyGate(opts: DependencyGateOptions): P
   }
   const subject = subjectEntry.task;
   const subjectCanonical = subject.tracker_issue_id ?? subject.id;
+  // Symmetric to the dependency path (impl-R1 MAJ #1): a subject whose
+  // canonical lifecycle id cannot legally own an orchestrator path must
+  // refuse — never resolve and satisfy vacuously.
+  if (!TASK_ID_RE.test(subjectCanonical)) {
+    return build({
+      task_id: opts.taskId,
+      subject: {
+        resolved: false,
+        reason: 'subject_invalid_identity',
+        detail: `canonical state id ${JSON.stringify(subjectCanonical)} violates the orchestrator id contract`,
+      },
+      satisfied: false,
+      deps: [],
+      duplicate_declared_ids: [],
+    });
+  }
   const subjectCanonicalEntry = index.get(subjectCanonical);
   if (subjectCanonicalEntry === undefined || subjectCanonicalEntry.ambiguous || subjectCanonicalEntry.task !== subject) {
     return build({
