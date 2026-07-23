@@ -49,6 +49,8 @@ import {
   type VerifyResult,
 } from '../../orchestrator/verify-runner.ts';
 import { emit, fail, ok } from '../envelope.ts';
+import { runShipDependencyGate } from './dispatch.ts';
+import type { DependencyObserver } from '../../orchestrator/dependency-gate.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
@@ -56,7 +58,7 @@ import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateComplete(
   args: CompleteArgs,
-  deps: { run?: RunCommand } = {},
+  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null> } = {},
 ): Promise<{ exitCode: number }> {
   const parsed = CompleteArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -900,6 +902,13 @@ export async function runOrchestrateComplete(
       }
       nextState = applyTransition(stateNow.state, 'review_passed');
     } else {
+      // FORGE-233: defense-in-depth — re-run the dependency-merge gate at
+      // completion (a dependency edge added after dispatch, or a dep whose
+      // proof degraded, must refuse BEFORE merge_pending commits).
+      const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
+      if (!gate.ok) {
+        return { exitCode: emit(gate.failure, { json: opts.json }) };
+      }
       // ship: merge_pending is legal ONLY behind a COMPLETE ship record —
       // reviewed binding + base + pr (the write-ahead proves the external
       // side effects were recorded before the state advertises them).

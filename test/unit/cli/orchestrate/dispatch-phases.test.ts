@@ -1,16 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync , existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { v7 as uuidv7 } from 'uuid';
 import { execaSync } from 'execa';
 
 import { runOrchestrateClaim } from '../../../../src/cli/orchestrate/claim.ts';
+import { runOrchestratePhases } from '../../../../src/cli/orchestrate/phases.ts';
 import { runOrchestrateDispatch } from '../../../../src/cli/orchestrate/dispatch.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
 import { TASK_MARKER_RELPATH } from '../../../../src/core/workspace.ts';
+
+function writeShipPhasesFixture(repoRoot: string): void {
+  mkdirSync(join(repoRoot, 'plans'), { recursive: true });
+  writeFileSync(join(repoRoot, 'plans', 'phases.yaml'), 'project: "fixture"\nphases:\n  - id: phase-1\n    name: "Phase"\n    status: active\n    goal: "Goal."\n    gate_criteria:\n      - "Gate."\n    tasks:\n      - id: P1-T01\n        title: "Subject"\n        description: "Subject task."\n        type: foundation\n        priority: P0\n        estimate: S\n        owner_type: backend-dev\n        tracker_issue_id: FORGE-1\n        acceptance:\n          - "ok"\n', 'utf8');
+}
+
 
 // FORGE-231: per-phase dispatch legality (owner decision PA).
 
@@ -153,6 +160,7 @@ test('dispatch --phase review against an unbound worktree refuses (binding gate 
 test('dispatch --phase ship: legal only from reviewed; pointer self-loop', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupClaimed(stdout);
+  writeShipPhasesFixture(ctx.repoRoot);
 
   // Illegal from claimed.
   const bad = await runOrchestrateDispatch({
@@ -305,4 +313,197 @@ test('dispatch refuses an EXPIRED lease even with matching identity (impl R1 MAJ
   assert.equal(result.exitCode, 1);
   const env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.error.code, 'LEASE_EXPIRED');
+});
+
+test('FORGE-233: ship dispatch with an unmet dep → exact DEPS_NOT_MERGED envelope, ZERO side effects', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  // Subject depends on DEP-1 (merge_pending, open PR).
+  mkdirSync(join(ctx.repoRoot, 'plans'), { recursive: true });
+  writeFileSync(
+    join(ctx.repoRoot, 'plans', 'phases.yaml'),
+    [
+      'project: "fixture"',
+      'phases:',
+      '  - id: phase-1',
+      '    name: "Phase"',
+      '    status: active',
+      '    goal: "Goal."',
+      '    gate_criteria: ["Gate."]',
+      '    tasks:',
+      '      - id: P1-T01',
+      '        title: "Subject"',
+      '        description: "Subject."',
+      '        type: foundation',
+      '        priority: P0',
+      '        estimate: S',
+      '        owner_type: backend-dev',
+      '        tracker_issue_id: FORGE-1',
+      '        acceptance: ["ok"]',
+      '        depends_on: [P1-T00]',
+      '      - id: P1-T00',
+      '        title: "Dep"',
+      '        description: "Dep."',
+      '        type: foundation',
+      '        priority: P0',
+      '        estimate: S',
+      '        owner_type: backend-dev',
+      '        tracker_issue_id: DEP-1',
+      '        acceptance: ["ok"]',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  const depDir = join(ctx.forgeDir, 'orchestrator', 'tasks', 'DEP-1');
+  mkdirSync(depDir, { recursive: true });
+  writeFileSync(
+    join(depDir, 'state.json'),
+    JSON.stringify({
+      version: 1, task_id: 'DEP-1', state: 'merge_pending', state_version: 3, attempt_count: 1,
+      failure_count: 0, last_failure_key: null, review_attempt_count: 1, ship_attempt_count: 1,
+      current_attempt_id: 'att-1', updated_at: new Date().toISOString(),
+      updated_by: { run_id: 'r', claim_id: 'c', generation: 1 },
+    }),
+    'utf8',
+  );
+  writeFileSync(
+    join(depDir, 'ship-record.json'),
+    JSON.stringify({
+      version: 1, task_id: 'DEP-1', revision: 2, reviewed_head_sha: 'a'.repeat(40),
+      review_attempt_id: 'att-r', base: { repo: 'octo/base', branch: 'main', push_remote: 'origin' },
+      pr: { repo: 'octo/base', number: 5, url: 'https://github.com/octo/base/pull/5' },
+      merge_attempt: 'submitted', updated_at: new Date().toISOString(),
+    }),
+    'utf8',
+  );
+  forceState(ctx, 'reviewed');
+  const before = readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8');
+
+  const result = await runOrchestrateDispatch(
+    {
+      taskId: 'FORGE-1', claimId: ctx.claimId, runId: ctx.runId,
+      worktreePath: join(ctx.repoRoot, 'wt'), phase: 'ship', forgeDir: ctx.forgeDir, json: true,
+    },
+    { observerFor: async () => ({ mergeResult: async () => ({ merged: false, state: 'open' as const }) }) },
+  );
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  // Exact envelope contract (Codex plan R2 #5): closed enums, machine-readable.
+  assert.equal(env.ok, false);
+  assert.equal(env.error.code, 'DEPS_NOT_MERGED');
+  assert.equal(env.error.retriable, true, 'open PR is a waiting condition');
+  const gate = env.error.details.dependency_gate;
+  assert.equal(gate.version, 1);
+  assert.deepEqual(gate.subject, { resolved: true, task_id: 'P1-T01' });
+  assert.equal(gate.satisfied, false);
+  assert.equal(gate.deps.length, 1);
+  assert.equal(gate.deps[0].declared_id, 'P1-T00');
+  assert.equal(gate.deps[0].reason, 'not_merged');
+  assert.equal(gate.deps[0].disposition, 'waiting');
+  assert.deepEqual(gate.duplicate_declared_ids, []);
+  // ZERO side effects: state byte-identical, no attempt dir created.
+  const after = readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8');
+  assert.equal(after, before, 'no pointer bump on refusal');
+  assert.equal(existsSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts')), false, 'no attempt dir');
+});
+
+test('FORGE-233: ship dispatch with subject MISSING from phases.yaml → refusal, zero side effects', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  mkdirSync(join(ctx.repoRoot, 'plans'), { recursive: true });
+  writeFileSync(
+    join(ctx.repoRoot, 'plans', 'phases.yaml'),
+    [
+      'project: "fixture"', 'phases:', '  - id: phase-1', '    name: "P"', '    status: active',
+      '    goal: "G."', '    gate_criteria: ["g"]', '    tasks:',
+      '      - id: P1-T77', '        title: "Other"', '        description: "o"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev', '        acceptance: ["ok"]', '',
+    ].join('\n'),
+    'utf8',
+  );
+  forceState(ctx, 'reviewed');
+  const before = readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8');
+  const result = await runOrchestrateDispatch({
+    taskId: 'FORGE-1', claimId: ctx.claimId, runId: ctx.runId,
+    worktreePath: join(ctx.repoRoot, 'wt'), phase: 'ship', forgeDir: ctx.forgeDir, json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'DEPS_NOT_MERGED');
+  assert.equal(env.error.retriable, false, 'unresolved subject is operator territory');
+  assert.equal(env.error.details.dependency_gate.subject.resolved, false);
+  const after = readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8');
+  assert.equal(after, before);
+});
+
+test('FORGE-233: phases --phase ship filters unmet-dep candidates into blocked_on_deps', async (t) => {
+  const stdout = captureStdout(t);
+  const ctx = await setupClaimed(stdout);
+  // Same two-task fixture: subject reviewed, dep merge_pending with open PR.
+  mkdirSync(join(ctx.repoRoot, 'plans'), { recursive: true });
+  writeFileSync(
+    join(ctx.repoRoot, 'plans', 'phases.yaml'),
+    [
+      'project: "fixture"', 'phases:', '  - id: phase-1', '    name: "P"', '    status: active',
+      '    goal: "G."', '    gate_criteria: ["g"]', '    tasks:',
+      '      - id: P1-T01', '        title: "Subject"', '        description: "s"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev',
+      '        tracker_issue_id: FORGE-1', '        acceptance: ["ok"]', '        depends_on: [P1-T00]',
+      '      - id: P1-T00', '        title: "Dep"', '        description: "d"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev',
+      '        tracker_issue_id: DEP-1', '        acceptance: ["ok"]', '',
+    ].join('\n'),
+    'utf8',
+  );
+  const depDir = join(ctx.forgeDir, 'orchestrator', 'tasks', 'DEP-1');
+  mkdirSync(depDir, { recursive: true });
+  writeFileSync(
+    join(depDir, 'state.json'),
+    JSON.stringify({
+      version: 1, task_id: 'DEP-1', state: 'merge_pending', state_version: 3, attempt_count: 1,
+      failure_count: 0, last_failure_key: null, review_attempt_count: 1, ship_attempt_count: 1,
+      current_attempt_id: 'att-1', updated_at: new Date().toISOString(),
+      updated_by: { run_id: 'r', claim_id: 'c', generation: 1 },
+    }),
+    'utf8',
+  );
+  writeFileSync(
+    join(depDir, 'ship-record.json'),
+    JSON.stringify({
+      version: 1, task_id: 'DEP-1', revision: 2, reviewed_head_sha: 'a'.repeat(40),
+      review_attempt_id: 'att-r', base: { repo: 'octo/base', branch: 'main', push_remote: 'origin' },
+      pr: { repo: 'octo/base', number: 5, url: 'https://github.com/octo/base/pull/5' },
+      merge_attempt: 'submitted', updated_at: new Date().toISOString(),
+    }),
+    'utf8',
+  );
+  forceState(ctx, 'reviewed');
+  stdout.length = 0;
+
+  const open = await runOrchestratePhases(
+    { ready: true, phase: 'ship', forgeDir: ctx.forgeDir, json: true },
+    { observerFor: async () => ({ mergeResult: async () => ({ merged: false, state: 'open' as const }) }) },
+  );
+  assert.equal(open.exitCode, 0);
+  const env1 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env1.data.tasks.length, 0, 'unmet-dep candidate is not dispatchable');
+  assert.equal(env1.data.blocked_on_deps.length, 1);
+  assert.equal(env1.data.blocked_on_deps[0].task_id, 'FORGE-1');
+  assert.equal(env1.data.blocked_on_deps[0].dependency_gate.deps[0].reason, 'not_merged');
+  stdout.length = 0;
+
+  const merged = await runOrchestratePhases(
+    { ready: true, phase: 'ship', forgeDir: ctx.forgeDir, json: true },
+    {
+      observerFor: async () => ({
+        mergeResult: async () => ({
+          merged: true as const, base_ref: 'main', merge_commit_sha: 'e'.repeat(40), merged_head_sha: 'a'.repeat(40),
+        }),
+      }),
+    },
+  );
+  assert.equal(merged.exitCode, 0);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.data.tasks.length, 1, 'live merge proof admits the candidate');
+  assert.equal(env2.data.blocked_on_deps.length, 0);
 });

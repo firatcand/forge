@@ -14,6 +14,12 @@ import type { RunCommand } from '../../../../src/orchestrator/verify-runner.ts';
 import type { ClaimableTracker } from '../../../../src/cli/orchestrate/tracker-factory.ts';
 import type { ClaimResult } from '../../../../src/trackers/types.ts';
 
+function writeShipPhasesFixture(repoRoot: string): void {
+  mkdirSync(join(repoRoot, 'plans'), { recursive: true });
+  writeFileSync(join(repoRoot, 'plans', 'phases.yaml'), 'project: "fixture"\nphases:\n  - id: phase-1\n    name: "Phase"\n    status: active\n    goal: "Goal."\n    gate_criteria:\n      - "Gate."\n    tasks:\n      - id: P1-T01\n        title: "Subject"\n        description: "Subject task."\n        type: foundation\n        priority: P0\n        estimate: S\n        owner_type: backend-dev\n        tracker_issue_id: FORGE-1\n        acceptance:\n          - "ok"\n', 'utf8');
+}
+
+
 function captureStdout(t: { after: (fn: () => void) => void }): string[] {
   const buf: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
@@ -322,6 +328,7 @@ test('FORGE-231: pinned review gate rejects a substituted composed carrier (witn
 test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship record', async (t) => {
   const stdout = captureStdout(t);
   const ctx = await setupRunning(stdout);
+  writeShipPhasesFixture(ctx.repoRoot);
   const rv = await advanceToReviewAttempt(stdout, ctx);
   writeRawWitness(ctx.forgeDir, rv.reviewAttemptId, { targetSha: rv.headSha });
   const composed = writePinnedVerdict(ctx.repoRoot, 'ready_for_review', rv.headSha);
@@ -380,6 +387,41 @@ test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship r
     }),
     'utf8',
   );
+
+  // FORGE-233 defense-in-depth: a dependency EDGE ADDED AFTER dispatch (a
+  // realistic reconciliation) must refuse completion BEFORE merge_pending.
+  const phasesPath = join(ctx.repoRoot, 'plans', 'phases.yaml');
+  const trivialPhases = readFileSync(phasesPath, 'utf8');
+  writeFileSync(
+    phasesPath,
+    trivialPhases.replace(
+      'tracker_issue_id: FORGE-1\n',
+      'tracker_issue_id: FORGE-1\n        depends_on: [P1-T99]\n',
+    ) + [
+      '      - id: P1-T99', '        title: "Late dep"', '        description: "d"', '        type: foundation',
+      '        priority: P0', '        estimate: S', '        owner_type: backend-dev', '        acceptance: ["ok"]', '',
+    ].join('\n'),
+    'utf8',
+  );
+  result = await runOrchestrateComplete({
+    taskId: 'FORGE-1',
+    attemptId: shipAttempt,
+    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
+    phase: 'ship',
+    forgeDir: ctx.forgeDir,
+    json: true,
+  });
+  assert.equal(result.exitCode, 1);
+  env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'DEPS_NOT_MERGED', 'late dependency edge refuses completion');
+  assert.equal(env.error.details.dependency_gate.deps[0].reason, 'legacy_dependency_unproven');
+  assert.equal(
+    JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8')).state,
+    'reviewed',
+    'no merge_pending commit on refusal',
+  );
+  writeFileSync(phasesPath, trivialPhases, 'utf8');
+  stdout.length = 0;
 
   // …then the ship completion enters the ASYNC merge wait — merge_pending,
   // never shipped (the platform merge is the only proof).

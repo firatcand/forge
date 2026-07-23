@@ -59,7 +59,7 @@ export type GcPlanRow =
   | (GcPlanRowBase & {
       readonly action: 'mark_terminal';
       readonly payload: {
-        readonly targetState: TerminalTaskState | 'shipped';
+        readonly targetState: TerminalTaskState;
         readonly leaseIdentity: LeaseIdentity;
         readonly trackerState?: string;
       };
@@ -765,11 +765,13 @@ function findTrackerIssueForTask(
   return undefined;
 }
 
-function mapTrackerToTerminal(trackerState: string): TerminalTaskState | 'shipped' | null {
+// FORGE-233: tracker done/closed is NEVER merge proof (ORCHESTRATOR:880) —
+// row 1 no longer maps it to 'shipped'; only cancellation remains actionable.
+// A tracker-done divergence is REPORT-ONLY (row-6 family); the proof-backed
+// merge_pending→shipped promotion arrives with FORGE-235's reconciliation.
+function mapTrackerToTerminal(trackerState: string): TerminalTaskState | null {
   const lower = trackerState.toLowerCase();
-  if (lower.includes('done')) return 'shipped';
   if (lower.includes('cancel')) return 'cancelled';
-  if (lower.includes('closed')) return 'shipped';
   return null;
 }
 
