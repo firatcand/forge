@@ -26,6 +26,7 @@ import {
   GhRepoViewSchema,
   GhRequiredChecksParamsSchema,
   GhRestPullPagesSchema,
+  GhRestPullSchema,
   GhRulesetDetailSchema,
   GraphqlPrObservationSchema,
   Sha40,
@@ -95,6 +96,66 @@ export function parseGitHubUrl(url: string): { host: string; repo: string } | nu
   return null;
 }
 
+// Effective push destination per git's precedence for the HEAD branch:
+// branch.<head>.pushRemote → remote.pushDefault → branch.<head>.remote →
+// origin; then ALL push URLs of that remote (git pushes to every one).
+// Shared by the adapter's resolveBase() and the factory's activation gate
+// (impl-R1 MAJ #4). Returns null when the remote's URLs cannot be read.
+export async function resolveEffectivePushUrls(
+  git: Exec,
+  headBranch: string,
+): Promise<string[] | null> {
+  const config = async (key: string): Promise<string | null> => {
+    let res: ExecResult;
+    try {
+      res = await git(['config', '--get', key]);
+    } catch {
+      return null;
+    }
+    if (res.exitCode !== 0) return null;
+    const v = res.stdout.trim();
+    return v.length > 0 ? v : null;
+  };
+  const remote =
+    (await config(`branch.${headBranch}.pushRemote`)) ??
+    (await config('remote.pushDefault')) ??
+    (await config(`branch.${headBranch}.remote`)) ??
+    'origin';
+  let urlsRes: ExecResult;
+  try {
+    urlsRes = await git(['remote', 'get-url', '--push', '--all', remote]);
+  } catch {
+    return null;
+  }
+  if (urlsRes.exitCode !== 0) return null;
+  const urls = urlsRes.stdout
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return urls;
+}
+
+// Remote NAME per the same precedence (persisted into the ship record).
+export async function resolveEffectivePushRemote(git: Exec, headBranch: string): Promise<string> {
+  const config = async (key: string): Promise<string | null> => {
+    let res: ExecResult;
+    try {
+      res = await git(['config', '--get', key]);
+    } catch {
+      return null;
+    }
+    if (res.exitCode !== 0) return null;
+    const v = res.stdout.trim();
+    return v.length > 0 ? v : null;
+  };
+  return (
+    (await config(`branch.${headBranch}.pushRemote`)) ??
+    (await config('remote.pushDefault')) ??
+    (await config(`branch.${headBranch}.remote`)) ??
+    'origin'
+  );
+}
+
 export class GitHubRepoHost implements RepoHost {
   private readonly o: GitHubRepoHostOptions;
   private readonly delay: number;
@@ -106,8 +167,16 @@ export class GitHubRepoHost implements RepoHost {
 
   // ─── helpers ───────────────────────────────────────────────────────────────
 
+  // CRIT impl-R1 #1: a REJECTED executor promise (timeout/spawn wrapper) must
+  // never bypass enrollment reconciliation or revoke confirmation — rejections
+  // become nonzero ExecResults so every downstream path (Phase A, revoke,
+  // classification) still runs.
   private async gh(args: readonly string[]): Promise<ExecResult> {
-    return this.o.gh(args);
+    try {
+      return await this.o.gh(args);
+    } catch (err) {
+      return { stdout: '', stderr: `executor rejected: ${err instanceof Error ? err.message : String(err)}`, exitCode: 254 };
+    }
   }
 
   private async ghJson<T>(
@@ -154,14 +223,8 @@ export class GitHubRepoHost implements RepoHost {
       // Persisted-first WITH fence: route through the fenced replay so a stale
       // attempt with a superseded reviewed binding gets the typed conflict,
       // never the stored base (Codex plan R2 #3).
-      const replayed = upsertBaseResolution(this.o.forgeDir, this.o.taskId, {
-        base: record.base,
-        expectedReviewAttemptId: this.o.reviewBinding.attemptId,
-        expectedReviewedHeadSha: this.o.reviewBinding.headSha,
-        holder: this.o.holder,
-        fence: this.o.recordFence,
-      });
-      return this.validateBase(replayed.base!);
+      const replayed = this.persistBase(record.base);
+      return this.validateBase(replayed);
     }
 
     // First resolution. Base repo identity from gh; push topology from the
@@ -171,8 +234,11 @@ export class GitHubRepoHost implements RepoHost {
       GhRepoViewSchema,
       'repo view',
     );
-    const pushRemote = await this.effectivePushRemote();
-    const pushUrls = await this.allPushUrls(pushRemote);
+    const pushRemote = await resolveEffectivePushRemote(this.git.bind(this), this.o.headBranch);
+    const pushUrls = await resolveEffectivePushUrls(this.git.bind(this), this.o.headBranch);
+    if (pushUrls === null) {
+      throw new RepoHostError('unsupported_host', 'cannot resolve effective push URLs', {});
+    }
     if (pushUrls.length === 0) {
       throw new RepoHostError('unsupported_host', `remote ${pushRemote} has no push URL`, {});
     }
@@ -201,14 +267,35 @@ export class GitHubRepoHost implements RepoHost {
       branch: this.o.baseBranch,
       push_remote: pushRemote,
     };
-    upsertBaseResolution(this.o.forgeDir, this.o.taskId, {
-      base,
-      expectedReviewAttemptId: this.o.reviewBinding.attemptId,
-      expectedReviewedHeadSha: this.o.reviewBinding.headSha,
-      holder: this.o.holder,
-      fence: this.o.recordFence,
-    });
+    this.persistBase(base);
     return this.validateBase(base);
+  }
+
+  // MAJ impl-R1 #5: the adapter's error boundary is RepoHostError — the
+  // orchestrator-level persistence codes are mapped so a consumer can
+  // distinguish repo-host binding conflicts from generic state failures.
+  private persistBase(base: BaseResolutionBinding): BaseResolutionBinding {
+    try {
+      const record = upsertBaseResolution(this.o.forgeDir, this.o.taskId, {
+        base,
+        expectedReviewAttemptId: this.o.reviewBinding.attemptId,
+        expectedReviewedHeadSha: this.o.reviewBinding.headSha,
+        holder: this.o.holder,
+        fence: this.o.recordFence,
+      });
+      return record.base!;
+    } catch (err) {
+      if (err instanceof OrchestratorError) {
+        if (err.code === 'STALE_ATTEMPT' || err.code === 'STATE_VERSION_CONFLICT') {
+          throw new RepoHostError('binding_conflict', err.message, { taskId: this.o.taskId }, { cause: err });
+        }
+        if (err.code === 'STATE_NOT_FOUND') {
+          throw new RepoHostError('record_missing', err.message, { taskId: this.o.taskId }, { cause: err });
+        }
+        throw new RepoHostError('transport', err.message, { taskId: this.o.taskId }, { cause: err });
+      }
+      throw err;
+    }
   }
 
   private validateBase(base: BaseResolutionBinding): BaseResolution {
@@ -222,39 +309,11 @@ export class GitHubRepoHost implements RepoHost {
   }
 
   private async git(args: readonly string[]): Promise<ExecResult> {
-    return this.o.git(args);
-  }
-
-  private async gitConfig(key: string): Promise<string | null> {
-    const res = await this.git(['config', '--get', key]);
-    if (res.exitCode !== 0) return null;
-    const v = res.stdout.trim();
-    return v.length > 0 ? v : null;
-  }
-
-  // git's push-remote precedence for the HEAD branch:
-  // branch.<head>.pushRemote → remote.pushDefault → branch.<head>.remote → origin.
-  private async effectivePushRemote(): Promise<string> {
-    return (
-      (await this.gitConfig(`branch.${this.o.headBranch}.pushRemote`)) ??
-      (await this.gitConfig('remote.pushDefault')) ??
-      (await this.gitConfig(`branch.${this.o.headBranch}.remote`)) ??
-      'origin'
-    );
-  }
-
-  // ALL effective push URLs (git pushes to every one; `--all` enumerates).
-  private async allPushUrls(remote: string): Promise<string[]> {
-    const res = await this.git(['remote', 'get-url', '--push', '--all', remote]);
-    if (res.exitCode !== 0) {
-      throw new RepoHostError('unsupported_host', `cannot resolve push URLs for remote ${remote}`, {
-        stderr: res.stderr.slice(0, 500),
-      });
+    try {
+      return await this.o.git(args);
+    } catch (err) {
+      return { stdout: '', stderr: `executor rejected: ${err instanceof Error ? err.message : String(err)}`, exitCode: 254 };
     }
-    return res.stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
   }
 
   // ─── probe (plan v3; R1 #1) ────────────────────────────────────────────────
@@ -309,9 +368,22 @@ export class GitHubRepoHost implements RepoHost {
 
     const rulesetChecks = new Set<string>();
     let merge_queue_enabled = false;
-    const rulesetIds = new Set<number>();
+    // (ruleset_id, source_type) — identity is MANDATORY for governing rules
+    // (CRIT impl-R1 #2): a rule we cannot trace to a readable ruleset detail
+    // is a rule whose bypass list we cannot prove empty.
+    const rulesetRefs = new Map<number, string>();
     for (const rule of rules) {
-      if (rule.ruleset_id !== undefined) rulesetIds.add(rule.ruleset_id);
+      const governs = rule.type === 'merge_queue' || rule.type === 'required_status_checks' || rule.type === 'pull_request';
+      if (governs) {
+        if (rule.ruleset_id === undefined || rule.ruleset_source_type === undefined) {
+          return {
+            ok: false,
+            reason: 'auth',
+            detail: `effective rule '${rule.type}' carries no ruleset identity — bypass actors cannot be verified`,
+          };
+        }
+        rulesetRefs.set(rule.ruleset_id, rule.ruleset_source_type);
+      }
       if (rule.type === 'merge_queue') merge_queue_enabled = true;
       if (rule.type === 'required_status_checks') {
         const params = GhRequiredChecksParamsSchema.safeParse(rule.parameters ?? {});
@@ -325,8 +397,22 @@ export class GitHubRepoHost implements RepoHost {
     // (c) per-ruleset detail: bypass_actors must be EXPLICITLY present and
     // empty — omitted/unreadable/malformed is NOT evidence of no bypass.
     let rulesetBypass = false;
-    for (const id of rulesetIds) {
-      const detailRes = await this.gh(['api', `repos/${repo}/rulesets/${id}`]);
+    const owner = repo.split('/')[0]!;
+    for (const [id, sourceType] of rulesetRefs) {
+      // Detail endpoint is routed BY SOURCE (CRIT impl-R1 #2): repository and
+      // organization rulesets live at different paths; an unknown source
+      // scope cannot be verified → fail closed.
+      let detailPath: string;
+      if (sourceType === 'Repository') detailPath = `repos/${repo}/rulesets/${id}`;
+      else if (sourceType === 'Organization') detailPath = `orgs/${owner}/rulesets/${id}`;
+      else {
+        return {
+          ok: false,
+          reason: 'auth',
+          detail: `ruleset ${id} has unsupported source '${sourceType}' — bypass actors cannot be verified`,
+        };
+      }
+      const detailRes = await this.gh(['api', detailPath]);
       if (detailRes.exitCode !== 0) {
         return {
           ok: false,
@@ -438,16 +524,27 @@ export class GitHubRepoHost implements RepoHost {
     ]);
 
     if (createRes.exitCode === 0) {
-      // Validated create URL is the authoritative new identity (plan v4 ΔB):
-      // verification reads may lag; on exhaustion the parsed success ref is
-      // returned — the successful command inputs established marker/head/base.
+      // Validated create URL is the authoritative new identity (plan v4 ΔB).
+      // Verification is a repository-scoped read of THAT number (MIN impl-R1
+      // #1) — a stale whole-set listing must not substitute a different PR.
       const ref = this.parseCreateUrl(createRes.stdout, repo);
       for (let i = 0; i < 2; i += 1) {
-        try {
-          const verified = await this.classifyExisting(repo, owner, head, base);
-          if (verified) return verified;
-        } catch (err) {
-          if (!(err instanceof RepoHostError && err.code === 'transport')) throw err;
+        const readRes = await this.gh(['api', `repos/${repo}/pulls/${ref.number}`]);
+        if (readRes.exitCode === 0) {
+          try {
+            const pullRaw: unknown = JSON.parse(readRes.stdout);
+            const pullParsed = GhRestPullSchema.safeParse(pullRaw);
+            if (
+              pullParsed.success &&
+              pullParsed.data.head.ref === head &&
+              pullParsed.data.base.ref === base &&
+              (pullParsed.data.body ?? '').includes(marker)
+            ) {
+              return this.validateRef({ repo, number: pullParsed.data.number, url: pullParsed.data.html_url });
+            }
+          } catch {
+            // fall through to retry / ΔB fallback
+          }
         }
         if (this.delay > 0) await sleep(this.delay);
       }
@@ -717,7 +814,7 @@ export class GitHubRepoHost implements RepoHost {
     //    first absent read never terminates; stable absence = 2 consecutive
     //    known-absent reads; exhaustion without merged/enrollment/stable
     //    absence → loud failure, NEVER head/check classification.
-    const phaseA = await this.observeEnrollment(pr);
+    const phaseA = await this.observeEnrollment(pr, 'detect');
     if (phaseA.kind === 'merged') return this.mergedOutcome(phaseA.result, expectedHeadSha);
     if (phaseA.kind === 'unconfirmed') {
       return this.validateOutcome({
@@ -733,7 +830,7 @@ export class GitHubRepoHost implements RepoHost {
         return this.validateOutcome({ ok: false, reason: 'transport', detail: revokeFailure });
       }
       // Phase B — post-revocation confirmation.
-      const phaseB = await this.observeEnrollment(pr);
+      const phaseB = await this.observeEnrollment(pr, 'confirm');
       if (phaseB.kind === 'merged') return this.mergedOutcome(phaseB.result, expectedHeadSha);
       if (phaseB.kind !== 'absent') {
         return this.validateOutcome({
@@ -800,9 +897,19 @@ export class GitHubRepoHost implements RepoHost {
       // Green checks + right head + unmerged (plan v4 ΔC): a DEFINITE server
       // policy refusal is 'protection_rejected'; an executor/network/no-ack
       // failure is 'transport' — conservative default is transport.
+      // ΔC (MAJ impl-R1 #2): stderr is diagnostic — 'protection_rejected'
+      // needs API-shaped merge-refusal evidence AND no transport/auth noise;
+      // everything ambiguous stays 'transport' (retryable, not parked).
+      const transportNoise =
+        /(SAML|SSO|rate limit|secondary rate|timed? ?out|EAI_|ENOTFOUND|ECONN|dial tcp|proxy|TLS|certificate|executor rejected|connection|network)/i.test(
+          mergeRes.stderr,
+        );
       const definitePolicy =
         mergeRes.exitCode !== 0 &&
-        /(protect|required|review|not mergeable|merge.*blocked|blocked.*merge)/i.test(mergeRes.stderr);
+        !transportNoise &&
+        /(not mergeable|review is required|review required|required status check|merge queue is required|protected branch|base branch was modified|HTTP 405|HTTP 422)/i.test(
+          mergeRes.stderr,
+        );
       if (definitePolicy) {
         return this.validateOutcome({
           ok: false,
@@ -852,13 +959,19 @@ export class GitHubRepoHost implements RepoHost {
   // Bounded enrollment observation (plan v4 Δ1 + ΔA): 3 reads × delay.
   // Returns: merged | enrolled (with forms) | absent (2 consecutive known-
   // absent) | unconfirmed (exhaustion without any of the above).
-  private async observeEnrollment(pr: PullRequestRef): Promise<
+  // mode 'detect' (Phase A): a positive enrollment observation returns
+  // immediately — it must be revoked. mode 'confirm' (Phase B, MAJ impl-R1
+  // #1): a positive read may be STALE cache after a successful revoke, so
+  // polling continues through it; only exhaustion-with-last-read-positive
+  // parks as still-enrolled.
+  private async observeEnrollment(pr: PullRequestRef, mode: 'detect' | 'confirm'): Promise<
     | { kind: 'merged'; result: MergeResult }
     | { kind: 'enrolled'; auto: boolean; queued: boolean; nodeId: string }
     | { kind: 'absent' }
     | { kind: 'unconfirmed'; detail: string }
   > {
     let consecutiveAbsent = 0;
+    let lastEnrolled: { auto: boolean; queued: boolean; nodeId: string } | null = null;
     let lastDetail = 'no successful observation';
     for (let read = 0; read < 3; read += 1) {
       if (read > 0 && this.delay > 0) await sleep(this.delay);
@@ -881,12 +994,22 @@ export class GitHubRepoHost implements RepoHost {
       }
       const auto = obs.autoMergeRequest !== null;
       const queued = obs.isInMergeQueue || obs.mergeQueueEntry !== null;
-      if (auto || queued) return { kind: 'enrolled', auto, queued, nodeId: obs.id };
+      if (auto || queued) {
+        if (mode === 'detect') return { kind: 'enrolled', auto, queued, nodeId: obs.id };
+        lastEnrolled = { auto, queued, nodeId: obs.id };
+        consecutiveAbsent = 0;
+        lastDetail = 'enrollment still observable';
+        continue;
+      }
+      lastEnrolled = null;
       consecutiveAbsent += 1;
       lastDetail = 'absent';
       if (consecutiveAbsent >= 2 && read >= 2) return { kind: 'absent' };
     }
     if (consecutiveAbsent >= 2) return { kind: 'absent' };
+    if (mode === 'confirm' && lastEnrolled !== null) {
+      return { kind: 'enrolled', ...lastEnrolled };
+    }
     return { kind: 'unconfirmed', detail: lastDetail };
   }
 

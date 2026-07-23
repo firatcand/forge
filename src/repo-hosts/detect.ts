@@ -6,7 +6,13 @@
 // github.com only; anything else → null (consumer parks; ship unavailable).
 
 import { readShipRecord } from '../orchestrator/ship-record.ts';
-import { GitHubRepoHost, parseGitHubUrl, type Exec, type GitHubRepoHostOptions } from './github.ts';
+import {
+  GitHubRepoHost,
+  parseGitHubUrl,
+  resolveEffectivePushUrls,
+  type Exec,
+  type GitHubRepoHostOptions,
+} from './github.ts';
 
 export type CreateGitHubRepoHostOptions = Omit<GitHubRepoHostOptions, 'gh' | 'git'> & {
   gh: Exec;
@@ -29,13 +35,17 @@ export async function createGitHubRepoHost(
     return new GitHubRepoHost(opts);
   }
 
-  // First resolution path: the effective push destination must be github.com.
-  // (Full topology validation — all push URLs, fork comparison — runs inside
-  // resolveBase(); this is the cheap activation gate.)
-  const remoteRes = await opts.git(['remote', 'get-url', '--push', 'origin']);
-  if (remoteRes.exitCode !== 0) return null;
-  const parsed = parseGitHubUrl(remoteRes.stdout.trim().split('\n')[0] ?? '');
-  if (parsed === null || parsed.host !== 'github.com') return null;
+  // First resolution path (impl-R1 MAJ #4): activation uses the SAME
+  // effective head-branch push precedence as resolveBase() — a GitLab origin
+  // with branch.<head>.pushRemote → github.com must still activate, and every
+  // effective push URL must be github.com. (Owner/repo fork comparison needs
+  // gh metadata and stays in resolveBase().)
+  const urls = await resolveEffectivePushUrls(opts.git, opts.headBranch);
+  if (urls === null || urls.length === 0) return null;
+  for (const url of urls) {
+    const parsed = parseGitHubUrl(url);
+    if (parsed === null || parsed.host !== 'github.com') return null;
+  }
 
   return new GitHubRepoHost(opts);
 }

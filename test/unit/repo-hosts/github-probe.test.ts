@@ -5,8 +5,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  REPO,
-  REVIEW,
   classicRoute,
   existenceRoutes,
   gitTopologyRoutes,
@@ -47,8 +45,8 @@ test('rulesets-only: paginated pages flattened; merge_queue on page 2 detected',
   const { report } = await probed([
     repoViewRoute(),
     rulesRoute([
-      [{ type: 'required_status_checks', ruleset_id: 7, parameters: { required_status_checks: [{ context: 'ci' }] } }],
-      [{ type: 'merge_queue', ruleset_id: 7 }],
+      [{ type: 'required_status_checks', ruleset_id: 7, ruleset_source_type: 'Repository', parameters: { required_status_checks: [{ context: 'ci' }] } }],
+      [{ type: 'merge_queue', ruleset_id: 7, ruleset_source_type: 'Repository' }],
     ]),
     { match: (a) => a[0] === 'api' && String(a[1]).endsWith('/rulesets/7'), result: { stdout: JSON.stringify({ id: 7, bypass_actors: [] }) } },
     classicRoute('absent'),
@@ -65,7 +63,7 @@ test('rulesets-only: paginated pages flattened; merge_queue on page 2 detected',
 test('ruleset bypass_actors NON-EMPTY → bypass_rules_present', async () => {
   const { report } = await probed([
     repoViewRoute(),
-    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 9, parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 9, ruleset_source_type: 'Repository', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
     { match: (a) => a[0] === 'api' && String(a[1]).endsWith('/rulesets/9'), result: { stdout: JSON.stringify({ id: 9, bypass_actors: [{ actor_id: 1 }] }) } },
     classicRoute('absent'),
     ...existenceRoutes(),
@@ -80,7 +78,7 @@ test('ruleset bypass_actors NON-EMPTY → bypass_rules_present', async () => {
 test('ruleset detail OMITS bypass_actors → probe fails closed (auth)', async () => {
   const { report } = await probed([
     repoViewRoute(),
-    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 5, parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 5, ruleset_source_type: 'Repository', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
     { match: (a) => a[0] === 'api' && String(a[1]).endsWith('/rulesets/5'), result: { stdout: JSON.stringify({ id: 5 }) } },
   ]);
   assert.equal(report.ok, false);
@@ -93,7 +91,7 @@ test('ruleset detail OMITS bypass_actors → probe fails closed (auth)', async (
 test('ruleset detail unreadable (org/enterprise scope) → probe fails closed', async () => {
   const { report } = await probed([
     repoViewRoute(),
-    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 11, parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 11, ruleset_source_type: 'Repository', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
     { match: (a) => a[0] === 'api' && String(a[1]).endsWith('/rulesets/11'), result: { exitCode: 1, stderr: 'HTTP 404' } },
   ]);
   assert.equal(report.ok, false);
@@ -103,7 +101,7 @@ test('ruleset detail unreadable (org/enterprise scope) → probe fails closed', 
 test('ruleset detail malformed JSON → transport failure, never a pass', async () => {
   const { report } = await probed([
     repoViewRoute(),
-    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 3, parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 3, ruleset_source_type: 'Repository', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
     { match: (a) => a[0] === 'api' && String(a[1]).endsWith('/rulesets/3'), result: { stdout: 'not-json{' } },
   ]);
   assert.equal(report.ok, false);
@@ -201,4 +199,42 @@ test('probe without a persisted base → record_missing surfaces as failed probe
   const report = await host.probe();
   assert.equal(report.ok, false);
   if (!report.ok) assert.match(report.detail, /resolveBase/);
+});
+
+test('governing rule WITHOUT ruleset identity → probe fails closed (impl-R1 CRIT #2)', async () => {
+  const { report } = await probed([
+    repoViewRoute(),
+    rulesRoute([[{ type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    classicRoute('absent'),
+    ...existenceRoutes(),
+  ]);
+  assert.equal(report.ok, false);
+  if (!report.ok) {
+    assert.equal(report.reason, 'auth');
+    assert.match(report.detail, /no ruleset identity/);
+  }
+});
+
+test('Organization-sourced ruleset detail is routed to the orgs endpoint', async () => {
+  const gh = scriptedExec([
+    repoViewRoute(),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 44, ruleset_source_type: 'Organization', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+    { match: (a) => a[0] === 'api' && a[1] === 'orgs/octo/rulesets/44', result: { stdout: JSON.stringify({ id: 44, bypass_actors: [] }) } },
+    classicRoute('absent'),
+    ...existenceRoutes(),
+  ]);
+  const { host } = makeHost({ gh, git: gitTopologyRoutes() });
+  await host.resolveBase();
+  const report = await host.probe();
+  assert.equal(report.ok, true);
+  assert.ok(gh.calls.some((c) => c[1] === 'orgs/octo/rulesets/44'), 'org ruleset detail must use orgs/{owner}/rulesets/{id}');
+});
+
+test('unknown ruleset source scope → probe fails closed', async () => {
+  const { report } = await probed([
+    repoViewRoute(),
+    rulesRoute([[{ type: 'required_status_checks', ruleset_id: 45, ruleset_source_type: 'Enterprise', parameters: { required_status_checks: [{ context: 'ci' }] } }]]),
+  ]);
+  assert.equal(report.ok, false);
+  if (!report.ok) assert.match(report.detail, /unsupported source/);
 });

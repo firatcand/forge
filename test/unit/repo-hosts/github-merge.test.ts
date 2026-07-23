@@ -327,3 +327,74 @@ test('every gh call in the merge path is --repo scoped to the recorded repo', as
     assert.ok(i > 0 && call[i + 1] === REPO, `pr command must be --repo scoped: ${call.join(' ')}`);
   }
 });
+
+// ─── impl-R1 fix-round additions ─────────────────────────────────────────────
+
+test('REJECTED merge executor promise still runs Phase A; merged → ok (impl-R1 CRIT #1)', async () => {
+  const { host, gh } = await hostWithBase([
+    {
+      match: (a) => a[0] === 'pr' && a[1] === 'merge' && !a.includes('--disable-auto'),
+      result: () => {
+        throw new Error('spawn timeout');
+      },
+    },
+    graphqlRoute(() => graphqlObservation(MERGED_OK)),
+  ]);
+  const out = await host.mergeAtomic(PR, SHA_A);
+  assert.deepEqual(out, { ok: true, merge_commit_sha: SHA_B }, 'rejection must not bypass reconciliation');
+  assert.ok(gh.calls.some((c) => c[1] === 'graphql'), 'Phase A observation ran');
+});
+
+test('REJECTED revoke executor → typed standing_enrollment failure (impl-R1 CRIT #1)', async () => {
+  const { host } = await hostWithBase([
+    mergeCmd({ exitCode: 0 }),
+    {
+      match: (a) => a[0] === 'api' && a[1] === 'graphql' && String(a[3]).includes('dequeuePullRequest'),
+      result: () => {
+        throw new Error('socket hang up');
+      },
+    },
+    graphqlRoute(() => graphqlObservation({ isInMergeQueue: true, mergeQueueEntry: { id: 'q1', state: 'QUEUED' } })),
+  ]);
+  const out = await host.mergeAtomic(PR, SHA_A);
+  assert.equal(out.ok, false);
+  if (!out.ok) assert.match(out.detail, /standing_enrollment.*executor rejected/);
+});
+
+test('Phase B: stale positive then 2 absents → cleanup CONFIRMED, not parked (impl-R1 MAJ #1)', async () => {
+  let dequeued = false;
+  // Phase A reads 0-1: enrolled on read 0. Phase B reads: stale positive, absent, absent.
+  const { host } = await hostWithBase([
+    mergeCmd({ exitCode: 0 }),
+    {
+      match: (a) => a[0] === 'api' && a[1] === 'graphql' && String(a[3]).includes('dequeuePullRequest'),
+      result: () => {
+        dequeued = true;
+        return { stdout: '{"data":{"dequeuePullRequest":{"clientMutationId":null}}}' };
+      },
+    },
+    graphqlRoute((nth) =>
+      nth === 0 || nth === 1
+        ? graphqlObservation({ isInMergeQueue: true, mergeQueueEntry: { id: 'q1', state: 'QUEUED' } })
+        : graphqlObservation({}),
+    ),
+  ]);
+  const out = await host.mergeAtomic(PR, SHA_A);
+  assert.equal(dequeued, true);
+  assert.equal(out.ok, false);
+  if (!out.ok) {
+    assert.equal(out.reason, 'protection_rejected', 'confirmed cleanup → revoked outcome, NOT unconfirmed');
+    assert.match(out.detail, /revoked/);
+  }
+});
+
+test('green checks + right head + SSO/protected-flavored transport stderr → transport (impl-R1 MAJ #2)', async () => {
+  const { host } = await hostWithBase([
+    mergeCmd({ exitCode: 1, stderr: 'error: resource protected by organization SAML enforcement' }),
+    graphqlRoute(() => graphqlObservation({})),
+    checksCmd(['pass']),
+  ]);
+  const out = await host.mergeAtomic(PR, SHA_A);
+  assert.equal(out.ok, false);
+  if (!out.ok) assert.equal(out.reason, 'transport', 'SSO noise must never classify as policy');
+});

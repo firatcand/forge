@@ -181,12 +181,6 @@ export function graphqlRoute(fn: (nth: number) => string): Route {
   };
 }
 
-/** ship record base pre-persisted so recordedRepo() resolves. */
-export async function withPersistedBase(host: GitHubRepoHost, gitRoutes?: Route[]): Promise<void> {
-  // resolveBase persists octo/base via the injected execs.
-  await host.resolveBase();
-}
-
 export function gitTopologyRoutes(pushUrl = `https://github.com/${REPO}.git`, extra: Route[] = []): ScriptedExec {
   return scriptedExec([
     { match: (a) => a[0] === 'config', result: { exitCode: 1 } },

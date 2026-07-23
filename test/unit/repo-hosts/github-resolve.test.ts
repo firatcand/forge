@@ -21,13 +21,10 @@ import {
   REVIEW,
   SHA_B,
   TASK,
-  classicRoute,
-  existenceRoutes,
   forgeDirWithRecord,
   gitTopologyRoutes,
   makeHost,
   repoViewRoute,
-  rulesRoute,
   scriptedExec,
   type Route,
 } from './helpers.ts';
@@ -109,13 +106,15 @@ test('two marked open matches → pr_conflict (ambiguity fails closed)', async (
   );
 });
 
-test('empty set → create; verified read returns the created PR', async () => {
+test('empty set → create; verified read is a SCOPED GET of the created number', async () => {
   const { host, gh } = await resolvedHost([
-    pullsRoute((nth) => (nth === 0 ? [[]] : [[pull(21, 'open', true)]])),
+    pullsRoute([[]]),
     { match: ['pr', 'create'], result: { stdout: `https://github.com/${REPO}/pull/21\n` } },
+    { match: (a) => a[0] === 'api' && a[1] === `repos/${REPO}/pulls/21`, result: { stdout: JSON.stringify(pull(21, 'open', true)) } },
   ]);
   const ref = await host.createOrGetPullRequest(HEAD, 'main');
   assert.equal(ref.number, 21);
+  assert.ok(gh.calls.some((c) => c[1] === `repos/${REPO}/pulls/21`), 'verification targets the parsed number, not a whole-set listing');
   const create = gh.calls.find((c) => c[0] === 'pr' && c[1] === 'create')!;
   assert.ok(create.includes('--repo') && create[create.indexOf('--repo') + 1] === REPO);
   const body = create[create.indexOf('--body') + 1]!;
@@ -126,6 +125,7 @@ test('create success + ALL verification reads stale → parsed create-URL ref re
   const { host } = await resolvedHost([
     pullsRoute([[]]),
     { match: ['pr', 'create'], result: { stdout: `https://github.com/${REPO}/pull/33\n` } },
+    { match: (a) => a[0] === 'api' && a[1] === `repos/${REPO}/pulls/33`, result: { exitCode: 1, stderr: 'HTTP 404' } },
   ]);
   const ref = await host.createOrGetPullRequest(HEAD, 'main');
   assert.deepEqual(ref, { repo: REPO, number: 33, url: `https://github.com/${REPO}/pull/33` });
@@ -234,7 +234,7 @@ test('persisted-base path REJECTS a superseded reviewed binding (fence, R2 #3)',
   });
   await assert.rejects(
     () => host.resolveBase(),
-    (err) => err instanceof OrchestratorError && err.code === 'STALE_ATTEMPT',
+    (err) => err instanceof RepoHostError && err.code === 'binding_conflict',
   );
 });
 
@@ -326,12 +326,67 @@ test('factory: no record + non-github push → null; github push → adapter; au
 
 // ─── Structural billing invariant ────────────────────────────────────────────
 
-test('src/repo-hosts/** imports no harness/model-runner modules (billing invariant)', () => {
+test('src/repo-hosts/** imports no harness/model/process modules (billing invariant)', () => {
   const dir = join(process.cwd(), 'src', 'repo-hosts');
-  const banned = /from '(\.\.\/)+(harnesses|cli\/codex|sync-status)\//;
+  // Any import/require style, either quote character (impl-R1 MIN #2).
+  const bannedModule =
+    /(from\s*|require\s*\(\s*)["'](?:(?:\.\.\/)+(?:harnesses|cli\/codex|sync-status)\/|node:child_process|child_process|execa|cross-spawn|shelljs)["']?/;
   for (const file of readdirSync(dir).filter((f) => f.endsWith('.ts'))) {
     const src = readFileSync(join(dir, file), 'utf8');
-    assert.ok(!banned.test(src), `${file} must not import harness/model modules`);
-    assert.ok(!/execa/.test(src), `${file} must not spawn processes directly — executors are injected`);
+    assert.ok(!bannedModule.test(src), `${file} must not import harness/model/process modules`);
+    assert.ok(!/\bexeca\b|(?<![.\w])spawn(Sync)?\s*\(|(?<![.\w])exec(Sync)?\s*\(/.test(src), `${file} must not spawn processes — executors are injected`);
   }
+});
+
+// ─── impl-R1 fix-round additions ─────────────────────────────────────────────
+
+test('same-base replay re-validates UNDER the CAS marker: binding swapped between calls → conflict (impl-R1 MAJ #3)', () => {
+  const fd = forgeDirWithRecord();
+  const opts = { base: BASE, expectedReviewAttemptId: REVIEW.attemptId, expectedReviewedHeadSha: REVIEW.headSha, holder: HOLDER };
+  upsertBaseResolution(fd, TASK, opts);
+  // The reviewed binding is replaced (drift → re-review) — the replay caller
+  // still expects the OLD binding and must conflict, not report success.
+  upsertReviewedBinding(fd, TASK, { reviewedHeadSha: SHA_B, reviewAttemptId: 'attempt-r2', holder: HOLDER });
+  assert.throws(
+    () => upsertBaseResolution(fd, TASK, opts),
+    (err: unknown) => err instanceof OrchestratorError && err.code === 'STALE_ATTEMPT',
+  );
+});
+
+test('FakeRepoHost accepts the additive tainted_merge and pr_closed outcomes', async () => {
+  const { FakeRepoHost } = await import('../../../src/repo-hosts/fake.ts');
+  const tainted = new FakeRepoHost({
+    mergeAttempt: { ok: false, reason: 'tainted_merge', detail: 'merged head mismatch' },
+  });
+  const pr = { repo: REPO, number: 1, url: `https://github.com/${REPO}/pull/1` };
+  const out1 = await tainted.mergeAtomic(pr, 'a'.repeat(40));
+  assert.equal(!out1.ok && out1.reason, 'tainted_merge');
+  const closed = new FakeRepoHost({
+    mergeAttempt: { ok: false, reason: 'pr_closed', detail: 'pr_closed_unmerged' },
+  });
+  const out2 = await closed.mergeAtomic(pr, 'a'.repeat(40));
+  assert.equal(!out2.ok && out2.reason, 'pr_closed');
+});
+
+test('factory activates via head-branch pushRemote when origin is NOT github (impl-R1 MAJ #4)', async () => {
+  const fd = forgeDirWithRecord();
+  const gh = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  const git = scriptedExec([
+    { match: (a) => a[0] === 'config' && a[2] === `branch.${HEAD}.pushRemote`, result: { stdout: 'gh-remote\n' } },
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote' && a.includes('gh-remote'), result: { stdout: `https://github.com/${REPO}.git\n` } },
+  ]);
+  const host = await createGitHubRepoHost(factoryBase(gh, git, fd));
+  assert.ok(host !== null, 'branch.<head>.pushRemote pointing at github.com must activate');
+  assert.ok(!git.calls.some((c) => c.includes('origin')), 'origin must not be consulted when pushRemote wins');
+});
+
+test('factory: mixed push URLs (one non-github) → null (impl-R1 MAJ #4)', async () => {
+  const fd = forgeDirWithRecord();
+  const gh = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  const git = scriptedExec([
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\nhttps://gitlab.com/o/r.git\n` } },
+  ]);
+  assert.equal(await createGitHubRepoHost(factoryBase(gh, git, fd)), null);
 });

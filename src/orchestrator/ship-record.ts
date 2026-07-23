@@ -7,7 +7,12 @@
 
 import { lstatSync, readFileSync } from 'node:fs';
 import { CasError, OrchestratorError } from '../core/errors.ts';
-import { casGuardedWrite, type CasHolderIdentity } from '../core/fs-atomic.ts';
+import {
+  acquireCasMarker,
+  casGuardedWrite,
+  releaseCasMarker,
+  type CasHolderIdentity,
+} from '../core/fs-atomic.ts';
 import { ShipRecordSchema, type ShipRecord } from '../schemas/ship-record.ts';
 import { shipRecordFilePath } from './questions/paths.ts';
 
@@ -201,9 +206,36 @@ export function upsertBaseResolution(
     validateBinding(current);
     if (current.base !== null) {
       if (sameBase(current.base, opts.base)) {
-        // Replay — the write-ahead already committed. Fence still runs.
-        opts.fence?.();
-        return current;
+        // Replay — but validated UNDER the CAS marker (impl-R1 MAJ #3): a
+        // concurrent reviewed-binding writer between the unguarded read and
+        // return would otherwise let a stale caller report replay success.
+        const held = acquireCasMarker(
+          shipRecordFilePath(forgeDir, taskId),
+          current.revision,
+          opts.holder,
+          revisionOf,
+        );
+        try {
+          if (held.raw === null) {
+            throw new OrchestratorError('STATE_NOT_FOUND', `ship record for task ${taskId} vanished during replay`, { taskId });
+          }
+          const reread = ShipRecordSchema.safeParse(JSON.parse(held.raw));
+          if (!reread.success) {
+            throw new OrchestratorError('SCHEMA_INVALID', `ship record for task ${taskId} failed schema validation`, { taskId });
+          }
+          validateBinding(reread.data);
+          if (reread.data.base === null || !sameBase(reread.data.base, opts.base)) {
+            throw new OrchestratorError(
+              'STATE_VERSION_CONFLICT',
+              `ship record for task ${taskId} changed during replay validation`,
+              { taskId },
+            );
+          }
+          opts.fence?.();
+          return reread.data;
+        } finally {
+          releaseCasMarker(held);
+        }
       }
       throw new OrchestratorError(
         'STATE_VERSION_CONFLICT',
