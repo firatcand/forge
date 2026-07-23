@@ -146,3 +146,118 @@ export function upsertReviewedBinding(
     throw new OrchestratorError('IO_ERROR', `ship record write failed for task ${taskId}`, { taskId, cause: err });
   }
 }
+export interface BaseResolutionBinding {
+  repo: string;
+  branch: string;
+  push_remote: string;
+}
+
+export interface BaseResolutionOptions {
+  base: BaseResolutionBinding;
+  /** The reviewed binding this base belongs to — a superseded attempt must not write. */
+  expectedReviewAttemptId: string;
+  expectedReviewedHeadSha: string;
+  holder: CasHolderIdentity;
+  fence?: () => void;
+}
+
+function sameBase(a: BaseResolutionBinding, b: BaseResolutionBinding): boolean {
+  return a.repo === b.repo && a.branch === b.branch && a.push_remote === b.push_remote;
+}
+
+// FORGE-232: the base-resolution write-ahead (plan v3 §upsertBaseResolution).
+// NEVER creates the record — base resolution cannot mint the trusted reviewed
+// binding (Codex plan R2 #3). The only legal mutation is base:null → base;
+// the same base is replay success (fence + binding validation still run); a
+// different stored base or a reviewed-binding mismatch is a hard conflict —
+// the durable PR identity is never retargeted by replay.
+export function upsertBaseResolution(
+  forgeDir: string,
+  taskId: string,
+  opts: BaseResolutionOptions,
+): ShipRecord {
+  const validateBinding = (current: ShipRecord): void => {
+    if (
+      current.review_attempt_id !== opts.expectedReviewAttemptId ||
+      current.reviewed_head_sha !== opts.expectedReviewedHeadSha
+    ) {
+      throw new OrchestratorError(
+        'STALE_ATTEMPT',
+        `ship record for task ${taskId} is bound to a different reviewed attempt — this base resolution is superseded and must not be written`,
+        { taskId, attemptId: opts.expectedReviewAttemptId },
+      );
+    }
+  };
+
+  const attempt = (): ShipRecord => {
+    const current = readShipRecord(forgeDir, taskId);
+    if (current === null) {
+      throw new OrchestratorError(
+        'STATE_NOT_FOUND',
+        `no ship record for task ${taskId} — base resolution never creates it (the reviewed binding must be minted first)`,
+        { taskId },
+      );
+    }
+    validateBinding(current);
+    if (current.base !== null) {
+      if (sameBase(current.base, opts.base)) {
+        // Replay — the write-ahead already committed. Fence still runs.
+        opts.fence?.();
+        return current;
+      }
+      throw new OrchestratorError(
+        'STATE_VERSION_CONFLICT',
+        `ship record for task ${taskId} already holds a DIFFERENT base resolution — never overwritten`,
+        { taskId },
+      );
+    }
+    const next: ShipRecord = {
+      ...current,
+      revision: current.revision + 1,
+      base: { ...opts.base },
+      updated_at: new Date().toISOString(),
+    };
+    const validated = ShipRecordSchema.safeParse(next);
+    if (!validated.success) {
+      throw new OrchestratorError('SCHEMA_INVALID', `ship record for task ${taskId} failed schema validation`, {
+        taskId,
+        zodError: validated.error.message,
+      });
+    }
+    casGuardedWrite({
+      filePath: shipRecordFilePath(forgeDir, taskId),
+      expectedVersion: current.revision,
+      holder: opts.holder,
+      readVersion: revisionOf,
+      fence: opts.fence,
+      buildContent: () => JSON.stringify(validated.data),
+    });
+    return validated.data;
+  };
+
+  try {
+    return attempt();
+  } catch (err) {
+    if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
+      // Accept ONLY an exact same-base, same-binding concurrent commit.
+      const current = readShipRecord(forgeDir, taskId);
+      if (
+        current !== null &&
+        current.review_attempt_id === opts.expectedReviewAttemptId &&
+        current.reviewed_head_sha === opts.expectedReviewedHeadSha &&
+        current.base !== null &&
+        sameBase(current.base, opts.base)
+      ) {
+        opts.fence?.();
+        return current;
+      }
+      throw new OrchestratorError(
+        'STATE_VERSION_CONFLICT',
+        `ship record for task ${taskId} changed concurrently`,
+        { taskId, cause: err },
+      );
+    }
+    if (err instanceof OrchestratorError) throw err;
+    throw new OrchestratorError('IO_ERROR', `ship record write failed for task ${taskId}`, { taskId, cause: err });
+  }
+}

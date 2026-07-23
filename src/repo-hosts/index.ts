@@ -19,3 +19,9 @@ export type {
 } from './types.ts';
 export { FakeRepoHost } from './fake.ts';
 export type { FakeRepoHostScript, FakeRepoHostCall } from './fake.ts';
+export { GitHubRepoHost, evaluateProbeBar, parseGitHubUrl } from './github.ts';
+export type { Exec, ExecResult, GitHubRepoHostOptions } from './github.ts';
+export { createGitHubRepoHost } from './detect.ts';
+export type { CreateGitHubRepoHostOptions } from './detect.ts';
+export { RepoHostError } from './errors.ts';
+export type { RepoHostErrorCode } from './errors.ts';
