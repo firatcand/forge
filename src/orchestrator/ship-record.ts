@@ -267,29 +267,25 @@ export function upsertBaseResolution(
     return validated.data;
   };
 
-  try {
-    return attempt();
-  } catch (err) {
-    if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
-      // Accept ONLY an exact same-base, same-binding concurrent commit.
-      const current = readShipRecord(forgeDir, taskId);
-      if (
-        current !== null &&
-        current.review_attempt_id === opts.expectedReviewAttemptId &&
-        current.reviewed_head_sha === opts.expectedReviewedHeadSha &&
-        current.base !== null &&
-        sameBase(current.base, opts.base)
-      ) {
-        opts.fence?.();
-        return current;
+  // impl-R2 MAJ #1: CAS-conflict recovery NEVER accepts through an unguarded
+  // read — a reviewed-binding writer holding the marker may be about to
+  // supersede the binding this caller validated. Recovery re-runs the full
+  // marker-held path once (its replay branch revalidates UNDER the marker);
+  // a second conflict is a hard conflict.
+  for (let round = 0; ; round += 1) {
+    try {
+      return attempt();
+    } catch (err) {
+      if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
+        if (round === 0) continue;
+        throw new OrchestratorError(
+          'STATE_VERSION_CONFLICT',
+          `ship record for task ${taskId} changed concurrently`,
+          { taskId, cause: err },
+        );
       }
-      throw new OrchestratorError(
-        'STATE_VERSION_CONFLICT',
-        `ship record for task ${taskId} changed concurrently`,
-        { taskId, cause: err },
-      );
+      if (err instanceof OrchestratorError) throw err;
+      throw new OrchestratorError('IO_ERROR', `ship record write failed for task ${taskId}`, { taskId, cause: err });
     }
-    if (err instanceof OrchestratorError) throw err;
-    throw new OrchestratorError('IO_ERROR', `ship record write failed for task ${taskId}`, { taskId, cause: err });
   }
 }

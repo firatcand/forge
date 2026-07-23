@@ -3,7 +3,7 @@
 // upsertBaseResolution fencing (R2 #3), structural billing invariant.
 
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { OrchestratorError } from '../../../src/core/errors.ts';
@@ -306,14 +306,15 @@ test('factory: persisted base is authoritative — remote swapped to GitLab stil
 });
 
 test('factory: no record + non-github push → null; github push → adapter; auth is --hostname scoped', async () => {
+  const unsetConfig = { match: (a: readonly string[]) => a[0] === 'config', result: { exitCode: 1 } };
   const fd1 = forgeDirWithRecord();
   const gh1 = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
-  const git1 = scriptedExec([{ match: (a) => a[0] === 'remote', result: { stdout: 'https://gitlab.com/o/r.git\n' } }]);
+  const git1 = scriptedExec([unsetConfig, { match: (a) => a[0] === 'remote', result: { stdout: 'https://gitlab.com/o/r.git\n' } }]);
   assert.equal(await createGitHubRepoHost(factoryBase(gh1, git1, fd1)), null);
 
   const fd2 = forgeDirWithRecord();
   const gh2 = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
-  const git2 = scriptedExec([{ match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } }]);
+  const git2 = scriptedExec([unsetConfig, { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } }]);
   const host = await createGitHubRepoHost(factoryBase(gh2, git2, fd2));
   assert.ok(host !== null);
   const auth = gh2.calls.find((c) => c[0] === 'auth')!;
@@ -389,4 +390,98 @@ test('factory: mixed push URLs (one non-github) → null (impl-R1 MAJ #4)', asyn
     { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\nhttps://gitlab.com/o/r.git\n` } },
   ]);
   assert.equal(await createGitHubRepoHost(factoryBase(gh, git, fd)), null);
+});
+
+// ─── impl-R2 fix-round additions ─────────────────────────────────────────────
+
+test('CAS-conflict recovery retries the MARKER-HELD path, never accepts via unguarded read (impl-R2 MAJ #1)', () => {
+  const fd = forgeDirWithRecord();
+  const opts = { base: BASE, expectedReviewAttemptId: REVIEW.attemptId, expectedReviewedHeadSha: REVIEW.headSha, holder: HOLDER };
+  upsertBaseResolution(fd, TASK, opts);
+  // A contending writer holds the record's CAS marker: the replay's marker
+  // acquisition conflicts. Recovery must retry the guarded path (which then
+  // also conflicts) and surface STATE_VERSION_CONFLICT — NOT succeed through
+  // an unguarded read while the writer is mid-flight.
+  const record = readShipRecord(fd, TASK)!;
+  const markerPath = join(fd, 'orchestrator', 'tasks', TASK, `ship-record.json.cas-${record.revision}`);
+  writeFileSync(markerPath, JSON.stringify({ run_id: 'other', claim_id: 'other', generation: 9, pid: 1, token: 't' }), 'utf8');
+  try {
+    assert.throws(
+      () => upsertBaseResolution(fd, TASK, opts),
+      (err: unknown) => err instanceof OrchestratorError && err.code === 'STATE_VERSION_CONFLICT',
+    );
+  } finally {
+    rmSync(markerPath, { force: true });
+  }
+});
+
+test('git config execution FAILURE (exit 128 / rejection) fails topology closed — never treated as unset (impl-R2 MAJ #2)', async () => {
+  // exit 128 on the pushRemote lookup: must NOT fall through to origin.
+  const git128 = scriptedExec([
+    { match: (a) => a[0] === 'config' && a[2] === `branch.${HEAD}.pushRemote`, result: { exitCode: 128, stderr: 'fatal: bad config' } },
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } },
+  ]);
+  const { host: h1 } = makeHost({ gh: scriptedExec([repoViewRoute()]), git: git128 });
+  await assert.rejects(
+    () => h1.resolveBase(),
+    (err) => err instanceof RepoHostError && err.code === 'unsupported_host',
+  );
+
+  // rejected config executor: factory must return null, not activate via origin.
+  const fd = forgeDirWithRecord();
+  const gh = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  const gitRej = scriptedExec([
+    {
+      match: (a) => a[0] === 'config' && a[2] === `branch.${HEAD}.pushRemote`,
+      result: () => {
+        throw new Error('spawn EAGAIN');
+      },
+    },
+    { match: (a) => a[0] === 'config', result: { exitCode: 1 } },
+    { match: (a) => a[0] === 'remote', result: { stdout: `https://github.com/${REPO}.git\n` } },
+  ]);
+  assert.equal(await createGitHubRepoHost(factoryBase(gh, gitRej, fd)), null);
+});
+
+test('probe NEVER rejects: corrupt ship record composes a fail-closed report (impl-R2 MAJ #3)', async () => {
+  const gh = scriptedExec([repoViewRoute()]);
+  const { host, forgeDir } = makeHost({ gh, git: gitTopologyRoutes() });
+  await host.resolveBase();
+  writeFileSync(join(forgeDir, 'orchestrator', 'tasks', TASK, 'ship-record.json'), 'corrupt{', 'utf8');
+  const report = await host.probe();
+  assert.equal(report.ok, false);
+  if (!report.ok) assert.equal(report.reason, 'transport');
+});
+
+test('factory: rejected gh auth executor → null; corrupt record → typed schema error (impl-R2 MAJ #3)', async () => {
+  const fd1 = forgeDirWithRecord();
+  const ghRej = scriptedExec([
+    {
+      match: ['auth', 'status'],
+      result: () => {
+        throw new Error('spawn timeout');
+      },
+    },
+  ]);
+  assert.equal(await createGitHubRepoHost(factoryBase(ghRej, scriptedExec([]), fd1)), null);
+
+  const fd2 = forgeDirWithRecord();
+  writeFileSync(join(fd2, 'orchestrator', 'tasks', TASK, 'ship-record.json'), 'corrupt{', 'utf8');
+  const gh2 = scriptedExec([{ match: ['auth', 'status'], result: { exitCode: 0 } }]);
+  await assert.rejects(
+    () => createGitHubRepoHost(factoryBase(gh2, scriptedExec([]), fd2)),
+    (err) => err instanceof RepoHostError && err.code === 'schema',
+  );
+});
+
+test('verified create read naming a DIFFERENT number cannot substitute the PR (impl-R2 MIN #1)', async () => {
+  const { host } = await resolvedHost([
+    pullsRoute([[]]),
+    { match: ['pr', 'create'], result: { stdout: `https://github.com/${REPO}/pull/50\n` } },
+    // Malformed backend: /pulls/50 returns PR 51 with matching marker/refs.
+    { match: (a) => a[0] === 'api' && a[1] === `repos/${REPO}/pulls/50`, result: { stdout: JSON.stringify(pull(51, 'open', true)) } },
+  ]);
+  const ref = await host.createOrGetPullRequest(HEAD, 'main');
+  assert.equal(ref.number, 50, 'the URL-derived identity wins; the mismatched payload is ignored');
 });

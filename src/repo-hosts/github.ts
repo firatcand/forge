@@ -96,31 +96,48 @@ export function parseGitHubUrl(url: string): { host: string; repo: string } | nu
   return null;
 }
 
-// Effective push destination per git's precedence for the HEAD branch:
+// Effective push topology per git's precedence for the HEAD branch:
 // branch.<head>.pushRemote → remote.pushDefault → branch.<head>.remote →
 // origin; then ALL push URLs of that remote (git pushes to every one).
-// Shared by the adapter's resolveBase() and the factory's activation gate
-// (impl-R1 MAJ #4). Returns null when the remote's URLs cannot be read.
-export async function resolveEffectivePushUrls(
+// Resolved in ONE pass (impl-R2 MAJ #2) — remote name and URLs can never
+// come from different reads. `git config --get` exit 1 is the documented
+// "key unset" result and advances precedence; ANY other failure (exit >1,
+// executor rejection) is NOT evidence of absence and fails closed (null).
+export interface PushTopology {
+  remote: string;
+  urls: string[];
+}
+
+export async function resolveEffectivePushTopology(
   git: Exec,
   headBranch: string,
-): Promise<string[] | null> {
-  const config = async (key: string): Promise<string | null> => {
+): Promise<PushTopology | null> {
+  const config = async (key: string): Promise<{ ok: true; value: string | null } | { ok: false }> => {
     let res: ExecResult;
     try {
       res = await git(['config', '--get', key]);
     } catch {
-      return null;
+      return { ok: false };
     }
-    if (res.exitCode !== 0) return null;
-    const v = res.stdout.trim();
-    return v.length > 0 ? v : null;
+    if (res.exitCode === 0) {
+      const v = res.stdout.trim();
+      return { ok: true, value: v.length > 0 ? v : null };
+    }
+    if (res.exitCode === 1) return { ok: true, value: null }; // documented: key unset
+    return { ok: false };
   };
-  const remote =
-    (await config(`branch.${headBranch}.pushRemote`)) ??
-    (await config('remote.pushDefault')) ??
-    (await config(`branch.${headBranch}.remote`)) ??
-    'origin';
+
+  let remote: string | null = null;
+  for (const key of [`branch.${headBranch}.pushRemote`, 'remote.pushDefault', `branch.${headBranch}.remote`]) {
+    const r = await config(key);
+    if (!r.ok) return null; // execution failure ≠ unset — fail closed
+    if (r.value !== null) {
+      remote = r.value;
+      break;
+    }
+  }
+  remote = remote ?? 'origin';
+
   let urlsRes: ExecResult;
   try {
     urlsRes = await git(['remote', 'get-url', '--push', '--all', remote]);
@@ -132,28 +149,7 @@ export async function resolveEffectivePushUrls(
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
-  return urls;
-}
-
-// Remote NAME per the same precedence (persisted into the ship record).
-export async function resolveEffectivePushRemote(git: Exec, headBranch: string): Promise<string> {
-  const config = async (key: string): Promise<string | null> => {
-    let res: ExecResult;
-    try {
-      res = await git(['config', '--get', key]);
-    } catch {
-      return null;
-    }
-    if (res.exitCode !== 0) return null;
-    const v = res.stdout.trim();
-    return v.length > 0 ? v : null;
-  };
-  return (
-    (await config(`branch.${headBranch}.pushRemote`)) ??
-    (await config('remote.pushDefault')) ??
-    (await config(`branch.${headBranch}.remote`)) ??
-    'origin'
-  );
+  return { remote, urls };
 }
 
 export class GitHubRepoHost implements RepoHost {
@@ -205,8 +201,27 @@ export class GitHubRepoHost implements RepoHost {
     return validated.data;
   }
 
+  // impl-R2 MAJ #3: every ship-record read at the adapter boundary maps to
+  // RepoHostError — a truncated/corrupt record must surface as 'schema', an
+  // I/O failure as 'transport', never a leaked OrchestratorError/SyntaxError.
+  private readRecordSafe(): ReturnType<typeof readShipRecord> {
+    try {
+      return readShipRecord(this.o.forgeDir, this.o.taskId);
+    } catch (err) {
+      if (err instanceof OrchestratorError && err.code === 'SCHEMA_INVALID') {
+        throw new RepoHostError('schema', err.message, { taskId: this.o.taskId }, { cause: err });
+      }
+      throw new RepoHostError(
+        'transport',
+        `ship record unreadable for task ${this.o.taskId}`,
+        { taskId: this.o.taskId },
+        { cause: err },
+      );
+    }
+  }
+
   private recordedRepo(): string {
-    const record = readShipRecord(this.o.forgeDir, this.o.taskId);
+    const record = this.readRecordSafe();
     if (record?.base) return record.base.repo;
     throw new RepoHostError(
       'record_missing',
@@ -218,7 +233,7 @@ export class GitHubRepoHost implements RepoHost {
   // ─── resolveBase (plan v3; R2 #3 #4) ───────────────────────────────────────
 
   async resolveBase(): Promise<BaseResolution> {
-    const record = readShipRecord(this.o.forgeDir, this.o.taskId);
+    const record = this.readRecordSafe();
     if (record?.base) {
       // Persisted-first WITH fence: route through the fenced replay so a stale
       // attempt with a superseded reviewed binding gets the typed conflict,
@@ -234,11 +249,11 @@ export class GitHubRepoHost implements RepoHost {
       GhRepoViewSchema,
       'repo view',
     );
-    const pushRemote = await resolveEffectivePushRemote(this.git.bind(this), this.o.headBranch);
-    const pushUrls = await resolveEffectivePushUrls(this.git.bind(this), this.o.headBranch);
-    if (pushUrls === null) {
-      throw new RepoHostError('unsupported_host', 'cannot resolve effective push URLs', {});
+    const topology = await resolveEffectivePushTopology(this.git.bind(this), this.o.headBranch);
+    if (topology === null) {
+      throw new RepoHostError('unsupported_host', 'cannot resolve the effective push topology', {});
     }
+    const { remote: pushRemote, urls: pushUrls } = topology;
     if (pushUrls.length === 0) {
       throw new RepoHostError('unsupported_host', `remote ${pushRemote} has no push URL`, {});
     }
@@ -322,18 +337,25 @@ export class GitHubRepoHost implements RepoHost {
     try {
       return await this.probeInner();
     } catch (err) {
+      // The probe ALWAYS composes its failure union (impl-R2 MAJ #3) — a
+      // thrown error of any shape becomes a fail-closed report, never a
+      // rejection the consumer has to distinguish.
       if (err instanceof RepoHostError) {
         const reason =
           err.code === 'transport' ? 'transport' : err.code === 'schema' ? 'transport' : 'unsupported_host';
         return { ok: false, reason, detail: err.message.slice(0, 2000) };
       }
-      throw err;
+      return {
+        ok: false,
+        reason: 'transport',
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 2000),
+      };
     }
   }
 
   private async probeInner(): Promise<ProbeReport> {
     const repo = this.recordedRepo();
-    const branchRaw = readShipRecord(this.o.forgeDir, this.o.taskId)!.base!.branch;
+    const branchRaw = this.readRecordSafe()!.base!.branch;
     const branch = encodeURIComponent(branchRaw);
 
     // (a) repo-level: squash method + permissions.
@@ -536,11 +558,15 @@ export class GitHubRepoHost implements RepoHost {
             const pullParsed = GhRestPullSchema.safeParse(pullRaw);
             if (
               pullParsed.success &&
+              pullParsed.data.number === ref.number &&
               pullParsed.data.head.ref === head &&
               pullParsed.data.base.ref === base &&
               (pullParsed.data.body ?? '').includes(marker)
             ) {
-              return this.validateRef({ repo, number: pullParsed.data.number, url: pullParsed.data.html_url });
+              // Payload verified AGAINST the URL-derived identity (impl-R2
+              // MIN #1) — a malformed response for /pulls/N naming another
+              // number can never substitute a different PR.
+              return ref;
             }
           } catch {
             // fall through to retry / ΔB fallback
