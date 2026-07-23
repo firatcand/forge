@@ -71,11 +71,25 @@ export const MergeResultSchema = z.discriminatedUnion('merged', [
 ]);
 export type MergeResult = z.infer<typeof MergeResultSchema>;
 
+// FORGE-232 additive reason extensions (pre-consumer; FakeRepoHost validates
+// through this same schema): 'tainted_merge' = the PR merged but with a head
+// OTHER than the pinned expected SHA (detail carries both SHAs — the consumer
+// enters tainted-merge handling, never `shipped`); 'pr_closed' = the PR is
+// closed-unmerged or missing (spec's closed-without-merge parking rule needs a
+// signal distinguishable from head_drift, which would re-dispatch review).
 export const MergeAttemptOutcomeSchema = z.discriminatedUnion('ok', [
   z.object({ ok: z.literal(true), merge_commit_sha: Sha }),
   z.object({
     ok: z.literal(false),
-    reason: z.enum(['head_drift', 'checks_not_green', 'protection_rejected', 'transport', 'unsupported']),
+    reason: z.enum([
+      'head_drift',
+      'checks_not_green',
+      'protection_rejected',
+      'transport',
+      'unsupported',
+      'tainted_merge',
+      'pr_closed',
+    ]),
     detail: z.string().max(2000),
   }),
 ]);
