@@ -59,7 +59,7 @@ export type GcPlanRow =
   | (GcPlanRowBase & {
       readonly action: 'mark_terminal';
       readonly payload: {
-        readonly targetState: TerminalTaskState | 'shipped';
+        readonly targetState: TerminalTaskState;
         readonly leaseIdentity: LeaseIdentity;
         readonly trackerState?: string;
       };
@@ -126,6 +126,8 @@ export type GcPlanRow =
           // FORGE-231: tracker-done divergence (row 6 — never auto-shipped)
           // and stuck CAS transition markers (report + manual remediation).
           | 'tracker_done_not_shipped'
+          // FORGE-233: row-1 report-only replacement for tracker done/closed
+          | 'tracker_claims_shipped'
           | 'stuck_cas_marker';
         readonly description: string;
       };
@@ -250,6 +252,23 @@ function detectRow1(s: OrchestratorSnapshot): GcPlanRow[] {
     if (task.state?.state !== 'running') continue;
     const issue = findTrackerIssueForTask(s, taskId, task.state);
     if (!issue) continue;
+    const lower = issue.state.toLowerCase();
+    // FORGE-233: tracker done/closed is NEVER merge proof — the divergence is
+    // REPORT-ONLY (surfaced for the operator; proof-backed promotion is
+    // FORGE-235). Only cancellation remains an actionable terminal mapping.
+    if (lower.includes('done') || lower.includes('closed')) {
+      rows.push({
+        rowId: 1,
+        taskId,
+        severity: 'warn',
+        action: 'report_orphan',
+        payload: {
+          kind: 'tracker_claims_shipped',
+          description: `tracker says '${issue.state}' while the task is running locally — tracker status is not merge proof; resolve manually (never auto-shipped)`,
+        },
+      });
+      continue;
+    }
     const targetState = mapTrackerToTerminal(issue.state);
     if (!targetState) continue;
     const lease = task.leases.find((l) => l.isCanonical);
@@ -765,11 +784,13 @@ function findTrackerIssueForTask(
   return undefined;
 }
 
-function mapTrackerToTerminal(trackerState: string): TerminalTaskState | 'shipped' | null {
+// FORGE-233: tracker done/closed is NEVER merge proof (ORCHESTRATOR:880) —
+// row 1 no longer maps it to 'shipped'; only cancellation remains actionable.
+// A tracker-done divergence is REPORT-ONLY (row-6 family); the proof-backed
+// merge_pending→shipped promotion arrives with FORGE-235's reconciliation.
+function mapTrackerToTerminal(trackerState: string): TerminalTaskState | null {
   const lower = trackerState.toLowerCase();
-  if (lower.includes('done')) return 'shipped';
   if (lower.includes('cancel')) return 'cancelled';
-  if (lower.includes('closed')) return 'shipped';
   return null;
 }
 

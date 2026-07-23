@@ -165,6 +165,31 @@ export class GitHubRepoHost implements RepoHost {
     this.delay = opts.pollDelayMs ?? 2000;
   }
 
+  // FORGE-233: observation-only construction — mergeResult()/headSha() need
+  // nothing but the gh executor (they operate on an explicit PullRequestRef).
+  // Mutation-context fields are inert sentinels and the git executor FAILS
+  // CLOSED, so no mutating method can acquire write authority through this
+  // path (Codex FORGE-233 plan R1 #4).
+  static forObservation(opts: { gh: Exec; forgeDir: string; taskId: string }): GitHubRepoHost {
+    const failClosedGit: Exec = async () => ({
+      stdout: '',
+      stderr: 'observation-only host: git execution is not available',
+      exitCode: 254,
+    });
+    return new GitHubRepoHost({
+      gh: opts.gh,
+      git: failClosedGit,
+      worktreePath: '',
+      taskId: opts.taskId,
+      forgeDir: opts.forgeDir,
+      baseBranch: '',
+      headBranch: '',
+      reviewBinding: { attemptId: 'observation-only', headSha: '0'.repeat(40) },
+      holder: { run_id: 'observation-only', claim_id: 'observation-only', generation: 0 },
+      pollDelayMs: 0,
+    });
+  }
+
   // ─── helpers ───────────────────────────────────────────────────────────────
 
   // CRIT impl-R1 #1: a REJECTED executor promise (timeout/spawn wrapper) must

@@ -211,6 +211,7 @@ export type OrchestratorErrorCode =
   | 'INVALID_ID'            // task_id / attempt_id failed segment validation
   | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries
   | 'DECISION_KEY_EXHAUSTED' // worker question-channel budget for a decision_key hit; do not retry
+  | 'DEPS_NOT_MERGED'       // FORGE-233: SHIP refused — a depends_on task lacks live merge proof
   | 'IO_ERROR';             // unexpected filesystem error
 
 export interface OrchestratorErrorDetails {

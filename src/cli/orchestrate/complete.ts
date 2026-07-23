@@ -49,6 +49,8 @@ import {
   type VerifyResult,
 } from '../../orchestrator/verify-runner.ts';
 import { emit, fail, ok } from '../envelope.ts';
+import { runShipDependencyGate } from './dispatch.ts';
+import type { DependencyObserver } from '../../orchestrator/dependency-gate.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
@@ -56,7 +58,7 @@ import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateComplete(
   args: CompleteArgs,
-  deps: { run?: RunCommand } = {},
+  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null> } = {},
 ): Promise<{ exitCode: number }> {
   const parsed = CompleteArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -668,6 +670,17 @@ export async function runOrchestrateComplete(
           ),
         };
       }
+    }
+  }
+
+  // 2c. FORGE-233 (impl-R1 MAJ #4): the SHIP dependency gate runs BEFORE any
+  //     artifact publication — a refused completion must leave NO verdict
+  //     files and NO attempt_completed event behind (a later legitimate
+  //     completion would collide with prematurely published identity).
+  if (opts.phase === 'ship' && verdict.data.verdict === 'ready_for_review') {
+    const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
+    if (!gate.ok) {
+      return { exitCode: emit(gate.failure, { json: opts.json }) };
     }
   }
 

@@ -9,6 +9,10 @@
 import path from 'node:path';
 
 import { loadPhases, resolvePhasesYaml } from '../../core/phases.ts';
+import { evaluateShipDependencyGate, type DependencyObserver } from '../../orchestrator/dependency-gate.ts';
+import type { DependencyGateReport } from '../../schemas/dependency-gate.ts';
+import { createDependencyObserver } from '../../repo-hosts/detect.ts';
+import { ghExec } from './gh-exec.ts';
 import { PhasesError } from '../../core/errors.ts';
 import { loadSettings } from '../../core/settings.ts';
 import type { Phases, Task } from '../../schemas/phases.ts';
@@ -119,7 +123,10 @@ function buildPhasesParseFailure(err: unknown): ReturnType<typeof fail> {
   );
 }
 
-export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode: number }> {
+export async function runOrchestratePhases(
+  args: PhasesArgs,
+  deps: { observerFor?: (depStateId: string) => Promise<DependencyObserver | null> } = {},
+): Promise<{ exitCode: number }> {
   const parsed = PhasesArgsSchema.safeParse(args);
   if (!parsed.success) {
     return {
@@ -194,6 +201,11 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
   }
 
   const candidates: Array<{ task: Task; phaseId: string }> = [];
+  // FORGE-233: ship candidates pass through the dependency-merge gate; the
+  // unsatisfied ones surface with their machine-readable reports (read-only,
+  // suggest-don't-force — the skill shows WHY a reviewed task can't ship).
+  const shipGateCandidates: Array<{ task: Task; phaseId: string }> = [];
+  const blockedOnDeps: Array<{ task_id: string; dependency_gate: DependencyGateReport }> = [];
   // FORGE-177: ready human-owned tasks are collected separately so the dispatch
   // loop never claims them, but they remain queue-visible as manual checkpoints.
   const humanCheckpoints: HumanCheckpointOut[] = [];
@@ -211,6 +223,10 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
       const ids = new Set(inState.map((t) => t.taskId));
       const candidateId = task.tracker_issue_id ?? task.id;
       if (!ids.has(candidateId) && !ids.has(task.id)) continue;
+      if (opts.phase === 'ship') {
+        shipGateCandidates.push({ task, phaseId });
+        continue;
+      }
       candidates.push({ task, phaseId });
       continue;
     }
@@ -247,6 +263,24 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
     };
   } catch {
     hardLockGlobs = undefined;
+  }
+
+  if (shipGateCandidates.length > 0) {
+    const allTasks = phases.phases.flatMap((ph) => ph.tasks);
+    for (const cand of shipGateCandidates) {
+      const report = await evaluateShipDependencyGate({
+        forgeDir: opts.forgeDir,
+        taskId: cand.task.tracker_issue_id ?? cand.task.id,
+        tasks: allTasks,
+        observerFor:
+          deps.observerFor ?? ((depId) => createDependencyObserver(opts.forgeDir, depId, ghExec)),
+      });
+      if (report.satisfied) {
+        candidates.push(cand);
+      } else {
+        blockedOnDeps.push({ task_id: cand.task.tracker_issue_id ?? cand.task.id, dependency_gate: report });
+      }
+    }
   }
 
   const retryEligible = candidates.filter(({ task }) => {
@@ -290,6 +324,7 @@ export async function runOrchestratePhases(args: PhasesArgs): Promise<{ exitCode
     tasks: limited,
     overlap_check: 'enabled',
     human_checkpoints: humanCheckpoints,
+    ...(opts.phase === 'ship' ? { blocked_on_deps: blockedOnDeps } : {}),
     // FORGE-149: opt-in. Field omitted entirely when the flag is absent so the
     // JSON shape is byte-identical to the pre-change output for existing consumers.
     ...(opts.includeWarnings ? { warnings: cheapWarnings } : {}),

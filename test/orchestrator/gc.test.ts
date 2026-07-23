@@ -148,7 +148,7 @@ test('gc: cheap mode skips expensive rows (1, 3, 4, 6, 7, 9, 10) even when their
 
 // ---- Row 1: running + tracker done → mark_terminal ----
 
-test('gc row 1: running locally + tracker done → mark_terminal:shipped (full mode)', () => {
+test('gc row 1: tracker done NEVER writes shipped (FORGE-233 — tracker status is not merge proof)', () => {
   const lease = mkLease({ task_id: 'TASK-A', claim_id: 'claim-1' });
   const tasks = new Map([
     [
@@ -164,12 +164,9 @@ test('gc row 1: running locally + tracker done → mark_terminal:shipped (full m
   ]);
   const plan = planGc(mkSnapshot({ tasks, trackerIssues, mode: 'full' }));
   const row = plan.rows.find((r) => r.rowId === 1);
-  assert.ok(row);
-  assert.equal(row.action, 'mark_terminal');
-  if (row.action === 'mark_terminal') {
-    assert.equal(row.payload.targetState, 'shipped');
-    assert.equal(row.payload.leaseIdentity.claimId, 'claim-1');
-  }
+  assert.ok(row, 'the divergence must still SURFACE (report-only)');
+  assert.equal(row.action, 'report_orphan');
+  if (row.action === 'report_orphan') assert.equal(row.payload.kind, 'tracker_claims_shipped');
 });
 
 test('gc row 1: running locally + tracker cancelled → mark_terminal:cancelled', () => {

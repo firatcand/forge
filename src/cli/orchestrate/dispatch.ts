@@ -41,13 +41,24 @@ import { manifestFilePath } from '../../orchestrator/questions/paths.ts';
 import type { Lease } from '../../schemas/lease.ts';
 import type { TaskStateRecord } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
+import { resolvePhasesYaml, loadPhases } from '../../core/phases.ts';
+import { evaluateShipDependencyGate, gateRetriable, type DependencyObserver } from '../../orchestrator/dependency-gate.ts';
+import { createDependencyObserver } from '../../repo-hosts/detect.ts';
+import { ghExec } from './gh-exec.ts';
+import type { Task as PhasesTask } from '../../schemas/phases.ts';
 import { hasFlag, parseFlag, resolveForgeDir } from './flags.ts';
 import { resolveLogRotateMaxBytes } from './log-rotate-settings.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
 import type { VerbHandler } from './index.ts';
 
+export interface DispatchGateDeps {
+  /** FORGE-233 injection seam: dependency observer factory (tests inject fakes). */
+  observerFor?: (depStateId: string) => Promise<DependencyObserver | null>;
+}
+
 export async function runOrchestrateDispatch(
   args: DispatchArgs,
+  deps: DispatchGateDeps = {},
 ): Promise<{ exitCode: number }> {
   const parsed = DispatchArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -148,6 +159,7 @@ export async function runOrchestrateDispatch(
     };
   }
 
+
   // 2. Validate claim_id against current lease.
   let lease: Lease;
   try {
@@ -198,6 +210,18 @@ export async function runOrchestrateDispatch(
         { json: opts.json },
       ),
     };
+  }
+
+  // FORGE-233: SHIP admission — the real dependency-merge gate. Runs AFTER
+  // lease ownership/expiry validation (impl-R2 MIN: no live probes for an
+  // unauthorized caller) and BEFORE any manifest/event/pointer publication;
+  // refusal is machine-readable (details.dependency_gate) and never
+  // synthesizes an empty dependency set.
+  if (phase === 'ship') {
+    const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
+    if (!gate.ok) {
+      return { exitCode: emit(gate.failure, { json: opts.json }) };
+    }
   }
 
   // 3. For a REVIEW attempt, pin BOTH diff endpoints NOW (dispatch time) so
@@ -432,3 +456,66 @@ export const dispatchHandler: VerbHandler = {
     });
   },
 };
+
+// ─── FORGE-233: shared SHIP dependency-gate runner ───────────────────────────
+
+type GateRun =
+  | { ok: true }
+  | { ok: false; failure: ReturnType<typeof fail> };
+
+export async function runShipDependencyGate(
+  forgeDir: string,
+  taskId: string,
+  observerFor?: (depStateId: string) => Promise<DependencyObserver | null>,
+): Promise<GateRun> {
+  // phases.yaml is REQUIRED for ship admission: without the declared edges the
+  // gate cannot know the dependency set — fail closed, never assume []. The
+  // graph is resolved EXCLUSIVELY from the repository containing forgeDir
+  // (impl-R1 CRIT: a cwd fallback let repository B's graph admit repository
+  // A's task). Every refusal carries the versioned report so DEPS_NOT_MERGED
+  // consumers always find details.dependency_gate (impl-R1 MAJ #2).
+  const repoRoot = path.dirname(path.resolve(forgeDir));
+  const phasesUnavailable = (detail: string): GateRun => ({
+    ok: false,
+    failure: fail('DEPS_NOT_MERGED', `cannot evaluate ship dependencies for ${taskId}: ${detail}`, false, {
+      taskId,
+      dependency_gate: {
+        version: 1,
+        task_id: taskId,
+        subject: { resolved: false, reason: 'subject_unresolved', detail },
+        satisfied: false,
+        deps: [],
+        duplicate_declared_ids: [],
+      },
+    }),
+  });
+  const phasesPath = resolvePhasesYaml(repoRoot);
+  if (phasesPath === undefined) {
+    return phasesUnavailable('phases.yaml not found in the target repository');
+  }
+  let tasks: PhasesTask[];
+  try {
+    tasks = loadPhases(phasesPath).phases.phases.flatMap((ph) => ph.tasks);
+  } catch (err) {
+    return phasesUnavailable(`phases.yaml unreadable: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  const report = await evaluateShipDependencyGate({
+    forgeDir,
+    taskId,
+    tasks,
+    observerFor: observerFor ?? ((depId) => createDependencyObserver(forgeDir, depId, ghExec)),
+  });
+  if (report.satisfied) return { ok: true };
+  const blockers = report.subject.resolved
+    ? report.deps.filter((d) => !d.satisfied).map((d) => `${d.declared_id}:${d.satisfied ? '' : d.reason}`).join(', ')
+    : report.subject.reason;
+  return {
+    ok: false,
+    failure: fail(
+      'DEPS_NOT_MERGED',
+      `cannot ship ${taskId}: dependency merge gate unsatisfied (${blockers})`,
+      gateRetriable(report),
+      { taskId, dependency_gate: report },
+    ),
+  };
+}

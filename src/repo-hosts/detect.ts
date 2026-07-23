@@ -71,3 +71,22 @@ export async function createGitHubRepoHost(
 
   return new GitHubRepoHost(opts);
 }
+
+// FORGE-233: dependency observer for the SHIP dependency-merge gate. Reads
+// the DEPENDENCY task's persisted ship record; a usable PR identity yields an
+// observation-only host (mergeResult only — no worktree, no git, no write
+// authority). No record / no pr → null (the gate maps null per its taxonomy).
+export async function createDependencyObserver(
+  forgeDir: string,
+  depTaskId: string,
+  gh: Exec,
+): Promise<Pick<GitHubRepoHost, 'mergeResult'> | null> {
+  let record;
+  try {
+    record = readShipRecord(forgeDir, depTaskId);
+  } catch {
+    return null; // unreadable record → gate reports probe_unavailable/ship_record paths
+  }
+  if (record === null || record.pr === null || record.base === null) return null;
+  return GitHubRepoHost.forObservation({ gh, forgeDir, taskId: depTaskId });
+}
