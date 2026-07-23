@@ -159,15 +159,6 @@ export async function runOrchestrateDispatch(
     };
   }
 
-  // FORGE-233: SHIP admission — the real dependency-merge gate. Runs BEFORE
-  // any manifest/event/pointer publication; refusal is machine-readable
-  // (details.dependency_gate) and never synthesizes an empty dependency set.
-  if (phase === 'ship') {
-    const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
-    if (!gate.ok) {
-      return { exitCode: emit(gate.failure, { json: opts.json }) };
-    }
-  }
 
   // 2. Validate claim_id against current lease.
   let lease: Lease;
@@ -219,6 +210,18 @@ export async function runOrchestrateDispatch(
         { json: opts.json },
       ),
     };
+  }
+
+  // FORGE-233: SHIP admission — the real dependency-merge gate. Runs AFTER
+  // lease ownership/expiry validation (impl-R2 MIN: no live probes for an
+  // unauthorized caller) and BEFORE any manifest/event/pointer publication;
+  // refusal is machine-readable (details.dependency_gate) and never
+  // synthesizes an empty dependency set.
+  if (phase === 'ship') {
+    const gate = await runShipDependencyGate(opts.forgeDir, opts.taskId, deps.observerFor);
+    if (!gate.ok) {
+      return { exitCode: emit(gate.failure, { json: opts.json }) };
+    }
   }
 
   // 3. For a REVIEW attempt, pin BOTH diff endpoints NOW (dispatch time) so
