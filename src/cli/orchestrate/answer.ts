@@ -212,6 +212,17 @@ function resolveShipPark(
     if (state.state === expected && (optionId === 'cancel_task' || state.current_attempt_id === parkedAttemptId)) {
       return { ok: true, action: `already applied (state ${state.state})` };
     }
+    // impl-R3 MAJ #2: a SAME-ATTEMPT orphan park (question published, park
+    // transition crashed → state still 'reviewed') must honor a cancel
+    // answer via the full transaction — a consumed-but-unapplied cancel
+    // would leave the task shippable against the operator's decision.
+    if (
+      optionId === 'cancel_task' &&
+      state.state === 'reviewed' &&
+      state.current_attempt_id === parkedAttemptId
+    ) {
+      return applyCancelTransaction(forgeDir, taskId, parkedAttemptId, state, err);
+    }
     err.write(
       `forge orchestrate answer: ship park resolution expected '${expected}' but the task is '${state.state}' — cannot repair\n`,
     );
@@ -224,57 +235,7 @@ function resolveShipPark(
     return { ok: false };
   }
   if (optionId === 'cancel_task') {
-    // The cancel TRANSACTION inlined (impl R1 MAJ #4): event + state →
-    // cancelled + lease release — never a bare state write that strands the
-    // lease. (Tracker footer cleanup stays best-effort gc territory here;
-    // the interactive cancel verb performs it when driven directly.)
-    let lease;
-    try {
-      lease = readLease(forgeDir, taskId);
-    } catch (e) {
-      err.write(`forge orchestrate answer: ${e instanceof Error ? e.message : String(e)}\n`);
-      return { ok: false };
-    }
-    try {
-      appendAttemptEvent(
-        {
-          type: 'attempt_cancelled',
-          ts: new Date().toISOString(),
-          reason: 'ship park: cancel_task answer',
-        },
-        {
-          forgeDir,
-          taskId,
-          attemptId: parkedAttemptId,
-          caller: callerFromLease(lease),
-        },
-      );
-    } catch {
-      // best-effort audit event
-    }
-    try {
-      writeTaskState(
-        forgeDir,
-        {
-          ...state,
-          state: applyTransition(state.state, 'cancel'),
-          state_version: state.state_version + 1,
-          updated_at: new Date().toISOString(),
-          updated_by: callerFromLease(lease),
-        },
-        callerFromLease(lease),
-        { expectedCurrentAttemptId: parkedAttemptId },
-      );
-    } catch (e) {
-      err.write(`forge orchestrate answer: cancel transition failed: ${e instanceof Error ? e.message : String(e)}\n`);
-      return { ok: false };
-    }
-    try {
-      releaseLease({ forgeDir, taskId, caller: callerFromLease(lease) });
-    } catch {
-      // best-effort — state 'cancelled' is the source of truth
-    }
-    return { ok: true, action: 'cancel → cancelled (event + state + lease release)' };
+    return applyCancelTransaction(forgeDir, taskId, parkedAttemptId, state, err);
   }
   let lease;
   try {
@@ -302,4 +263,59 @@ function resolveShipPark(
     return { ok: false };
   }
   return { ok: true, action: `question_answered_ship → ${next}` };
+}
+
+// The cancel TRANSACTION (impl R1 MAJ #4 / R3 MAJ #2): event + state →
+// cancelled + lease release — never a bare state write that strands the
+// lease. Legal from blocked_on_question (normal park) AND from reviewed
+// (same-attempt orphan park repair).
+function applyCancelTransaction(
+  forgeDir: string,
+  taskId: string,
+  parkedAttemptId: string,
+  state: ReturnType<typeof readTaskState>,
+  err: { write: (s: string) => void },
+): { ok: true; action: string } | { ok: false } {
+  let lease;
+  try {
+    lease = readLease(forgeDir, taskId);
+  } catch (e) {
+    err.write(`forge orchestrate answer: ${e instanceof Error ? e.message : String(e)}\n`);
+    return { ok: false };
+  }
+  try {
+    appendAttemptEvent(
+      {
+        type: 'attempt_cancelled',
+        ts: new Date().toISOString(),
+        reason: 'ship park: cancel_task answer',
+      },
+      { forgeDir, taskId, attemptId: parkedAttemptId, caller: callerFromLease(lease) },
+    );
+  } catch {
+    // best-effort audit event
+  }
+  try {
+    writeTaskState(
+      forgeDir,
+      {
+        ...state,
+        state: applyTransition(state.state, 'cancel'),
+        state_version: state.state_version + 1,
+        updated_at: new Date().toISOString(),
+        updated_by: callerFromLease(lease),
+      },
+      callerFromLease(lease),
+      { expectedCurrentAttemptId: parkedAttemptId },
+    );
+  } catch (e) {
+    err.write(`forge orchestrate answer: cancel transition failed: ${e instanceof Error ? e.message : String(e)}\n`);
+    return { ok: false };
+  }
+  try {
+    releaseLease({ forgeDir, taskId, caller: callerFromLease(lease) });
+  } catch {
+    // best-effort — state 'cancelled' is the source of truth
+  }
+  return { ok: true, action: 'cancel → cancelled (event + state + lease release)' };
 }

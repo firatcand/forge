@@ -62,7 +62,7 @@ import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateComplete(
   args: CompleteArgs,
-  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null> } = {},
+  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null>; expectedStateVersion?: number } = {},
 ): Promise<{ exitCode: number }> {
   const parsed = CompleteArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -1250,7 +1250,7 @@ export async function runOrchestrateComplete(
         // impl R5: re-verify the attempt pointer UNDER the marker — a phase
         // completion that ran while a superseding attempt dispatched (a
         // review/ship pointer self-loop) must not advance the task.
-        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId, ...(shipSuccessAdmittedVersion !== null ? { expectedStateVersion: shipSuccessAdmittedVersion } : {}) },
+        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId, ...(shipSuccessAdmittedVersion !== null ? { expectedStateVersion: shipSuccessAdmittedVersion } : deps.expectedStateVersion !== undefined ? { expectedStateVersion: deps.expectedStateVersion } : {}) },
       );
     } catch (err) {
       return {

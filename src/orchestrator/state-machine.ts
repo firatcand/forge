@@ -73,8 +73,11 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   // looping (plan v3 Δ11); resolution is phase-aware (question_answered_ship).
   'reviewed:question_written': 'blocked_on_question',
   'blocked_on_question:question_answered_ship': 'reviewed',
-  // FORGE-234: a cancel_task park answer cancels WHILE STILL blocked.
+  // FORGE-234: a cancel_task park answer cancels WHILE STILL blocked; a
+  // same-attempt ORPHAN park (question published, transition crashed) may be
+  // cancelled directly from reviewed (impl-R3 MAJ #2 repair path).
   'blocked_on_question:cancel': 'cancelled',
+  'reviewed:cancel': 'cancelled',
   'blocked_on_question:answer_recorded': 'awaiting_respawn',
   'awaiting_respawn:dispatch': 'dispatched',
   'running:complete_ready_for_review': 'ready_for_review',

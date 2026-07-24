@@ -376,3 +376,55 @@ test("attempt B never repairs itself onto A's orphaned park (impl-R2 MAJ #2)", a
   const ans = runOrchestrateAnswer({ questionId: env.error.details.question_id, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
   assert.equal(ans.exitCode, 1, "A's stale park answer is refused (pre-write)");
 });
+
+test('stale failure never mints a carrier; complete refuses a version-moved failure (impl-R3 MAJ #1)', async (t) => {
+  const stdout = captureStdout(t);
+  void stdout;
+  const fx = fixture();
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const original = JSON.parse(readFileSync(statePath, 'utf8'));
+  const host = new FakeRepoHost({ base: { repo: REPO, branch: 'main', push_remote: 'origin' } });
+  const r = await runOrchestrateShip(
+    { taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true },
+    {
+      shipOpDeps: {
+        repoHost: host, git: gitOk, sleepMs: async () => {},
+        runCommand: async () => {
+          writeFileSync(statePath, JSON.stringify({ ...original, state_version: original.state_version + 2 }));
+          return { exitCode: 1, stdout: '', stderr: 'fail', timedOut: false };
+        },
+        gitleaks: async () => ({ clean: true, detail: '' }),
+        tracker: { updateState: async () => ({ ok: true as const }) },
+      },
+    },
+  );
+  assert.equal(r.exitCode, 1);
+  // NO carrier minted for the stale invocation.
+  const { existsSync } = await import('node:fs');
+  assert.equal(
+    existsSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'attempts', ATTEMPT, 'ship_op_verdict.input.json')),
+    false,
+    'stale failure leaves no consumable carrier',
+  );
+  const after = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(after.failure_count, 0, 'no budget consumed by the stale invocation');
+});
+
+test('cancel answer on a same-attempt ORPHAN park cancels via the full transaction (impl-R3 MAJ #2)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const questionId = env.error.details.question_id;
+  // Crash BETWEEN question publication and the park transition: state reviewed, same attempt.
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const s = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(statePath, JSON.stringify({ ...s, state: 'reviewed', state_version: s.state_version + 1 }));
+
+  const ans = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(ans.exitCode, 0, 'the operator cancellation is honored, not consumed-and-lost');
+  const after = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(after.state, 'cancelled');
+  const lease = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'lease.json'), 'utf8'));
+  assert.equal(lease.status, 'released');
+});

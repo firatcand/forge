@@ -30,7 +30,7 @@ import { runVerify, type RunCommand, type VerifyResult } from './verify-runner.t
 
 export type ShipOpOutcome =
   | { kind: 'success'; receiptPath: string; verdictInputPath: string; targetSha: string; pr: PullRequestRef }
-  | { kind: 'failure'; reason: ShipFailureReason; detail: string; verdictInputPath: string; targetSha: string }
+  | { kind: 'failure'; reason: ShipFailureReason; detail: string; verdictInputPath: string; targetSha: string; admittedStateVersion: number }
   | { kind: 'drift'; detail: string; targetSha: string; admittedStateVersion: number }
   | { kind: 'park'; reason: ShipParkReason; detail: string; fingerprint: string }
   | { kind: 'refused'; code: string; detail: string };
@@ -295,6 +295,24 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       throw err;
     }
   };
+  // impl-R3 MAJ #1: the fence runs BEFORE the failure carrier is minted — a
+  // stale invocation leaves NO carrier a later complete could consume.
+  const failOutcome = (reason: ShipFailureReason, summary: string, detail: string): ShipOpOutcome => {
+    try {
+      fence();
+    } catch (err) {
+      if (err instanceof OrchestratorError) return { kind: 'refused', code: err.code, detail: err.message };
+      throw err;
+    }
+    return {
+      kind: 'failure',
+      reason,
+      detail,
+      verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', summary),
+      targetSha: adm.targetSha,
+      admittedStateVersion: adm.admittedStateVersion,
+    };
+  };
 
   try {
     // 1. Base resolution (persisted-first; fenced write-ahead inside).
@@ -355,13 +373,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       run: deps.runCommand,
     });
     if (args.settings.verify && !verify.passed) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'verify_failed',
-        detail: `settings.verify failed in the ship worktree`,
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'verify_failed'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('verify_failed', 'verify_failed', `settings.verify failed in the ship worktree`);
     }
 
     // 4. Final-SHA binding: worktree HEAD must equal the pin.
@@ -390,22 +402,10 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       }
     }
     if (scanBase === null) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'secrets_scan_failed',
-        detail: 'cannot resolve the scan base (merge-base with the recorded base branch failed) — fail closed',
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'secrets_scan_base_unresolvable'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('secrets_scan_failed', 'secrets_scan_base_unresolvable', 'cannot resolve the scan base (merge-base with the recorded base branch failed) — fail closed');
     }
     if (deps.gitleaks === undefined) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'secrets_scan_failed',
-        detail: 'gitleaks is not available — the final secrets gate cannot run (fail closed)',
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'secrets_scan_unavailable'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('secrets_scan_failed', 'secrets_scan_unavailable', 'gitleaks is not available — the final secrets gate cannot run (fail closed)');
     }
     let scan;
     try {
@@ -414,13 +414,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       scan = { clean: false, detail: `scanner error: ${err instanceof Error ? err.message : String(err)}` };
     }
     if (!scan.clean) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'secrets_scan_failed',
-        detail: scan.detail.slice(0, 500),
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'secrets_scan_failed'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('secrets_scan_failed', 'secrets_scan_failed', scan.detail.slice(0, 500));
     }
 
     // 6. SHA-bound push (plan v2 Δ1): push the immutable object, never the ref.
@@ -442,13 +436,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       }, sleep, fence),
     );
     if (!pushRes.ok) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'push_failed',
-        detail: pushRes.detail,
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'push_failed'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('push_failed', 'push_failed', pushRes.detail);
     }
 
     // 7. PR create-or-get (idempotent, marker-led) + live head equality.
@@ -488,13 +476,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
         fence,
       });
     } catch (err) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'pr_binding_failed',
-        detail: err instanceof Error ? err.message : String(err),
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'pr_binding_failed'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('pr_binding_failed', 'pr_binding_failed', err instanceof Error ? err.message : String(err));
     }
 
     // 9. Tracker in_review (retriable-only retry; exhaustion = budgeted failure).
@@ -506,13 +488,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       }, sleep, fence),
     );
     if (!trackerRes.ok) {
-      return fencedOr({
-        kind: 'failure',
-        reason: 'tracker_failed',
-        detail: trackerRes.detail,
-        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'tracker_failed'),
-        targetSha: adm.targetSha,
-      });
+      return failOutcome('tracker_failed', 'tracker_failed', trackerRes.detail);
     }
 
     // 10. The fenced receipt — proof for complete that THE VERB RAN (Δ10+ΔR2).

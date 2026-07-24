@@ -302,6 +302,11 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
                   mergeResult: (pr: Parameters<typeof hostForComplete.mergeResult>[0]) => hostForComplete.mergeResult(pr),
                   headSha: (pr: Parameters<typeof hostForComplete.headSha>[0]) => hostForComplete.headSha(pr),
                 }),
+          // impl-R3 MAJ #1: BOTH outcomes bind the completion CAS to the
+          // admitted state version — a round-trip between the operation's
+          // last fence and complete's commit refuses instead of consuming
+          // budget (failure) or double-committing (success re-check).
+          ...(outcome.kind === 'failure' ? { expectedStateVersion: outcome.admittedStateVersion } : {}),
         },
       );
     }
