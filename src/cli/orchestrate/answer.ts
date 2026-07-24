@@ -1,5 +1,7 @@
 import { applyTransition, readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { callerFromLease, readLease } from './lease-io.ts';
+import { appendAttemptEvent } from '../../orchestrator/attempt-events.ts';
+import { release as releaseLease } from '../../orchestrator/leases.ts';
 import {
   QuestionChannelError,
   findQuestionFile,
@@ -122,6 +124,24 @@ export function runOrchestrateAnswer(
     if (!(e instanceof QuestionChannelError)) throw e;
   }
 
+  // FORGE-234 (impl R1 MAJ #4): a SHIP-origin answer validates the park is
+  // still CURRENT before persisting anything — a superseded question must
+  // never receive a durable answer.
+  if (q.origin?.phase === 'ship') {
+    try {
+      const stateNow = readTaskState(opts.forgeDir, location.taskId);
+      if (stateNow.state === 'blocked_on_question' && stateNow.current_attempt_id !== location.attemptId) {
+        err.write(
+          `forge orchestrate answer: ship park for attempt ${location.attemptId} was superseded by ${stateNow.current_attempt_id ?? 'none'} — stale answer refused\n`,
+        );
+        return { exitCode: 1 };
+      }
+    } catch (e) {
+      err.write(`forge orchestrate answer: cannot read task state: ${e instanceof Error ? e.message : String(e)}\n`);
+      return { exitCode: 1 };
+    }
+  }
+
   const now = opts.now ?? (() => new Date());
   const answeredBy = opts.answeredBy ?? 'supervisor';
   const answer = AnswerSchema.parse({
@@ -182,14 +202,75 @@ function resolveShipPark(
     return { ok: false };
   }
   if (state.state !== 'blocked_on_question') {
-    // Already resolved (crash-replay after the CAS landed) — converged.
-    return { ok: true, action: `already applied (state ${state.state})` };
+    // Crash-replay convergence is DESTINATION-AWARE (impl R1 MAJ #4): only
+    // the answer's own expected destination counts as already-applied.
+    const expected = optionId === 'cancel_task' ? 'cancelled' : 'reviewed';
+    if (state.state === expected && (optionId === 'cancel_task' || state.current_attempt_id === parkedAttemptId)) {
+      return { ok: true, action: `already applied (state ${state.state})` };
+    }
+    err.write(
+      `forge orchestrate answer: ship park resolution expected '${expected}' but the task is '${state.state}' — cannot repair\n`,
+    );
+    return { ok: false };
   }
   if (state.current_attempt_id !== parkedAttemptId) {
     err.write(
       `forge orchestrate answer: ship park for attempt ${parkedAttemptId} was superseded by ${state.current_attempt_id ?? 'none'} — stale answer refused\n`,
     );
     return { ok: false };
+  }
+  if (optionId === 'cancel_task') {
+    // The cancel TRANSACTION inlined (impl R1 MAJ #4): event + state →
+    // cancelled + lease release — never a bare state write that strands the
+    // lease. (Tracker footer cleanup stays best-effort gc territory here;
+    // the interactive cancel verb performs it when driven directly.)
+    let lease;
+    try {
+      lease = readLease(forgeDir, taskId);
+    } catch (e) {
+      err.write(`forge orchestrate answer: ${e instanceof Error ? e.message : String(e)}\n`);
+      return { ok: false };
+    }
+    try {
+      appendAttemptEvent(
+        {
+          type: 'attempt_cancelled',
+          ts: new Date().toISOString(),
+          reason: 'ship park: cancel_task answer',
+        },
+        {
+          forgeDir,
+          taskId,
+          attemptId: parkedAttemptId,
+          caller: callerFromLease(lease),
+        },
+      );
+    } catch {
+      // best-effort audit event
+    }
+    try {
+      writeTaskState(
+        forgeDir,
+        {
+          ...state,
+          state: applyTransition(state.state, 'cancel'),
+          state_version: state.state_version + 1,
+          updated_at: new Date().toISOString(),
+          updated_by: callerFromLease(lease),
+        },
+        callerFromLease(lease),
+        { expectedCurrentAttemptId: parkedAttemptId },
+      );
+    } catch (e) {
+      err.write(`forge orchestrate answer: cancel transition failed: ${e instanceof Error ? e.message : String(e)}\n`);
+      return { ok: false };
+    }
+    try {
+      releaseLease({ forgeDir, taskId, caller: callerFromLease(lease) });
+    } catch {
+      // best-effort — state 'cancelled' is the source of truth
+    }
+    return { ok: true, action: 'cancel → cancelled (event + state + lease release)' };
   }
   let lease;
   try {
@@ -198,8 +279,7 @@ function resolveShipPark(
     err.write(`forge orchestrate answer: ${e instanceof Error ? e.message : String(e)}\n`);
     return { ok: false };
   }
-  const trigger = optionId === 'cancel_task' ? 'cancel' : 'question_answered_ship';
-  const next = applyTransition(state.state, trigger);
+  const next = applyTransition(state.state, 'question_answered_ship');
   try {
     writeTaskState(
       forgeDir,
@@ -217,5 +297,5 @@ function resolveShipPark(
     err.write(`forge orchestrate answer: state transition failed: ${e instanceof Error ? e.message : String(e)}\n`);
     return { ok: false };
   }
-  return { ok: true, action: `${trigger} → ${next}` };
+  return { ok: true, action: `question_answered_ship → ${next}` };
 }

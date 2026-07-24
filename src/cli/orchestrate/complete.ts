@@ -688,6 +688,8 @@ export async function runOrchestrateComplete(
     }
   }
 
+  let shipSuccessAdmittedVersion: number | null = null;
+
   // 2d. FORGE-234: SHIP completion trust (plan v3 Δ10 + R3 ΔR1/ΔR2). ALL ship
   //     outcomes carry a PINNED verdict whose target must equal the manifest
   //     pin and the record's reviewed binding; the SUCCESS outcome
@@ -791,6 +793,7 @@ export async function runOrchestrateComplete(
           ),
         };
       }
+      shipSuccessAdmittedVersion = receipt.admitted_state_version;
       if (stateForReceipt.state_version !== receipt.admitted_state_version) {
         return {
           exitCode: emit(
@@ -842,8 +845,10 @@ export async function runOrchestrateComplete(
               liveOk = head.ok === true && head.sha === shipManifest.ship_target_sha;
               liveDetail = head.ok ? `live head ${head.sha}` : `head unreadable (${head.reason ?? 'unknown'})`;
             } else {
-              liveOk = true; // observer without headSha (test seam): open PR + receipt suffices
-              liveDetail = 'open PR (observer has no headSha capability)';
+              // impl-R1 MAJ #2: an observer without headSha CANNOT prove the
+              // live head — completion refuses (never proceeds unproven).
+              liveOk = false;
+              liveDetail = 'observer lacks headSha capability — live head unprovable';
             }
           }
         }
@@ -1245,7 +1250,7 @@ export async function runOrchestrateComplete(
         // impl R5: re-verify the attempt pointer UNDER the marker — a phase
         // completion that ran while a superseding attempt dispatched (a
         // review/ship pointer self-loop) must not advance the task.
-        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
+        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId, ...(shipSuccessAdmittedVersion !== null ? { expectedStateVersion: shipSuccessAdmittedVersion } : {}) },
       );
     } catch (err) {
       return {

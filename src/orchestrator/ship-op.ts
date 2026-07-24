@@ -204,14 +204,19 @@ export function admitShip(args: ShipOpArgs, readLease: () => Lease): Admitted {
 
 // ─── The operation ───────────────────────────────────────────────────────────
 
+// impl-R1 CRIT #3: EVERY retry attempt is individually fenced — a lease lost
+// during backoff must refuse BEFORE the next remote mutation, not after.
 async function withTransientRetry<T>(
   fn: () => Promise<{ ok: true; value: T } | { ok: false; retriable: boolean; detail: string }>,
   sleep: (ms: number) => Promise<void>,
+  fence: () => void,
 ): Promise<{ ok: true; value: T } | { ok: false; detail: string }> {
   let lastDetail = 'no attempts';
-  const maxAttempts = Math.min(DEFAULT_RETRY_POLICY.retry_attempts, 5);
+  const maxAttempts = DEFAULT_RETRY_POLICY.retry_attempts;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    fence();
     const res = await fn();
+    fence();
     if (res.ok) return res;
     lastDetail = res.detail;
     if (!res.retriable) return { ok: false, detail: res.detail };
@@ -343,9 +348,30 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
       return { kind: 'drift', detail: `worktree HEAD ${headSha} != reviewed ${adm.targetSha}`, targetSha: adm.targetSha };
     }
 
-    // 5. Secrets scan — fail closed on missing scanner, execution error, or findings.
-    const baseSha = await deps.git(['-C', adm.worktreePath, 'merge-base', 'HEAD', `refs/remotes/origin/${record1.base.branch}`]);
-    const scanBase = baseSha.exitCode === 0 ? baseSha.stdout.trim() : adm.targetSha;
+    // 5. Secrets scan — fail closed on missing scanner, execution error,
+    //    findings, OR an unresolvable scan base (impl-R1 CRIT #2: an empty
+    //    target..target range silently skips the branch's commits).
+    let scanBase: string | null = null;
+    for (const baseRef of [
+      `refs/remotes/${record1.base.push_remote}/${record1.base.branch}`,
+      `refs/remotes/origin/${record1.base.branch}`,
+      record1.base.branch,
+    ]) {
+      const mb = await deps.git(['-C', adm.worktreePath, 'merge-base', 'HEAD', baseRef]);
+      if (mb.exitCode === 0 && mb.stdout.trim().length > 0) {
+        scanBase = mb.stdout.trim();
+        break;
+      }
+    }
+    if (scanBase === null) {
+      return {
+        kind: 'failure',
+        reason: 'secrets_scan_failed',
+        detail: 'cannot resolve the scan base (merge-base with the recorded base branch failed) — fail closed',
+        verdictInputPath: writeVerdictInput(args, adm, 'changes_needed', 'secrets_scan_base_unresolvable'),
+        targetSha: adm.targetSha,
+      };
+    }
     if (deps.gitleaks === undefined) {
       return {
         kind: 'failure',
@@ -387,7 +413,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
         ]);
         if (res.exitCode === 0) return { ok: true as const, value: res };
         return { ok: false as const, retriable: transientGit(res), detail: res.stderr.slice(0, 400) };
-      }, sleep),
+      }, sleep, fence),
     );
     if (!pushRes.ok) {
       return {
@@ -450,7 +476,7 @@ export async function runShipOperation(args: ShipOpArgs, deps: ShipOpDeps, readL
         const res = await deps.tracker.updateState('in_review');
         if (res.ok) return { ok: true as const, value: true };
         return { ok: false as const, retriable: res.retriable, detail: res.detail };
-      }, sleep),
+      }, sleep, fence),
     );
     if (!trackerRes.ok) {
       return {

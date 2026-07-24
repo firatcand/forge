@@ -25,6 +25,10 @@ import {
   type ShipParkReason,
 } from '../../orchestrator/ship-op.ts';
 import { readShipRecord } from '../../orchestrator/ship-record.ts';
+import { readFileSync } from 'node:fs';
+import { AttemptManifestSchema } from '../../schemas/attempt.ts';
+import { manifestFilePath } from '../../orchestrator/questions/paths.ts';
+import { readFrozenBaseBranch } from '../../orchestrator/worktree-base.ts';
 import { writeQuestionAtomic } from '../../orchestrator/questions/writer.ts';
 import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/lookup.ts';
 import { createGitHubRepoHost } from '../../repo-hosts/detect.ts';
@@ -105,6 +109,43 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
         };
       }
     }
+    // impl-R1 MAJ #3: a crash BETWEEN question publication and the park
+    // transition leaves state 'reviewed' with an open ship question — the
+    // mandatory park must be REPAIRED, never silently deduped away.
+    if (currentState.state === 'reviewed' && currentState.current_attempt_id === opts.attemptId) {
+      const orphanParks = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter(
+        (q) => q.task_id === opts.taskId && q.origin?.phase === 'ship' && q.status === 'open',
+      );
+      if (orphanParks.length > 0) {
+        const q = orphanParks[0]!;
+        const lease = leaseReader();
+        const next = applyTransition(currentState.state, 'question_written');
+        writeTaskState(
+          opts.forgeDir,
+          {
+            ...currentState,
+            state: next,
+            state_version: currentState.state_version + 1,
+            updated_at: new Date().toISOString(),
+            updated_by: callerFromLease(lease),
+          },
+          callerFromLease(lease),
+          { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
+        );
+        return {
+          exitCode: emit(
+            fail('SHIP_PARKED' as never, `ship parked (${q.origin!.park_reason}): park transition repaired`, false, {
+              taskId: opts.taskId,
+              park_reason: q.origin!.park_reason,
+              question_id: q.question_id,
+              replayed: true,
+              repaired: true,
+            }),
+            { json: opts.json },
+          ),
+        };
+      }
+    }
   } catch {
     // state unreadable → fall through; the operation's admission reports it
   }
@@ -119,12 +160,28 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
   })();
   let repoHost = deps.shipOpDeps?.repoHost;
   if (repoHost === undefined) {
+    // impl-R1 CRIT #1: production wiring derives EVERY identity from the
+    // MANIFEST — worktree path, frozen base branch (worktree marker), and the
+    // live head branch. Empty sentinels would break the first real
+    // resolveBase() (branch '' fails the record schema) and topology
+    // detection (wrong cwd).
     const manifestReviewBinding = record
       ? { attemptId: record.review_attempt_id, headSha: record.reviewed_head_sha }
       : { attemptId: 'unresolved', headSha: '0'.repeat(40) };
     let lease;
+    let manifestForWiring;
     try {
       lease = leaseReader();
+      const raw = readFileSync(manifestFilePath(opts.forgeDir, opts.taskId, opts.attemptId), 'utf8');
+      const parsedManifest = AttemptManifestSchema.safeParse(JSON.parse(raw));
+      if (!parsedManifest.success) {
+        return {
+          exitCode: emit(fail('SCHEMA_INVALID', `ship manifest for ${opts.attemptId} failed schema validation`, false), {
+            json: opts.json,
+          }),
+        };
+      }
+      manifestForWiring = parsedManifest.data;
     } catch (err) {
       const e = err as unknown;
       return {
@@ -134,14 +191,36 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
         ),
       };
     }
+    const worktreePath = manifestForWiring.worktree_path;
+    const frozenBase = readFrozenBaseBranch(worktreePath);
+    if (frozenBase === null) {
+      return {
+        exitCode: emit(
+          fail('VERIFICATION_FAILED', `worktree at ${worktreePath} has no frozen base branch marker`, false),
+          { json: opts.json },
+        ),
+      };
+    }
+    // Worktree-scoped git: the adapter's topology/config reads must run IN
+    // the task worktree, never the invoking cwd.
+    const worktreeGit: Exec = async (args) => gitExec(['-C', worktreePath, ...args]);
+    const headBranchRes = await worktreeGit(['rev-parse', '--abbrev-ref', 'HEAD']);
+    const headBranch = headBranchRes.stdout.trim();
+    if (headBranchRes.exitCode !== 0 || headBranch.length === 0 || headBranch === 'HEAD') {
+      return {
+        exitCode: emit(fail('VERIFICATION_FAILED', `worktree at ${worktreePath} is not on a named branch`, false), {
+          json: opts.json,
+        }),
+      };
+    }
     repoHost = await createGitHubRepoHost({
       gh: ghExec,
-      git: gitExec,
-      worktreePath: '',
+      git: worktreeGit,
+      worktreePath,
       taskId: opts.taskId,
       forgeDir: opts.forgeDir,
-      baseBranch: '',
-      headBranch: '',
+      baseBranch: frozenBase,
+      headBranch,
       reviewBinding: manifestReviewBinding,
       holder: { run_id: lease.owner_run_id, claim_id: lease.claim_id, generation: lease.generation },
       pollDelayMs: 2000,
@@ -241,7 +320,7 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
           );
           try {
             appendAttemptEvent(
-              { type: 'drift', at: new Date().toISOString(), data: { scope: 'ship', detail: outcome.detail.slice(0, 300) } } as never,
+              { type: 'ship_drift', ts: new Date().toISOString(), detail: outcome.detail.slice(0, 500) },
               { forgeDir: opts.forgeDir, taskId: opts.taskId, attemptId: opts.attemptId, caller: callerFromLease(lease) },
             );
           } catch {
@@ -327,7 +406,7 @@ async function parkShip(
         run_id: lease.owner_run_id,
         task_id: opts.taskId,
         agent_id: 'ship-verb',
-        decision_key: `ship-park:${fingerprint}`,
+        decision_key: `ship-park:${fingerprint}`.slice(0, 200),
         attempt: 1,
         max_attempts: 1,
         created_at: nowIso,

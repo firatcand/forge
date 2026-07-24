@@ -76,6 +76,13 @@ export const AttemptEventSchema = z.discriminatedUnion('type', [
     reason: byteBoundedString(2_000, { min: 1 }),
   }),
   z.object({
+    // FORGE-234: ship head-drift regression audit event (reviewed →
+    // ready_for_review; no budget consumption).
+    type: z.literal('ship_drift'),
+    ts: z.string().datetime(),
+    detail: z.string().max(500),
+  }),
+  z.object({
     type: z.literal('attempt_completed'),
     ts: Ts,
     verdict: z.enum(['ready_for_review', 'changes_needed', 'blocked']),

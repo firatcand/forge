@@ -257,3 +257,92 @@ test('success path routes through complete: merge_pending + released lease + rec
   const lease = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'lease.json'), 'utf8'));
   assert.equal(lease.status, 'released', 'lease released at merge_pending');
 });
+
+// ─── impl-R1 fix-round additions ─────────────────────────────────────────────
+
+test('ship failure routes through complete and consumes budget (task stays reviewed, failure_count+1)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  const host = new FakeRepoHost({ base: { repo: REPO, branch: 'main', push_remote: 'origin' } });
+  const r = await runOrchestrateShip(
+    { taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true },
+    {
+      shipOpDeps: {
+        repoHost: host,
+        git: gitOk,
+        gitleaks: async () => ({ clean: false, detail: 'aws key found' }),
+        sleepMs: async () => {},
+        runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+        tracker: { updateState: async () => ({ ok: true as const }) },
+      },
+    },
+  );
+  assert.equal(r.exitCode, 0, 'failure completion is a SUCCESSFUL complete invocation (budget accounted)');
+  const state = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json'), 'utf8'));
+  assert.equal(state.state, 'reviewed', 'budgeted ship failure returns to reviewed');
+  assert.equal(state.failure_count, 1, 'one budget unit consumed');
+});
+
+test('orphan park (question written, transition crashed) is REPAIRED on replay (impl-R1 MAJ #3)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const questionId = env.error.details.question_id;
+  // Simulate the crash: revert the park transition, keeping the open question.
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const s = JSON.parse(readFileSync(statePath, 'utf8'));
+  writeFileSync(statePath, JSON.stringify({ ...s, state: 'reviewed', state_version: s.state_version + 1 }));
+  stdout.length = 0;
+
+  const r2 = await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  assert.equal(r2.exitCode, 1);
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env2.error.details.repaired, true);
+  assert.equal(env2.error.details.question_id, questionId);
+  const after = JSON.parse(readFileSync(statePath, 'utf8'));
+  assert.equal(after.state, 'blocked_on_question', 'the mandatory park is blocking again');
+});
+
+test('cancel_task releases the lease (full transaction, impl-R1 MAJ #4)', async (t) => {
+  const stdout = captureStdout(t);
+  void stdout;
+  const fx = fixture();
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const ans = runOrchestrateAnswer({ questionId: env.error.details.question_id, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(ans.exitCode, 0);
+  const lease = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'lease.json'), 'utf8'));
+  assert.equal(lease.status, 'released', 'cancel answer releases the lease');
+});
+
+test('completion observer WITHOUT headSha refuses (impl-R1 MAJ #2)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  const host = new FakeRepoHost({
+    base: { repo: REPO, branch: 'main', push_remote: 'origin' },
+    pullRequest: PR,
+    headSha: { ok: true, sha: SHA },
+  });
+  const r = await runOrchestrateShip(
+    { taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true },
+    {
+      shipOpDeps: {
+        repoHost: host, git: gitOk, gitleaks: async () => ({ clean: true, detail: '' }),
+        sleepMs: async () => {}, runCommand: async () => ({ exitCode: 0, stdout: '', stderr: '', timedOut: false }),
+        tracker: { updateState: async () => ({ ok: true as const }) },
+      },
+      // Force complete to use a mergeResult-only observer (no headSha).
+      runComplete: (args) =>
+        import('../../../../src/cli/orchestrate/complete.ts').then((m) =>
+          m.runOrchestrateComplete(args, {
+            observerFor: async () => ({ mergeResult: async () => ({ merged: false as const, state: 'open' as const }) }),
+          }),
+        ),
+    },
+  );
+  assert.equal(r.exitCode, 1);
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  assert.equal(env.error.code, 'VERIFICATION_FAILED');
+  assert.match(env.error.message, /headSha capability/);
+});

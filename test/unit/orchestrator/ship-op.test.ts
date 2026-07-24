@@ -394,3 +394,43 @@ test('re-run after crash-past-PR-create adopts the PR (record already bound) and
   const record = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'ship-record.json'), 'utf8'));
   assert.deepEqual(record.pr, PR);
 });
+
+// ─── impl-R1 fix-round additions ─────────────────────────────────────────────
+
+test('per-retry fence: lease stolen during push backoff refuses BEFORE the retry mutation (impl-R1 CRIT #3)', async () => {
+  const fx = fixture();
+  let pushes = 0;
+  const stealingLease = () => {
+    const lease = fx.readLease();
+    // After the first push attempt fails and backoff elapses, the lease is stolen.
+    return pushes >= 1 ? { ...lease, claim_id: 'claim-thief' } : lease;
+  };
+  const { deps } = depsOf(fx, {
+    gitScript: { pushExit: [1, 0] },
+  });
+  const origGit = deps.git;
+  deps.git = async (args) => {
+    if ([...args].includes('push')) pushes += 1;
+    return origGit(args);
+  };
+  const out = await runShipOperation(argsOf(fx), deps, stealingLease as never);
+  assert.equal(out.kind, 'refused');
+  if (out.kind === 'refused') assert.equal(out.code, 'LEASE_STOLEN');
+  assert.equal(pushes, 1, 'the second push never ran under stolen authority');
+});
+
+test('unresolvable scan base fails CLOSED through the budgeted path (impl-R1 CRIT #2)', async () => {
+  const fx = fixture();
+  const { deps } = depsOf(fx);
+  const origGit = deps.git;
+  deps.git = async (args) => {
+    if ([...args].includes('merge-base')) return { stdout: '', stderr: 'fatal: no merge base', exitCode: 128 };
+    return origGit(args);
+  };
+  const out = await runShipOperation(argsOf(fx), deps, fx.readLease);
+  assert.equal(out.kind, 'failure');
+  if (out.kind === 'failure') {
+    assert.equal(out.reason, 'secrets_scan_failed');
+    assert.match(out.detail, /scan base/);
+  }
+});

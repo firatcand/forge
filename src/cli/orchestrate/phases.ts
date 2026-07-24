@@ -230,6 +230,19 @@ export async function runOrchestratePhases(
       candidates.push({ task, phaseId });
       continue;
     }
+    // FORGE-234 (impl R1 MAJ #5): the explicit IMPLEMENT listing must never
+    // surface a task whose orchestrator lifecycle has moved past implement —
+    // a reviewed SHIP-failure retry is a ship candidate, not an implement one.
+    if (opts.phase === 'implement') {
+      try {
+        const s = readTaskState(opts.forgeDir, task.tracker_issue_id ?? task.id);
+        if (s.state === 'reviewed' || s.state === 'ready_for_review' || s.state === 'merge_pending' || s.state === 'shipped') {
+          continue;
+        }
+      } catch {
+        // no orchestrator state → normal implement candidate
+      }
+    }
     // Are all deps satisfied?
     const allDepsDone = task.depends_on.every(
       (depId) => doneTaskIds.has(depId) || isTrackerIdDone(depId, tasks),

@@ -236,7 +236,7 @@ export function writeTaskState(
   // the CURRENT state's current_attempt_id UNDER the marker. A phase
   // completion (review/ship) that ran while a superseding attempt dispatched
   // must not advance the task on behalf of a pointer that has moved on.
-  opts: { requireActiveLease?: boolean; expectedCurrentAttemptId?: string } = {},
+  opts: { requireActiveLease?: boolean; expectedCurrentAttemptId?: string; expectedStateVersion?: number } = {},
 ): void {
   // 1. Validate path/payload task_id agreement (id-in-path-and-payload learning).
   validateOrchestratorId(state.task_id, 'task_id');
@@ -320,13 +320,13 @@ export function writeTaskState(
         if (opts.requireActiveLease) {
           assertLeaseUnexpiredFromFile(forgeDir, taskId);
         }
-        if (opts.expectedCurrentAttemptId !== undefined) {
-          // Re-read the CURRENT state under marker ownership and require the
-          // attempt pointer to still be ours. buildContent runs on the same
-          // post-acquire read, so a superseding dispatch cannot slip between.
-          let currentPtr: string | null | undefined;
+        if (opts.expectedCurrentAttemptId !== undefined || opts.expectedStateVersion !== undefined) {
+          // Re-read the CURRENT state under marker ownership. buildContent
+          // runs on the same post-acquire read, so a superseding dispatch
+          // cannot slip between.
+          let current: { current_attempt_id: string | null; state_version: number };
           try {
-            currentPtr = readTaskState(forgeDir, taskId).current_attempt_id;
+            current = readTaskState(forgeDir, taskId);
           } catch (err) {
             throw new OrchestratorError(
               'STATE_NOT_FOUND',
@@ -334,11 +334,22 @@ export function writeTaskState(
               { taskId, cause: err },
             );
           }
-          if (currentPtr !== opts.expectedCurrentAttemptId) {
+          if (opts.expectedCurrentAttemptId !== undefined && current.current_attempt_id !== opts.expectedCurrentAttemptId) {
             throw new OrchestratorError(
               'STALE_ATTEMPT',
-              `attempt '${opts.expectedCurrentAttemptId}' was superseded by '${currentPtr ?? 'none'}' before its commit landed — a superseded phase attempt must not advance the task`,
-              { taskId, expected: opts.expectedCurrentAttemptId, actual: currentPtr ?? null },
+              `attempt '${opts.expectedCurrentAttemptId}' was superseded by '${current.current_attempt_id ?? 'none'}' before its commit landed — a superseded phase attempt must not advance the task`,
+              { taskId, expected: opts.expectedCurrentAttemptId, actual: current.current_attempt_id ?? null },
+            );
+          }
+          // FORGE-234 (impl R1 MAJ #1): the SHIP success commit pins the
+          // ADMITTED state version INSIDE the marker-held fence — a park/
+          // answer round-trip (V → V+2) with every other identity intact
+          // must invalidate the stale receipt at the final CAS.
+          if (opts.expectedStateVersion !== undefined && current.state_version !== opts.expectedStateVersion) {
+            throw new OrchestratorError(
+              'STALE_ATTEMPT',
+              `state version moved to ${current.state_version} (expected ${opts.expectedStateVersion}) before the commit landed — the admitting invocation was invalidated`,
+              { taskId, expected: opts.expectedStateVersion, actual: current.state_version },
             );
           }
         }
