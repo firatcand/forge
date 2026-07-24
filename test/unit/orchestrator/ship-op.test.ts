@@ -434,3 +434,19 @@ test('unresolvable scan base fails CLOSED through the budgeted path (impl-R1 CRI
     assert.match(out.detail, /scan base/);
   }
 });
+
+test('stale invocation FAILURE outcome refuses instead of consuming budget (impl-R2 MAJ #1)', async () => {
+  const fx = fixture();
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const original = JSON.parse(readFileSync(statePath, 'utf8'));
+  const { deps } = depsOf(fx, {
+    runCommand: async () => {
+      // The park/answer round-trip lands DURING verify; verify then fails.
+      writeFileSync(statePath, JSON.stringify({ ...original, state_version: original.state_version + 2 }));
+      return { exitCode: 1, stdout: '', stderr: 'tests failed', timedOut: false };
+    },
+  });
+  const out = await runShipOperation(argsOf(fx), deps, fx.readLease);
+  assert.equal(out.kind, 'refused', 'a stale invocation must never mint a budgeted failure carrier');
+  if (out.kind === 'refused') assert.equal(out.code, 'STALE_ATTEMPT');
+});

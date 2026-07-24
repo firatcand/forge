@@ -346,3 +346,33 @@ test('completion observer WITHOUT headSha refuses (impl-R1 MAJ #2)', async (t) =
   assert.equal(env.error.code, 'VERIFICATION_FAILED');
   assert.match(env.error.message, /headSha capability/);
 });
+
+test("attempt B never repairs itself onto A's orphaned park (impl-R2 MAJ #2)", async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  // A parks, then crashes pre-transition; B is dispatched (pointer moves).
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const s = JSON.parse(readFileSync(statePath, 'utf8'));
+  const B = '01890000-0000-7000-8000-00000000000b';
+  writeFileSync(statePath, JSON.stringify({ ...s, state: 'reviewed', current_attempt_id: B, state_version: s.state_version + 1 }));
+  // B's manifest so admission-side reads resolve.
+  const bDir = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'attempts', B);
+  mkdirSync(bDir, { recursive: true });
+  writeFileSync(join(bDir, 'manifest.json'), JSON.stringify({
+    version: 1, attempt_id: B, task_id: TASK, run_id: 'run-001', claim_id: 'claim-001',
+    generation: 0, phase: 'ship', worktree_path: fx.worktree, dispatched_at: new Date().toISOString(),
+    ship_target_sha: SHA,
+  }));
+  stdout.length = 0;
+
+  const r = await runOrchestrateShip({ taskId: TASK, attemptId: B, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env2 = JSON.parse(stdout[stdout.length - 1] ?? '');
+  // B must NOT adopt A's question: it parks FRESH (new question) — never repaired:true on A's id.
+  assert.notEqual(env2.error.details?.question_id, env.error.details.question_id, "B must not block itself on A's question");
+
+  // And answering A's stale question refuses BEFORE persisting.
+  const ans = runOrchestrateAnswer({ questionId: env.error.details.question_id, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(ans.exitCode, 1, "A's stale park answer is refused (pre-write)");
+});

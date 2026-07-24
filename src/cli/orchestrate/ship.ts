@@ -30,7 +30,7 @@ import { AttemptManifestSchema } from '../../schemas/attempt.ts';
 import { manifestFilePath } from '../../orchestrator/questions/paths.ts';
 import { readFrozenBaseBranch } from '../../orchestrator/worktree-base.ts';
 import { writeQuestionAtomic } from '../../orchestrator/questions/writer.ts';
-import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/lookup.ts';
+import { findQuestionFile, listOpenQuestionsAcrossTree } from '../../orchestrator/questions/lookup.ts';
 import { createGitHubRepoHost } from '../../repo-hosts/detect.ts';
 import type { Exec } from '../../repo-hosts/github.ts';
 import { createTracker } from './tracker-factory.ts';
@@ -91,9 +91,11 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
   try {
     const currentState = readTaskState(opts.forgeDir, opts.taskId);
     if (currentState.state === 'blocked_on_question' && currentState.current_attempt_id === opts.attemptId) {
-      const openParks = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter(
-        (q) => q.task_id === opts.taskId && q.origin?.phase === 'ship' && q.status === 'open',
-      );
+      const openParks = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter((q) => {
+        if (q.task_id !== opts.taskId || q.origin?.phase !== 'ship' || q.status !== 'open') return false;
+        const loc = findQuestionFile(q.question_id, { forgeDir: opts.forgeDir });
+        return loc !== null && loc.attemptId === opts.attemptId;
+      });
       if (openParks.length > 0) {
         const q = openParks[0]!;
         return {
@@ -113,9 +115,14 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
     // transition leaves state 'reviewed' with an open ship question — the
     // mandatory park must be REPAIRED, never silently deduped away.
     if (currentState.state === 'reviewed' && currentState.current_attempt_id === opts.attemptId) {
-      const orphanParks = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter(
-        (q) => q.task_id === opts.taskId && q.origin?.phase === 'ship' && q.status === 'open',
-      );
+      // impl-R2 MAJ #2: repair ONLY a park owned by THIS attempt — attempt
+      // B must never block itself on A's orphaned question (answering A's
+      // question would then refuse against B's pointer, wedging the task).
+      const orphanParks = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter((q) => {
+        if (q.task_id !== opts.taskId || q.origin?.phase !== 'ship' || q.status !== 'open') return false;
+        const loc = findQuestionFile(q.question_id, { forgeDir: opts.forgeDir });
+        return loc !== null && loc.attemptId === opts.attemptId;
+      });
       if (orphanParks.length > 0) {
         const q = orphanParks[0]!;
         const lease = leaseReader();
@@ -316,7 +323,11 @@ export async function runOrchestrateShip(args: ShipArgs, deps: ShipVerbDeps = {}
               updated_by: callerFromLease(lease),
             },
             callerFromLease(lease),
-            { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
+            {
+              requireActiveLease: true,
+              expectedCurrentAttemptId: opts.attemptId,
+              expectedStateVersion: outcome.admittedStateVersion,
+            },
           );
           try {
             appendAttemptEvent(
@@ -368,9 +379,13 @@ async function parkShip(
   fingerprint: string,
 ): Promise<{ exitCode: number }> {
   try {
-    const open = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter(
-      (q) => q.task_id === opts.taskId && q.origin?.incident_fingerprint === fingerprint && q.status === 'open',
-    );
+    // impl-R2 MAJ #2: incident dedupe is ATTEMPT-BOUND — a superseded
+    // attempt's open question never satisfies the current attempt's park.
+    const open = listOpenQuestionsAcrossTree({ forgeDir: opts.forgeDir }).filter((q) => {
+      if (q.task_id !== opts.taskId || q.origin?.incident_fingerprint !== fingerprint || q.status !== 'open') return false;
+      const loc = findQuestionFile(q.question_id, { forgeDir: opts.forgeDir });
+      return loc !== null && loc.attemptId === opts.attemptId;
+    });
     if (open.length > 0) {
       // Replay of the SAME unresolved incident — the durable park already exists.
       return {

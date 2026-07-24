@@ -130,7 +130,11 @@ export function runOrchestrateAnswer(
   if (q.origin?.phase === 'ship') {
     try {
       const stateNow = readTaskState(opts.forgeDir, location.taskId);
-      if (stateNow.state === 'blocked_on_question' && stateNow.current_attempt_id !== location.attemptId) {
+      // impl-R2 MAJ #2: a ship question whose ATTEMPT is no longer the
+      // current pointer is stale in EVERY state — the answer must refuse
+      // BEFORE persisting (a durable answer on a superseded park would
+      // consume the operator's cancellation without honoring it).
+      if (stateNow.current_attempt_id !== location.attemptId) {
         err.write(
           `forge orchestrate answer: ship park for attempt ${location.attemptId} was superseded by ${stateNow.current_attempt_id ?? 'none'} — stale answer refused\n`,
         );

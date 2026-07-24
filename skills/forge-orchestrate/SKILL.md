@@ -234,8 +234,11 @@ reviewed task with a satisfied dependency gate:
 ```bash
 # S1. Dispatch the first-class ship attempt (pointer self-loop; pins the
 #     manifest to the ship record's reviewed SHA).
+# The ship worktree already exists from the implement/review rounds;
+# ensure-worktree is idempotent and returns its path.
+WORKTREE_PATH=$(forge orchestrate ensure-worktree --task "${TASK_ID}" --json | jq -r '.data.worktree_path')
 DISPATCH_OUT=$(forge orchestrate dispatch --task "${TASK_ID}" --claim "${CLAIM_ID}" \
-  --run "${RUN_ID}" --phase ship --json)
+  --run "${RUN_ID}" --phase ship --worktree "${WORKTREE_PATH}" --json)
 ATTEMPT_ID=$(echo "${DISPATCH_OUT}" | jq -r '.data.attempt_id')
 
 # S2. Run the verb-only ship operation (verify → SHA-bound push → PR
