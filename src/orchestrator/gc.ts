@@ -399,8 +399,13 @@ function detectRow5(s: OrchestratorSnapshot): GcPlanRow[] {
         action: 'report_orphan',
         payload: {
           kind: 'answer_no_question',
+          // FORGE-234 (R3 ΔR3): resolution is DESTINATION-AWARE and owned by
+          // the answer verb (ship-origin: retry_ship → reviewed, cancel_task →
+          // cancelled; worker-origin: dispatch re-spawn). gc never advances a
+          // parked task itself — a blind awaiting_respawn would violate a
+          // cancel answer.
           description: answerReady
-            ? `Attempt ${att.attemptId}: answer ready — run gc to advance to awaiting_respawn`
+            ? `Attempt ${att.attemptId}: answer ready — re-run \`forge orchestrate answer\` to apply the phase-aware resolution (ship parks resolve to reviewed/cancelled; worker questions re-dispatch)`
             : `Attempt ${att.attemptId}: question timeout (${elapsedMs}ms > ${timeoutMs}ms) — run gc to mark expired`,
         },
       });

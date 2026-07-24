@@ -265,3 +265,9 @@ The verb logs a `guardrail_checked` event to your attempt's event stream. A fort
 ## Question budget
 
 {{BUDGET_WARNING}}
+
+<!-- FORGE-234: SHIP is VERB-ONLY (owner decision 2026-07-23). There is NO
+     ship worker prompt: after `dispatch --phase ship`, the dispatch skill
+     invokes `forge orchestrate ship --task <id> --attempt <id>` directly —
+     every ship step is deterministic git/gh/CLI work and never spawns a
+     model subagent (billing invariant by construction). -->

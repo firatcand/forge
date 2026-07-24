@@ -136,6 +136,15 @@ export const DispatchArgsSchema = z.object({
 });
 export type DispatchArgs = z.infer<typeof DispatchArgsSchema>;
 
+// FORGE-234: forge orchestrate ship — verb-only ship operation.
+export const ShipArgsSchema = z.object({
+  taskId: TaskIdSchema,
+  attemptId: AttemptIdSchema,
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type ShipArgs = z.infer<typeof ShipArgsSchema>;
+
 export const HeartbeatArgsSchema = z.object({
   taskId: TaskIdSchema,
   attemptId: AttemptIdSchema,

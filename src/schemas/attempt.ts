@@ -134,6 +134,12 @@ export const AttemptManifestSchema = z
     dispatched_at: Ts,
     review_target_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
     review_base_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+    // FORGE-234: the reviewed SHA a SHIP attempt is authorized to ship —
+    // pinned at dispatch from the ship record. OPTIONAL in schema v1 so
+    // pre-234 manifests keep parsing; the ship verb and complete REQUIRE it
+    // at the use boundary (a legacy SHIP manifest gets a typed re-dispatch
+    // refusal, never a silently derived pin).
+    ship_target_sha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
   })
   .refine(
     (m) => m.phase !== 'review' || (m.review_target_sha !== undefined && m.review_base_sha !== undefined),

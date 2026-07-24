@@ -161,6 +161,18 @@ test('dispatch --phase ship: legal only from reviewed; pointer self-loop', async
   const stdout = captureStdout(t);
   const ctx = await setupClaimed(stdout);
   writeShipPhasesFixture(ctx.repoRoot);
+  // FORGE-234: ship dispatch pins ship_target_sha from the ship record.
+  const recDir = join(ctx.forgeDir, 'orchestrator', 'tasks', 'FORGE-1');
+  mkdirSync(recDir, { recursive: true });
+  writeFileSync(
+    join(recDir, 'ship-record.json'),
+    JSON.stringify({
+      version: 1, task_id: 'FORGE-1', revision: 1, reviewed_head_sha: 'a'.repeat(40),
+      review_attempt_id: 'att-rev', base: null, pr: null, merge_attempt: 'not_started',
+      updated_at: new Date().toISOString(),
+    }),
+    'utf8',
+  );
 
   // Illegal from claimed.
   const bad = await runOrchestrateDispatch({
@@ -191,6 +203,11 @@ test('dispatch --phase ship: legal only from reviewed; pointer self-loop', async
   assert.equal(state.state, 'reviewed');
   assert.equal(state.current_attempt_id, env.data.attempt_id);
   assert.equal(state.ship_attempt_count, 1);
+  // FORGE-234: the manifest is pinned to the record's reviewed SHA.
+  const manifest = JSON.parse(
+    readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', env.data.attempt_id, 'manifest.json'), 'utf8'),
+  );
+  assert.equal(manifest.ship_target_sha, 'a'.repeat(40));
 });
 
 test('dispatch implement from awaiting_respawn refuses when the failure budget is exhausted', async (t) => {

@@ -31,6 +31,15 @@ export const VerdictSchema = z.object({
 
 export type Verdict = z.infer<typeof VerdictSchema>;
 
+// FORGE-234: the SHIP completion carrier — same shape as the generic worker
+// verdict but target_sha is REQUIRED (mirror of the review-phase pinned
+// split). ALL ship outcomes (success and budgeted failure) must name the SHA
+// they speak for; complete verifies the manifest/record equality chain.
+export const PinnedShipVerdictSchema = VerdictSchema.extend({
+  target_sha: z.string().regex(/^[0-9a-f]{40}$/),
+});
+export type PinnedShipVerdict = z.infer<typeof PinnedShipVerdictSchema>;
+
 export const ReviewVerdictSchema = z.object({
   version: z.literal(1),
   verdict: z.enum(['pass', 'changes_requested']),

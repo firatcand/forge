@@ -25,6 +25,7 @@ import { heartbeatHandler } from './heartbeat.ts';
 import { questionWriteHandler } from './question-write.ts';
 import { eventHandler } from './event.ts';
 import { completeHandler } from './complete.ts';
+import { runOrchestrateShip } from './ship.ts';
 import { cancelHandler } from './cancel.ts';
 import { applyDecisionHandler } from './apply-decision.ts';
 import { amendRoadmapHandler } from './amend-roadmap.ts';
@@ -435,6 +436,12 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     JSON_FLAG,
     FD,
   ],
+  ship: [
+    { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
+    { flag: 'attempt', takesValue: true, description: 'Ship attempt id (from dispatch --phase ship).', valueLabel: '<attempt-id>' },
+    JSON_FLAG,
+    FD,
+  ],
   cancel: [
     { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
     { flag: 'reason', takesValue: true, description: 'Cancellation reason.', valueLabel: '<text>' },
@@ -501,6 +508,21 @@ const RUN_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
 };
 
 // FORGE-179: nested audit sub-verb flag declarations.
+
+// FORGE-234: forge orchestrate ship — the verb-only ship operation
+// (reviewed → merge_pending; spec ORCHESTRATOR:877 steps 1-7).
+const shipHandler: VerbHandler = {
+  band: 'mutate',
+  synopsis: 'Run the ship operation: verify, SHA-bound push, PR create-or-get, tracker in_review → merge_pending.',
+  async run(rest, opts) {
+    const forgeDir = resolveForgeDir(rest, opts.cwd);
+    const taskId = parseFlag(rest, 'task') ?? rest.find((a) => !a.startsWith('--')) ?? '';
+    const attemptId = parseFlag(rest, 'attempt') ?? '';
+    const json = hasFlag(rest, 'json');
+    return runOrchestrateShip({ taskId, attemptId, forgeDir, json });
+  },
+};
+
 const AUDIT_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
   plan: [
     { flag: 'scope', takesValue: true, description: 'Comma-separated scope globs (override auto-discovery / settings).', valueLabel: '<globs>' },
@@ -563,6 +585,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['answer', withFlags(answerHandler, FLAG_DECLS['answer']!)],
   ['event', withFlags(eventHandler, FLAG_DECLS['event']!)],
   ['complete', withFlags(completeHandler, FLAG_DECLS['complete']!)],
+  ['ship', withFlags(shipHandler, FLAG_DECLS['ship']!)],
   ['cancel', withFlags(cancelHandler, FLAG_DECLS['cancel']!)],
   ['reconcile', withFlags(reconcileHandler, FLAG_DECLS['reconcile']!)],
   ['apply-decision', withFlags(applyDecisionHandler, FLAG_DECLS['apply-decision']!)],
@@ -596,6 +619,7 @@ export const HELP_ORDER: readonly string[] = [
   'answer',
   'event',
   'complete',
+  'ship',
   'cancel',
   'reconcile',
   'apply-decision',

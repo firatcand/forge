@@ -289,3 +289,129 @@ export function upsertBaseResolution(
     }
   }
 }
+
+export interface PullRequestBindingOptions {
+  pr: { repo: string; number: number; url: string };
+  expectedReviewAttemptId: string;
+  expectedReviewedHeadSha: string;
+  holder: CasHolderIdentity;
+  fence?: () => void;
+}
+
+function samePr(a: { repo: string; number: number }, b: { repo: string; number: number }): boolean {
+  return a.repo === b.repo && a.number === b.number;
+}
+
+// FORGE-234: the PR-identity write (plan v2 Δ8 full contract). The durable
+// intent BEFORE PR creation is the base+review binding; AFTER creation the
+// returned identity is persisted here — the crash window between them is
+// recovered by createOrGetPullRequest. Never creates the record; pr is
+// null→pr once; the same branch-pair PR survives re-review (upsertReviewed-
+// Binding preserves pr); a DIFFERENT pr is a hard conflict.
+export function upsertPullRequestBinding(
+  forgeDir: string,
+  taskId: string,
+  opts: PullRequestBindingOptions,
+): ShipRecord {
+  const validate = (current: ShipRecord): void => {
+    if (current.task_id !== taskId) {
+      throw new OrchestratorError('SCHEMA_INVALID', `ship record task_id ${current.task_id} != ${taskId}`, { taskId });
+    }
+    if (
+      current.review_attempt_id !== opts.expectedReviewAttemptId ||
+      current.reviewed_head_sha !== opts.expectedReviewedHeadSha
+    ) {
+      throw new OrchestratorError(
+        'STALE_ATTEMPT',
+        `ship record for task ${taskId} is bound to a different reviewed attempt — this PR binding is superseded`,
+        { taskId, attemptId: opts.expectedReviewAttemptId },
+      );
+    }
+    if (current.base === null) {
+      throw new OrchestratorError('STATE_NOT_FOUND', `ship record for task ${taskId} has no base — resolveBase must run first`, { taskId });
+    }
+    if (opts.pr.repo !== current.base.repo) {
+      throw new OrchestratorError(
+        'STATE_VERSION_CONFLICT',
+        `pr repo ${opts.pr.repo} != recorded base repo ${current.base.repo}`,
+        { taskId },
+      );
+    }
+  };
+
+  const attempt = (): ShipRecord => {
+    const current = readShipRecord(forgeDir, taskId);
+    if (current === null) {
+      throw new OrchestratorError('STATE_NOT_FOUND', `no ship record for task ${taskId} — PR binding never creates it`, { taskId });
+    }
+    validate(current);
+    if (current.pr !== null) {
+      if (samePr(current.pr, opts.pr)) {
+        // Replay — validated UNDER the CAS marker (same discipline as the
+        // base-resolution replay; an unguarded read must never accept).
+        const held = acquireCasMarker(shipRecordFilePath(forgeDir, taskId), current.revision, opts.holder, revisionOf);
+        try {
+          if (held.raw === null) {
+            throw new OrchestratorError('STATE_NOT_FOUND', `ship record for task ${taskId} vanished during replay`, { taskId });
+          }
+          const reread = ShipRecordSchema.safeParse(JSON.parse(held.raw));
+          if (!reread.success) {
+            throw new OrchestratorError('SCHEMA_INVALID', `ship record for task ${taskId} failed schema validation`, { taskId });
+          }
+          validate(reread.data);
+          if (reread.data.pr === null || !samePr(reread.data.pr, opts.pr)) {
+            throw new OrchestratorError('STATE_VERSION_CONFLICT', `ship record for task ${taskId} changed during replay validation`, { taskId });
+          }
+          opts.fence?.();
+          return reread.data;
+        } finally {
+          releaseCasMarker(held);
+        }
+      }
+      throw new OrchestratorError(
+        'STATE_VERSION_CONFLICT',
+        `ship record for task ${taskId} already holds a DIFFERENT pr — never overwritten`,
+        { taskId },
+      );
+    }
+    const next: ShipRecord = {
+      ...current,
+      revision: current.revision + 1,
+      pr: { ...opts.pr },
+      merge_attempt: current.merge_attempt,
+      updated_at: new Date().toISOString(),
+    };
+    const validated = ShipRecordSchema.safeParse(next);
+    if (!validated.success) {
+      throw new OrchestratorError('SCHEMA_INVALID', `ship record for task ${taskId} failed schema validation`, {
+        taskId,
+        zodError: validated.error.message,
+      });
+    }
+    casGuardedWrite({
+      filePath: shipRecordFilePath(forgeDir, taskId),
+      expectedVersion: current.revision,
+      holder: opts.holder,
+      readVersion: revisionOf,
+      fence: opts.fence,
+      buildContent: () => JSON.stringify(validated.data),
+    });
+    return validated.data;
+  };
+
+  for (let round = 0; ; round += 1) {
+    try {
+      return attempt();
+    } catch (err) {
+      if (err instanceof CasError && (err.code === 'cas_conflict' || err.code === 'version_conflict')) {
+        if (round === 0) continue; // one marker-held retry, never unguarded acceptance
+        throw new OrchestratorError('STATE_VERSION_CONFLICT', `ship record for task ${taskId} changed concurrently`, {
+          taskId,
+          cause: err,
+        });
+      }
+      if (err instanceof OrchestratorError) throw err;
+      throw new OrchestratorError('IO_ERROR', `ship record write failed for task ${taskId}`, { taskId, cause: err });
+    }
+  }
+}

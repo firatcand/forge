@@ -52,6 +52,7 @@ export type TransitionTrigger =
   | 'ship_op_completed'                 // ship side effects submitted → async merge wait
   | 'merge_confirmed'                   // RepoHost.mergeResult() proof → shipped
   | 'head_drift'                        // PR head ≠ reviewed SHA → back to review
+  | 'question_answered_ship'            // FORGE-234: ship park resolved retry_ship → reviewed
   | 'pr_closed_unmerged'                // PR closed without merging → park
   | 'probe_or_policy_loss'              // honesty probe / policy revoked → park
   | 'implement_verified_single_host'    // single-host direct path (no review hop)
@@ -68,6 +69,12 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'dispatched:first_heartbeat': 'running',
   'running:question_written': 'blocked_on_question',
   'ready_for_review:question_written': 'blocked_on_question',
+  // FORGE-234: SHIP policy park — a reviewed task parks durably instead of
+  // looping (plan v3 Δ11); resolution is phase-aware (question_answered_ship).
+  'reviewed:question_written': 'blocked_on_question',
+  'blocked_on_question:question_answered_ship': 'reviewed',
+  // FORGE-234: a cancel_task park answer cancels WHILE STILL blocked.
+  'blocked_on_question:cancel': 'cancelled',
   'blocked_on_question:answer_recorded': 'awaiting_respawn',
   'awaiting_respawn:dispatch': 'dispatched',
   'running:complete_ready_for_review': 'ready_for_review',
@@ -96,6 +103,9 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'reviewed:ship_op_completed': 'merge_pending',
   'merge_pending:merge_confirmed': 'shipped',
   'merge_pending:head_drift': 'ready_for_review',
+  // FORGE-234: pre-push drift (worktree HEAD or PR head ≠ reviewed SHA) is a
+  // NO-FAULT regression — re-enter verify + review, no budget consumption.
+  'reviewed:head_drift': 'ready_for_review',
   'merge_pending:pr_closed_unmerged': 'blocked_on_question',
   'merge_pending:probe_or_policy_loss': 'blocked_on_question',
   'merge_pending:cancel': 'cancelled',

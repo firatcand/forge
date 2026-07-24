@@ -287,6 +287,13 @@ export async function runOrchestratePhases(
     const taskId = task.tracker_issue_id ?? task.id;
     try {
       const state = readTaskState(opts.forgeDir, taskId);
+      // FORGE-234 (plan v3 Δ13): a budgeted SHIP failure leaves the task in
+      // `reviewed` — backoff applies ONLY to the ship listing (implement
+      // NEVER lists reviewed tasks; review/default listings are unchanged),
+      // with failure_count as the exponent.
+      if (opts.phase === 'ship' && state.state === 'reviewed' && state.failure_count > 0 && state.last_failed_at) {
+        return nextEligibleAt(state.failure_count, state.last_failed_at, retryPolicy) <= new Date();
+      }
       if (state.state !== 'running' || !state.last_failed_at) return true;
       return nextEligibleAt(state.attempt_count, state.last_failed_at, retryPolicy) <= new Date();
     } catch {
