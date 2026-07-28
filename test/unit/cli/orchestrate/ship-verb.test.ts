@@ -372,9 +372,11 @@ test("attempt B never repairs itself onto A's orphaned park (impl-R2 MAJ #2)", a
   // B must NOT adopt A's question: it parks FRESH (new question) — never repaired:true on A's id.
   assert.notEqual(env2.error.details?.question_id, env.error.details.question_id, "B must not block itself on A's question");
 
-  // And answering A's stale question refuses BEFORE persisting.
-  const ans = runOrchestrateAnswer({ questionId: env.error.details.question_id, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
-  assert.equal(ans.exitCode, 1, "A's stale park answer is refused (pre-write)");
+  // A stale RETRY (attempt-scoped) is refused before persisting — it must not
+  // resurrect a superseded attempt. (A cancel is task-level and IS honored;
+  // that guarantee has its own test.)
+  const ans = runOrchestrateAnswer({ questionId: env.error.details.question_id, optionId: 'retry_ship', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(ans.exitCode, 1, "A's stale retry_ship answer is refused (pre-write)");
 });
 
 test('stale failure never mints a carrier; complete refuses a version-moved failure (impl-R3 MAJ #1)', async (t) => {
@@ -429,7 +431,7 @@ test('cancel answer on a same-attempt ORPHAN park cancels via the full transacti
   assert.equal(lease.status, 'released');
 });
 
-test('a LOST cancellation race consumes NOTHING: no answer file, question stays answerable (impl-R4 MAJ)', async (t) => {
+test('a cancellation is TASK-level: honored even when a dispatch steals the attempt pointer (impl-R4/R5)', async (t) => {
   const stdout = captureStdout(t);
   const fx = fixture();
   await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
@@ -448,18 +450,35 @@ test('a LOST cancellation race consumes NOTHING: no answer file, question stays 
   );
 
   const ans = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
-  assert.equal(ans.exitCode, 1, 'the lost race refuses');
-
-  // The invariant: NOTHING was consumed — no durable answer, so the question
-  // remains answerable once the operator re-targets the live attempt.
+  assert.equal(ans.exitCode, 0, 'a task-level cancel is applicable regardless of which attempt holds the pointer');
+  assert.equal(
+    JSON.parse(readFileSync(statePath, 'utf8')).state,
+    'cancelled',
+    "the operator's cancellation is honored, never orphaned by a racing dispatch",
+  );
   const answerPath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'attempts', ATTEMPT, 'answers', `${questionId}.json`);
-  assert.equal(existsSync(answerPath), false, 'no answer file may be published when the CAS is lost');
+  assert.equal(existsSync(answerPath), true, 'the honored answer is durable');
+});
 
-  // Restoring the parked attempt lets the same answer succeed — proof the
-  // operator's cancellation was never swallowed.
-  writeFileSync(statePath, JSON.stringify({ ...s, state: 'reviewed', state_version: s.state_version + 2 }));
-  const retry = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
-  assert.equal(retry.exitCode, 0);
-  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).state, 'cancelled');
-  assert.equal(existsSync(answerPath), true, 'the honored answer IS durable');
+test('competing supervisors cannot commit contradictory outcomes (impl-R5 MAJ)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const questionId = env.error.details.question_id;
+
+  // Supervisor R answers retry_ship — the answer file is the reservation.
+  const r = runOrchestrateAnswer({ questionId, optionId: 'retry_ship', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(r.exitCode, 0);
+
+  // Supervisor C answers cancel_task on the SAME question: the durable answer
+  // already exists and names retry_ship, so C must NOT commit 'cancelled'.
+  const c = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(c.exitCode, 1, 'the losing option is refused, never applied');
+  const state = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json'), 'utf8'));
+  assert.equal(state.state, 'reviewed', 'state matches the DURABLE answer (retry_ship), not the loser');
+  const answer = JSON.parse(
+    readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'attempts', ATTEMPT, 'answers', `${questionId}.json`), 'utf8'),
+  );
+  assert.equal(answer.option_id, 'retry_ship', 'the durable answer is authoritative');
 });

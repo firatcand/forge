@@ -134,7 +134,9 @@ export function runOrchestrateAnswer(
       // current pointer is stale in EVERY state — the answer must refuse
       // BEFORE persisting (a durable answer on a superseded park would
       // consume the operator's cancellation without honoring it).
-      if (stateNow.current_attempt_id !== location.attemptId) {
+      // A cancel is task-level (see resolveShipPark) — only retry_ship is
+      // refused when its parked attempt was superseded.
+      if (opts.optionId !== 'cancel_task' && stateNow.current_attempt_id !== location.attemptId) {
         err.write(
           `forge orchestrate answer: ship park for attempt ${location.attemptId} was superseded by ${stateNow.current_attempt_id ?? 'none'} — stale answer refused\n`,
         );
@@ -157,24 +159,15 @@ export function runOrchestrateAnswer(
     ...(opts.note ? { note: opts.note } : {}),
   });
 
-  // FORGE-234 (impl R4): for SHIP-origin parks the STATE RESOLUTION COMMITS
-  // FIRST, then the answer becomes durable. Ordering matters because the
-  // answer file hides the question from open-question scans: if the CAS lost
-  // a race (a concurrent SHIP dispatch installing a new attempt) AFTER the
-  // answer was published, the operator's cancellation would be consumed and
-  // unrepairable. Committing the transition first means a lost race consumes
-  // NOTHING — the operator simply answers again against the new state.
+  // FORGE-234 (impl R5): the ANSWER FILE is the single-writer reservation —
+  // its `wx` write serializes competing supervisors (the loser gets
+  // DUPLICATE_ID and never touches state), so the DURABLE option always
+  // decides the resolution. Resolution therefore runs AFTER publication.
   //
-  // The inverse window (transition committed, answer write fails) is benign
-  // and convergent: resolveShipPark is destination-aware, so a replay reports
-  // "already applied" and re-writes the answer.
-  let shipResolution: string | null = null;
-  if (q.origin?.phase === 'ship') {
-    const resolved = resolveShipPark(opts.forgeDir, location.taskId, location.attemptId, opts.optionId, err);
-    if (!resolved.ok) return { exitCode: 1 };
-    shipResolution = resolved.action;
-  }
-
+  // The R4 hazard this once created — a published cancel that could never be
+  // applied because a dispatch stole the attempt pointer — is closed by
+  // cancellation being TASK-level rather than attempt-level (see
+  // applyCancelTransaction): a durable cancel is always applicable.
   try {
     writeAnswerAtomic(answer, readOpts);
   } catch (e) {
@@ -193,8 +186,10 @@ export function runOrchestrateAnswer(
     );
     return { exitCode: 1 };
   }
-  if (shipResolution !== null) {
-    out.write(`Answered ${opts.questionId} with option ${opts.optionId}; ship park resolution ${shipResolution}.\n`);
+  if (q.origin?.phase === 'ship') {
+    const resolved = resolveShipPark(opts.forgeDir, location.taskId, location.attemptId, opts.optionId, err);
+    if (!resolved.ok) return { exitCode: 1 };
+    out.write(`Answered ${opts.questionId} with option ${opts.optionId}; ship park resolution ${resolved.action}.\n`);
     return { exitCode: 0 };
   }
   out.write(`Answered ${opts.questionId} with option ${opts.optionId}.\n`);
@@ -217,26 +212,30 @@ function resolveShipPark(
     err.write(`forge orchestrate answer: cannot read task state: ${e instanceof Error ? e.message : String(e)}\n`);
     return { ok: false };
   }
+  // impl-R5: cancel_task is a TASK-level decision, not an attempt-level one.
+  // A durable cancellation is applicable from any cancellable state and is
+  // fenced on the CURRENT attempt pointer — a concurrent SHIP dispatch that
+  // steals the pointer can therefore never orphan the operator's cancel
+  // (the R4 hazard), while the answer file's single-writer reservation keeps
+  // competing options from committing contradictory outcomes (the R5 hazard).
+  if (optionId === 'cancel_task') {
+    if (state.state === 'cancelled') return { ok: true, action: 'already applied (state cancelled)' };
+    if (state.state !== 'blocked_on_question' && state.state !== 'reviewed') {
+      err.write(
+        `forge orchestrate answer: cannot cancel task ${taskId} from state '${state.state}'\n`,
+      );
+      return { ok: false };
+    }
+    return applyCancelTransaction(forgeDir, taskId, state.current_attempt_id ?? parkedAttemptId, state, err);
+  }
   if (state.state !== 'blocked_on_question') {
-    // Crash-replay convergence is DESTINATION-AWARE (impl R1 MAJ #4): only
-    // the answer's own expected destination counts as already-applied.
-    const expected = optionId === 'cancel_task' ? 'cancelled' : 'reviewed';
-    if (state.state === expected && (optionId === 'cancel_task' || state.current_attempt_id === parkedAttemptId)) {
+    // retry_ship is ATTEMPT-scoped: it means "re-ship THIS attempt's work".
+    // Destination-aware replay convergence (impl R1 MAJ #4).
+    if (state.state === 'reviewed' && state.current_attempt_id === parkedAttemptId) {
       return { ok: true, action: `already applied (state ${state.state})` };
     }
-    // impl-R3 MAJ #2: a SAME-ATTEMPT orphan park (question published, park
-    // transition crashed → state still 'reviewed') must honor a cancel
-    // answer via the full transaction — a consumed-but-unapplied cancel
-    // would leave the task shippable against the operator's decision.
-    if (
-      optionId === 'cancel_task' &&
-      state.state === 'reviewed' &&
-      state.current_attempt_id === parkedAttemptId
-    ) {
-      return applyCancelTransaction(forgeDir, taskId, parkedAttemptId, state, err);
-    }
     err.write(
-      `forge orchestrate answer: ship park resolution expected '${expected}' but the task is '${state.state}' — cannot repair\n`,
+      `forge orchestrate answer: ship park resolution expected 'reviewed' but the task is '${state.state}' — cannot repair\n`,
     );
     return { ok: false };
   }
@@ -245,9 +244,6 @@ function resolveShipPark(
       `forge orchestrate answer: ship park for attempt ${parkedAttemptId} was superseded by ${state.current_attempt_id ?? 'none'} — stale answer refused\n`,
     );
     return { ok: false };
-  }
-  if (optionId === 'cancel_task') {
-    return applyCancelTransaction(forgeDir, taskId, parkedAttemptId, state, err);
   }
   let lease;
   try {
@@ -284,7 +280,7 @@ function resolveShipPark(
 function applyCancelTransaction(
   forgeDir: string,
   taskId: string,
-  parkedAttemptId: string,
+  attemptIdForFence: string,
   state: ReturnType<typeof readTaskState>,
   err: { write: (s: string) => void },
 ): { ok: true; action: string } | { ok: false } {
@@ -302,7 +298,7 @@ function applyCancelTransaction(
         ts: new Date().toISOString(),
         reason: 'ship park: cancel_task answer',
       },
-      { forgeDir, taskId, attemptId: parkedAttemptId, caller: callerFromLease(lease) },
+      { forgeDir, taskId, attemptId: attemptIdForFence, caller: callerFromLease(lease) },
     );
   } catch {
     // best-effort audit event
@@ -318,7 +314,7 @@ function applyCancelTransaction(
         updated_by: callerFromLease(lease),
       },
       callerFromLease(lease),
-      { expectedCurrentAttemptId: parkedAttemptId },
+      { expectedCurrentAttemptId: attemptIdForFence },
     );
   } catch (e) {
     err.write(`forge orchestrate answer: cancel transition failed: ${e instanceof Error ? e.message : String(e)}\n`);
