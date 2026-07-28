@@ -196,6 +196,14 @@ export function runOrchestrateAnswer(
   return { exitCode: 0 };
 }
 
+// KNOWN LIMIT (FORGE-234; see spec/ORCHESTRATOR.md §SHIP policy parks): answer
+// selection and state resolution are two independently serialized writes. The
+// sequential lifecycle and competing-supervisor cases are correct, but a park
+// racing a SUCCESSOR attempt's progress leaves two narrow windows (cancel vs.
+// a successor that already moved past reviewed; orphan repair vs. a resolved
+// retry). Closing them needs a shared per-question transaction — tracked as
+// its own task.
+//
 // FORGE-234: phase-aware ship-park resolution. CAS against the live state;
 // a superseded parked attempt refuses (stale answer must not move the task).
 function resolveShipPark(

@@ -886,6 +886,32 @@ Each task flows through three phases sequentially. Each phase is its own subagen
   - Red PR CI → regress via the changes-requested path with findings injected. Transient git/tracker failures → retry with backoff; after `retry_attempts` failures → `failed`, fatal notification.
 - **`'auto'` preconditions** (`ship.merge_policy: 'auto'`; default is `'approval'` = open PR, human merges): requires `agents.review_host_cli` configured (dual-host review — single-host + `auto` is a settings validation error) AND the RepoHost **honesty probe** passing: the *effective* base-branch rules (classic branch protection + rulesets) enforce at least one blocking required status check; the squash method is allowed; the authenticated identity has write permission; no admin bypass is in play; **the base branch has NO merge queue** (owner decision MQ: a queue-enabled base can queue/merge with no orchestrator running, breaking the head-bound guarantee — merge-queue repos are UNSUPPORTED for `'auto'`; the probe reports `merge_queue_enabled` and the ship path parks fail-closed). Probe failure → **park the task with a question** — never warn-and-merge, never a silent downgrade. (Tracker and repo host are orthogonal — a Linear-tracked repo hosted on GitHub gets the full path. Repos with no RepoHost cannot SHIP at all — see §RepoHost.)
 
+### SHIP policy parks — known concurrency limits (FORGE-234; hardening tracked separately)
+
+The SHIP policy park (unsupported host, fork topology, PR conflict, honesty-probe
+failure) writes a durable question and resolves it through the `answer` verb. Answer
+selection and state resolution are **two independently serialized writes** — the answer
+file's `wx` write is the single-writer reservation, and the state CAS is separately fenced.
+That is sufficient for the sequential lifecycle and for competing supervisors (the durable
+option always decides), but two narrow windows remain when a park races a *successor
+attempt's* progress:
+
+1. **Cancellation vs. successor lifecycle.** `cancel_task` is task-level and applies from
+   `blocked_on_question` or `reviewed`. If a superseding SHIP attempt has already moved the
+   task to `ready_for_review` (drift) or `merge_pending` before the operator answers, the
+   cancellation is published but cannot converge; the operator must use `forge orchestrate
+   cancel` directly.
+2. **Orphan repair vs. resolved retry.** A SHIP invocation that snapshots an orphaned park
+   can commit its `reviewed → blocked_on_question` repair after a concurrent `retry_ship`
+   resolution reported "already applied", re-parking a task the operator just released.
+   Re-answering converges.
+
+Neither window touches the merge path, the ship proof chain, or a normal ship: parks only
+fire on repositories the orchestrator cannot legitimately ship to at all. Closing them
+properly requires a **shared per-question transaction** covering answer selection and state
+resolution together (rather than two serialized writes) — tracked as its own task so the
+primitive gets a full design review.
+
 ### Single-host mode
 
 If `agents.review_host_cli` is `null`, REVIEW phase is skipped. Task flows IMPLEMENT → SHIP directly. A one-time warning at orchestrator first-run: *"Second-opinion review disabled — running single-host. Forge recommends configuring review_host_cli for adversarial review."*
