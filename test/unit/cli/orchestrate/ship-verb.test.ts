@@ -2,7 +2,7 @@
 // phase-aware answer resolution, drift regression, single-envelope contract.
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test, type TestContext } from 'node:test';
@@ -427,4 +427,39 @@ test('cancel answer on a same-attempt ORPHAN park cancels via the full transacti
   assert.equal(after.state, 'cancelled');
   const lease = JSON.parse(readFileSync(join(fx.forgeDir, 'orchestrator/tasks', TASK, 'lease.json'), 'utf8'));
   assert.equal(lease.status, 'released');
+});
+
+test('a LOST cancellation race consumes NOTHING: no answer file, question stays answerable (impl-R4 MAJ)', async (t) => {
+  const stdout = captureStdout(t);
+  const fx = fixture();
+  await runOrchestrateShip({ taskId: TASK, attemptId: ATTEMPT, forgeDir: fx.forgeDir, json: true }, parkingDeps());
+  const env = JSON.parse(stdout[stdout.length - 1] ?? '');
+  const questionId = env.error.details.question_id;
+
+  // Crash between question publication and the park transition…
+  const statePath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'state.json');
+  const s = JSON.parse(readFileSync(statePath, 'utf8'));
+  // …and a concurrent SHIP dispatch WINS the state CAS, installing attempt B
+  // before the operator's cancel answer commits.
+  const B = '01890000-0000-7000-8000-00000000000c';
+  writeFileSync(
+    statePath,
+    JSON.stringify({ ...s, state: 'reviewed', current_attempt_id: B, state_version: s.state_version + 1 }),
+  );
+
+  const ans = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(ans.exitCode, 1, 'the lost race refuses');
+
+  // The invariant: NOTHING was consumed — no durable answer, so the question
+  // remains answerable once the operator re-targets the live attempt.
+  const answerPath = join(fx.forgeDir, 'orchestrator/tasks', TASK, 'attempts', ATTEMPT, 'answers', `${questionId}.json`);
+  assert.equal(existsSync(answerPath), false, 'no answer file may be published when the CAS is lost');
+
+  // Restoring the parked attempt lets the same answer succeed — proof the
+  // operator's cancellation was never swallowed.
+  writeFileSync(statePath, JSON.stringify({ ...s, state: 'reviewed', state_version: s.state_version + 2 }));
+  const retry = runOrchestrateAnswer({ questionId, optionId: 'cancel_task', forgeDir: fx.forgeDir, stdout: sink, stderr: sink });
+  assert.equal(retry.exitCode, 0);
+  assert.equal(JSON.parse(readFileSync(statePath, 'utf8')).state, 'cancelled');
+  assert.equal(existsSync(answerPath), true, 'the honored answer IS durable');
 });

@@ -157,6 +157,24 @@ export function runOrchestrateAnswer(
     ...(opts.note ? { note: opts.note } : {}),
   });
 
+  // FORGE-234 (impl R4): for SHIP-origin parks the STATE RESOLUTION COMMITS
+  // FIRST, then the answer becomes durable. Ordering matters because the
+  // answer file hides the question from open-question scans: if the CAS lost
+  // a race (a concurrent SHIP dispatch installing a new attempt) AFTER the
+  // answer was published, the operator's cancellation would be consumed and
+  // unrepairable. Committing the transition first means a lost race consumes
+  // NOTHING — the operator simply answers again against the new state.
+  //
+  // The inverse window (transition committed, answer write fails) is benign
+  // and convergent: resolveShipPark is destination-aware, so a replay reports
+  // "already applied" and re-writes the answer.
+  let shipResolution: string | null = null;
+  if (q.origin?.phase === 'ship') {
+    const resolved = resolveShipPark(opts.forgeDir, location.taskId, location.attemptId, opts.optionId, err);
+    if (!resolved.ok) return { exitCode: 1 };
+    shipResolution = resolved.action;
+  }
+
   try {
     writeAnswerAtomic(answer, readOpts);
   } catch (e) {
@@ -175,14 +193,8 @@ export function runOrchestrateAnswer(
     );
     return { exitCode: 1 };
   }
-  // FORGE-234 (plan v3 Δ11 + R3 ΔR3): the answer verb OWNS the state
-  // resolution for SHIP-origin parks — retry_ship → reviewed (re-ship);
-  // cancel_task → cancelled while still blocked. Worker-origin questions keep
-  // the existing lifecycle (dispatch re-spawns; no transition here).
-  if (q.origin?.phase === 'ship') {
-    const resolved = resolveShipPark(opts.forgeDir, location.taskId, location.attemptId, opts.optionId, err);
-    if (!resolved.ok) return { exitCode: 1 };
-    out.write(`Answered ${opts.questionId} with option ${opts.optionId}; ship park resolution ${resolved.action}.\n`);
+  if (shipResolution !== null) {
+    out.write(`Answered ${opts.questionId} with option ${opts.optionId}; ship park resolution ${shipResolution}.\n`);
     return { exitCode: 0 };
   }
   out.write(`Answered ${opts.questionId} with option ${opts.optionId}.\n`);
