@@ -41,10 +41,13 @@ test('a sampling of still-illegal transitions throw ILLEGAL_TRANSITION', () => {
       err instanceof OrchestratorError && err.code === 'ILLEGAL_TRANSITION',
   );
 
-  // question_written does not fire from an arbitrary state (e.g. reviewed).
+  // FORGE-234: reviewed:question_written became LEGAL (ship policy park);
+  // an arbitrary-state question (e.g. claimed) is still illegal.
+  assert.doesNotThrow(() =>
+    assertLegalTransition('reviewed', 'blocked_on_question', 'question_written'),
+  );
   assert.throws(
-    () =>
-      assertLegalTransition('reviewed', 'blocked_on_question', 'question_written'),
+    () => assertLegalTransition('claimed', 'blocked_on_question', 'question_written'),
     (err: unknown) =>
       err instanceof OrchestratorError && err.code === 'ILLEGAL_TRANSITION',
   );

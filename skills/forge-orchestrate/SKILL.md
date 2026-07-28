@@ -225,6 +225,39 @@ Per `spec/ORCHESTRATOR.md` §80-98:
   `forge orchestrate cancel <task_id> --reason "<reason>"` as the suggested
   recovery — does NOT auto-cancel. User decides.
 
+## Ship rounds (FORGE-234 — VERB-ONLY, no worker spawn)
+
+SHIP is **not** a worker phase: there is no ship worker prompt and no model
+subagent. When `forge orchestrate phases --ready --phase ship --json` lists a
+reviewed task with a satisfied dependency gate:
+
+```bash
+# S1. Dispatch the first-class ship attempt (pointer self-loop; pins the
+#     manifest to the ship record's reviewed SHA).
+# The ship worktree already exists from the implement/review rounds;
+# ensure-worktree is idempotent and returns its path.
+WORKTREE_PATH=$(forge orchestrate ensure-worktree --task "${TASK_ID}" --json | jq -r '.data.worktree_path')
+DISPATCH_OUT=$(forge orchestrate dispatch --task "${TASK_ID}" --claim "${CLAIM_ID}" \
+  --run "${RUN_ID}" --phase ship --worktree "${WORKTREE_PATH}" --json)
+ATTEMPT_ID=$(echo "${DISPATCH_OUT}" | jq -r '.data.attempt_id')
+
+# S2. Run the verb-only ship operation (verify → SHA-bound push → PR
+#     create-or-get → tracker in_review → merge_pending). NEVER spawn a
+#     worker for this; the verb is deterministic git/gh work.
+forge orchestrate ship --task "${TASK_ID}" --attempt "${ATTEMPT_ID}" --json
+```
+
+Outcome handling:
+- `ok` with `next_state: merge_pending` — done; the merge itself happens on
+  merge_pending ticks (FORGE-235), never here.
+- `SHIP_PARKED` — surface `details.question_id` to the user exactly like a
+  worker question; the answer verb resolves it (`retry_ship` → re-ship later;
+  `cancel_task` cancels).
+- `VERIFICATION_FAILED` head-drift — the task regressed to review; the next
+  review round picks it up (no budget consumed).
+- Any budgeted failure — the task stays `reviewed` with backoff; it reappears
+  in a later `--phase ship` listing when eligible.
+
 ## Exit codes
 
 - `0` — success (round complete, or user typed `stop` cleanly)

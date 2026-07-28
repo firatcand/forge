@@ -79,6 +79,25 @@ export const QuestionSchema = z.object({
   recommended_option_id: z.string().min(1).max(64).optional(),
   what_happens_if_unanswered: z.string().max(2_000).optional(),
   classification: DecisionClassificationSchema,
+  // FORGE-234: the versioned park-origin contract (plan v3 Δ11). Present only
+  // on SHIP policy parks; the answer verb routes state resolution by it
+  // (retry_ship → reviewed, cancel_task → cancelled) and gc row 5 repairs
+  // toward the phase-specific destination — never a blind awaiting_respawn.
+  origin: z
+    .object({
+      phase: z.literal('ship'),
+      park_reason: z.enum([
+        'unsupported_host',
+        'fork_topology',
+        'pr_conflict',
+        'probe_bar_failed',
+        'probe_unavailable',
+      ]),
+      // reason + repo + base + merge_policy + probe snapshot — dedupe is
+      // scoped to the CURRENT unresolved incident (plan v3 Δ12).
+      incident_fingerprint: z.string().min(1).max(200),
+    })
+    .optional(),
 });
 
 export const AnswerSchema = z.object({

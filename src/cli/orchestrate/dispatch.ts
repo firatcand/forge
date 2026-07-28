@@ -43,6 +43,7 @@ import type { TaskStateRecord } from '../../schemas/task-state.ts';
 import { emit, fail, ok } from '../envelope.ts';
 import { resolvePhasesYaml, loadPhases } from '../../core/phases.ts';
 import { evaluateShipDependencyGate, gateRetriable, type DependencyObserver } from '../../orchestrator/dependency-gate.ts';
+import { readShipRecord } from '../../orchestrator/ship-record.ts';
 import { createDependencyObserver } from '../../repo-hosts/detect.ts';
 import { ghExec } from './gh-exec.ts';
 import type { Task as PhasesTask } from '../../schemas/phases.ts';
@@ -287,6 +288,42 @@ export async function runOrchestrateDispatch(
     }
   }
 
+  // FORGE-234 (plan v2 Δ5): a SHIP attempt is authorized for EXACTLY the
+  // ship record's reviewed binding at dispatch time — the manifest pin is the
+  // immutable anchor the verb, receipt, and complete all bind to.
+  let shipTargetSha: string | undefined;
+  if (phase === 'ship') {
+    let record;
+    try {
+      record = readShipRecord(opts.forgeDir, opts.taskId);
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(
+            err instanceof OrchestratorError ? err.code : 'IO_ERROR',
+            `cannot dispatch ship for task ${opts.taskId}: ship record unreadable — ${err instanceof Error ? err.message : String(err)}`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (record === null) {
+      return {
+        exitCode: emit(
+          fail(
+            'STATE_NOT_FOUND',
+            `cannot dispatch ship for task ${opts.taskId}: no ship record (the reviewed binding must be minted at review pass)`,
+            false,
+            { taskId: opts.taskId },
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+    shipTargetSha = record.reviewed_head_sha;
+  }
+
   // 4. Mint attempt_id, validate + write the manifest atomically (wx) BEFORE
   //    the state pointer commits.
   const attemptId = uuidv7();
@@ -312,6 +349,7 @@ export async function runOrchestrateDispatch(
     worktree_path: opts.worktreePath,
     dispatched_at: new Date().toISOString(),
     ...(reviewTargetSha !== undefined ? { review_target_sha: reviewTargetSha } : {}),
+    ...(shipTargetSha !== undefined ? { ship_target_sha: shipTargetSha } : {}),
     ...(reviewBaseSha !== undefined ? { review_base_sha: reviewBaseSha } : {}),
   };
   const manifestParsed = AttemptManifestSchema.safeParse(manifestCandidate);

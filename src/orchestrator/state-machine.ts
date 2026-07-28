@@ -52,6 +52,7 @@ export type TransitionTrigger =
   | 'ship_op_completed'                 // ship side effects submitted → async merge wait
   | 'merge_confirmed'                   // RepoHost.mergeResult() proof → shipped
   | 'head_drift'                        // PR head ≠ reviewed SHA → back to review
+  | 'question_answered_ship'            // FORGE-234: ship park resolved retry_ship → reviewed
   | 'pr_closed_unmerged'                // PR closed without merging → park
   | 'probe_or_policy_loss'              // honesty probe / policy revoked → park
   | 'implement_verified_single_host'    // single-host direct path (no review hop)
@@ -68,6 +69,15 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'dispatched:first_heartbeat': 'running',
   'running:question_written': 'blocked_on_question',
   'ready_for_review:question_written': 'blocked_on_question',
+  // FORGE-234: SHIP policy park — a reviewed task parks durably instead of
+  // looping (plan v3 Δ11); resolution is phase-aware (question_answered_ship).
+  'reviewed:question_written': 'blocked_on_question',
+  'blocked_on_question:question_answered_ship': 'reviewed',
+  // FORGE-234: a cancel_task park answer cancels WHILE STILL blocked; a
+  // same-attempt ORPHAN park (question published, transition crashed) may be
+  // cancelled directly from reviewed (impl-R3 MAJ #2 repair path).
+  'blocked_on_question:cancel': 'cancelled',
+  'reviewed:cancel': 'cancelled',
   'blocked_on_question:answer_recorded': 'awaiting_respawn',
   'awaiting_respawn:dispatch': 'dispatched',
   'running:complete_ready_for_review': 'ready_for_review',
@@ -96,6 +106,9 @@ const TRANSITION_TABLE: Readonly<Partial<Record<TransitionKey, TaskState>>> = {
   'reviewed:ship_op_completed': 'merge_pending',
   'merge_pending:merge_confirmed': 'shipped',
   'merge_pending:head_drift': 'ready_for_review',
+  // FORGE-234: pre-push drift (worktree HEAD or PR head ≠ reviewed SHA) is a
+  // NO-FAULT regression — re-enter verify + review, no budget consumption.
+  'reviewed:head_drift': 'ready_for_review',
   'merge_pending:pr_closed_unmerged': 'blocked_on_question',
   'merge_pending:probe_or_policy_loss': 'blocked_on_question',
   'merge_pending:cancel': 'cancelled',
@@ -226,7 +239,7 @@ export function writeTaskState(
   // the CURRENT state's current_attempt_id UNDER the marker. A phase
   // completion (review/ship) that ran while a superseding attempt dispatched
   // must not advance the task on behalf of a pointer that has moved on.
-  opts: { requireActiveLease?: boolean; expectedCurrentAttemptId?: string } = {},
+  opts: { requireActiveLease?: boolean; expectedCurrentAttemptId?: string; expectedStateVersion?: number } = {},
 ): void {
   // 1. Validate path/payload task_id agreement (id-in-path-and-payload learning).
   validateOrchestratorId(state.task_id, 'task_id');
@@ -310,13 +323,13 @@ export function writeTaskState(
         if (opts.requireActiveLease) {
           assertLeaseUnexpiredFromFile(forgeDir, taskId);
         }
-        if (opts.expectedCurrentAttemptId !== undefined) {
-          // Re-read the CURRENT state under marker ownership and require the
-          // attempt pointer to still be ours. buildContent runs on the same
-          // post-acquire read, so a superseding dispatch cannot slip between.
-          let currentPtr: string | null | undefined;
+        if (opts.expectedCurrentAttemptId !== undefined || opts.expectedStateVersion !== undefined) {
+          // Re-read the CURRENT state under marker ownership. buildContent
+          // runs on the same post-acquire read, so a superseding dispatch
+          // cannot slip between.
+          let current: { current_attempt_id: string | null; state_version: number };
           try {
-            currentPtr = readTaskState(forgeDir, taskId).current_attempt_id;
+            current = readTaskState(forgeDir, taskId);
           } catch (err) {
             throw new OrchestratorError(
               'STATE_NOT_FOUND',
@@ -324,11 +337,22 @@ export function writeTaskState(
               { taskId, cause: err },
             );
           }
-          if (currentPtr !== opts.expectedCurrentAttemptId) {
+          if (opts.expectedCurrentAttemptId !== undefined && current.current_attempt_id !== opts.expectedCurrentAttemptId) {
             throw new OrchestratorError(
               'STALE_ATTEMPT',
-              `attempt '${opts.expectedCurrentAttemptId}' was superseded by '${currentPtr ?? 'none'}' before its commit landed — a superseded phase attempt must not advance the task`,
-              { taskId, expected: opts.expectedCurrentAttemptId, actual: currentPtr ?? null },
+              `attempt '${opts.expectedCurrentAttemptId}' was superseded by '${current.current_attempt_id ?? 'none'}' before its commit landed — a superseded phase attempt must not advance the task`,
+              { taskId, expected: opts.expectedCurrentAttemptId, actual: current.current_attempt_id ?? null },
+            );
+          }
+          // FORGE-234 (impl R1 MAJ #1): the SHIP success commit pins the
+          // ADMITTED state version INSIDE the marker-held fence — a park/
+          // answer round-trip (V → V+2) with every other identity intact
+          // must invalidate the stale receipt at the final CAS.
+          if (opts.expectedStateVersion !== undefined && current.state_version !== opts.expectedStateVersion) {
+            throw new OrchestratorError(
+              'STALE_ATTEMPT',
+              `state version moved to ${current.state_version} (expected ${opts.expectedStateVersion}) before the commit landed — the admitting invocation was invalidated`,
+              { taskId, expected: opts.expectedStateVersion, actual: current.state_version },
             );
           }
         }

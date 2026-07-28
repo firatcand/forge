@@ -358,19 +358,44 @@ test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship r
   const shipAttempt = JSON.parse(stdout[stdout.length - 1] ?? '').data.attempt_id;
   stdout.length = 0;
 
-  // Incomplete record (base/pr null) → refused.
-  const shipVerdict = writeVerdict(ctx.repoRoot, 'ready_for_review');
-  result = await runOrchestrateComplete({
-    taskId: 'FORGE-1',
-    attemptId: shipAttempt,
-    verdictFile: shipVerdict,
-    phase: 'ship',
-    forgeDir: ctx.forgeDir,
-    json: true,
+  // FORGE-234: ship completions carry PINNED verdicts (target_sha required).
+  const recordNow = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/ship-record.json'), 'utf8'));
+  const shipTarget = recordNow.reviewed_head_sha;
+  const writeShipVerdict = (verdict: string): string => {
+    const p = join(ctx.repoRoot, `ship-verdict-${verdict}.json`);
+    writeFileSync(
+      p,
+      JSON.stringify({
+        version: 1, verdict, summary: 'ship op', branch: 'feat/x', save_point: '',
+        tests: { ran: false, passed: 0, failed: 0, skipped: 0, duration_ms: 0, output_excerpt: '' },
+        lint: { ran: false, clean: true, violations: 0, output_excerpt: '' },
+        target_sha: shipTarget,
+      }),
+      'utf8',
+    );
+    return p;
+  };
+  const shipObserver = async () => ({
+    mergeResult: async () => ({ merged: false as const, state: 'open' as const }),
+    headSha: async () => ({ ok: true as const, sha: shipTarget }),
   });
+
+  // No receipt yet → the SUCCESS outcome is refused (direct complete ≠ ship).
+  result = await runOrchestrateComplete(
+    {
+      taskId: 'FORGE-1',
+      attemptId: shipAttempt,
+      verdictFile: writeShipVerdict('ready_for_review'),
+      phase: 'ship',
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { observerFor: shipObserver },
+  );
   assert.equal(result.exitCode, 1);
   let env = JSON.parse(stdout[stdout.length - 1] ?? '');
-  assert.equal(env.error.code, 'SHIP_RECORD_INCOMPLETE');
+  assert.equal(env.error.code, 'STALE_ATTEMPT');
+  assert.match(env.error.message, /no ship receipt/);
   stdout.length = 0;
 
   // Populate base + pr (the FORGE-234 write-ahead stages, hand-rolled here)…
@@ -423,16 +448,32 @@ test('FORGE-231: ship completion → merge_pending ONLY behind a complete ship r
   writeFileSync(phasesPath, trivialPhases, 'utf8');
   stdout.length = 0;
 
+  // FORGE-234: write the fenced ship receipt (the proof the verb ran).
+  const stateNow2 = JSON.parse(readFileSync(join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/state.json'), 'utf8'));
+  writeFileSync(
+    join(ctx.forgeDir, 'orchestrator/tasks/FORGE-1/attempts', shipAttempt, 'ship_receipt.json'),
+    JSON.stringify({
+      version: 1, task_id: 'FORGE-1', attempt_id: shipAttempt, target_sha: shipTarget,
+      admitted_state_version: stateNow2.state_version, probe: 'skipped_approval',
+      pushed: true, pr: { repo: 'o/r', number: 7, url: 'https://example.test/pr/7' },
+      tracker_updated: true, created_at: new Date().toISOString(),
+    }),
+    'utf8',
+  );
+
   // …then the ship completion enters the ASYNC merge wait — merge_pending,
   // never shipped (the platform merge is the only proof).
-  result = await runOrchestrateComplete({
-    taskId: 'FORGE-1',
-    attemptId: shipAttempt,
-    verdictFile: writeVerdict(ctx.repoRoot, 'ready_for_review'),
-    phase: 'ship',
-    forgeDir: ctx.forgeDir,
-    json: true,
-  });
+  result = await runOrchestrateComplete(
+    {
+      taskId: 'FORGE-1',
+      attemptId: shipAttempt,
+      verdictFile: writeShipVerdict('ready_for_review'),
+      phase: 'ship',
+      forgeDir: ctx.forgeDir,
+      json: true,
+    },
+    { observerFor: shipObserver },
+  );
   assert.equal(result.exitCode, 0);
   env = JSON.parse(stdout[stdout.length - 1] ?? '');
   assert.equal(env.data.next_state, 'merge_pending');

@@ -27,7 +27,11 @@ import { existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync, rmSyn
 import path from 'node:path';
 
 import { CompleteArgsSchema, type CompleteArgs } from '../../schemas/cli-args.ts';
-import { VerdictSchema } from '../../schemas/verdict.ts';
+import { VerdictSchema, PinnedShipVerdictSchema } from '../../schemas/verdict.ts';
+import { ShipReceiptSchema, type ShipReceipt } from '../../schemas/ship-receipt.ts';
+import { shipReceiptPath } from '../../orchestrator/ship-op.ts';
+import { createDependencyObserver } from '../../repo-hosts/detect.ts';
+import { ghExec } from './gh-exec.ts';
 import { AttemptManifestSchema, type AttemptManifest } from '../../schemas/attempt.ts';
 import { applyTransition, readTaskState, writeTaskState } from '../../orchestrator/state-machine.ts';
 import { composeTrustedReviewOutcome } from '../../orchestrator/review-compose.ts';
@@ -58,7 +62,7 @@ import type { VerbHandler } from './index.ts';
 
 export async function runOrchestrateComplete(
   args: CompleteArgs,
-  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null> } = {},
+  deps: { run?: RunCommand; observerFor?: (depStateId: string) => Promise<DependencyObserver | null>; expectedStateVersion?: number } = {},
 ): Promise<{ exitCode: number }> {
   const parsed = CompleteArgsSchema.safeParse(args);
   if (!parsed.success) {
@@ -684,6 +688,186 @@ export async function runOrchestrateComplete(
     }
   }
 
+  let shipSuccessAdmittedVersion: number | null = null;
+
+  // 2d. FORGE-234: SHIP completion trust (plan v3 Δ10 + R3 ΔR1/ΔR2). ALL ship
+  //     outcomes carry a PINNED verdict whose target must equal the manifest
+  //     pin and the record's reviewed binding; the SUCCESS outcome
+  //     additionally requires the fenced ship receipt (proof the verb ran),
+  //     the admitted-state-version pin, the probe/policy match, and a FRESH
+  //     live PR-head read. Every refusal here precedes artifact publication.
+  if (opts.phase === 'ship') {
+    const pinnedShip = PinnedShipVerdictSchema.safeParse(verdict.data);
+    if (!pinnedShip.success) {
+      return {
+        exitCode: emit(
+          fail('VERIFICATION_FAILED', `ship completion requires a pinned verdict (target_sha): ${pinnedShip.error.message.slice(0, 200)}`, false),
+          { json: opts.json },
+        ),
+      };
+    }
+    let shipManifest;
+    try {
+      shipManifest = readAttemptManifestChecked(opts.forgeDir, opts.taskId, opts.attemptId);
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(err instanceof OrchestratorError ? err.code : 'IO_ERROR', err instanceof Error ? err.message : String(err), false),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (shipManifest.ship_target_sha === undefined) {
+      return {
+        exitCode: emit(
+          fail('STALE_ATTEMPT', `ship manifest for ${opts.attemptId} predates the target pin — re-dispatch required`, false),
+          { json: opts.json },
+        ),
+      };
+    }
+    let shipRecordNow: ReturnType<typeof readShipRecord>;
+    try {
+      shipRecordNow = readShipRecord(opts.forgeDir, opts.taskId);
+    } catch (err) {
+      return {
+        exitCode: emit(
+          fail(err instanceof OrchestratorError ? err.code : 'IO_ERROR', err instanceof Error ? err.message : String(err), false),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (shipRecordNow === null || shipRecordNow.reviewed_head_sha !== shipManifest.ship_target_sha) {
+      return {
+        exitCode: emit(
+          fail('STALE_ATTEMPT', `ship record reviewed binding does not match the manifest pin for ${opts.taskId}`, false),
+          { json: opts.json },
+        ),
+      };
+    }
+    if (pinnedShip.data.target_sha !== shipManifest.ship_target_sha) {
+      return {
+        exitCode: emit(
+          fail(
+            'VERIFICATION_FAILED',
+            `ship verdict target ${pinnedShip.data.target_sha} != manifest pin ${shipManifest.ship_target_sha}`,
+            false,
+          ),
+          { json: opts.json },
+        ),
+      };
+    }
+
+    if (verdict.data.verdict === 'ready_for_review') {
+      // SUCCESS outcome — the receipt is the proof the verb ran (ΔR1 scopes
+      // the receipt to success ONLY; budgeted failures have no milestone).
+      const receiptRes = readShipReceiptChecked(opts.forgeDir, opts.taskId, opts.attemptId);
+      if (!receiptRes.ok) {
+        return { exitCode: emit(fail(receiptRes.code, receiptRes.detail, false), { json: opts.json }) };
+      }
+      const receipt = receiptRes.receipt;
+      if (
+        receipt.task_id !== opts.taskId ||
+        receipt.attempt_id !== opts.attemptId ||
+        receipt.target_sha !== shipManifest.ship_target_sha ||
+        shipRecordNow.pr === null ||
+        receipt.pr.repo !== shipRecordNow.pr.repo ||
+        receipt.pr.number !== shipRecordNow.pr.number
+      ) {
+        return {
+          exitCode: emit(
+            fail('VERIFICATION_FAILED', `ship receipt identity does not match the attempt/record binding for ${opts.taskId}`, false),
+            { json: opts.json },
+          ),
+        };
+      }
+      // Admitted-state-version pin (ΔR2): a crash → park → retry_ship
+      // round-trip preserves every other identity; only this pin catches it.
+      let stateForReceipt;
+      try {
+        stateForReceipt = readTaskState(opts.forgeDir, opts.taskId);
+      } catch (err) {
+        return {
+          exitCode: emit(
+            fail(err instanceof OrchestratorError ? err.code : 'IO_ERROR', err instanceof Error ? err.message : String(err), false),
+            { json: opts.json },
+          ),
+        };
+      }
+      shipSuccessAdmittedVersion = receipt.admitted_state_version;
+      if (stateForReceipt.state_version !== receipt.admitted_state_version) {
+        return {
+          exitCode: emit(
+            fail(
+              'STALE_ATTEMPT',
+              `ship receipt was admitted at state version ${receipt.admitted_state_version} but the task is now at ${stateForReceipt.state_version} — re-dispatch required`,
+              false,
+            ),
+            { json: opts.json },
+          ),
+        };
+      }
+      // Probe/policy replay check (ΔR2): an approval-era receipt never
+      // authorizes completion after a policy flip to auto.
+      let shipPolicy = 'approval';
+      try {
+        shipPolicy = loadSettings(path.join(opts.forgeDir, 'settings.yaml')).ship.merge_policy;
+      } catch {
+        // unconfigured workspace → schema default (approval)
+      }
+      if (shipPolicy === 'auto' && receipt.probe !== 'passed') {
+        return {
+          exitCode: emit(
+            fail('VERIFICATION_FAILED', `merge_policy is 'auto' but the ship receipt has no passed honesty probe — re-dispatch required`, false),
+            { json: opts.json },
+          ),
+        };
+      }
+      // FRESH live PR-head read (Δ10): the verb's post-create observation is
+      // not reused; the head must still equal the pin AT COMPLETION TIME.
+      const prForLiveCheck = shipRecordNow.pr;
+      const observerFactory = deps.observerFor ?? ((depId: string) => createDependencyObserver(opts.forgeDir, depId, ghExec));
+      let liveOk = false;
+      let liveDetail = 'no observer available';
+      try {
+        const observer = await observerFactory(opts.taskId);
+        if (observer !== null) {
+          const live = await observer.mergeResult(prForLiveCheck);
+          if (live.merged) {
+            liveDetail = `PR already merged (${live.merged_head_sha})`;
+            liveOk = live.merged_head_sha === shipManifest.ship_target_sha;
+          } else {
+            // Not merged yet (expected): use headSha equality via the record's
+            // pr — mergeResult's unmerged branch does not carry the head, so
+            // fall back to a headSha-capable observer when available.
+            const headCapable = observer as { headSha?: (pr: typeof prForLiveCheck) => Promise<{ ok: boolean; sha?: string; reason?: string }> };
+            if (typeof headCapable.headSha === 'function') {
+              const head = await headCapable.headSha(prForLiveCheck);
+              liveOk = head.ok === true && head.sha === shipManifest.ship_target_sha;
+              liveDetail = head.ok ? `live head ${head.sha}` : `head unreadable (${head.reason ?? 'unknown'})`;
+            } else {
+              // impl-R1 MAJ #2: an observer without headSha CANNOT prove the
+              // live head — completion refuses (never proceeds unproven).
+              liveOk = false;
+              liveDetail = 'observer lacks headSha capability — live head unprovable';
+            }
+          }
+        }
+      } catch (err) {
+        liveDetail = err instanceof Error ? err.message : String(err);
+      }
+      if (!liveOk) {
+        return {
+          exitCode: emit(
+            fail('VERIFICATION_FAILED', `live PR head check failed at ship completion: ${liveDetail}`, false, {
+              taskId: opts.taskId,
+            }),
+            { json: opts.json },
+          ),
+        };
+      }
+    }
+  }
+
   // 3. Write the verdict + verified files atomically. FORGE-187 (R1): the
   //    filenames are phase-scoped so implement, review, and ship can each write
   //    a verdict on the SAME attempt without colliding (the `flag:'wx'` write
@@ -1066,7 +1250,7 @@ export async function runOrchestrateComplete(
         // impl R5: re-verify the attempt pointer UNDER the marker — a phase
         // completion that ran while a superseding attempt dispatched (a
         // review/ship pointer self-loop) must not advance the task.
-        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId },
+        { requireActiveLease: true, expectedCurrentAttemptId: opts.attemptId, ...(shipSuccessAdmittedVersion !== null ? { expectedStateVersion: shipSuccessAdmittedVersion } : deps.expectedStateVersion !== undefined ? { expectedStateVersion: deps.expectedStateVersion } : {}) },
       );
     } catch (err) {
       return {
@@ -1374,4 +1558,56 @@ function shipRecordFence(
       throw new CasError('lease_lost', `attempt ${attemptId} was superseded by ${ptr ?? 'none'} during ship-record write`);
     }
   };
+}
+
+// ─── FORGE-234 ship-completion helpers ───────────────────────────────────────
+
+function readAttemptManifestChecked(forgeDir: string, taskId: string, attemptId: string) {
+  const p = manifestFilePath(forgeDir, taskId, attemptId);
+  let raw: string;
+  try {
+    raw = readFileSync(p, 'utf8');
+  } catch {
+    throw new OrchestratorError('STALE_ATTEMPT', `no manifest for ship attempt ${attemptId} — re-dispatch required`, {
+      taskId,
+      attemptId,
+    });
+  }
+  const parsed = AttemptManifestSchema.safeParse(JSON.parse(raw));
+  if (!parsed.success) {
+    throw new OrchestratorError('SCHEMA_INVALID', `manifest for attempt ${attemptId} failed schema validation`, { taskId });
+  }
+  if (parsed.data.task_id !== taskId || parsed.data.attempt_id !== attemptId || parsed.data.phase !== 'ship') {
+    throw new OrchestratorError('STALE_ATTEMPT', `manifest identity mismatch for ship attempt ${attemptId}`, { taskId });
+  }
+  return parsed.data;
+}
+
+function readShipReceiptChecked(
+  forgeDir: string,
+  taskId: string,
+  attemptId: string,
+): { ok: true; receipt: ShipReceipt } | { ok: false; code: 'STALE_ATTEMPT' | 'SCHEMA_INVALID'; detail: string } {
+  const p = shipReceiptPath(forgeDir, taskId, attemptId);
+  let raw: string;
+  try {
+    raw = readFileSync(p, 'utf8');
+  } catch {
+    return {
+      ok: false,
+      code: 'STALE_ATTEMPT',
+      detail: `no ship receipt for attempt ${attemptId} — the ship operation did not complete; run forge orchestrate ship (direct completion is not a ship)`,
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { ok: false, code: 'SCHEMA_INVALID', detail: 'ship receipt is not JSON' };
+  }
+  const validated = ShipReceiptSchema.safeParse(parsed);
+  if (!validated.success) {
+    return { ok: false, code: 'SCHEMA_INVALID', detail: 'ship receipt failed schema validation' };
+  }
+  return { ok: true, receipt: validated.data };
 }
