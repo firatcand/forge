@@ -181,9 +181,46 @@ forge orchestrate answer "${QUESTION_ID}" --option "${OPTION_ID}" --json
 On `DUPLICATE_ID` (another supervisor answered concurrently): log
 `[skip] Q-X already answered`, move to next question.
 
+## Step 5b — Drain merge_pending (FORGE-235 — VERB-ONLY)
+
+Tasks that already shipped a PR sit in `merge_pending` until the platform
+merge is **proven**. Run one reconciliation pass per round, after questions
+and before asking about the next round:
+
+```bash
+forge orchestrate merge-tick --json
+```
+
+The verb scans every `merge_pending` (and `shipped`) task, least-recently-probed
+first. It promotes to `shipped` **only** on an exact live merge proof — the PR
+merged into the recorded base at the recorded reviewed SHA — and then syncs the
+tracker to Done. Under `ship.merge_policy: auto` it may also perform the merge
+itself, once, behind a reservation and the honesty-probe bar; under `approval`
+(the default) it never merges and simply waits for a human.
+
+Read `data.results[]` and surface, per disposition:
+
+- `promoted` — report it (`N shipped this round`); nothing else to do.
+- `checks_pending` / `probe_unavailable` / `reservation_contended` /
+  `lease_leftover_deferred` / `merge_call_failed_reported` — **waiting**. Say
+  nothing beyond a one-line count; the next round retries.
+- anything in `data.operator_action` — print `task_id`, `disposition`,
+  `pr` and `action_hint` verbatim, then move on.
+
+**Do not** try to "fix" an operator-action task from the skill. FORGE-235
+reports these outcomes and deliberately writes no task state for them; the
+lifecycle transitions out of `merge_pending` (re-review after drift, re-open
+after a closed PR, cancel) land in FORGE-237. Until then the honest options
+are the ones in `action_hint`: repair the condition on the same reviewed head,
+or merge that exact head manually — the next tick will then promote it.
+
+`forge orchestrate dashboard` shows the same queue (§Awaiting merge) between
+rounds.
+
 ## Step 6 — Continue or stop
 
-After dispatching tasks and answering all open questions, ask one more time:
+After dispatching tasks, answering all open questions, and draining
+`merge_pending`, ask one more time:
 
 `AskUserQuestion("Continue with another round?" yes / no)`
 
@@ -196,6 +233,7 @@ After dispatching tasks and answering all open questions, ask one more time:
 ✓ /forge orchestrate round complete:
   - 3 tasks dispatched (FORGE-99, FORGE-100, FORGE-101)
   - 1 question answered (FORGE-99 decision_key=worktree-naming)
+  - merge-tick: 1 promoted, 2 waiting, 1 needs you (FORGE-97 drift_reported)
   - Run: 01900000-0000-7000-8000-aaaaaaaaaaaa
 ```
 
@@ -249,7 +287,7 @@ forge orchestrate ship --task "${TASK_ID}" --attempt "${ATTEMPT_ID}" --json
 
 Outcome handling:
 - `ok` with `next_state: merge_pending` — done; the merge itself happens on
-  merge_pending ticks (FORGE-235), never here.
+  merge_pending ticks (Step 5b, `merge-tick`), never here.
 - `SHIP_PARKED` — surface `details.question_id` to the user exactly like a
   worker question; the answer verb resolves it (`retry_ship` → re-ship later;
   `cancel_task` cancels).

@@ -134,6 +134,10 @@ export const CLI_VERBS: readonly RegistryEntry[] = [
     summary: 'Run the verb-only ship operation: verify, SHA-bound push, PR create-or-get, tracker in_review — reviewed → merge_pending.',
   },
   {
+    name: 'merge-tick',
+    summary: 'Reconcile merge_pending tasks: promote to shipped on live RepoHost merge proof; report divergences.',
+  },
+  {
     name: 'cancel',
     summary: 'Cancel a task: state → cancelled (terminal), release lease, preserve worktree.',
   },

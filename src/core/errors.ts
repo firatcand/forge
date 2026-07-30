@@ -212,6 +212,8 @@ export type OrchestratorErrorCode =
   | 'CLAIM_HISTORY_CORRUPT' // claim-history.jsonl is non-empty but contains no parseable entries
   | 'DECISION_KEY_EXHAUSTED' // worker question-channel budget for a decision_key hit; do not retry
   | 'DEPS_NOT_MERGED'       // FORGE-233: SHIP refused — a depends_on task lacks live merge proof
+  | 'MERGE_PROOF_MISSING'   // FORGE-235: merge promotion attempted with no valid durable attestation
+  | 'MERGE_PROOF_MISMATCH'  // FORGE-235: the durable attestation is a DIFFERENT witness than the caller's
   | 'IO_ERROR';             // unexpected filesystem error
 
 export interface OrchestratorErrorDetails {

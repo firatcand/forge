@@ -90,3 +90,23 @@ export async function createDependencyObserver(
   if (record === null || record.pr === null || record.base === null) return null;
   return GitHubRepoHost.forObservation({ gh, forgeDir, taskId: depTaskId });
 }
+
+// FORGE-235: the explicitly MUTATION-CAPABLE persisted-identity host for the
+// merge tick. Kept distinct from createDependencyObserver /
+// GitHubRepoHost.forObservation (observation-only) so auto-merge authority can
+// never leak into an observer: gc holds an observer and therefore cannot merge
+// by construction (plan v3 Δ7).
+export async function createMergeHost(
+  forgeDir: string,
+  taskId: string,
+  gh: Exec,
+): Promise<GitHubRepoHost | null> {
+  let record;
+  try {
+    record = readShipRecord(forgeDir, taskId);
+  } catch {
+    return null;
+  }
+  if (record === null || record.pr === null || record.base === null) return null;
+  return GitHubRepoHost.forMerge({ gh, forgeDir, taskId });
+}

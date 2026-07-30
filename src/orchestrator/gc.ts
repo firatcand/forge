@@ -611,7 +611,14 @@ function detectRow12(s: OrchestratorSnapshot): GcPlanRow[] {
 // identity-checked lease release. complete releases the worker lease right
 // after entering merge_pending; a crash in that window leaves a lease with no
 // heartbeat source. The task STATE is untouched (merge_pending is legitimate
-// until the platform merge is confirmed — FORGE-234's probing rows own that).
+// until the platform merge is confirmed).
+//
+// FORGE-235 division of labour: gc stays OFFLINE and deterministic — it never
+// probes a platform and never promotes. `forge orchestrate merge-tick` owns
+// live observation, promotion on exact proof, and typed reports for every
+// non-terminal outcome. Releasing this lease is a precondition for that
+// promotion: commitMergePromotion refuses while a live lease exists, so a
+// crashed worker's leftover lease is exactly what this row clears.
 function detectRow15(s: OrchestratorSnapshot): GcPlanRow[] {
   const rows: GcPlanRow[] = [];
   const graceMs = s.stealGraceMs ?? STEAL_GRACE_MS_DEFAULT;

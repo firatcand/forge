@@ -9,11 +9,17 @@ import {
   writeSync as _writeSync,
 } from 'node:fs';
 import { CasError, OrchestratorError } from '../core/errors.ts';
-import { casGuardedWrite } from '../core/fs-atomic.ts';
+import { casGuardedWrite, type CasHolderIdentity } from '../core/fs-atomic.ts';
 import { parseLeaseFile } from '../schemas/lease.ts';
 import { TaskStateSchema, type TaskState, type TaskStateRecord } from '../schemas/task-state.ts';
 import { stateFilePath, leaseFilePath, validateIdSegment } from './questions/paths.ts';
 import { isNodeFsError } from './questions/errors.ts';
+// FORGE-235: the promotion fence re-reads BOTH durable artifacts under the
+// marker, so the caller's argument is never the authority. Neither module
+// imports this one — no cycle.
+import { readMergeAttestation, sameAttestationIdentity } from './reconciliation-record.ts';
+import { readShipRecord } from './ship-record.ts';
+import type { MergeAttestation } from '../schemas/merge-attestation.ts';
 
 // Test seam — same pattern as writer.ts. Tests use mock.method to override.
 export const __smFsForTesting = {
@@ -210,6 +216,16 @@ export function readTaskState(
   }
 
   const result = TaskStateSchema.safeParse(parsed);
+  if (result.success && result.data.task_id !== taskId) {
+    // Path↔payload binding (FORGE-235): a state file copied or restored under
+    // ANOTHER task's directory must never be adopted as this task's state —
+    // otherwise a promotion could ship a task on a different task's evidence.
+    throw new OrchestratorError(
+      'SCHEMA_INVALID',
+      `state.json under task ${taskId} declares task_id ${result.data.task_id}`,
+      { taskId, path },
+    );
+  }
   if (!result.success) {
     throw new OrchestratorError(
       'SCHEMA_INVALID',
@@ -501,5 +517,170 @@ export function assertLeaseOwnershipFromFile(
         caller_run_id: caller.run_id,
       },
     );
+  }
+}
+
+// ─── FORGE-235: the ONE constrained merge-reconciliation authority ───────────
+
+function promotionStateVersion(raw: string): number {
+  const parsed = JSON.parse(raw) as { state_version?: unknown };
+  if (typeof parsed?.state_version !== 'number' || !Number.isInteger(parsed.state_version)) {
+    throw new OrchestratorError('SCHEMA_INVALID', 'state.json has no integer state_version', {});
+  }
+  return parsed.state_version;
+}
+
+// The evidence contract for `merge_pending → shipped`: a VALID durable
+// attestation that is the same witness as the caller's, and a live ship record
+// still carrying the binding the proof was read against. Shared by the CAS
+// fence and the already-shipped resume path so neither can drift from the other.
+function verifyDurableProof(forgeDir: string, taskId: string, attestation: MergeAttestation): void {
+  const durable = readMergeAttestation(forgeDir, taskId);
+  if (durable.kind !== 'valid') {
+    throw new OrchestratorError(
+      'MERGE_PROOF_MISSING',
+      `merge promotion requires a valid durable attestation (${durable.kind === 'invalid' ? durable.detail : 'absent'})`,
+      { taskId },
+    );
+  }
+  if (!sameAttestationIdentity(durable.attestation, attestation)) {
+    throw new OrchestratorError('MERGE_PROOF_MISMATCH', `the durable attestation for ${taskId} is a different witness`, {
+      taskId,
+    });
+  }
+  const record = readShipRecord(forgeDir, taskId);
+  if (
+    record === null ||
+    record.revision !== attestation.ship_record_revision ||
+    record.reviewed_head_sha !== attestation.reviewed_head_sha ||
+    record.cycle !== attestation.cycle ||
+    record.pr === null ||
+    record.pr.repo !== attestation.pr.repo ||
+    record.pr.number !== attestation.pr.number ||
+    record.base === null ||
+    record.base.repo !== attestation.base_repo ||
+    record.base.branch !== attestation.base_branch
+  ) {
+    throw new OrchestratorError('STATE_VERSION_CONFLICT', `ship record binding moved during merge promotion`, { taskId });
+  }
+}
+
+// `commitMergePromotion` is the ONLY task-state write FORGE-235 performs, and
+// the ONLY lease-free writer in the codebase. Its narrowness is the safety
+// property (plan v5 Δ9/Δ17):
+//
+//  * destination is FIXED — `merge_pending → shipped` via `merge_confirmed`.
+//    There is no `next`-state parameter, so no caller can request an arbitrary
+//    transition without merge proof;
+//  * the caller's argument is NOT the authority: the DURABLE attestation file
+//    is re-read and every binding field compared, so a fabricated in-memory
+//    object cannot promote anything. `writeMergeAttestation` mints that file
+//    only from an exact live `mergeResult` proof (ORCHESTRATOR:880 preserved);
+//  * the live ship record is re-read too — a binding that moved after the proof
+//    (new PR, new reviewed head, advanced revision) refuses;
+//  * all of it is re-validated UNDER the state CAS marker — a marker is never
+//    held across network I/O, so a stale observation cannot commit;
+//  * a LIVE worker lease means a crash leftover: refuse (LEASE_EXISTS) and let
+//    gc row 15 release it, rather than reconciling under someone's ownership.
+export function commitMergePromotion(
+  forgeDir: string,
+  taskId: string,
+  attestation: MergeAttestation,
+  holder: CasHolderIdentity,
+): number {
+  if (attestation.task_id !== taskId) {
+    throw new OrchestratorError('SCHEMA_INVALID', `attestation task_id ${attestation.task_id} != ${taskId}`, { taskId });
+  }
+  const observed = readTaskState(forgeDir, taskId);
+  if (observed.state !== 'merge_pending' && observed.state !== 'shipped') {
+    throw new OrchestratorError(
+      'ILLEGAL_TRANSITION',
+      `merge promotion is legal only from merge_pending (task is '${observed.state}')`,
+      { taskId },
+    );
+  }
+  if (observed.state === 'shipped') {
+    // Resume no-op — but NOT an unchecked one. The caller treats a successful
+    // return as authorization to sync the tracker, so the same durable evidence
+    // the promotion path requires must still hold.
+    verifyDurableProof(forgeDir, taskId, attestation);
+    return observed.state_version;
+  }
+
+  const next = applyTransition(observed.state, 'merge_confirmed');
+  const payloadState: TaskStateRecord = {
+    ...observed,
+    state: next,
+    state_version: observed.state_version + 1,
+    updated_at: new Date().toISOString(),
+    updated_by: { run_id: holder.run_id, claim_id: holder.claim_id, generation: holder.generation },
+  };
+  const payload = JSON.stringify(TaskStateSchema.parse(payloadState), null, 2);
+
+  // casGuardedWrite wraps ANY non-CasError thrown by the fence into
+  // CasError('io'), which would flatten the fence's typed refusals into a
+  // generic CAS conflict. The refusal reason is load-bearing here — the merge
+  // tick routes LEASE_EXISTS to "defer to gc row 15" — so the fence records it
+  // in a box and we re-throw the original after unwinding.
+  const refusal: { err: OrchestratorError | null } = { err: null };
+  const refuse = (err: OrchestratorError): never => {
+    refusal.err = err;
+    throw err;
+  };
+
+  try {
+    casGuardedWrite({
+      filePath: stateFilePath(forgeDir, taskId),
+      expectedVersion: observed.state_version,
+      holder,
+      readVersion: promotionStateVersion,
+      fence: () => {
+        // A live (non-tombstone, unexpired) worker lease → defer to gc row 15.
+        const parsed = readLeaseFileOrNull(forgeDir, taskId);
+        if (parsed !== null && parsed.kind === 'active' && Date.parse(parsed.lease.expires_at) > Date.now()) {
+          refuse(new OrchestratorError('LEASE_EXISTS', `task ${taskId} still holds a live worker lease`, { taskId }));
+        }
+        // The DURABLE artifacts are the authority, not the argument.
+        try {
+          verifyDurableProof(forgeDir, taskId, attestation);
+        } catch (err) {
+          refuse(err as OrchestratorError);
+        }
+        // Re-validate the observation's identity UNDER the marker.
+        const live = readTaskState(forgeDir, taskId);
+        if (live.state !== 'merge_pending' || live.state_version !== observed.state_version) {
+          refuse(new OrchestratorError('STALE_ATTEMPT', `task ${taskId} moved during merge promotion`, { taskId }));
+        }
+        if (live.current_attempt_id !== observed.current_attempt_id) {
+          refuse(new OrchestratorError('STALE_ATTEMPT', `attempt pointer moved during merge promotion`, { taskId }));
+        }
+      },
+      buildContent: () => payload,
+    });
+  } catch (err) {
+    if (refusal.err !== null) throw refusal.err;
+    if (err instanceof OrchestratorError) throw err;
+    if (err instanceof CasError) {
+      throw new OrchestratorError('STATE_VERSION_CONFLICT', `merge promotion lost the state CAS for ${taskId}`, {
+        taskId,
+        cause: err,
+      });
+    }
+    throw err;
+  }
+  return payloadState.state_version;
+}
+
+// Lease read that never throws for the promotion fence: absent/tombstoned/
+// invalid all mean "no live worker".
+function readLeaseFileOrNull(
+  forgeDir: string,
+  taskId: string,
+): ReturnType<typeof parseLeaseFile> | null {
+  try {
+    const raw = _readFileSync(leaseFilePath(forgeDir, taskId), 'utf8');
+    return parseLeaseFile(JSON.parse(raw));
+  } catch {
+    return null;
   }
 }

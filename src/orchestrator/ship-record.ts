@@ -52,6 +52,16 @@ export function readShipRecord(forgeDir: string, taskId: string): ShipRecord | n
       zodError: parsed.error.message,
     });
   }
+  // Path↔payload binding (FORGE-235): a record copied or restored under ANOTHER
+  // task's directory carries a foreign PR identity. Without this check the merge
+  // tick would probe that PR and promote THIS task on someone else's merge.
+  if (parsed.data.task_id !== taskId) {
+    throw new OrchestratorError(
+      'SCHEMA_INVALID',
+      `ship record under task ${taskId} declares task_id ${parsed.data.task_id}`,
+      { taskId },
+    );
+  }
   return parsed.data;
 }
 
@@ -95,6 +105,7 @@ export function upsertReviewedBinding(
           revision: 1,
           reviewed_head_sha: opts.reviewedHeadSha,
           review_attempt_id: opts.reviewAttemptId,
+          cycle: 1,
           base: null,
           pr: null,
           merge_attempt: 'not_started',

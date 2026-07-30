@@ -295,6 +295,7 @@ forge orchestrate worktree-drift-guard --adr <slug> [--task <task-id>] [--dry-ru
 | `event` | mutate | Worker has dispatch grant |
 | `complete` | mutate | Worker has dispatch grant |
 | `cancel` | mutate | Supervisor explicit |
+| `merge-tick` | mutate | Inherited from the ship approval already given for the task (FORGE-235): under `merge_policy: approval` the tick only observes and promotes on proof; under `auto` the merge itself was authorized by the setting + honesty probe |
 | `gc` | mutate | Supervisor explicit OR auto-gc opt-in |
 | `run start` | mutate | Invocation of `/forge orchestrate` = approval |
 | `apply-decision` | mutate | `/update-spec --apply` skill diff-review |
@@ -640,7 +641,7 @@ interface Tracker {
 | `blocked_on_question` | any | Check `.forge/orchestrator/tasks/<t>/attempts/<a>/answers/`. If answer exists, mark `awaiting_respawn`. If not and `attempt_started + question_timeout_ms` elapsed, mark `expired`. |
 | `ready_for_review` (local) | `done` (tracker) | Report divergence + park with a question — do **not** mark `shipped` (tracker `done` — even a closed GitHub issue — cannot prove that a specific PR merged to the recorded base at the reviewed head SHA). If the operator confirms an out-of-band manual merge, gc resolves via RepoHost confirmation → `shipped`, else `cancelled` with a note. |
 | `shipped` | not closed | Confirm via RepoHost + PR record: if merged at the reviewed head SHA, transition tracker to done. If NOT merged, local `shipped` is corrupt — park with a question (never re-open/re-merge silently). |
-| `merge_pending` | any | Probe via RepoHost + PR record. Merged to recorded base at the reviewed head SHA → `shipped`; update tracker; emit `shipped` notification. Merged with `mergedHeadSha != reviewed_head_sha` (tainted — external merge; forge's own call is head-bound) → park with **fatal** notification + revert guidance; never `shipped`. PR closed without merge / honesty-probe or policy loss → park with a question (answer → `reviewed` for re-ship, or `cancelled`); the next tick must NOT silently recreate the PR or retry the merge. Head SHA drifted → regress to `ready_for_review` — the new head re-enters verify + re-review (dual-host: cross-host review; single-host: CLI re-verification refreshes `reviewed_head_sha` — §Single-host mode). |
+| `merge_pending` | any | Probe via RepoHost + PR record. Merged to recorded base at the reviewed head SHA → `shipped`; update tracker; emit `shipped` notification. Merged with `mergedHeadSha != reviewed_head_sha` (tainted — external merge; forge's own call is head-bound) → **fatal** notification + revert guidance; never `shipped`. PR closed without merge / honesty-probe or policy loss / head drift → typed report; the tick must NOT silently recreate the PR or retry the merge. *(Implemented in FORGE-235 by `forge orchestrate merge-tick`, NOT by gc — gc stays offline and deterministic. **Only the terminal promotion writes task state**; every negative outcome is reported without mutation. The parking, `reviewed` regression, and cancel destinations this row describes require an ownership-reacquisition primitive that does not exist yet and land in FORGE-237 — see §Reported, not automated.)* |
 | Verdict file exists but `verdict.verified.json` missing | n/a | Re-run CLI verification; write `verdict.verified.json`. |
 | Branch exists in repo | worktree missing | If task `shipped`: prune. If task `unclaimed` or terminal: prompt user with `--dry-run` output before pruning. |
 | Worktree exists | no task with matching ID in `phases.yaml` | Orphan; report. `gc --remove-orphan-worktrees` to delete. |
@@ -648,7 +649,7 @@ interface Tracker {
 | Answer file exists | question file is missing | Log warning; archive. (Shouldn't happen.) |
 | Multiple leases for same task | n/a | Only most recent `generation` is authoritative. Older NON-CANONICAL duplicate artifacts (e.g. `lease.json.bak`) are unlinked; a stale identity at the CANONICAL path is released by writing a tombstone through the CAS protocol (the canonical file is never deleted — FORGE-231). |
 | Lease present | task state is terminal | Release lease. |
-| `merge_pending` + canonical lease expired beyond grace | n/a | Identity-checked lease release (row 15 — FORGE-231): `complete` releases the worker lease right after entering `merge_pending`; a crash in that window leaves a lease with no heartbeat source. Task STATE untouched — the merge_pending probing rows (FORGE-234) own state resolution. |
+| `merge_pending` + canonical lease expired beyond grace | n/a | Identity-checked lease release (row 15 — FORGE-231): `complete` releases the worker lease right after entering `merge_pending`; a crash in that window leaves a lease with no heartbeat source. Task STATE untouched — `merge-tick` (FORGE-235) owns state resolution. This row is a **precondition** for it: promotion refuses while a live lease exists, so clearing a crashed worker's leftover lease is what unblocks the next tick. |
 | Incomplete CAS transition marker present (state/lease/ship-record) | n/a | REPORT ONLY (row 16 — FORGE-231, conservative no-takeover): gc never removes an incomplete marker. The report carries the ownership tuple, the OWNER-CORRELATED lease state (incl. tombstone attribution), run-directory presence (a trace — run manifests persist and prove nothing about liveness) and PID liveness AS A HINT (PID reuse is possible); the operator confirms the owning run is dead, then removes the marker manually. Completed markers (file version advanced past them) are cleaned automatically. |
 
 ### `--dry-run` output
@@ -872,12 +873,12 @@ Each task flows through three phases sequentially. Each phase is its own subagen
 > Implementation lands in FORGE-231…235.
 
 - Dispatch skill detects `reviewed` tasks.
-- **Dependency check before dispatch:** all `depends_on` tasks must be in state `shipped` — which per the lifecycle below means their PRs are **merged to base**. A dependency in `merge_pending` (PR open, not yet merged) defers SHIP until it merges. *(Implemented in FORGE-233: the gate's ONLY positive vector is a live RepoHost merge proof — `mergeResult(pr)` confirming merged into the dependency's recorded base at its recorded `reviewed_head_sha`. Local task state, ship records (write-ahead bookkeeping), phases.yaml, and tracker status never satisfy on their own; a `shipped` dependency is still live-probed until FORGE-235 introduces a versioned merge attestation. Enforcement: `phases --ready --phase ship` discovery filtering, `dispatch --phase ship` admission, and `complete --phase ship` defense-in-depth — all emitting a machine-readable `DEPS_NOT_MERGED` envelope with `details.dependency_gate` (versioned discriminated report; `retriable` iff every blocker is a waiting condition). The gc tracker-done→shipped mapping became report-only in the same change — proof-backed promotion is FORGE-235.)*
+- **Dependency check before dispatch:** all `depends_on` tasks must be in state `shipped` — which per the lifecycle below means their PRs are **merged to base**. A dependency in `merge_pending` (PR open, not yet merged) defers SHIP until it merges. *(Implemented in FORGE-233: the gate's ONLY positive vector is a live RepoHost merge proof — `mergeResult(pr)` confirming merged into the dependency's recorded base at its recorded `reviewed_head_sha`. Local task state, ship records (write-ahead bookkeeping), phases.yaml, and tracker status never satisfy on their own. FORGE-235 added the SECOND positive vector: for a dependency that is itself `shipped`, a **merge attestation** matching its current record binding exactly (task, cycle, PR, base repo + branch, reviewed head, merged head, record revision) satisfies without a re-probe, because its provenance rules make it a witness of prior live proof rather than an assertion; an attestation that is unreadable, misbound, or self-inconsistent is `attestation_invalid` (operator action) and never falls back to the live probe. A dependency still in `merge_pending` is ALWAYS live-probed — its attestation, if any, exists only inside the write-ahead window before promotion, which is when the binding is least settled. Absent an attestation, a `shipped` dependency is still live-probed. Enforcement: `phases --ready --phase ship` discovery filtering, `dispatch --phase ship` admission, and `complete --phase ship` defense-in-depth — all emitting a machine-readable `DEPS_NOT_MERGED` envelope with `details.dependency_gate` (versioned discriminated report; `retriable` iff every blocker is a waiting condition). The gc tracker-done→shipped mapping became report-only in the same change — proof-backed promotion is FORGE-235.)*
 - **Reviewed-SHA recording (final-SHA binding, part 1):** when REVIEW passes, the CLI (`complete --phase review`) records the **verified review target** (`verdict.target_sha`, checked against the dispatch-time `review_target_sha` and the current worktree HEAD — see Phase 2) as **`reviewed_head_sha`** — CLI-owned, immutable for the attempt, persisted in the ship record (below). This is the ONLY SHA the ship operation may ship. (Single-host mode records the CLI-verified IMPLEMENT head instead — see §Single-host mode.)
 - **The ship operation** (idempotent + crash-safe; implemented in FORGE-234 as the VERB-ONLY `forge orchestrate ship` — owner decision 2026-07-23: every step is deterministic git/gh/CLI work, no model worker exists for the ship phase; the verb finishes through the `complete --phase ship` choke point, which requires the pinned ship verdict + the fenced `ship_receipt.json` (attempt-scoped proof the operation ran: target SHA, admitted state version, probe disposition, PR identity) + a FRESH live PR-head read before `merge_pending` commits; SHIP policy failures — unsupported host, fork topology, PR conflict, probe failures — park durably via a `reviewed → blocked_on_question` question whose phase-aware answer resolves `retry_ship → reviewed` or cancels while blocked): (1) **write-ahead**: persist/refresh the durable **ship record** at `.forge/orchestrator/tasks/<task_id>/ship-record.json` (reviewed_head_sha, resolved base repo + base branch, then per-side-effect: PR id/URL, merge-attempt status) — the record is written **before** each external side effect and reconciled idempotently after it, so a crash between push, PR-create, and merge recovers via create-or-get; (2) re-run `settings.verify` in the task worktree; (3) verify the local head equals `reviewed_head_sha` — any post-review change (rebase-on-drift, `update-branch`, conflict resolution, third-party push) produces a new SHA that must re-enter verify + re-review before shipping proceeds (dual-host: cross-host review; single-host: CLI re-verification — §Single-host mode); (4) final secrets scan; (5) push; (6) create-or-get the PR via the RepoHost; (7) mark tracker `in_review`. **Forge creates NO standing auto-merge enablement** (`gh pr merge --auto`): GitHub's persisted auto-merge request cannot hold an expected head SHA, and GitHub auto-disables it only for pushes by users *without* write permission — a write-capable push after enablement could therefore merge unreviewed code. The merge is instead the atomic, head-bound step below.
 - On success: task state advances to **`merge_pending`** (non-terminal). Notification `merge_pending` event emitted (`auto_merge: true|false` — true when `ship.merge_policy: 'auto'`, i.e. forge will execute the head-bound merge on green).
 - **The merge step (`'auto'` only; runs on `merge_pending` ticks):** when the platform reports every required check green AND `headSha(pr) == reviewed_head_sha`, forge executes the **atomic head-bound merge**: `gh pr merge --squash --match-head-commit "<reviewed_head_sha>"`. The expected-head check is enforced **server-side at merge time** (GraphQL `expectedHeadOid`) — if the head moved between probe and call, the merge fails and the task enters drift handling. Branch protection is likewise enforced server-side on the call: forge cannot merge red (`--admin` and every bypass path prohibited). Durability trade-off (accepted): with no orchestrator running, nothing merges — the task waits in `merge_pending`, fail-safe (`approval`-equivalent), until the next tick.
-- **`merge_pending → shipped` (terminal) requires RepoHost confirmation** (gc/reconcile or dispatch-tick probe) that the PR merged into the **recorded base repo + base branch** AND the merged PR head equals **`reviewed_head_sha`**. Tracker status is never merge proof (see gc divergence table). Notification `shipped` emitted on confirmation.
+- **`merge_pending → shipped` (terminal) requires RepoHost confirmation** (gc/reconcile or dispatch-tick probe) that the PR merged into the **recorded base repo + base branch** AND the merged PR head equals **`reviewed_head_sha`**. Tracker status is never merge proof (see gc divergence table). Notification `shipped` emitted on confirmation. *(Implemented in FORGE-235 as `forge orchestrate merge-tick` — see §The merge tick.)*
 - Failure/regression paths (fail-closed, each with an event):
   - **Head drift while pending** (probe sees `headSha(pr) != reviewed_head_sha`) → regress to `ready_for_review`: the new head MUST re-enter verify + cross-host review (never plain `reviewed`, which would allow silent re-ship; single-host: CLI re-verification refreshes the SHA — see §Single-host mode).
   - **Atomic merge call fails** (head moved between probe and call, or checks regressed) → re-enter drift handling; repeated unexplained failures → park with a question.
@@ -885,6 +886,133 @@ Each task flows through three phases sequentially. Each phase is its own subagen
   - **Tainted merge** (PR merged with `mergedHeadSha != reviewed_head_sha` — necessarily an external actor, since forge's own merge call is head-bound) → park with a **fatal** notification + revert guidance; never mark `shipped`.
   - Red PR CI → regress via the changes-requested path with findings injected. Transient git/tracker failures → retry with backoff; after `retry_attempts` failures → `failed`, fatal notification.
 - **`'auto'` preconditions** (`ship.merge_policy: 'auto'`; default is `'approval'` = open PR, human merges): requires `agents.review_host_cli` configured (dual-host review — single-host + `auto` is a settings validation error) AND the RepoHost **honesty probe** passing: the *effective* base-branch rules (classic branch protection + rulesets) enforce at least one blocking required status check; the squash method is allowed; the authenticated identity has write permission; no admin bypass is in play; **the base branch has NO merge queue** (owner decision MQ: a queue-enabled base can queue/merge with no orchestrator running, breaking the head-bound guarantee — merge-queue repos are UNSUPPORTED for `'auto'`; the probe reports `merge_queue_enabled` and the ship path parks fail-closed). Probe failure → **park the task with a question** — never warn-and-merge, never a silent downgrade. (Tracker and repo host are orthogonal — a Linear-tracked repo hosted on GitHub gets the full path. Repos with no RepoHost cannot SHIP at all — see §RepoHost.)
+
+### The merge tick (FORGE-235)
+
+`forge orchestrate merge-tick [--task <id>] [--limit <n>]` is the layer that
+reconciles `merge_pending`. It is a **verb**, not a worker: deterministic
+gh/file work, no model in the loop. gc does not probe and does not promote —
+it stays offline and deterministic; the tick owns every live observation.
+
+- **Scan.** Least-recently-probed task first (from the journal's
+  `last_probed_at`, which EVERY completed live observation stamps — not just the
+  waiting ones, or a permanently-broken task would hold sort key 0 forever),
+  unreadable/unbound tasks last, so a broken task can never starve a healthy
+  one. A `shipped` task whose attestation is valid and whose tracker sync is
+  done leaves the scan entirely; a task whose state file is unreadable or
+  misbound stays IN the scan (sorted last) so the corruption is reported rather
+  than hidden. `--limit` bounds LIVE PROBES only: a task that will resolve
+  locally — unreadable state, corrupt journal, missing/misbound ship record, or
+  an invalid attestation on a `shipped` task — never reaches the network, so it
+  is reported in full alongside the capped probes rather than competing with
+  them for slots. (Capping those starves the report; letting them displace
+  healthy tasks starves reconciliation, since their reports cannot stamp a
+  fairness timestamp — they are simply different budgets.) Keyed fatals are
+  written under `orchestrator/runs/<run_id>/notifications.jsonl`, and the
+  envelope returns that `run_id`. `--limit` truncation is always reported
+  (`capped`, `total_candidates`) — never silent. A per-task fault is contained;
+  the scan continues.
+- **Probe holding nothing.** The tick reads live state (`mergeResult`, and
+  `headSha`/`requiredChecksGreen` as needed) while holding no CAS marker, then
+  acquires the marker and re-validates the observation's identity under it
+  (state version, attempt pointer, ship-record revision, PR identity, reviewed
+  head). A stale observation can never commit; a marker is never held across
+  network I/O.
+- **Merging (`'auto'` only).** Green + exact head + honesty bar still passing →
+  one `mergeAtomic` behind a **journal reservation**. The reservation is
+  acquired INSIDE the journal CAS (the mutator re-tests the current record and
+  aborts if a live reservation exists), so two ticks that both observed "no
+  reservation" cannot both proceed; settlement is owner-scoped, so a slow
+  predecessor can never settle the takeover that replaced it. The merge call's own success is never treated as
+  proof: the tick re-probes and only an exact live proof promotes.
+- **The merge attestation** (`merge-attestation.json`) is the one local artifact
+  permitted to assert a merge fact, and only because its writer enforces the
+  provenance. There is **no API that accepts a caller-authored attestation**:
+  `mintMergeAttestation` is the sole entry point, it derives every field from a
+  live `MergeResult` plus the task's own ship record, and it re-checks exactness
+  (merged into the recorded base branch, at the recorded reviewed head) before
+  writing. The write is create-only, subject re-validated under the marker,
+  path↔task bound; a *different* existing attestation is corruption that is
+  never overwritten. It lands **write-ahead** of the state CAS so a crash after
+  proof is resumable.
+- **The promotion fence treats the durable artifacts as the authority, not its
+  argument.** Under the state marker `commitMergePromotion` re-reads
+  `merge-attestation.json` (must be valid AND the same witness) and the live
+  ship record (revision, cycle, PR, base repo + branch, reviewed head must all
+  still match). A fabricated in-memory attestation refuses with
+  `MERGE_PROOF_MISSING` / `MERGE_PROOF_MISMATCH`; a binding that moved after the
+  proof refuses with `STATE_VERSION_CONFLICT`.
+- **Path↔payload binding.** `state.json` and `ship-record.json` are now bound to
+  the task directory they live in (as the attestation and journal already were).
+  A copied or restored `.forge` tree therefore cannot make one task ship on
+  another task's PR.
+- **The reconciliation journal** (`reconciliation.json`) owns observation
+  status: probe timestamps, uncertainty streak (transport/unknown only — a long
+  CI run is expected waiting, tracked by `pending_since`), merge-failure streak,
+  the merge reservation, and tracker-sync progress. It is separate from the ship
+  record so routine probes never advance the revision attestations bind to. Its
+  subject is `{cycle, pr, reviewed_head_sha, ship_record_revision}`; a subject
+  change resets the status so a stale streak never describes a new subject.
+- **Resume ladder.** ensure `shipped` → ensure tracker Done → advisory
+  notification, runnable from any crash point. The already-`shipped` no-op is
+  NOT unchecked: it re-verifies the same durable evidence before authorizing the
+  tracker step. That step is bounded and idempotent. The attempt is RESERVED
+  inside the journal CAS before the network call, OWNER-SCOPED with a timestamp:
+  a contender that finds a live reservation waits (the task is already shipped —
+  only the bookkeeping is outstanding) instead of counting the in-flight attempt
+  as consumed and raising a false exhaustion; a reservation left stale by a
+  crash on the final allowed attempt settles to `failed` rather than staying
+  `pending` forever. Settlement matches the EXACT reservation token (owner +
+  attempt number): a tick that stalled past the TTL and lost the seat neither
+  writes its late answer over the successor's state nor raises a fatal derived
+  from it — it reports the merge (which is proven regardless) and leaves the
+  bookkeeping to the owner of record.
+- **The journal is preflighted, not assumed.** Every journal write is wrapped in
+  a diagnostic catch, so a corrupt `reconciliation.json` would otherwise degrade
+  silently — waiting reports with no memory, and a promotion whose tracker sync
+  is skipped forever. The tick reads it up front and returns
+  `reconciliation_invalid_reported` instead. The journal holds only observation
+  bookkeeping, so the honest remedy in its hint is "delete it; the next tick
+  rebuilds it from a fresh probe". An already-synced or exhausted task is never re-called, a
+  non-retriable failure exhausts immediately, and a terminal sync status is
+  never regressed by a late failure. A `shipped` task with **no**
+  attestation is live-probed **before** any tracker mutation. A post-merge
+  tracker failure never falsifies `shipped` — the repository really did merge;
+  it is a bounded sync divergence (`tracker_sync_exhausted_reported`).
+
+#### Reported, not automated (FORGE-235 boundary; FORGE-237 closes it)
+
+FORGE-235 performs **exactly one** task-state write: the terminal
+`merge_pending → shipped` promotion, through `commitMergePromotion` — a
+fixed-destination, attestation-requiring, lease-refusing writer (the only
+lease-free writer in the codebase).
+
+Every other outcome is a **typed report with zero state mutation**: `tainted`,
+`pr_closed`, `drift`, `ci_red`, `policy_loss`, `merge_unsupported`,
+`merge_budget_exhausted`, `ship_record_invalid`, `attestation_invalid`,
+`reconciliation_invalid`, `shipped_unproven`, `tracker_sync_exhausted` (each with a deterministic
+`failure_key` + a keyed fatal), plus the waiting class that simply retries next
+tick (`checks_pending`, `probe_unavailable`, `reservation_contended`,
+`lease_leftover_deferred`, `merge_call_failed`).
+
+The reason is structural, not a shortcut: leaving `merge_pending` for a
+NON-terminal destination requires re-acquiring ownership, and forge has no
+primitive for it — the worker lease is released on entry to `merge_pending`,
+`claim` accepts only `unclaimed`, `dispatch` requires a live lease, and
+`cancel` excludes `merge_pending`. Writing a park or regression here would
+strand the task in a state nothing can pick up. Because no negative outcome
+writes state, neither that wedge nor "stale negative evidence overrides a real
+merge" can occur, and reporting is strictly more information than the status
+quo (today nothing reconciles `merge_pending` at all).
+
+**FORGE-237** adds the ownership-reacquisition primitive and converts these
+reports into the transitions the divergence table describes (park with a
+question, regress to `ready_for_review` on drift, cancel), plus the real budget
+charge for repeated unexplained merge failures — which FORGE-235 records in the
+journal only, since both escalation destinations are deferred with it. Action
+hints in FORGE-235's reports say what forge genuinely **cannot** do yet, and
+offer the two real options: repair the condition on the same reviewed head, or
+merge that exact head manually (the next tick then promotes it).
 
 ### SHIP policy parks — known concurrency limits (FORGE-234; hardening tracked separately)
 

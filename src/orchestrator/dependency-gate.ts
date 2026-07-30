@@ -24,6 +24,7 @@ import { ShipRecordSchema, type ShipRecord } from '../schemas/ship-record.ts';
 import { TASK_ID_RE } from '../schemas/task-id.ts';
 import type { MergeResult } from '../repo-hosts/types.ts';
 import { readTaskState } from './state-machine.ts';
+import { readMergeAttestation } from './reconciliation-record.ts';
 import { shipRecordFilePath, stateFilePath } from './questions/paths.ts';
 
 const RECORD_MAX_BYTES = 256 * 1024;
@@ -274,7 +275,59 @@ async function evaluateDep(
     });
   }
 
-  // ── The ONLY positive vector: live platform merge proof ──
+  // ── FORGE-235: the SECOND positive vector — a provenance-enforced merge
+  // attestation. Unlike the ship record (write-ahead bookkeeping populated
+  // BEFORE any merge), an attestation is created exclusively from an exact
+  // live mergeResult proof under a marker-held revalidation, so it is a
+  // durable WITNESS of prior live proof rather than an assertion. It must
+  // match this dep's CURRENT record exactly; anything else is operator action.
+  // The attestation is only honoured for a dependency whose own lifecycle has
+  // COMPLETED (`shipped`). A task still in `merge_pending` has an attestation
+  // only in the write-ahead window before its promotion CAS, and that window is
+  // exactly when the binding is least settled — fall through to the live probe
+  // there rather than widening the offline path.
+  const attRead = state === 'shipped' ? readMergeAttestation(opts.forgeDir, stateId) : { kind: 'absent' as const };
+  if (attRead.kind === 'invalid') {
+    return unsatisfied(declaredId, 'attestation_invalid', {
+      resolved_task_id: depTask.id,
+      state_id: stateId,
+      observed_state: state,
+      detail: attRead.detail,
+    });
+  }
+  if (attRead.kind === 'valid') {
+    const att = attRead.attestation;
+    const matches =
+      att.task_id === stateId &&
+      att.cycle === record.cycle &&
+      att.pr.repo === record.pr.repo &&
+      att.pr.number === record.pr.number &&
+      att.base_repo === record.base.repo &&
+      att.base_branch === record.base.branch &&
+      att.reviewed_head_sha === record.reviewed_head_sha &&
+      att.merged_head_sha === record.reviewed_head_sha &&
+      att.ship_record_revision === record.revision;
+    if (!matches) {
+      return unsatisfied(declaredId, 'attestation_invalid', {
+        resolved_task_id: depTask.id,
+        state_id: stateId,
+        observed_state: state,
+        detail: 'attestation does not match the dependency\'s current record binding',
+      });
+    }
+    return {
+      declared_id: declaredId,
+      resolved_task_id: depTask.id,
+      state_id: stateId,
+      observed_state: state,
+      satisfied: true,
+      vector: 'merge_attestation',
+      disposition: 'satisfied',
+      observed: { base_ref: att.base_branch, merged_head_sha: att.merged_head_sha },
+    };
+  }
+
+  // ── Fallback: live platform merge proof (absent attestation) ──
   let observer: DependencyObserver | null;
   try {
     observer = await opts.observerFor(stateId);

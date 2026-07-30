@@ -437,3 +437,159 @@ test('satisfied entries REQUIRE observed proof fields — schema rejects observe
   };
   assert.equal(DependencyGateReportSchema.safeParse(bad).success, false);
 });
+
+// ─── FORGE-235: the merge_attestation vector ─────────────────────────────────
+
+function writeAttestation(fd: string, id: string, overrides: Record<string, unknown> = {}): void {
+  const dir = join(fd, 'orchestrator', 'tasks', id);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'merge-attestation.json'),
+    JSON.stringify({
+      version: 1,
+      task_id: id,
+      cycle: 1,
+      pr: { repo: 'octo/base', number: 7, url: 'https://github.com/octo/base/pull/7' },
+      base_repo: 'octo/base',
+      base_branch: 'main',
+      reviewed_head_sha: SHA_R,
+      merged_head_sha: SHA_R,
+      merge_commit_sha: SHA_M,
+      ship_record_revision: 3,
+      attested_at: new Date().toISOString(),
+      ...overrides,
+    }),
+    'utf8',
+  );
+}
+
+test('a matching attestation satisfies the gate WITHOUT a live probe', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1');
+  const probed: string[] = [];
+  const report = await gate({
+    fd,
+    tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })],
+    observer: async (id) => {
+      probed.push(id);
+      return { mergeResult: async () => mergedOk };
+    },
+  });
+  assert.equal(report.satisfied, true);
+  assert.equal(report.deps[0]!.satisfied, true);
+  if (report.deps[0]!.satisfied) assert.equal(report.deps[0]!.vector, 'merge_attestation');
+  assert.deepEqual(probed, [], 'a witness of prior live proof needs no re-probe');
+});
+
+test('the attestation is checked BEFORE the live probe, so an offline platform still gates open', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1');
+  const report = await gate({
+    fd,
+    tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })],
+    observer: observerOf(new Error('gh is down')),
+  });
+  assert.equal(report.satisfied, true);
+});
+
+test('an attestation bound to a DIFFERENT record revision is attestation_invalid, never a fallback', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1', { ship_record_revision: 2 });
+  const report = await gate({
+    fd,
+    tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })],
+    observer: observerOf(mergedOk),
+  });
+  assert.equal(report.satisfied, false);
+  assert.equal(report.deps[0]!.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('an attestation naming another task is attestation_invalid (path↔task binding)', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1', { task_id: 'DEP-2' });
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('an attestation for a different PR number is attestation_invalid', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1', { pr: { repo: 'octo/base', number: 8, url: 'https://github.com/octo/base/pull/8' } });
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('a self-inconsistent attestation (merged head != reviewed head) is invalid, not proof', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1', { merged_head_sha: SHA_M });
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('a garbage attestation file is operator action — never silently treated as absent', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  mkdirSync(join(fd, 'orchestrator', 'tasks', 'DEP-1'), { recursive: true });
+  writeFileSync(join(fd, 'orchestrator', 'tasks', 'DEP-1', 'merge-attestation.json'), 'not json at all', 'utf8');
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('a symlinked attestation is refused (no following links out of the task dir)', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'shipped');
+  writeRecord(fd, 'DEP-1');
+  const decoy = join(fd, 'decoy-attestation.json');
+  writeFileSync(decoy, JSON.stringify({ version: 1, task_id: 'DEP-1', cycle: 1 }), 'utf8');
+  symlinkSync(decoy, join(fd, 'orchestrator', 'tasks', 'DEP-1', 'merge-attestation.json'));
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, false);
+  if (!report.deps[0]!.satisfied) assert.equal(report.deps[0]!.reason, 'attestation_invalid');
+});
+
+test('no attestation → the live-proof vector still applies unchanged', async () => {
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'merge_pending');
+  writeRecord(fd, 'DEP-1');
+  const report = await gate({ fd, tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })], observer: observerOf(mergedOk) });
+  assert.equal(report.satisfied, true);
+  if (report.deps[0]!.satisfied) assert.equal(report.deps[0]!.vector, 'live_merge_proof');
+});
+
+test('an attestation on a still-merge_pending dep is IGNORED — the live probe decides', async () => {
+  // The write-ahead window (attested, promotion CAS not yet landed) is exactly
+  // when the binding is least settled, so the offline path stays closed there.
+  const fd = forgeDir();
+  writeState(fd, 'DEP-1', 'merge_pending');
+  writeRecord(fd, 'DEP-1');
+  writeAttestation(fd, 'DEP-1');
+  const probed: string[] = [];
+  const report = await gate({
+    fd,
+    tasks: [subj(['DEP-1']), mkTask({ id: 'DEP-1' })],
+    observer: async (id) => {
+      probed.push(id);
+      return { mergeResult: async () => mergedOk };
+    },
+  });
+  assert.deepEqual(probed, ['DEP-1'], 'a merge_pending dep is always live-probed');
+  assert.equal(report.satisfied, true);
+  if (report.deps[0]!.satisfied) assert.equal(report.deps[0]!.vector, 'live_merge_proof');
+});
