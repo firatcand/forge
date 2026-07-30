@@ -27,6 +27,10 @@ export const ShipRecordSchema = z
     revision: z.number().int().min(1),
     reviewed_head_sha: Sha,
     review_attempt_id: z.string().min(1).max(64),
+    // FORGE-235: the ship CYCLE this record describes. Additive — legacy
+    // records parse as cycle 1. FORGE-235 only READS it (attestation + journal
+    // bind against it); advancement ships with startNewShipCycle in FORGE-237.
+    cycle: z.number().int().min(1).default(1),
     base: z
       .object({
         repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),

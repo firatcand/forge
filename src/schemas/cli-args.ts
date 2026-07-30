@@ -145,6 +145,15 @@ export const ShipArgsSchema = z.object({
 });
 export type ShipArgs = z.infer<typeof ShipArgsSchema>;
 
+// FORGE-235: forge orchestrate merge-tick — reconcile merge_pending tasks.
+export const MergeTickArgsSchema = z.object({
+  taskId: TaskIdSchema.optional(),
+  limit: z.number().int().positive().optional(),
+  forgeDir: ForgeDirField,
+  json: JsonFlag,
+});
+export type MergeTickArgs = z.infer<typeof MergeTickArgsSchema>;
+
 export const HeartbeatArgsSchema = z.object({
   taskId: TaskIdSchema,
   attemptId: AttemptIdSchema,

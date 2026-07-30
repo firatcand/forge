@@ -49,7 +49,14 @@ export type ProbeReport = z.infer<typeof ProbeReportSchema>;
 export const ChecksResultSchema = z.discriminatedUnion('status', [
   z.object({ status: z.literal('green') }),
   z.object({ status: z.literal('pending'), pending_count: z.number().int().min(0) }),
-  z.object({ status: z.literal('red'), failing_count: z.number().int().min(0) }),
+  z.object({
+    status: z.literal('red'),
+    failing_count: z.number().int().min(0),
+    // FORGE-235: the adapter already reads names + buckets; surfacing them
+    // lets ci_red_reported carry an actionable payload. Additive + bounded —
+    // scripts without it still validate.
+    failing: z.array(z.object({ name: z.string().max(200), bucket: z.string().max(40) })).max(20).optional(),
+  }),
   z.object({ status: z.literal('unknown'), reason: z.string().max(2000) }),
 ]);
 export type ChecksResult = z.infer<typeof ChecksResultSchema>;

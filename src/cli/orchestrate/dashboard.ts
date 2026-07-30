@@ -35,6 +35,11 @@ import {
   isTrackerIdDone,
 } from '../../orchestrator/readiness.ts';
 import { listOpenQuestionsAcrossTree } from '../../orchestrator/questions/index.ts';
+import { readShipRecord } from '../../orchestrator/ship-record.ts';
+import {
+  readMergeAttestation,
+  readReconciliationRecord,
+} from '../../orchestrator/reconciliation-record.ts';
 import {
   tasksRootDir,
   stateFilePath,
@@ -87,11 +92,36 @@ export interface LeaseHealthOut {
   readonly task_id: string;
   readonly status: LeaseHealth;
 }
+// FORGE-235: tasks parked in merge_pending (PR open, merge not yet proven).
+// Sourced from the LOCAL reconciliation journal — the dashboard never probes
+// the platform (read-only band); `forge orchestrate merge-tick` is the layer
+// that observes live and promotes on proof.
+export interface MergePendingOut {
+  readonly task_id: string;
+  /**
+   * `merge_pending` = merge not yet proven. `shipped` entries appear ONLY while
+   * their post-merge tracker sync is still unfinished — the merge is done, the
+   * bookkeeping is not, and that divergence has nowhere else to surface.
+   */
+  readonly state: 'merge_pending' | 'shipped';
+  readonly pr_url?: string;
+  readonly reviewed_head_sha?: string;
+  readonly last_probed_at?: string;
+  readonly last_probe_outcome?: string;
+  /** Set once required checks have been observed pending — how long the wait has run. */
+  readonly pending_since?: string;
+  /** Consecutive UNCERTAIN probes (transport/unknown), not expected waiting. */
+  readonly probe_failure_streak?: number;
+  /** Present once the tick has proven the merge; the promotion is then local. */
+  readonly attested: boolean;
+  readonly tracker_sync?: 'pending' | 'done' | 'failed';
+}
 export interface DashboardData {
   readonly active_sessions: ActiveSession[];
   readonly open_questions: OpenQuestionOut[];
   readonly ready_tasks: string[];
   readonly blocked_tasks: BlockedTask[];
+  readonly merge_pending: MergePendingOut[];
   readonly overlap_warnings: OverlapWarning[];
   readonly lease_health: LeaseHealthOut[];
   readonly source: { ready_blocked: 'local-cache' | 'unavailable' };
@@ -319,6 +349,29 @@ function formatDashboard(d: DashboardData, width: number): string {
       : '  (from local cache — run /reconcile for tracker truth)',
   );
 
+  section('Awaiting merge');
+  if (d.merge_pending.length === 0) lines.push('  (none)');
+  for (const m of d.merge_pending) {
+    const why =
+      m.state === 'shipped'
+        ? 'merged — tracker sync unfinished'
+        : m.attested
+          ? 'merge proven — promotion pending'
+          : m.pending_since
+            ? `checks pending since ${m.pending_since}`
+            : (m.last_probe_outcome ?? 'not yet probed');
+    lines.push(`  ${m.task_id}: ${why}${m.pr_url ? ` (${m.pr_url})` : ''}`);
+    if (m.probe_failure_streak !== undefined && m.probe_failure_streak > 0) {
+      lines.push(`    ! ${m.probe_failure_streak} consecutive uncertain probe(s)`);
+    }
+    if (m.tracker_sync === 'failed') {
+      lines.push('    ! shipped, but the tracker was never updated — close the issue manually');
+    }
+  }
+  if (d.merge_pending.length > 0) {
+    lines.push('  (run `forge orchestrate merge-tick` to observe live and promote on proof)');
+  }
+
   section('Overlap + lease warnings');
   if (d.overlap_warnings.length === 0) lines.push('  overlap: (none)');
   for (const o of d.overlap_warnings) {
@@ -419,11 +472,68 @@ export function runOrchestrateDashboard(
     .filter((r): r is TaskRow & { lease: Lease } => r.lease !== undefined)
     .map((r) => ({ task_id: r.taskId, status: classifyLeaseHealth(r.lease.expires_at, now) }));
 
+  // Awaiting-merge view (FORGE-235) — journal + record reads only, no probes.
+  const merge_pending: MergePendingOut[] = [];
+  for (const row of rows) {
+    const taskState = row.state?.state;
+    if (taskState !== 'merge_pending' && taskState !== 'shipped') continue;
+    // A shipped task is only interesting here while its tracker sync is open;
+    // a fully reconciled one is done and must not clutter the queue.
+    if (taskState === 'shipped') {
+      // Only a POSITIVE 'done' retires a shipped task from the queue. A missing
+      // or unreadable journal means the crash landed between the promotion CAS
+      // and the first sync write — unfinished work, not finished work.
+      let reconciled = false;
+      try {
+        reconciled = readReconciliationRecord(forgeDir, row.taskId)?.tracker_sync.status === 'done';
+      } catch {
+        reconciled = false;
+      }
+      if (reconciled) continue;
+    }
+    const entry: {
+      task_id: string;
+      state: 'merge_pending' | 'shipped';
+      pr_url?: string;
+      reviewed_head_sha?: string;
+      last_probed_at?: string;
+      last_probe_outcome?: string;
+      pending_since?: string;
+      probe_failure_streak?: number;
+      attested: boolean;
+      tracker_sync?: 'pending' | 'done' | 'failed';
+    } = { task_id: row.taskId, state: taskState, attested: false };
+    try {
+      const record = readShipRecord(forgeDir, row.taskId);
+      if (record?.pr) entry.pr_url = record.pr.url;
+      if (record) entry.reviewed_head_sha = record.reviewed_head_sha;
+    } catch (e) {
+      warnings.push(`ship record unreadable for ${row.taskId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    try {
+      const journal = readReconciliationRecord(forgeDir, row.taskId);
+      if (journal) {
+        if (journal.last_probed_at !== null) entry.last_probed_at = journal.last_probed_at;
+        if (journal.last_probe_outcome !== null) entry.last_probe_outcome = journal.last_probe_outcome;
+        if (journal.pending_since !== null) entry.pending_since = journal.pending_since;
+        entry.probe_failure_streak = journal.probe_failure_streak;
+        entry.tracker_sync = journal.tracker_sync.status;
+      }
+    } catch (e) {
+      warnings.push(`reconciliation journal unreadable for ${row.taskId}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    const att = readMergeAttestation(forgeDir, row.taskId);
+    entry.attested = att.kind === 'valid';
+    if (att.kind === 'invalid') warnings.push(`merge attestation invalid for ${row.taskId}: ${att.detail}`);
+    merge_pending.push(entry);
+  }
+
   const data: DashboardData = {
     active_sessions,
     open_questions,
     ready_tasks: ready,
     blocked_tasks: blocked,
+    merge_pending,
     overlap_warnings,
     lease_health,
     source: { ready_blocked: phasesLoaded ? 'local-cache' : 'unavailable' },

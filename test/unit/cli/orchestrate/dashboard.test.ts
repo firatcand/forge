@@ -345,3 +345,138 @@ test('dashboard: pretty (non-json) output writes to the injected stream', () => 
   assert.match(text, /Ready vs blocked/);
   assert.match(text, /from local cache/);
 });
+
+// ── FORGE-235: the awaiting-merge section ────────────────────────────────────
+
+const M_SHA = 'a'.repeat(40);
+const M_COMMIT = 'c'.repeat(40);
+const M_PR = { repo: 'octo/base', number: 21, url: 'https://github.com/octo/base/pull/21' };
+
+function shipRecordJson(forgeDir: string, taskId: string): void {
+  writeJson(join(forgeDir, 'orchestrator', 'tasks', taskId, 'ship-record.json'), {
+    version: 1, task_id: taskId, revision: 2, reviewed_head_sha: M_SHA, review_attempt_id: 'att-rev',
+    cycle: 1, base: { repo: 'octo/base', branch: 'main', push_remote: 'origin' }, pr: M_PR,
+    merge_attempt: 'submitted', updated_at: new Date().toISOString(),
+  });
+}
+
+function journalJson(forgeDir: string, taskId: string, over: Record<string, unknown> = {}): void {
+  writeJson(join(forgeDir, 'orchestrator', 'tasks', taskId, 'reconciliation.json'), {
+    version: 1, task_id: taskId, revision: 1,
+    subject: { cycle: 1, pr: M_PR, reviewed_head_sha: M_SHA, ship_record_revision: 2 },
+    last_probed_at: new Date().toISOString(), last_probe_outcome: 'open, awaiting human merge',
+    probe_failure_streak: 0, pending_since: null, merge_failure_streak: 0, last_merge_failure_at: null,
+    merge_reservation: null, tracker_sync: { status: 'pending', attempts: 0, last_error: null },
+    updated_at: new Date().toISOString(), ...over,
+  });
+}
+
+test('dashboard surfaces merge_pending tasks with their PR and last probe outcome', () => {
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  taskStateJson(forgeDir, 'FORGE-MP1', 'merge_pending');
+  shipRecordJson(forgeDir, 'FORGE-MP1');
+  journalJson(forgeDir, 'FORGE-MP1');
+  const out = capture();
+
+  const res = runOrchestrateDashboard({ forgeDir, json: true, stdout: out.stream });
+  assert.equal(res.exitCode, 0);
+  const data = JSON.parse(out.text()).data as DashboardData;
+
+  assert.equal(data.merge_pending.length, 1);
+  const entry = data.merge_pending[0]!;
+  assert.equal(entry.task_id, 'FORGE-MP1');
+  assert.equal(entry.pr_url, M_PR.url);
+  assert.equal(entry.reviewed_head_sha, M_SHA);
+  assert.equal(entry.attested, false);
+  assert.equal(entry.tracker_sync, 'pending');
+  assert.match(entry.last_probe_outcome ?? '', /awaiting human merge/);
+});
+
+test('a proven-but-unpromoted task is marked attested', () => {
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  taskStateJson(forgeDir, 'FORGE-MP2', 'merge_pending');
+  shipRecordJson(forgeDir, 'FORGE-MP2');
+  writeJson(join(forgeDir, 'orchestrator', 'tasks', 'FORGE-MP2', 'merge-attestation.json'), {
+    version: 1, task_id: 'FORGE-MP2', cycle: 1, pr: M_PR, base_repo: 'octo/base', base_branch: 'main',
+    reviewed_head_sha: M_SHA, merged_head_sha: M_SHA, merge_commit_sha: M_COMMIT,
+    ship_record_revision: 2, attested_at: new Date().toISOString(),
+  });
+  const out = capture();
+
+  runOrchestrateDashboard({ forgeDir, json: true, stdout: out.stream });
+  const data = JSON.parse(out.text()).data as DashboardData;
+  assert.equal(data.merge_pending[0]!.attested, true);
+});
+
+test('a corrupt attestation becomes a dashboard warning, never a silent pass', () => {
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  taskStateJson(forgeDir, 'FORGE-MP3', 'merge_pending');
+  shipRecordJson(forgeDir, 'FORGE-MP3');
+  mkdirSync(join(forgeDir, 'orchestrator', 'tasks', 'FORGE-MP3'), { recursive: true });
+  writeFileSync(join(forgeDir, 'orchestrator', 'tasks', 'FORGE-MP3', 'merge-attestation.json'), 'garbage', 'utf8');
+  const out = capture();
+
+  runOrchestrateDashboard({ forgeDir, json: true, stdout: out.stream });
+  const data = JSON.parse(out.text()).data as DashboardData;
+  assert.equal(data.merge_pending[0]!.attested, false);
+  assert.ok(data.warnings.some((w) => w.includes('attestation invalid for FORGE-MP3')));
+});
+
+test('the text view names the merge-tick verb and flags an unsynced tracker', () => {
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  // Tracker sync only runs AFTER the promotion CAS, so a sync failure always
+  // belongs to a `shipped` task — the section must cover that shape or the
+  // warning is unreachable in practice.
+  taskStateJson(forgeDir, 'FORGE-MP4', 'shipped');
+  shipRecordJson(forgeDir, 'FORGE-MP4');
+  journalJson(forgeDir, 'FORGE-MP4', {
+    tracker_sync: { status: 'failed', attempts: 5, last_error: 'tracker down' },
+    probe_failure_streak: 3,
+  });
+  const out = capture();
+
+  runOrchestrateDashboard({ forgeDir, json: false, stdout: out.stream });
+  const text = out.text();
+  assert.match(text, /Awaiting merge/);
+  assert.match(text, /FORGE-MP4/);
+  assert.match(text, /merge-tick/);
+  assert.match(text, /merged — tracker sync unfinished/);
+  assert.match(text, /close the issue manually/);
+});
+
+test('a fully reconciled shipped task is NOT in the awaiting-merge queue', () => {
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  taskStateJson(forgeDir, 'FORGE-MP7', 'shipped');
+  shipRecordJson(forgeDir, 'FORGE-MP7');
+  journalJson(forgeDir, 'FORGE-MP7', { tracker_sync: { status: 'done', attempts: 1, last_error: null } });
+  const out = capture();
+
+  runOrchestrateDashboard({ forgeDir, json: true, stdout: out.stream });
+  const data = JSON.parse(out.text()).data as DashboardData;
+  assert.deepEqual(data.merge_pending, []);
+});
+
+test('in-flight states never appear, and a shipped task with NO sync evidence still does', () => {
+  // Only a positive tracker_sync 'done' retires a shipped task: a crash between
+  // the promotion CAS and the first sync write leaves no journal at all, and
+  // treating that as "finished" would hide real unfinished bookkeeping.
+  const repo = repoRoot();
+  const forgeDir = join(repo, '.forge');
+  taskStateJson(forgeDir, 'FORGE-MP5', 'running');
+  taskStateJson(forgeDir, 'FORGE-MP6', 'shipped');
+  shipRecordJson(forgeDir, 'FORGE-MP6');
+  const out = capture();
+
+  runOrchestrateDashboard({ forgeDir, json: true, stdout: out.stream });
+  const data = JSON.parse(out.text()).data as DashboardData;
+  assert.deepEqual(
+    data.merge_pending.map((m) => m.task_id),
+    ['FORGE-MP6'],
+  );
+  assert.equal(data.merge_pending[0]!.state, 'shipped');
+});

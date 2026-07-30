@@ -22,10 +22,15 @@ const PR = { repo: REPO, number: 9, url: `https://github.com/${REPO}/pull/9` };
 function captureStdout(t: TestContext): string[] {
   const lines: string[] = [];
   const orig = process.stdout.write.bind(process.stdout);
-  process.stdout.write = ((chunk: string | Uint8Array) => {
+  // Non-JSON writes are FORWARDED: dropping them would swallow the test
+  // runner's own reporter output while the capture is installed.
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
     const s = String(chunk);
-    if (s.trimStart().startsWith('{')) lines.push(s.trim());
-    return true;
+    if (s.trimStart().startsWith('{')) {
+      lines.push(s.trim());
+      return true;
+    }
+    return (orig as (c: string | Uint8Array, ...r: unknown[]) => boolean)(chunk, ...rest);
   }) as typeof process.stdout.write;
   t.after(() => {
     process.stdout.write = orig;

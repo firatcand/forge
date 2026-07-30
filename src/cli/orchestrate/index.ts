@@ -26,6 +26,7 @@ import { questionWriteHandler } from './question-write.ts';
 import { eventHandler } from './event.ts';
 import { completeHandler } from './complete.ts';
 import { runOrchestrateShip } from './ship.ts';
+import { runOrchestrateMergeTick } from './merge-tick.ts';
 import { cancelHandler } from './cancel.ts';
 import { applyDecisionHandler } from './apply-decision.ts';
 import { amendRoadmapHandler } from './amend-roadmap.ts';
@@ -442,6 +443,12 @@ const FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
     JSON_FLAG,
     FD,
   ],
+  'merge-tick': [
+    { flag: 'task', takesValue: true, description: 'Reconcile one task (else every merge_pending task).', valueLabel: '<task-id>' },
+    { flag: 'limit', takesValue: true, description: 'Cap the scan (reported, never silent).', valueLabel: '<n>' },
+    JSON_FLAG,
+    FD,
+  ],
   cancel: [
     { flag: 'task', takesValue: true, description: 'Task id (else first positional).', valueLabel: '<task-id>' },
     { flag: 'reason', takesValue: true, description: 'Cancellation reason.', valueLabel: '<text>' },
@@ -523,6 +530,29 @@ const shipHandler: VerbHandler = {
   },
 };
 
+
+// FORGE-235: merge_pending reconciliation — promotes on exact live merge proof;
+// reports every non-terminal observation (FORGE-237 automates those).
+const mergeTickHandler: VerbHandler = {
+  band: 'mutate',
+  synopsis: 'Reconcile merge_pending tasks: promote on live merge proof, report divergences.',
+  async run(rest, opts) {
+    const forgeDir = resolveForgeDir(rest, opts.cwd);
+    // `--task` only: a bare positional would swallow the VALUE of a separated
+    // flag (`--limit 10` → taskId '10'), silently targeting a task named "10"
+    // instead of scanning the queue.
+    const taskFlag = parseFlag(rest, 'task');
+    const limitFlag = parseFlag(rest, 'limit');
+    const limit = limitFlag === undefined ? undefined : Number(limitFlag);
+    const json = hasFlag(rest, 'json');
+    return runOrchestrateMergeTick({
+      ...(taskFlag ? { taskId: taskFlag } : {}),
+      ...(limit === undefined ? {} : { limit }),
+      forgeDir,
+      json,
+    });
+  },
+};
 const AUDIT_SUB_FLAG_DECLS: Record<string, ReadonlyArray<FlagDecl>> = {
   plan: [
     { flag: 'scope', takesValue: true, description: 'Comma-separated scope globs (override auto-discovery / settings).', valueLabel: '<globs>' },
@@ -586,6 +616,7 @@ export const VERBS: VerbRegistry = new Map<string, VerbHandler | Map<string, Ver
   ['event', withFlags(eventHandler, FLAG_DECLS['event']!)],
   ['complete', withFlags(completeHandler, FLAG_DECLS['complete']!)],
   ['ship', withFlags(shipHandler, FLAG_DECLS['ship']!)],
+  ['merge-tick', withFlags(mergeTickHandler, FLAG_DECLS['merge-tick']!)],
   ['cancel', withFlags(cancelHandler, FLAG_DECLS['cancel']!)],
   ['reconcile', withFlags(reconcileHandler, FLAG_DECLS['reconcile']!)],
   ['apply-decision', withFlags(applyDecisionHandler, FLAG_DECLS['apply-decision']!)],
@@ -620,6 +651,7 @@ export const HELP_ORDER: readonly string[] = [
   'event',
   'complete',
   'ship',
+  'merge-tick',
   'cancel',
   'reconcile',
   'apply-decision',

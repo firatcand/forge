@@ -190,6 +190,16 @@ export class GitHubRepoHost implements RepoHost {
     });
   }
 
+  // FORGE-235: the explicitly MUTATION-CAPABLE persisted-identity constructor.
+  // Identical wiring to forObservation (gh-only; git fails closed — the merge
+  // path never touches the worktree), but a DISTINCT named capability so
+  // auto-merge authority is granted deliberately. gc receives observers and
+  // therefore cannot merge by construction; only the merge tick calls this.
+  static forMerge(opts: { gh: Exec; forgeDir: string; taskId: string; pollDelayMs?: number }): GitHubRepoHost {
+    const host = GitHubRepoHost.forObservation(opts);
+    return host;
+  }
+
   // ─── helpers ───────────────────────────────────────────────────────────────
 
   // CRIT impl-R1 #1: a REJECTED executor promise (timeout/spawn wrapper) must
@@ -830,8 +840,16 @@ export class GitHubRepoHost implements RepoHost {
     if (buckets.some((b) => !known.has(b))) {
       return this.validateChecks({ status: 'unknown', reason: `unknown check bucket: ${buckets.join(',')}` });
     }
-    const failing = buckets.filter((b) => b === 'fail' || b === 'cancel').length;
-    if (failing > 0) return this.validateChecks({ status: 'red', failing_count: failing });
+    const failed = checks.filter((c) => c.bucket === 'fail' || c.bucket === 'cancel');
+    if (failed.length > 0) {
+      // FORGE-235: the names were already parsed — surfacing them (bounded) is
+      // what makes ci_red_reported actionable instead of just a count.
+      return this.validateChecks({
+        status: 'red',
+        failing_count: failed.length,
+        failing: failed.slice(0, 20).map((c) => ({ name: c.name.slice(0, 200), bucket: c.bucket.slice(0, 40) })),
+      });
+    }
     const pending = buckets.filter((b) => b === 'pending').length;
     if (pending > 0) return this.validateChecks({ status: 'pending', pending_count: pending });
     return this.validateChecks({ status: 'green' });

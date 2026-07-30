@@ -168,3 +168,13 @@ export function legacyArchiveSession(
   const safe = isoTimestamp.replace(/[^0-9A-Za-z]/g, '-');
   return join(legacyArchiveRoot(forgeDir), safe);
 }
+
+// FORGE-235: the reconciliation journal + merge attestation live beside the
+// ship record under the task directory.
+export function reconciliationFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'reconciliation.json');
+}
+
+export function mergeAttestationFilePath(forgeDir: string, taskId: string): string {
+  return join(taskDir(forgeDir, taskId), 'merge-attestation.json');
+}

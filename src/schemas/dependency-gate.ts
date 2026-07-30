@@ -19,6 +19,9 @@ export const DEP_OPERATOR_REASONS = [
   'pr_closed_unmerged',
   'tainted_merge',
   'legacy_dependency_unproven',
+  // FORGE-235: a merge attestation exists but is malformed / misbound /
+  // revision-mismatched — surfaced as operator action, NEVER silent waiting.
+  'attestation_invalid',
 ] as const;
 
 // dep_state_blocking dispositions depend on the observed state: an ACTIVE dep
@@ -66,7 +69,7 @@ const DepSatisfiedSchema = z.object({
   state_id: z.string(),
   observed_state: z.string(),
   satisfied: z.literal(true),
-  vector: z.literal('live_merge_proof'),
+  vector: z.enum(['live_merge_proof', 'merge_attestation']),
   disposition: z.literal('satisfied'),
   observed: ObservedProof,
 });
